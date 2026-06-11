@@ -142,6 +142,9 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
+        # ThreadingHTTPServer opens one Store per request: wait out writer
+        # overlap instead of failing immediately with SQLITE_BUSY.
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.migrate()
 
     def close(self) -> None:
@@ -196,10 +199,13 @@ class Store:
         return [Notebook(r["id"], r["name"], r["created_at"], r["updated_at"]) for r in rows]
 
     def rename_notebook(self, notebook_id: int, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
         self.get_notebook(notebook_id)
         self.conn.execute(
             "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
-            (name.strip(), _now(), notebook_id),
+            (name, _now(), notebook_id),
         )
         self.conn.commit()
 

@@ -24,11 +24,13 @@ class FakeLLM:
 
     def __init__(self, reply_parts: list[str] | None = None) -> None:
         self.reply_parts = reply_parts or ["回答 ", "[S1]。"]
+        self.chat_count = 0
 
     def available(self) -> bool:
         return True
 
     def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        self.chat_count += 1
         return "".join(self.reply_parts)
 
     def chat_stream(
@@ -58,7 +60,8 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "s.db"), llm=FakeLLM())
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "s.db"), llm=cls.llm)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -201,6 +204,62 @@ class ServerTest(unittest.TestCase):
     def test_loopback_only(self) -> None:
         with self.assertRaises(ValueError):
             make_server(host="0.0.0.0")
+
+    def test_dns_rebinding_host_rejected(self) -> None:
+        """A rebound hostname must not reach the API even though it hits 127.0.0.1."""
+        status, _, raw = self._req("GET", "/api/health", headers={"Host": "evil.example"})
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(raw)["error"]["code"], "SECURITY_HOST_NOT_ALLOWED")
+        status, _, _ = self._req("GET", "/api/health", headers={"Host": f"localhost:{self.port}"})
+        self.assertEqual(status, 200)
+
+    def test_cross_origin_post_rejected(self) -> None:
+        """Browsers attach Origin to cross-site POSTs; those must be blocked (CSRF)."""
+        body = json.dumps({"name": "csrf"}).encode()
+        status, _, raw = self._req(
+            "POST",
+            "/api/notebooks",
+            body,
+            {"Origin": "https://evil.example", "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(raw)["error"]["code"], "SECURITY_CROSS_ORIGIN_BLOCKED")
+        status, _, _ = self._req(
+            "POST",
+            "/api/notebooks",
+            body,
+            {"Origin": f"http://127.0.0.1:{self.port}", "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 201)
+
+    def test_source_text_unknown_id_404(self) -> None:
+        status, err = self._json("GET", "/api/sources/99999/text")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
+
+    def test_questions_cached_until_sources_change(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "提案キャッシュ"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("質問とは何か？" * 50).encode(),
+            {"X-Filename": "q.txt"},
+        )
+        before = self.llm.chat_count
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.llm.chat_count, before + 1)
+        self._json("GET", f"/api/notebooks/{nb_id}/questions")  # cache hit
+        self.assertEqual(self.llm.chat_count, before + 1)
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("別の資料。" * 50).encode(),
+            {"X-Filename": "r.txt"},
+        )
+        self._json("GET", f"/api/notebooks/{nb_id}/questions")  # invalidated
+        self.assertEqual(self.llm.chat_count, before + 2)
 
     def test_upload_too_large_rejected(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "limit"})

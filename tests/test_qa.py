@@ -21,6 +21,7 @@ from shoin.qa import (
     ask,
     build_context,
     build_messages,
+    history_messages,
 )
 from shoin.search import retrieve
 from shoin.store import Store
@@ -197,6 +198,50 @@ class TestAsk(unittest.TestCase):
         with s:
             ask(s, FakeLLM(), nb, "zzz無関係qqq")
             self.assertEqual(len(s.list_messages(nb)), 2)
+
+
+class TestMultiTurn(unittest.TestCase):
+    def test_followup_carries_history(self) -> None:
+        """REQ-005: follow-up questions see prior turns (NotebookLM parity)."""
+        s, nb = seeded_store()
+        with s:
+            fake = FakeLLM(reply="核は引用検証[S1]。")
+            ask(s, fake, nb, "差別化は何か？")
+            ask(s, fake, nb, "検証についてさらに詳しく")
+            roles = [m["role"] for m in fake.chat_calls[-1]]
+            self.assertEqual(roles, ["system", "user", "assistant", "user"])
+            history_text = " ".join(m["content"] for m in fake.chat_calls[-1][1:-1])
+            self.assertIn("差別化は何か", history_text)
+
+    def test_history_strips_stale_citations(self) -> None:
+        """[S#] in history refers to a previous numbering: must not leak."""
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "答え ［Ｓ１，Ｓ２］と[S3]に基づく。")
+            msgs = history_messages(s, nb)
+            self.assertEqual(len(msgs), 2)
+            self.assertNotIn("S1", msgs[1]["content"])
+            self.assertNotIn("[S3]", msgs[1]["content"])
+            self.assertIn("基づく", msgs[1]["content"])
+
+    def test_history_is_bounded(self) -> None:
+        s, nb = seeded_store()
+        with s:
+            for i in range(20):
+                s.add_message(nb, "user", f"q{i}")
+                s.add_message(nb, "assistant", "あ" * 4000)
+            msgs = history_messages(s, nb)
+            self.assertLessEqual(len(msgs), 6)
+            for m in msgs:
+                self.assertLess(len(m["content"]), 4000)
+
+    def test_first_turn_has_no_history(self) -> None:
+        s, nb = seeded_store()
+        with s:
+            fake = FakeLLM()
+            ask(s, fake, nb, "書斎とは？")
+            self.assertEqual([m["role"] for m in fake.chat_calls[-1]], ["system", "user"])
 
 
 if __name__ == "__main__":

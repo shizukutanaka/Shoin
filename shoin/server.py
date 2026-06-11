@@ -29,6 +29,7 @@ from .qa import (
     _query_vector,
     build_context,
     build_messages,
+    history_messages,
 )
 from .search import retrieve
 from .store import Store, StoreError
@@ -41,6 +42,22 @@ _EXPORT_MIME = {
     "bibtex": "application/x-bibtex; charset=utf-8",
     "ris": "application/x-research-info-systems; charset=utf-8",
 }
+
+# Hostnames a browser may legitimately use to reach this loopback server.
+# Anything else (e.g. attacker.example rebound to 127.0.0.1) is rejected:
+# DNS rebinding / CSRF defense for the local web UI (spec STRIDE).
+_ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _hostname_of(netloc_like: str) -> str:
+    """Extract a lowercase hostname from a Host header or Origin URL."""
+    try:
+        if "://" in netloc_like:
+            return (urllib.parse.urlsplit(netloc_like).hostname or "").lower()
+        return (urllib.parse.urlsplit(f"//{netloc_like}").hostname or "").lower()
+    except ValueError:
+        return ""
+
 
 Json = dict[str, Any]
 
@@ -81,6 +98,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = f"shoin/{VERSION}"
     llm: ChatBackend  # set by make_server
     db: str
+    questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
 
     # --- plumbing -------------------------------------------------------
 
@@ -107,6 +125,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> Json:
         n = int(self.headers.get("Content-Length") or 0)
         if n > MAX_UPLOAD_BYTES:
+            self._drain(n)  # consume (bounded) so the error response reaches the client
             raise IngestError("INGEST_FILE_TOO_LARGE", "request body too large")
         raw = self.rfile.read(n) if n else b"{}"
         try:
@@ -153,7 +172,26 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/notebooks/(\d+)/export$", "export"),
     )
 
+    def _reject_cross_site(self, method: str) -> bool:
+        """DNS-rebinding / CSRF guard. True when the request was rejected.
+
+        The Host header must name this loopback server, and any Origin on a
+        state-changing request must be a local one (browsers attach Origin to
+        cross-site POSTs even in no-cors mode, so this blocks them).
+        """
+        host = self.headers.get("Host") or ""
+        if _hostname_of(host) not in _ALLOWED_HOSTNAMES:
+            self._error(403, "SECURITY_HOST_NOT_ALLOWED", f"unexpected Host: {host!r}")
+            return True
+        origin = self.headers.get("Origin")
+        if origin and method != "GET" and _hostname_of(origin) not in _ALLOWED_HOSTNAMES:
+            self._error(403, "SECURITY_CROSS_ORIGIN_BLOCKED", f"cross-site origin: {origin!r}")
+            return True
+        return False
+
     def _dispatch(self, method: str) -> None:
+        if self._reject_cross_site(method):
+            return
         parsed = urllib.parse.urlsplit(self.path)
         self._query = urllib.parse.parse_qs(parsed.query)
         for verb, pattern, name in self._ROUTES:
@@ -194,8 +232,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "Content-Length": str(len(body)),
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline';"
-                    " script-src 'unsafe-inline'; connect-src 'self'; img-src data:"
+                    " script-src 'unsafe-inline'; connect-src 'self'; img-src data:;"
+                    " frame-ancestors 'none'"
                 ),
+                "X-Frame-Options": "DENY",
             },
         )
         self.wfile.write(body)
@@ -286,6 +326,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:
+            exists = store.conn.execute("SELECT 1 FROM sources WHERE id=?", (src_id,)).fetchone()
+            if exists is None:
+                raise StoreError("SOURCE_NOT_FOUND", f"source {src_id} not found")
             rows = store.conn.execute(
                 "SELECT seq, text FROM chunks WHERE source_id=? ORDER BY seq", (src_id,)
             ).fetchall()
@@ -301,7 +344,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_questions(self, nb_id: int) -> None:
         with Store(self.db) as store:
-            self._json({"questions": suggest_questions(store, self.llm, nb_id)})
+            store.get_notebook(nb_id)
+            # Suggestions only change when the source set changes; cache per
+            # notebook so reopening the UI does not re-run the LLM every time.
+            fingerprint = tuple(s.id for s in store.sources_for_notebook(nb_id))
+            cached = self.questions_cache.get(nb_id)
+            if cached is not None and cached[0] == fingerprint:
+                self._json({"questions": cached[1]})
+                return
+            questions = suggest_questions(store, self.llm, nb_id)
+            self.questions_cache[nb_id] = (fingerprint, questions)
+            self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:
         data = self._read_json()
@@ -353,6 +406,7 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)  # 404 before headers go out
             qvec = _query_vector(self.llm, question)
             hits = retrieve(store, nb_id, question, query_vec=qvec)
+            history = history_messages(store, nb_id)  # before persisting this turn
             store.add_message(nb_id, "user", question, "{}")
 
             self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
@@ -382,7 +436,7 @@ class _Handler(BaseHTTPRequestHandler):
             parts: list[str] = []
             degraded = False
             try:
-                for token in self._stream_chat(build_messages(question, context)):
+                for token in self._stream_chat(build_messages(question, context, history)):
                     parts.append(token)
                     self._sse("delta", {"text": token})
             except LLMError:
@@ -408,7 +462,11 @@ def make_server(
     handler = type(
         "ShoinHandler",
         (_Handler,),
-        {"llm": llm if llm is not None else LLMClient(), "db": db or str(db_path())},
+        {
+            "llm": llm if llm is not None else LLMClient(),
+            "db": db or str(db_path()),
+            "questions_cache": {},
+        },
     )
     return ThreadingHTTPServer((host, port), handler)
 

@@ -9,6 +9,7 @@ defense). Degrades to a search-only answer when the LLM is unreachable.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -20,6 +21,13 @@ from .search import Hit, retrieve
 from .store import Store
 
 CONTEXT_TOKENS = 2400  # lightweight-LLM friendly context budget
+HISTORY_MESSAGES = 6  # recent turns carried into the prompt (REQ-005 follow-ups)
+HISTORY_TOKENS_EACH = 160  # per-message truncation keeps history within budget
+
+# Brackets that contain an S-number, e.g. [S1] / [S1, S2] / [Ｓ１]. History
+# citations refer to a *previous* context numbering, so they are stripped
+# before re-prompting to keep the model from echoing stale numbers.
+_HISTORY_CITE_RE = re.compile(r"\[[^\[\]]*[SsＳｓ]\s*[0-9０-９]+[^\[\]]*\]")
 
 SYSTEM_PROMPT = (
     "あなたはローカルノートブック「Shoin」のリサーチアシスタント。以下を厳守:\n"
@@ -117,7 +125,24 @@ def build_context(
     return GroundedContext(titles, "\n\n".join(parts), hits, snums)
 
 
-def build_messages(question: str, context: GroundedContext) -> list[Message]:
+def history_messages(
+    store: Store, notebook_id: int, limit: int = HISTORY_MESSAGES
+) -> list[Message]:
+    """Recent chat turns as prompt messages (multi-turn follow-up support)."""
+    rows = store.list_messages(notebook_id)[-limit:]
+    out: list[Message] = []
+    for r in rows:
+        body = _HISTORY_CITE_RE.sub("", str(r["body"])).strip()
+        if not body:
+            continue
+        role = "user" if str(r["role"]) == "user" else "assistant"
+        out.append({"role": role, "content": _truncate_tokens(body, HISTORY_TOKENS_EACH)})
+    return out
+
+
+def build_messages(
+    question: str, context: GroundedContext, history: list[Message] | None = None
+) -> list[Message]:
     user = (
         f"## ソース\n{context.block}\n\n"
         f"## 質問\n{question}\n\n"
@@ -125,6 +150,7 @@ def build_messages(question: str, context: GroundedContext) -> list[Message]:
     )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *(history or []),
         {"role": "user", "content": user},
     ]
 
@@ -156,6 +182,7 @@ def ask(
     """Grounded Q&A over a notebook. Never raises on LLM unavailability."""
     qvec = _query_vector(llm, question)
     hits = retrieve(store, notebook_id, question, query_vec=qvec, k=k)
+    history = history_messages(store, notebook_id)  # before persisting this turn
     if persist:
         store.add_message(notebook_id, "user", question, "{}")
 
@@ -164,7 +191,7 @@ def ask(
     else:
         context = build_context(store, hits)
         try:
-            text = llm.chat(build_messages(question, context))
+            text = llm.chat(build_messages(question, context, history))
             answer = Answer(text, hits, make_report(text, context.source_titles))
         except LLMError:
             text = _degraded_text(hits)
