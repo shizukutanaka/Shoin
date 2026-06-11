@@ -1,0 +1,42 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          pip install -e .
+          pip install ruff mypy coverage detect-secrets cyclonedx-bom
+      - name: Lint
+        run: |
+          ruff format --check .
+          ruff check .
+      - name: Type check
+        run: mypy --strict shoin/
+      - name: Test + Coverage
+        run: |
+          coverage run -m unittest discover -s tests -p "test_*.py"
+          coverage report --include="shoin/*" --fail-under=50
+      - name: Secret scan
+        run: |
+          detect-secrets scan shoin/ tests/ > ds.json
+          python3 -c "import json,sys; r=json.load(open('ds.json')).get('results',{}); n=sum(len(v) for v in r.values()); print('secrets:',n); sys.exit(1 if n else 0)"
+      - name: SBOM
+        if: matrix.python-version == '3.12'
+        run: |
+          python3 -c "import importlib.metadata as m; open('reqs.txt','w').write('pypdf=='+m.version('pypdf'))"
+          cyclonedx-py requirements reqs.txt -o sbom.json
+      - name: Upload SBOM
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
