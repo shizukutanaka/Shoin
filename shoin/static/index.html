@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shoin 書院</title>
+<style>
+:root{
+  --washi:#F6F2E9; --paper:#FFFFFF; --sumi:#20242B; --sumi-soft:#5A6068;
+  --seiji:#00C4CC; --seiji-ink:#00777D; --shu:#B3261E; --kohaku:#8A5A00;
+  --matsu:#2C6E49; --border:#E2DCCB; --border-strong:#C9C2AE;
+  --serif:"Hiragino Mincho ProN","Yu Mincho","BIZ UDMincho","Noto Serif CJK JP",Georgia,serif;
+  --sans:system-ui,-apple-system,"Hiragino Sans","Noto Sans CJK JP",sans-serif;
+  --mono:ui-monospace,"SF Mono",Consolas,monospace;
+  --sp:4px;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font-family:var(--sans);background:var(--washi);color:var(--sumi);font-size:15px;line-height:1.7}
+button,input,textarea,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--seiji);outline-offset:2px;border-radius:2px}
+a{color:var(--seiji-ink)}
+@media (prefers-reduced-motion:no-preference){
+  .msg,.toast{animation:rise .18s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+}
+
+/* ---- header: ink band ---- */
+header{display:flex;align-items:center;gap:16px;background:var(--sumi);color:var(--washi);
+  padding:0 16px;height:52px}
+.mark{font-family:var(--serif);writing-mode:vertical-rl;font-size:13px;letter-spacing:.35em;
+  line-height:1;border:1px solid var(--seiji);color:var(--seiji);padding:5px 3px;border-radius:2px}
+header h1{font-family:var(--serif);font-size:17px;font-weight:600;letter-spacing:.06em;flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lamp{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#C8C2B4}
+.lamp i{width:9px;height:9px;border-radius:50%;background:#6A6F77}
+.lamp.on i{background:var(--seiji)}
+header button{background:none;border:1px solid #4A4F57;color:var(--washi);border-radius:3px;
+  padding:3px 10px;font-size:12px;cursor:pointer}
+header button:hover{border-color:var(--seiji)}
+
+/* ---- layout ---- */
+main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)}
+.pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)}
+.pane:last-child{border-right:0}
+.pane-head{font-family:var(--serif);font-size:13px;letter-spacing:.18em;color:var(--sumi-soft);
+  padding:12px 14px 8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.pane-body{flex:1;overflow-y:auto;padding:12px 14px}
+.tabs{display:none}
+@media (max-width:880px){
+  main{grid-template-columns:1fr}
+  .pane{display:none;border-right:0}
+  .pane.active{display:flex}
+  .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--paper)}
+  .tabs button{flex:1;border:0;background:none;padding:10px;font-size:13px;cursor:pointer;
+    color:var(--sumi-soft);border-bottom:2px solid transparent}
+  .tabs button[aria-selected="true"]{color:var(--sumi);border-bottom-color:var(--seiji)}
+}
+
+/* ---- shared bits ---- */
+.btn{background:var(--paper);border:1px solid var(--border-strong);border-radius:3px;
+  padding:5px 12px;cursor:pointer;font-size:13px}
+.btn:hover{border-color:var(--seiji-ink)}
+.btn.primary{background:var(--seiji);border-color:var(--seiji);color:#062A2C;font-weight:600}
+.btn.danger{color:var(--shu)}
+.field{width:100%;background:var(--paper);border:1px solid var(--border-strong);border-radius:3px;
+  padding:7px 10px}
+.muted{color:var(--sumi-soft);font-size:12.5px}
+.empty{border:1px dashed var(--border-strong);border-radius:4px;padding:22px 16px;text-align:center;
+  color:var(--sumi-soft);margin-top:8px}
+.empty b{display:block;font-family:var(--serif);font-size:15px;color:var(--sumi);
+  letter-spacing:.08em;margin-bottom:6px}
+.badge{display:inline-block;font-size:11.5px;border-radius:2px;padding:1px 7px;margin-left:6px}
+.badge.warn{background:#F4E8CE;color:var(--kohaku)}
+.badge.err{background:#F6DEDC;color:var(--shu)}
+.badge.dim{background:#EAE5D8;color:var(--sumi-soft)}
+
+/* ---- seal chips (蔵書印) : the signature element ---- */
+.seal{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:20px;
+  padding:0 4px;margin:0 2px;font-family:var(--mono);font-size:11.5px;font-weight:700;
+  color:var(--seiji-ink);background:var(--paper);border:1.5px solid var(--seiji);
+  border-radius:3px;cursor:pointer;vertical-align:text-bottom}
+.seal:hover{background:var(--seiji);color:#062A2C}
+.seal.bad{color:var(--shu);border-color:var(--shu);text-decoration:line-through}
+.seal.bad:hover{background:var(--shu);color:#fff}
+
+/* ---- sources pane ---- */
+.src{display:flex;align-items:flex-start;gap:8px;padding:8px 6px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:3px}
+.src:hover{background:var(--paper)}
+.src .no{font-family:var(--mono);font-size:11px;color:var(--seiji-ink);border:1px solid var(--border-strong);border-radius:2px;padding:0 4px;margin-top:3px}
+.src .t{flex:1;font-size:13.5px;word-break:break-all}
+.src .k{font-size:11px;color:var(--sumi-soft)}
+.src button{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:14px;padding:0 2px}
+.src button:hover{color:var(--shu)}
+.adders{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.adders .row{display:flex;gap:6px}
+#nbList{list-style:none;padding:0}
+#nbList li{display:flex;gap:6px;align-items:center;padding:6px 4px;border-radius:3px;cursor:pointer}
+#nbList li:hover,#nbList li.cur{background:var(--paper)}
+#nbList .name{flex:1;font-family:var(--serif);font-size:14.5px}
+#nbList .c{font-size:11px;color:var(--sumi-soft)}
+
+/* ---- chat pane ---- */
+#chat{display:flex;flex-direction:column;gap:14px}
+.msg{max-width:72ch}
+.msg .who{font-family:var(--serif);font-size:11.5px;letter-spacing:.2em;color:var(--sumi-soft);margin-bottom:3px}
+.msg .body{background:var(--paper);border:1px solid var(--border);border-radius:4px;
+  padding:10px 13px;white-space:pre-wrap;word-break:break-word}
+.msg.user .body{background:transparent;border-color:var(--border-strong)}
+.msg .cites{margin-top:6px;font-size:12px;color:var(--sumi-soft);display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+#composer{border-top:1px solid var(--border);padding:10px 14px;background:var(--washi)}
+#qs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.q-chip{font-size:12px;border:1px solid var(--border-strong);background:var(--paper);
+  border-radius:12px;padding:3px 11px;cursor:pointer}
+.q-chip:hover{border-color:var(--seiji-ink);color:var(--seiji-ink)}
+#askForm{display:flex;gap:8px}
+#askInput{flex:1}
+#banner{display:none;background:#EFE9DA;border-bottom:1px solid var(--border-strong);
+  color:var(--kohaku);font-size:12.5px;padding:6px 14px}
+
+/* ---- studio pane ---- */
+.kinds{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}
+.note-form{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.card{background:var(--paper);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-bottom:10px}
+.card h4{font-family:var(--serif);font-size:13.5px;letter-spacing:.1em;display:flex;align-items:center}
+.card .bd{white-space:pre-wrap;font-size:13.5px;margin-top:6px;word-break:break-word}
+.card .x{float:right;border:0;background:none;color:var(--sumi-soft);cursor:pointer}
+.card .x:hover{color:var(--shu)}
+.exports{display:flex;gap:6px;margin-top:4px}
+
+/* ---- passage viewer / toast ---- */
+#viewer{position:fixed;inset:0;background:rgba(32,36,43,.45);display:none;z-index:30}
+#viewer.open{display:flex;align-items:center;justify-content:center;padding:24px}
+#viewer .sheet{background:var(--paper);max-width:680px;width:100%;max-height:80vh;display:flex;
+  flex-direction:column;border-radius:4px;border-top:3px solid var(--seiji)}
+#viewer .sheet h3{font-family:var(--serif);padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px}
+#viewer .sheet .tx{overflow-y:auto;padding:14px 16px;white-space:pre-wrap;font-size:13.5px}
+#viewer .sheet .ft{padding:10px 16px;border-top:1px solid var(--border);text-align:right}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:40;display:none;
+  background:var(--sumi);color:var(--washi);border-left:3px solid var(--shu);
+  border-radius:3px;padding:9px 16px;font-size:13px;max-width:88vw}
+.spin{display:inline-block;font-family:var(--mono)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <span class="mark" aria-hidden="true">書院</span>
+  <h1 id="nbTitle" data-i18n="app.title">Shoin</h1>
+  <span class="lamp" id="lamp"><i></i><span id="lampText" data-i18n="app.lamp.off">LLM未接続</span></span>
+  <button id="langBtn" type="button" aria-label="Switch language">EN</button>
+</header>
+<div id="banner" role="status"></div>
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="false" data-pane="paneSrc" data-i18n="tabs.sources">資料</button>
+  <button role="tab" aria-selected="true" data-pane="paneChat" data-i18n="tabs.chat">対話</button>
+  <button role="tab" aria-selected="false" data-pane="paneStudio" data-i18n="tabs.studio">書斎</button>
+</div>
+<main>
+  <!-- sources -->
+  <section class="pane" id="paneSrc" aria-label="Sources">
+    <div class="pane-head" data-i18n="sources.head">書 棚</div>
+    <div class="pane-body">
+      <ul id="nbList"></ul>
+      <form id="nbForm" class="adders" autocomplete="off">
+        <div class="row">
+          <input id="nbName" class="field" data-i18n-ph="nb.placeholder" placeholder="新しい書院の名前" required>
+          <button class="btn primary" type="submit" data-i18n="nb.create">作成</button>
+        </div>
+      </form>
+      <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+      <div id="srcList"></div>
+      <div id="srcEmpty" class="empty" hidden>
+        <b data-i18n="sources.empty.title">書棚が空</b>
+        <span data-i18n="sources.empty.body">ファイルかURLを加えると、引用付きで対話できる。</span>
+      </div>
+      <div class="adders" id="srcAdders" hidden>
+        <div class="row">
+          <input type="file" id="fileInput" class="field" accept=".txt,.md,.html,.pdf" aria-label="Upload file">
+        </div>
+        <div class="row">
+          <input id="urlInput" class="field" placeholder="https://…" aria-label="URL">
+          <button class="btn" id="urlBtn" type="button" data-i18n="sources.addurl">取込</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- chat -->
+  <section class="pane active" id="paneChat" aria-label="Chat">
+    <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span></div>
+    <div class="pane-body" id="chat" aria-live="polite"></div>
+    <div id="chatEmpty" class="empty" style="margin:14px" hidden>
+      <b data-i18n="chat.empty.title">問いから始まる</b>
+      <span data-i18n="chat.empty.body">下の入力欄から、資料に基づく質問をどうぞ。</span>
+    </div>
+    <div id="composer">
+      <div id="qs" aria-label="Suggested questions"></div>
+      <form id="askForm">
+        <input id="askInput" class="field" data-i18n-ph="chat.placeholder" placeholder="資料への質問…" autocomplete="off">
+        <button class="btn primary" id="askBtn" type="submit" data-i18n="chat.ask">尋ねる</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- studio + notes -->
+  <section class="pane" id="paneStudio" aria-label="Studio">
+    <div class="pane-head" data-i18n="studio.head">書 斎</div>
+    <div class="pane-body">
+      <div class="kinds" id="kinds"></div>
+      <div id="studioOut"></div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
+      <div class="pane-head" style="border:0;padding:0 0 8px" data-i18n="notes.head">ノ ー ト</div>
+      <form class="note-form" id="noteForm">
+        <input id="noteTitle" class="field" data-i18n-ph="notes.title" placeholder="題" required>
+        <textarea id="noteBody" class="field" rows="3" data-i18n-ph="notes.body" placeholder="本文"></textarea>
+        <button class="btn" type="submit" data-i18n="notes.save">ノートを保存</button>
+      </form>
+      <div id="noteList"></div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
+      <div class="muted" data-i18n="export.head">エクスポート</div>
+      <div class="exports">
+        <a class="btn" id="exMd" download>Markdown</a>
+        <a class="btn" id="exBib" download>BibTeX</a>
+        <a class="btn" id="exRis" download>RIS</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="viewer" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">
+  <div class="sheet">
+    <h3 id="viewerTitle"></h3>
+    <div class="tx" id="viewerText"></div>
+    <div class="ft"><button class="btn" id="viewerClose" data-i18n="viewer.close">閉じる</button></div>
+  </div>
+</div>
+<div id="toast" role="alert"></div>
+
+<script>
+"use strict";
+/* ---------- i18n (namespace.component.key) ---------- */
+const I18N = {
+  ja: {
+    "app.title":"Shoin 書院","app.lamp.on":"LLM接続中","app.lamp.off":"LLM未接続",
+    "tabs.sources":"資料","tabs.chat":"対話","tabs.studio":"書斎",
+    "sources.head":"書 棚","sources.empty.title":"書棚が空",
+    "sources.empty.body":"ファイルかURLを加えると、引用付きで対話できる。",
+    "sources.addurl":"取込","sources.added":"取込完了",
+    "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.delete":"この書院を削除",
+    "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
+    "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる",
+    "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
+    "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
+    "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
+    "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
+    "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
+    "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
+    "export.head":"エクスポート","viewer.close":"閉じる",
+    "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
+    "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…"
+  },
+  en: {
+    "app.title":"Shoin","app.lamp.on":"LLM connected","app.lamp.off":"LLM offline",
+    "tabs.sources":"Sources","tabs.chat":"Chat","tabs.studio":"Studio",
+    "sources.head":"SHELF","sources.empty.title":"The shelf is empty",
+    "sources.empty.body":"Add a file or URL to start a cited conversation.",
+    "sources.addurl":"Fetch","sources.added":"Source added",
+    "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.delete":"Delete this notebook",
+    "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
+    "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask",
+    "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
+    "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
+    "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
+    "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
+    "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
+    "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
+    "export.head":"Export","viewer.close":"Close",
+    "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
+    "err.generic":"Request failed. Is the server running?","busy":"Working…"
+  }
+};
+let lang = localStorage.getItem("shoin.lang") || (navigator.language||"ja").slice(0,2);
+if (!I18N[lang]) lang = "en";
+const t = k => (I18N[lang] && I18N[lang][k]) || I18N.ja[k] || k;
+function applyI18n(){
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach(el=>{el.textContent=t(el.dataset.i18n);});
+  document.querySelectorAll("[data-i18n-ph]").forEach(el=>{el.placeholder=t(el.dataset.i18nPh);});
+  $("#langBtn").textContent = lang==="ja" ? "EN" : "日本語";
+}
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => { const n=document.createElement(tag); if(cls)n.className=cls; if(text!=null)n.textContent=text; return n; };
+function toast(msg){ const x=$("#toast"); x.textContent=msg; x.style.display="block";
+  clearTimeout(x._t); x._t=setTimeout(()=>x.style.display="none", 6000); }
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if (!r.ok){
+    let code=r.status, msg=t("err.generic");
+    try{ const j=await r.json(); code=j.error.code; msg=j.error.message; }catch(_e){/* keep defaults */}
+    throw new Error(`[${code}] ${msg}`);
+  }
+  return r;
+}
+const jpost = (path, body) => api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+
+/* ---------- state ---------- */
+let notebooks = [], cur = null, srcIndex = new Map(); // source_id -> {s, title}
+
+/* ---------- notebooks & sources ---------- */
+async function loadNotebooks(){
+  const j = await (await api("/api/notebooks")).json();
+  notebooks = j.notebooks;
+  const ul = $("#nbList"); ul.replaceChildren();
+  for (const nb of notebooks){
+    const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
+    const name = el("span","name", nb.name);
+    const c = el("span","c", `${nb.counts.sources}册`);
+    li.append(name,c);
+    li.onclick = () => openNotebook(nb.id);
+    li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter") openNotebook(nb.id); };
+    ul.append(li);
+  }
+  if (!notebooks.length){
+    const e0 = el("div","empty"); e0.append(el("b",null,t("nb.empty.title")), el("span",null,t("nb.empty.body")));
+    ul.append(e0);
+  } else if (!cur){ openNotebook(notebooks[0].id); }
+}
+async function openNotebook(id){
+  const j = await (await api(`/api/notebooks/${id}`)).json();
+  cur = j; renderNotebook(); loadNotebooks();
+}
+function renderNotebook(){
+  $("#nbTitle").textContent = cur ? `${t("app.title")} — ${cur.name}` : t("app.title");
+  $("#srcAdders").hidden = !cur;
+  const list = $("#srcList"); list.replaceChildren();
+  srcIndex.clear();
+  if (cur){
+    cur.sources.forEach((s,i)=>{
+      srcIndex.set(s.id, {s:i+1, title:s.title});
+      const row = el("div","src");
+      row.append(el("span","no",`S${i+1}`));
+      const tt = el("span","t", s.title); tt.append(el("div","k", s.kind));
+      row.append(tt);
+      const del = el("button",null,"×"); del.setAttribute("aria-label","delete source");
+      del.onclick = async ev=>{ ev.stopPropagation();
+        try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
+      row.append(del);
+      row.onclick = () => showSource(s.id, s.title);
+      list.append(row);
+    });
+    $("#srcEmpty").hidden = cur.sources.length>0;
+    renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
+    $("#exMd").href = `/api/notebooks/${cur.id}/export?format=md`;
+    $("#exBib").href = `/api/notebooks/${cur.id}/export?format=bibtex`;
+    $("#exRis").href = `/api/notebooks/${cur.id}/export?format=ris`;
+  }
+}
+
+/* ---------- citations: 蔵書印 chips ---------- */
+function renderWithSeals(container, text, report){
+  container.replaceChildren();
+  const invalid = new Set((report && report.invalid) || []);
+  const srcMap = (report && report.source_map) || {};
+  // Match a whole bracket group, then pull every S-number inside it so that
+  // combined citations like "[S1, S2]" render as two seals (matches backend).
+  const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
+  while ((m = reB.exec(text))){
+    const nums = [...m[1].matchAll(/[Ss]\s*(\d+)/g)].map(x => Number(x[1]));
+    if (!nums.length) continue;           // not a citation bracket: leave as text
+    if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
+    nums.forEach((n, i) => {
+      if (i) container.append(document.createTextNode(" "));
+      const chip = el("button","seal" + (invalid.has(n) ? " bad":""), `S${n}`);
+      chip.type="button";
+      chip.title = invalid.has(n) ? t("chat.invalid") : (srcMap[`S${n}`] || "");
+      chip.onclick = () => openSeal(n, srcMap);
+      container.append(chip);
+    });
+    last = reB.lastIndex;
+  }
+  if (last < text.length) container.append(document.createTextNode(text.slice(last)));
+}
+function openSeal(n, srcMap){
+  const title = srcMap[`S${n}`];
+  for (const [sid, info] of srcIndex){ if (info.title === title){ showSource(sid, title); return; } }
+  if (title) toast(title);
+}
+async function showSource(id, title){
+  try{
+    const j = await (await api(`/api/sources/${id}/text`)).json();
+    $("#viewerTitle").textContent = title;
+    $("#viewerText").textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+    $("#viewer").classList.add("open");
+    $("#viewerClose").focus();
+  }catch(e){ toast(e.message); }
+}
+$("#viewerClose").onclick = () => $("#viewer").classList.remove("open");
+$("#viewer").onclick = e => { if (e.target.id==="viewer") $("#viewer").classList.remove("open"); };
+document.addEventListener("keydown", e=>{ if(e.key==="Escape") $("#viewer").classList.remove("open"); });
+
+/* ---------- chat ---------- */
+function addMsg(role, body, report){
+  const wrap = el("div","msg "+role);
+  wrap.append(el("div","who", role==="user" ? t("chat.you") : t("chat.shoin")));
+  const bd = el("div","body");
+  renderWithSeals(bd, body, report);
+  wrap.append(bd);
+  if (report && role!=="user"){
+    const c = el("div","cites");
+    if (report.invalid && report.invalid.length){
+      const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
+      c.append(b);
+    }
+    if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < 0.5){
+      c.append(el("span","badge warn", t("chat.coverage.low")));
+    }
+    if (c.children.length) wrap.append(c);
+  }
+  $("#chat").append(wrap);
+  $("#chat").scrollTop = $("#chat").scrollHeight;
+  return bd;
+}
+function renderChatHistory(){
+  $("#chat").replaceChildren();
+  (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
+  $("#chatEmpty").hidden = (cur.messages||[]).length>0;
+}
+async function refreshQuestions(){
+  $("#qs").replaceChildren();
+  if (!cur || !cur.sources.length || !window._llmOn) return;
+  try{
+    const j = await (await api(`/api/notebooks/${cur.id}/questions`)).json();
+    j.questions.forEach(q=>{
+      const b = el("button","q-chip", q); b.type="button";
+      b.onclick = ()=>{ $("#askInput").value=q; $("#askInput").focus(); };
+      $("#qs").append(b);
+    });
+  }catch(_e){ /* suggestions are best-effort */ }
+}
+$("#askForm").onsubmit = async e=>{
+  e.preventDefault();
+  if (!cur) return;
+  const q = $("#askInput").value.trim(); if(!q) return;
+  $("#askInput").value=""; $("#chatEmpty").hidden=true;
+  addMsg("user", q, null);
+  const bd = addMsg("ai", "", null);
+  bd.append(el("span","spin", t("busy")));
+  $("#askBtn").disabled = true;
+  let acc = "", meta=null;
+  try{
+    const r = await jpost(`/api/notebooks/${cur.id}/ask`, {question:q});
+    const reader = r.body.getReader(); const dec = new TextDecoder();
+    let buf = "";
+    for(;;){
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0){
+        const frame = buf.slice(0,i); buf = buf.slice(i+2);
+        let ev="message", data="";
+        for (const line of frame.split("\n")){
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        const j = JSON.parse(data);
+        if (ev==="meta") meta = j;
+        else if (ev==="delta"){ acc += j.text; bd.textContent = acc; }
+        else if (ev==="done"){
+          renderWithSeals(bd, acc, j.report);
+          const wrap = bd.parentElement, c = el("div","cites");
+          if (j.degraded) c.append(el("span","badge dim", t("chat.degraded")));
+          if (j.report.invalid.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+j.report.invalid.map(x=>"S"+x).join(", ")));
+          if (j.report.cited.length && j.report.coverage < 0.5)
+            c.append(el("span","badge warn", t("chat.coverage.low")));
+          if (c.children.length) wrap.append(c);
+        }
+      }
+    }
+  }catch(err){ bd.textContent=""; toast(err.message); }
+  finally{ $("#askBtn").disabled = false; }
+};
+
+/* ---------- studio & notes ---------- */
+const KINDS = ["briefing","study_guide","faq","timeline","mindmap"];
+function buildKindButtons(){
+  const k = $("#kinds"); k.replaceChildren();
+  KINDS.forEach(kind=>{
+    const b = el("button","btn", t("studio."+kind)); b.type="button";
+    b.onclick = async ()=>{
+      if (!cur || !cur.sources.length) return;
+      b.disabled = true; const old=b.textContent; b.textContent=t("busy");
+      try{ await jpost(`/api/notebooks/${cur.id}/studio`, {kind}); openNotebook(cur.id); }
+      catch(e){ toast(e.message); }
+      finally{ b.disabled=false; b.textContent=old; }
+    };
+    k.append(b);
+  });
+}
+function renderStudio(){
+  const out = $("#studioOut"); out.replaceChildren();
+  (cur.studio||[]).forEach(o=>{
+    const card = el("div","card");
+    const h = el("h4",null,t("studio."+o.kind));
+    if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
+    if (o.report && o.report.cited && o.report.cited.length && o.report.coverage<0.5)
+      h.append(el("span","badge warn", t("chat.coverage.low")));
+    card.append(h);
+    const bd = el("div","bd"); renderWithSeals(bd, o.body, o.report); card.append(bd);
+    out.append(card);
+  });
+}
+function renderNotes(){
+  const out = $("#noteList"); out.replaceChildren();
+  (cur.notes||[]).forEach(n=>{
+    const card = el("div","card");
+    const x = el("button","x","×"); x.setAttribute("aria-label","delete note");
+    x.onclick = async ()=>{ try{ await api(`/api/notes/${n.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
+    card.append(x, el("h4",null,n.title), el("div","bd",n.body));
+    out.append(card);
+  });
+}
+$("#noteForm").onsubmit = async e=>{
+  e.preventDefault(); if(!cur) return;
+  try{
+    await jpost(`/api/notebooks/${cur.id}/notes`, {title:$("#noteTitle").value, body:$("#noteBody").value});
+    $("#noteTitle").value=""; $("#noteBody").value=""; openNotebook(cur.id);
+  }catch(err){ toast(err.message); }
+};
+
+/* ---------- adders ---------- */
+$("#nbForm").onsubmit = async e=>{
+  e.preventDefault();
+  try{
+    const j = await (await jpost("/api/notebooks", {name:$("#nbName").value})).json();
+    $("#nbName").value=""; await openNotebook(j.id);
+  }catch(err){ toast(err.message); }
+};
+$("#fileInput").onchange = async e=>{
+  const f = e.target.files[0]; if(!f || !cur) return;
+  try{
+    await api(`/api/notebooks/${cur.id}/upload`, {method:"POST",
+      headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f});
+    toast(t("sources.added")); openNotebook(cur.id);
+  }catch(err){ toast(err.message); }
+  e.target.value="";
+};
+$("#urlBtn").onclick = async ()=>{
+  const u = $("#urlInput").value.trim(); if(!u || !cur) return;
+  try{ await jpost(`/api/notebooks/${cur.id}/sources`, {target:u});
+    $("#urlInput").value=""; toast(t("sources.added")); openNotebook(cur.id);
+  }catch(err){ toast(err.message); }
+};
+
+/* ---------- tabs / lang / health ---------- */
+document.querySelectorAll(".tabs button").forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
+    b.setAttribute("aria-selected","true");
+    document.querySelectorAll(".pane").forEach(p=>p.classList.remove("active"));
+    $("#"+b.dataset.pane).classList.add("active");
+  };
+});
+$("#langBtn").onclick = ()=>{
+  lang = lang==="ja" ? "en":"ja"; localStorage.setItem("shoin.lang", lang);
+  applyI18n(); buildKindButtons(); if (cur) renderNotebook();
+};
+async function health(){
+  try{
+    const j = await (await api("/api/health")).json();
+    window._llmOn = !!j.llm;
+    $("#lamp").classList.toggle("on", j.llm);
+    $("#lampText").textContent = j.llm ? t("app.lamp.on") : t("app.lamp.off");
+    const b = $("#banner");
+    b.style.display = j.llm ? "none" : "block";
+    if (!j.llm) b.textContent = t("banner.offline");
+  }catch(_e){ window._llmOn=false; }
+}
+
+/* ---------- boot ---------- */
+applyI18n(); buildKindButtons();
+health(); setInterval(health, 20000);
+loadNotebooks().catch(e=>toast(e.message));
+</script>
+</body>
+</html>

@@ -1,0 +1,426 @@
+"""Shoin web server: stdlib HTTP, bound to 127.0.0.1 only (spec STRIDE).
+
+Single-user local app. Each request opens its own Store (SQLite/WAL), the LLM
+backend is shared and injectable for tests. `ask` streams over SSE; everything
+else is plain JSON. No path-based static serving: only the embedded index.html.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import tempfile
+import urllib.parse
+from collections.abc import Callable, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+from .citation import make_report
+from .config import MAX_UPLOAD_BYTES, VERSION, db_path
+from .export import FORMATS, export
+from .ingest import IngestError
+from .llm import LLMClient, LLMError
+from .pipeline import index_source
+from .qa import (
+    NO_HIT_TEXT,
+    ChatBackend,
+    _degraded_text,
+    _query_vector,
+    build_context,
+    build_messages,
+)
+from .search import retrieve
+from .store import Store, StoreError
+from .studio import KINDS, generate, suggest_questions
+
+_STATIC = Path(__file__).resolve().parent / "static" / "index.html"
+
+_EXPORT_MIME = {
+    "md": "text/markdown; charset=utf-8",
+    "bibtex": "application/x-bibtex; charset=utf-8",
+    "ris": "application/x-research-info-systems; charset=utf-8",
+}
+
+Json = dict[str, Any]
+
+
+def _notebook_json(store: Store, nb_id: int) -> Json:
+    nb = store.get_notebook(nb_id)
+    return {
+        "id": nb.id,
+        "name": nb.name,
+        "counts": store.counts(nb_id),
+        "sources": [
+            {"id": s.id, "kind": s.kind, "title": s.title, "origin": s.origin}
+            for s in store.sources_for_notebook(nb_id)
+        ],
+        "notes": [
+            {"id": n["id"], "title": n["title"], "body": n["body"]} for n in store.list_notes(nb_id)
+        ],
+        "studio": [
+            {
+                "kind": o["kind"],
+                "body": o["body"],
+                "report": json.loads(str(o["citation_report"]) or "{}"),
+            }
+            for o in store.latest_studio_outputs(nb_id)
+        ],
+        "messages": [
+            {
+                "role": m["role"],
+                "body": m["body"],
+                "report": json.loads(str(m["citation_report"]) or "{}"),
+            }
+            for m in store.list_messages(nb_id)
+        ],
+    }
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server_version = f"shoin/{VERSION}"
+    llm: ChatBackend  # set by make_server
+    db: str
+
+    # --- plumbing -------------------------------------------------------
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # quiet by default
+        return
+
+    def _headers(self, status: int, ctype: str, extra: dict[str, str] | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+
+    def _json(self, payload: Json, status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._headers(status, "application/json; charset=utf-8", {"Content-Length": str(len(body))})
+        self.wfile.write(body)
+
+    def _error(self, status: int, code: str, message: str) -> None:
+        self._json({"error": {"code": code, "message": message}}, status)
+
+    def _read_json(self) -> Json:
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_UPLOAD_BYTES:
+            raise IngestError("INGEST_FILE_TOO_LARGE", "request body too large")
+        raw = self.rfile.read(n) if n else b"{}"
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"bad JSON body: {exc}") from exc
+        if not isinstance(data, dict):
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", "JSON object required")
+        return data
+
+    def _drain(self, n: int) -> None:
+        """Discard an oversize request body (bounded) so the error reaches the client."""
+        remaining = min(n, MAX_UPLOAD_BYTES + 65536)
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
+    def _require(self, data: Json, key: str) -> str:
+        value = str(data.get(key) or "").strip()
+        if not value:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}")
+        return value
+
+    # --- routing --------------------------------------------------------
+
+    _ROUTES: tuple[tuple[str, str, str], ...] = (
+        ("GET", r"^/$", "ui"),
+        ("GET", r"^/api/health$", "health"),
+        ("GET", r"^/api/notebooks$", "nb_list"),
+        ("POST", r"^/api/notebooks$", "nb_create"),
+        ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
+        ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
+        ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
+        ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
+        ("DELETE", r"^/api/sources/(\d+)$", "src_delete"),
+        ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
+        ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
+        ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
+        ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
+        ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
+        ("DELETE", r"^/api/notes/(\d+)$", "note_delete"),
+        ("GET", r"^/api/notebooks/(\d+)/export$", "export"),
+    )
+
+    def _dispatch(self, method: str) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        self._query = urllib.parse.parse_qs(parsed.query)
+        for verb, pattern, name in self._ROUTES:
+            if verb != method:
+                continue
+            m = re.match(pattern, parsed.path)
+            if m:
+                handler: Callable[..., None] = getattr(self, f"_h_{name}")
+                try:
+                    handler(*[int(g) for g in m.groups()])
+                except StoreError as exc:
+                    status = 404 if exc.code.endswith("_NOT_FOUND") else 400
+                    self._error(status, exc.code, str(exc))
+                except IngestError as exc:
+                    self._error(400, exc.code, str(exc))
+                except LLMError as exc:
+                    self._error(502, exc.code, str(exc))
+                return
+        self._error(404, "ROUTE_NOT_FOUND", f"no route: {method} {parsed.path}")
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        self._dispatch("GET")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._dispatch("POST")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
+    # --- handlers -------------------------------------------------------
+
+    def _h_ui(self) -> None:
+        body = _STATIC.read_bytes()
+        self._headers(
+            200,
+            "text/html; charset=utf-8",
+            {
+                "Content-Length": str(len(body)),
+                "Content-Security-Policy": (
+                    "default-src 'none'; style-src 'unsafe-inline';"
+                    " script-src 'unsafe-inline'; connect-src 'self'; img-src data:"
+                ),
+            },
+        )
+        self.wfile.write(body)
+
+    def _h_health(self) -> None:
+        avail = getattr(self.llm, "available", lambda: False)()
+        model = getattr(self.llm, "model", "")
+        self._json({"status": "ok", "version": VERSION, "llm": avail, "model": model})
+
+    def _h_nb_list(self) -> None:
+        with Store(self.db) as store:
+            self._json(
+                {
+                    "notebooks": [
+                        {"id": nb.id, "name": nb.name, "counts": store.counts(nb.id)}
+                        for nb in store.list_notebooks()
+                    ]
+                }
+            )
+
+    def _h_nb_create(self) -> None:
+        name = self._require(self._read_json(), "name")
+        with Store(self.db) as store:
+            nb = store.create_notebook(name)
+            self._json({"id": nb.id, "name": nb.name}, 201)
+
+    def _h_nb_get(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            self._json(_notebook_json(store, nb_id))
+
+    def _h_nb_delete(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            store.delete_notebook(nb_id)
+        self._json({"deleted": nb_id})
+
+    def _h_src_add(self, nb_id: int) -> None:
+        target = self._require(self._read_json(), "target")
+        with Store(self.db) as store:
+            result = index_source(store, nb_id, target, self.llm)
+            self._json(
+                {
+                    "source": {"id": result.source.id, "title": result.source.title},
+                    "n_chunks": result.n_chunks,
+                    "n_embedded": result.n_embedded,
+                },
+                201,
+            )
+
+    def _h_src_upload(self, nb_id: int) -> None:
+        raw_name = urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")
+        suffix = Path(raw_name).suffix.lower() or ".txt"
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0:
+            raise IngestError("INGEST_EMPTY", "empty upload")
+        if n > MAX_UPLOAD_BYTES:
+            self._drain(n)
+            raise IngestError("INGEST_FILE_TOO_LARGE", "upload exceeds 10MB limit")
+        data = self.rfile.read(n)
+        with tempfile.NamedTemporaryFile(
+            prefix=Path(raw_name).stem[:40] or "upload", suffix=suffix, delete=False
+        ) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        try:
+            with Store(self.db) as store:
+                result = index_source(store, nb_id, str(tmp_path), self.llm)
+                # keep the user's filename, not the temp path
+                store.conn.execute(
+                    "UPDATE sources SET title=?, origin=? WHERE id=?",
+                    (raw_name, raw_name, result.source.id),
+                )
+                store.conn.commit()
+                self._json(
+                    {
+                        "source": {"id": result.source.id, "title": raw_name},
+                        "n_chunks": result.n_chunks,
+                        "n_embedded": result.n_embedded,
+                    },
+                    201,
+                )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def _h_src_delete(self, src_id: int) -> None:
+        with Store(self.db) as store:
+            store.delete_source(src_id)
+        self._json({"deleted": src_id})
+
+    def _h_src_text(self, src_id: int) -> None:
+        with Store(self.db) as store:
+            rows = store.conn.execute(
+                "SELECT seq, text FROM chunks WHERE source_id=? ORDER BY seq", (src_id,)
+            ).fetchall()
+            self._json({"chunks": [{"seq": r["seq"], "text": r["text"]} for r in rows]})
+
+    def _h_studio(self, nb_id: int) -> None:
+        kind = self._require(self._read_json(), "kind")
+        if kind not in KINDS:
+            raise StoreError("STUDIO_KIND_INVALID", f"kind must be one of {KINDS}")
+        with Store(self.db) as store:
+            result = generate(store, self.llm, nb_id, kind)
+            self._json({"kind": result.kind, "body": result.body, "report": dict(result.report)})
+
+    def _h_questions(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            self._json({"questions": suggest_questions(store, self.llm, nb_id)})
+
+    def _h_note_add(self, nb_id: int) -> None:
+        data = self._read_json()
+        title = self._require(data, "title")
+        body = str(data.get("body") or "")
+        with Store(self.db) as store:
+            note_id = store.add_note(nb_id, title, body)
+            self._json({"id": note_id}, 201)
+
+    def _h_note_delete(self, note_id: int) -> None:
+        with Store(self.db) as store:
+            store.delete_note(note_id)
+        self._json({"deleted": note_id})
+
+    def _h_export(self, nb_id: int) -> None:
+        fmt = (self._query.get("format") or ["md"])[0]
+        if fmt not in FORMATS:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"format must be one of {FORMATS}")
+        with Store(self.db) as store:
+            text = export(store, nb_id, fmt)
+        body = text.encode("utf-8")
+        self._headers(
+            200,
+            _EXPORT_MIME[fmt],
+            {
+                "Content-Length": str(len(body)),
+                "Content-Disposition": f'attachment; filename="notebook-{nb_id}.{fmt}"',
+            },
+        )
+        self.wfile.write(body)
+
+    # --- SSE ask --------------------------------------------------------
+
+    def _sse(self, event: str, payload: Json) -> None:
+        data = json.dumps(payload, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
+        self.wfile.flush()
+
+    def _stream_chat(self, messages: list[dict[str, str]]) -> Iterator[str]:
+        stream = getattr(self.llm, "chat_stream", None)
+        if stream is not None:
+            yield from stream(messages)
+        else:
+            yield self.llm.chat(messages)
+
+    def _h_ask_sse(self, nb_id: int) -> None:
+        question = self._require(self._read_json(), "question")
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)  # 404 before headers go out
+            qvec = _query_vector(self.llm, question)
+            hits = retrieve(store, nb_id, question, query_vec=qvec)
+            store.add_message(nb_id, "user", question, "{}")
+
+            self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
+            if not hits:
+                report = make_report(NO_HIT_TEXT, [])
+                self._sse("meta", {"sources": []})
+                self._sse("delta", {"text": NO_HIT_TEXT})
+                self._sse("done", {"report": dict(report), "degraded": False})
+                store.add_message(nb_id, "assistant", NO_HIT_TEXT, json.dumps(report))
+                return
+
+            context = build_context(store, hits)
+            self._sse(
+                "meta",
+                {
+                    "sources": [
+                        {"s": i + 1, "title": t, "source_id": sid}
+                        for i, (t, sid) in enumerate(
+                            zip(
+                                context.source_titles,
+                                list(context.snumber_by_source.keys()),
+                            )
+                        )
+                    ]
+                },
+            )
+            parts: list[str] = []
+            degraded = False
+            try:
+                for token in self._stream_chat(build_messages(question, context)):
+                    parts.append(token)
+                    self._sse("delta", {"text": token})
+            except LLMError:
+                degraded = True
+                text = _degraded_text(hits)
+                parts = [text]
+                self._sse("delta", {"text": text})
+            full = "".join(parts)
+            report = make_report(full, context.source_titles)
+            self._sse("done", {"report": dict(report), "degraded": degraded})
+            store.add_message(nb_id, "assistant", full, json.dumps(report))
+
+
+def make_server(
+    host: str = "127.0.0.1",
+    port: int = 0,
+    db: str | None = None,
+    llm: ChatBackend | None = None,
+) -> ThreadingHTTPServer:
+    """Build a configured server. host is pinned to loopback by design."""
+    if not host.startswith("127."):
+        raise ValueError("Shoin binds to loopback only (privacy by design)")
+    handler = type(
+        "ShoinHandler",
+        (_Handler,),
+        {"llm": llm if llm is not None else LLMClient(), "db": db or str(db_path())},
+    )
+    return ThreadingHTTPServer((host, port), handler)
+
+
+def serve(port: int, db: str | None = None) -> None:  # pragma: no cover (blocking loop)
+    server = make_server(port=port, db=db)
+    actual = server.server_address[1]
+    print(f"Shoin (書院) v{VERSION} — http://127.0.0.1:{actual}/")
+    print("外部送信なし。Ctrl+C で終了。")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n停止。")
+    finally:
+        server.server_close()

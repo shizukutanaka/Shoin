@@ -1,0 +1,218 @@
+"""Phase 4 tests: HTTP server (routes, SSE ask, upload, security headers)."""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Iterator
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shoin.server import make_server  # noqa: E402
+
+
+class FakeLLM:
+    embedding_model = ""
+    model = "fake-4b"
+
+    def __init__(self, reply_parts: list[str] | None = None) -> None:
+        self.reply_parts = reply_parts or ["回答 ", "[S1]。"]
+
+    def available(self) -> bool:
+        return True
+
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        return "".join(self.reply_parts)
+
+    def chat_stream(
+        self, messages: list[dict[str, str]], temperature: float = 0.2
+    ) -> Iterator[str]:
+        yield from self.reply_parts
+
+    def embed_one(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+
+def parse_sse(raw: str) -> list[tuple[str, dict[str, object]]]:
+    events: list[tuple[str, dict[str, object]]] = []
+    for frame in raw.split("\n\n"):
+        ev, data = "message", ""
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                ev = line[6:].strip()
+            elif line.startswith("data:"):
+                data += line[5:].strip()
+        if data:
+            events.append((ev, json.loads(data)))
+    return events
+
+
+class ServerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "s.db"), llm=FakeLLM())
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    # --- helpers ---
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _req(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method, headers=headers or {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+
+    def _json(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> tuple[int, dict[str, object]]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        status, _, raw = self._req(
+            method, path, body, {"Content-Type": "application/json"} if body else {}
+        )
+        return status, json.loads(raw) if raw else {}
+
+    # --- tests (single flow to keep ordering deterministic) ---
+
+    def test_workflow(self) -> None:
+        # health + UI + security headers
+        status, data = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["llm"])
+        status, headers, page = self._req("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("書院", page.decode())
+        self.assertIn("Content-Security-Policy", headers)
+        self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+
+        # notebook CRUD
+        status, nb = self._json("POST", "/api/notebooks", {"name": "和紙研究"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        status, listing = self._json("GET", "/api/notebooks")
+        self.assertIn(nb_id, [n["id"] for n in listing["notebooks"]])
+
+        # validation error shape
+        status, err = self._json("POST", "/api/notebooks", {"name": "  "})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+
+        # upload keeps original filename
+        body = ("和紙は楮から作られる。" * 30).encode("utf-8")
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            body,
+            {"X-Filename": urllib.parse.quote("素材メモ.txt")},
+        )
+        self.assertEqual(status, 201)
+        up = json.loads(raw)
+        self.assertEqual(up["source"]["title"], "素材メモ.txt")
+        self.assertGreaterEqual(up["n_chunks"], 1)
+
+        # detail view
+        status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(len(detail["sources"]), 1)
+        src_id = detail["sources"][0]["id"]
+
+        # source text endpoint
+        status, chunks = self._json("GET", f"/api/sources/{src_id}/text")
+        self.assertEqual(status, 200)
+        self.assertIn("和紙", str(chunks["chunks"][0]["text"]))
+
+        # SSE ask: meta -> delta -> done, message persisted with report
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/ask",
+            json.dumps({"question": "和紙の原料は？"}).encode(),
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        events = parse_sse(raw.decode())
+        kinds = [e for e, _ in events]
+        self.assertEqual(kinds[0], "meta")
+        self.assertIn("delta", kinds)
+        self.assertEqual(kinds[-1], "done")
+        full = "".join(str(d["text"]) for e, d in events if e == "delta")
+        self.assertEqual(full, "回答 [S1]。")
+        done = events[-1][1]
+        self.assertEqual(done["report"]["cited"], [1])  # type: ignore[index]
+        status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(len(detail["messages"]), 2)
+
+        # studio + invalid kind
+        status, st = self._json("POST", f"/api/notebooks/{nb_id}/studio", {"kind": "briefing"})
+        self.assertEqual(status, 200)
+        self.assertEqual(st["report"]["cited"], [1])  # type: ignore[index]
+        status, err = self._json("POST", f"/api/notebooks/{nb_id}/studio", {"kind": "poem"})
+        self.assertEqual(status, 400)
+
+        # notes
+        status, note = self._json(
+            "POST", f"/api/notebooks/{nb_id}/notes", {"title": "覚書", "body": "重要"}
+        )
+        self.assertEqual(status, 201)
+        status, _ = self._json("DELETE", f"/api/notes/{note['id']}")
+        self.assertEqual(status, 200)
+
+        # export
+        status, headers, raw = self._req("GET", f"/api/notebooks/{nb_id}/export?format=bibtex")
+        self.assertEqual(status, 200)
+        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+        self.assertIn("@misc{shoin", raw.decode())
+
+        # 404s
+        status, err = self._json("GET", "/api/notebooks/999")
+        self.assertEqual(status, 404)
+        status, _ = self._json("GET", "/api/nope")
+        self.assertEqual(status, 404)
+
+        # delete notebook
+        status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+
+    def test_loopback_only(self) -> None:
+        with self.assertRaises(ValueError):
+            make_server(host="0.0.0.0")
+
+    def test_upload_too_large_rejected(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "limit"})
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            b"x" * (10 * 1024 * 1024 + 1),
+            {"X-Filename": "big.txt"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "INGEST_FILE_TOO_LARGE")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=0)
