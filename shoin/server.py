@@ -29,6 +29,7 @@ from .qa import (
     _query_vector,
     build_context,
     build_messages,
+    expand_query,
     history_messages,
 )
 from .search import retrieve
@@ -159,6 +160,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
+        ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
@@ -169,6 +171,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
         ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
         ("DELETE", r"^/api/notes/(\d+)$", "note_delete"),
+        ("DELETE", r"^/api/notebooks/(\d+)/messages$", "nb_clear_chat"),
         ("GET", r"^/api/notebooks/(\d+)/export$", "export"),
     )
 
@@ -218,6 +221,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch("POST")
 
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._dispatch("PATCH")
+
     def do_DELETE(self) -> None:  # noqa: N802
         self._dispatch("DELETE")
 
@@ -266,10 +272,22 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             self._json(_notebook_json(store, nb_id))
 
+    def _h_nb_rename(self, nb_id: int) -> None:
+        name = self._require(self._read_json(), "name")
+        with Store(self.db) as store:
+            store.rename_notebook(nb_id, name)
+        self._json({"id": nb_id, "name": name})
+
     def _h_nb_delete(self, nb_id: int) -> None:
         with Store(self.db) as store:
             store.delete_notebook(nb_id)
         self._json({"deleted": nb_id})
+
+    def _h_nb_clear_chat(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            store.clear_messages(nb_id)
+        self.questions_cache.pop(nb_id, None)
+        self._json({"cleared": nb_id})
 
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")
@@ -404,9 +422,10 @@ class _Handler(BaseHTTPRequestHandler):
         question = self._require(self._read_json(), "question")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404 before headers go out
-            qvec = _query_vector(self.llm, question)
-            hits = retrieve(store, nb_id, question, query_vec=qvec)
             history = history_messages(store, nb_id)  # before persisting this turn
+            retrieval_q = expand_query(question, history)
+            qvec = _query_vector(self.llm, retrieval_q)
+            hits = retrieve(store, nb_id, retrieval_q, query_vec=qvec)
             store.add_message(nb_id, "user", question, "{}")
 
             self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
@@ -424,12 +443,7 @@ class _Handler(BaseHTTPRequestHandler):
                 {
                     "sources": [
                         {"s": i + 1, "title": t, "source_id": sid}
-                        for i, (t, sid) in enumerate(
-                            zip(
-                                context.source_titles,
-                                list(context.snumber_by_source.keys()),
-                            )
-                        )
+                        for i, (t, sid) in enumerate(zip(context.source_titles, context.source_ids))
                     ]
                 },
             )
@@ -445,7 +459,7 @@ class _Handler(BaseHTTPRequestHandler):
                 parts = [text]
                 self._sse("delta", {"text": text})
             full = "".join(parts)
-            report = make_report(full, context.source_titles)
+            report = make_report(full, context.source_titles, context.source_ids)
             self._sse("done", {"report": dict(report), "degraded": degraded})
             store.add_message(nb_id, "assistant", full, json.dumps(report))
 

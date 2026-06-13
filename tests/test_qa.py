@@ -21,6 +21,7 @@ from shoin.qa import (
     ask,
     build_context,
     build_messages,
+    expand_query,
     history_messages,
 )
 from shoin.search import retrieve
@@ -242,6 +243,68 @@ class TestMultiTurn(unittest.TestCase):
             fake = FakeLLM()
             ask(s, fake, nb, "書斎とは？")
             self.assertEqual([m["role"] for m in fake.chat_calls[-1]], ["system", "user"])
+
+    def test_query_expand_short_followup(self) -> None:
+        """Short follow-up gets the last user turn prepended for retrieval."""
+        history: list[dict[str, str]] = [
+            {"role": "user", "content": "書斎の差別化とは？"},
+            {"role": "assistant", "content": "引用検証が核です。"},
+        ]
+        expanded = expand_query("詳しく", history)
+        self.assertIn("書斎の差別化", expanded)
+        self.assertIn("詳しく", expanded)
+
+    def test_query_no_expand_long_question(self) -> None:
+        """Long questions are not expanded (self-contained query)."""
+        history: list[dict[str, str]] = [{"role": "user", "content": "前の質問"}]
+        long_q = "書斎における引用検証の具体的な実装アルゴリズムについて詳しく教えてください。"
+        self.assertEqual(expand_query(long_q, history), long_q)
+
+    def test_query_no_expand_empty_history(self) -> None:
+        self.assertEqual(expand_query("短問", []), "短問")
+
+
+class TestCitationSourceIds(unittest.TestCase):
+    def test_source_id_map_in_report(self) -> None:
+        from shoin.citation import make_report
+
+        rep = make_report("根拠[S1]。", ["論文A", "論文B"], source_ids=[42, 7])
+        self.assertEqual(rep["source_id_map"], {"S1": 42, "S2": 7})
+
+    def test_source_id_map_absent_when_not_supplied(self) -> None:
+        from shoin.citation import make_report
+
+        rep = make_report("根拠[S1]。", ["論文A"])
+        self.assertNotIn("source_id_map", rep)
+
+    def test_build_context_populates_source_ids(self) -> None:
+        s, nb = seeded_store()
+        with s:
+            hits = retrieve(s, nb, "書斎", k=4)
+            ctx = build_context(s, hits)
+            self.assertEqual(len(ctx.source_ids), len(ctx.source_titles))
+            for sid in ctx.source_ids:
+                self.assertIsInstance(sid, int)
+
+
+class TestClearMessages(unittest.TestCase):
+    def test_clear_messages(self) -> None:
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "答え1")
+            self.assertEqual(len(s.list_messages(nb)), 2)
+            s.clear_messages(nb)
+            self.assertEqual(len(s.list_messages(nb)), 0)
+
+    def test_clear_messages_unknown_notebook(self) -> None:
+        from shoin.store import StoreError
+
+        s = Store(":memory:")
+        with s:
+            with self.assertRaises(StoreError) as ctx:
+                s.clear_messages(999)
+            self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
 
 
 if __name__ == "__main__":

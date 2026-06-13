@@ -99,8 +99,14 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 #nbList li:hover,#nbList li.cur{background:var(--paper)}
 #nbList .name{flex:1;font-family:var(--serif);font-size:14.5px}
 #nbList .c{font-size:11px;color:var(--sumi-soft)}
+#nbList .ren{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:11px;padding:0 3px;opacity:0}
+#nbList li:hover .ren,#nbList li.cur .ren{opacity:1}
+#nbList .ren:hover{color:var(--seiji-ink)}
 
 /* ---- chat pane ---- */
+.pane-head .clear-chat{margin-left:auto;font-size:11px;border:1px solid var(--border-strong);
+  background:none;border-radius:3px;padding:2px 8px;cursor:pointer;color:var(--sumi-soft)}
+.pane-head .clear-chat:hover{color:var(--shu);border-color:var(--shu)}
 #chat{display:flex;flex-direction:column;gap:14px}
 .msg{max-width:72ch}
 .msg .who{font-family:var(--serif);font-size:11.5px;letter-spacing:.2em;color:var(--sumi-soft);margin-bottom:3px}
@@ -188,7 +194,7 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 
   <!-- chat -->
   <section class="pane active" id="paneChat" aria-label="Chat">
-    <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span></div>
+    <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span><button class="clear-chat" id="clearChat" type="button" data-i18n="chat.clear" hidden>クリア</button></div>
     <div class="pane-body" id="chat" aria-live="polite"></div>
     <div id="chatEmpty" class="empty" style="margin:14px" hidden>
       <b data-i18n="chat.empty.title">問いから始まる</b>
@@ -247,9 +253,9 @@ const I18N = {
     "sources.head":"書 棚","sources.empty.title":"書棚が空",
     "sources.empty.body":"ファイルかURLを加えると、引用付きで対話できる。",
     "sources.addurl":"取込","sources.added":"取込完了",
-    "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.delete":"この書院を削除",
+    "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.rename":"名前を変更","nb.delete":"この書院を削除",
     "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
-    "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる",
+    "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
@@ -266,9 +272,9 @@ const I18N = {
     "sources.head":"SHELF","sources.empty.title":"The shelf is empty",
     "sources.empty.body":"Add a file or URL to start a cited conversation.",
     "sources.addurl":"Fetch","sources.added":"Source added",
-    "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.delete":"Delete this notebook",
+    "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.rename":"Rename","nb.delete":"Delete this notebook",
     "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
-    "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask",
+    "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
@@ -318,7 +324,19 @@ async function loadNotebooks(){
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
     const name = el("span","name", nb.name);
     const c = el("span","c", `${nb.counts.sources}册`);
-    li.append(name,c);
+    const ren = el("button","ren","✎"); ren.type="button"; ren.title=t("nb.rename");
+    ren.onclick = async ev=>{
+      ev.stopPropagation();
+      const newName = prompt(t("nb.rename"), nb.name);
+      if (!newName || !newName.trim()) return;
+      try{
+        await api(`/api/notebooks/${nb.id}`, {method:"PATCH",
+          headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:newName.trim()})});
+        if (cur && cur.id===nb.id) cur.name = newName.trim();
+        loadNotebooks(); renderNotebook();
+      }catch(e){ toast(e.message); }
+    };
+    li.append(name,c,ren);
     li.onclick = () => openNotebook(nb.id);
     li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter") openNotebook(nb.id); };
     ul.append(li);
@@ -364,6 +382,7 @@ function renderWithSeals(container, text, report){
   container.replaceChildren();
   const invalid = new Set((report && report.invalid) || []);
   const srcMap = (report && report.source_map) || {};
+  const idMap = (report && report.source_id_map) || null;
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -376,16 +395,19 @@ function renderWithSeals(container, text, report){
       const chip = el("button","seal" + (invalid.has(n) ? " bad":""), `S${n}`);
       chip.type="button";
       chip.title = invalid.has(n) ? t("chat.invalid") : (srcMap[`S${n}`] || "");
-      chip.onclick = () => openSeal(n, srcMap);
+      chip.onclick = () => openSeal(n, srcMap, idMap);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap){
+function openSeal(n, srcMap, idMap){
+  // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
+  const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
-  for (const [sid, info] of srcIndex){ if (info.title === title){ showSource(sid, title); return; } }
+  if (sid){ showSource(sid, title || `S${n}`); return; }
+  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title); return; } }
   if (title) toast(title);
 }
 async function showSource(id, title){
@@ -426,8 +448,17 @@ function addMsg(role, body, report){
 function renderChatHistory(){
   $("#chat").replaceChildren();
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
-  $("#chatEmpty").hidden = (cur.messages||[]).length>0;
+  const hasChat = (cur.messages||[]).length > 0;
+  $("#chatEmpty").hidden = hasChat;
+  $("#clearChat").hidden = !hasChat;
 }
+$("#clearChat").onclick = async ()=>{
+  if (!cur) return;
+  try{
+    await api(`/api/notebooks/${cur.id}/messages`, {method:"DELETE"});
+    openNotebook(cur.id);
+  }catch(e){ toast(e.message); }
+};
 async function refreshQuestions(){
   $("#qs").replaceChildren();
   if (!cur || !cur.sources.length || !window._llmOn) return;

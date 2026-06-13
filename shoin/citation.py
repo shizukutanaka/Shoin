@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 # A citation lives inside square brackets and may combine several sources:
 # [S1] / [S1, S2] / [S1; S3] / [S1 and S2] / [S1][S2]. Full-width brackets,
@@ -25,6 +25,9 @@ class CitationReport(TypedDict):
     coverage: float
     n_sources: int
     source_map: dict[str, str]
+    # Maps "S1" -> actual source DB id. Present when the caller supplies source_ids,
+    # absent on old persisted reports — consumers must guard with .get().
+    source_id_map: NotRequired[dict[str, int]]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -48,14 +51,21 @@ def validate_citations(text: str, n_sources: int) -> tuple[list[int], list[int]]
     return valid, invalid
 
 
-def make_report(text: str, source_titles: list[str]) -> CitationReport:
+def make_report(
+    text: str,
+    source_titles: list[str],
+    source_ids: list[int] | None = None,
+) -> CitationReport:
     """Build the citation_report attached to every generated answer/output."""
     n = len(source_titles)
     valid, invalid = validate_citations(text, n)
-    return CitationReport(
+    report = CitationReport(
         cited=valid,
         invalid=invalid,
         coverage=(len(set(valid)) / n) if n else 0.0,
         n_sources=n,
         source_map={f"S{i + 1}": t for i, t in enumerate(source_titles)},
     )
+    if source_ids is not None:
+        report["source_id_map"] = {f"S{i + 1}": sid for i, sid in enumerate(source_ids)}
+    return report

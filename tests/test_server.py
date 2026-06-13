@@ -191,6 +191,26 @@ class ServerTest(unittest.TestCase):
         self.assertIn("attachment", headers.get("Content-Disposition", ""))
         self.assertIn("@misc{shoin", raw.decode())
 
+        # rename notebook
+        status, renamed = self._json("PATCH", f"/api/notebooks/{nb_id}", {"name": "和紙研究 改"})
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed["name"], "和紙研究 改")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "和紙研究 改")
+
+        # rename blank name rejected
+        status, err = self._json("PATCH", f"/api/notebooks/{nb_id}", {"name": "  "})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")  # type: ignore[index]
+
+        # clear chat
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertGreater(len(detail["messages"]), 0)
+        status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}/messages")
+        self.assertEqual(status, 200)
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["messages"], [])
+
         # 404s
         status, err = self._json("GET", "/api/notebooks/999")
         self.assertEqual(status, 404)

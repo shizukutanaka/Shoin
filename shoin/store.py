@@ -362,6 +362,11 @@ class Store:
             ).fetchall()
         )
 
+    def clear_messages(self, notebook_id: int) -> None:
+        self.get_notebook(notebook_id)
+        self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
+        self.conn.commit()
+
     def counts(self, notebook_id: int) -> dict[str, int]:
         n_sources = self.conn.execute(
             "SELECT COUNT(*) AS n FROM sources WHERE notebook_id=?", (notebook_id,)

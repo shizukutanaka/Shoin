@@ -82,7 +82,7 @@ def generate(
             {"role": "user", "content": user},
         ]
     )
-    report = make_report(body, context.source_titles)
+    report = make_report(body, context.source_titles, context.source_ids)
     if persist:
         store.add_studio_output(notebook_id, kind, body, json.dumps(report))
     return StudioResult(kind, body, report)

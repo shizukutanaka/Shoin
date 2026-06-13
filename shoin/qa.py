@@ -58,6 +58,7 @@ class GroundedContext:
     block: str
     hits: list[Hit]
     snumber_by_source: dict[int, int] = field(default_factory=dict)
+    source_ids: list[int] = field(default_factory=list)  # ordered: source_ids[0] == S1
 
 
 @dataclass
@@ -122,7 +123,8 @@ def build_context(
             used += cost
         body = "\n…\n".join(texts)
         parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
-    return GroundedContext(titles, "\n\n".join(parts), hits, snums)
+    ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
+    return GroundedContext(titles, "\n\n".join(parts), hits, snums, ordered_ids)
 
 
 def history_messages(
@@ -155,6 +157,19 @@ def build_messages(
     ]
 
 
+def expand_query(question: str, history: list[Message]) -> str:
+    """Prepend the last user question to improve retrieval for short follow-ups.
+
+    "それを詳しく" alone returns no hits; combined with the prior question the
+    retrieval pipeline finds the right chunks.  Only applied when the current
+    question is short (< 30 chars) and there is a prior user turn.
+    """
+    if len(question) >= 30:
+        return question
+    prev = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
+    return f"{prev} {question}" if prev else question
+
+
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
     if not llm.embedding_model:
         return None
@@ -180,9 +195,10 @@ def ask(
     persist: bool = True,
 ) -> Answer:
     """Grounded Q&A over a notebook. Never raises on LLM unavailability."""
-    qvec = _query_vector(llm, question)
-    hits = retrieve(store, notebook_id, question, query_vec=qvec, k=k)
     history = history_messages(store, notebook_id)  # before persisting this turn
+    retrieval_q = expand_query(question, history)
+    qvec = _query_vector(llm, retrieval_q)
+    hits = retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
     if persist:
         store.add_message(notebook_id, "user", question, "{}")
 
@@ -192,10 +208,17 @@ def ask(
         context = build_context(store, hits)
         try:
             text = llm.chat(build_messages(question, context, history))
-            answer = Answer(text, hits, make_report(text, context.source_titles))
+            answer = Answer(
+                text, hits, make_report(text, context.source_titles, context.source_ids)
+            )
         except LLMError:
             text = _degraded_text(hits)
-            answer = Answer(text, hits, make_report(text, context.source_titles), degraded=True)
+            answer = Answer(
+                text,
+                hits,
+                make_report(text, context.source_titles, context.source_ids),
+                degraded=True,
+            )
 
     if persist:
         store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
