@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.1.26] - 2026-06-13
+### Fixed
+- **`generate()` が存在しない notebook に対して `NOTEBOOK_NOT_FOUND` でなく `NOTEBOOK_EMPTY` を返す**: `overview_hits()` は存在しない notebook_id に対して空リストを返すため、呼び出し元では「ソースなし」と「ノートブック不在」を区別できなかった。`store.get_notebook(notebook_id)` を `overview_hits()` の前に追加し、正しいエラーコードを送出するよう修正。
+- **`suggest_questions()` が存在しない notebook に対してサイレントに `[]` を返す**: 同様の問題。`store.get_notebook()` を先頭に追加し、`NOTEBOOK_NOT_FOUND` を送出するよう修正。
+
+### Added
+- **`studio.py` の全ユーザー向けメッセージを i18n 対応**: `_INSTRUCTIONS`(5種類: briefing / study_guide / faq / timeline / mindmap)、セクションヘッダー(`ソース`/`指示`)、引用注記、質問プロンプトテンプレートを `_STRINGS`/`_INSTRUCTIONS` 辞書に集約。`SHOIN_LANG=en` で英語のLLMプロンプトが使用される。`generate()` と `suggest_questions()` は `SYSTEM_PROMPT` 定数ではなく `_qa_t("system_prompt")` を呼び出し時に評価するよう変更。
+
 ## [v0.1.25] - 2026-06-13
 ### Fixed
 - **SSE no-hit レスポンスが `SHOIN_LANG` を無視**: `_h_ask_sse()` がクエリに一致するソースなしの場合に `NO_HIT_TEXT` 定数(常に日本語)を使用していた。v0.1.24 の `_t()` 機構を利用して `_qa_t("no_hit")` に変更し、`SHOIN_LANG=en` でも英語フォールバックが表示されるよう修正。

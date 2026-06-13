@@ -145,6 +145,41 @@ class StudioTest(unittest.TestCase):
         """DoD: suggest_questions degrades gracefully when LLM is down (graceful degradation)."""
         self.assertEqual(suggest_questions(self.store, FakeLLM(chat_error=True), self.nb), [])
 
+    def test_generate_missing_notebook_raises(self) -> None:
+        with self.assertRaises(StoreError) as ctx:
+            generate(self.store, FakeLLM(), 99999, "briefing")
+        self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_suggest_questions_missing_notebook_raises(self) -> None:
+        with self.assertRaises(StoreError) as ctx:
+            suggest_questions(self.store, FakeLLM(), 99999)
+        self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_generate_english_instructions(self) -> None:
+        import os
+
+        llm = FakeLLM(reply="Summary [S1].")
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            result = generate(self.store, llm, self.nb, "briefing", persist=False)
+        self.assertEqual(result.kind, "briefing")
+        # Verify English strings appear in the prompt sent to the LLM.
+        prompt = llm.chat_prompts[-1]
+        self.assertIn("## Sources", prompt)
+        self.assertIn("## Instructions", prompt)
+        self.assertIn("Executive Summary", prompt)
+        self.assertNotIn("## ソース", prompt)
+
+    def test_suggest_questions_english_prompt(self) -> None:
+        import os
+
+        llm = FakeLLM(reply="What is this? How does it work?")
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            suggest_questions(self.store, llm, self.nb)
+        prompt = llm.chat_prompts[-1]
+        self.assertIn("## Sources", prompt)
+        self.assertIn("questions a reader might ask", prompt)
+        self.assertNotIn("## ソース", prompt)
+
 
 class ExportTest(unittest.TestCase):
     def setUp(self) -> None:
