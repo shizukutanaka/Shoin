@@ -191,6 +191,15 @@ class ExportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             export(self.store, self.nb, "docx")
 
+    def test_export_missing_notebook_raises_for_all_formats(self) -> None:
+        """bibtex and ris must raise NOTEBOOK_NOT_FOUND, not return empty strings."""
+        from shoin.store import StoreError
+
+        for fmt in ("md", "bibtex", "ris"):
+            with self.assertRaises(StoreError) as cm:
+                export(self.store, 99999, fmt)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND", msg=f"format={fmt}")
+
     def test_notes_crud(self) -> None:
         notes = self.store.list_notes(self.nb)
         self.assertEqual(len(notes), 1)

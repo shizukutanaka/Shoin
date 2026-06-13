@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.10] - 2026-06-13
+### Fixed
+- **`export_bibtex` / `export_ris` が存在しないノートブックで空文字列を返していた**: `export_markdown` は先頭で `store.get_notebook()` を呼び出して存在確認しているが、`bibtex` / `ris` 系はそれをせず空結果を 200 OK で返していた。API の `StoreError("NOTEBOOK_NOT_FOUND")` → 404 変換に引っかからないため、削除済みノートブックへのエクスポートが無音で空ファイルになっていた。各フォーマット関数の先頭に `store.get_notebook()` を追加し挙動を統一。
+- **`add_source` の TOCTOU 競合でスレッドが未捕捉 `IntegrityError` を送出することがあった**: 重複チェック (`SELECT`) と挿入 (`INSERT`) の間に別スレッドが同一ソースを挿入すると `sqlite3.IntegrityError` が伝播して 500 応答になっていた。`IntegrityError` を捕捉して `StoreError("SOURCE_ALREADY_EXISTS")` に変換するよう修正。
+
 ## [v0.1.9] - 2026-06-13
 ### Fixed
 - **`fetch_url` が旧バージョン番号の User-Agent を送信していた**: `"shoin/0.1"` とハードコードされていた User-Agent ヘッダを `f"shoin/{VERSION}"` に変更。バージョンを上げるたびに手動更新が必要な不一致を解消。

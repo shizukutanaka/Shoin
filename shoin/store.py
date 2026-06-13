@@ -234,11 +234,17 @@ class Store:
                 f"identical source already in notebook (source id {dup['id']})",
             )
         ts = _now()
-        cur = self.conn.execute(
-            "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (notebook_id, kind, title, origin, sha256, ts),
-        )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (notebook_id, kind, title, origin, sha256, ts),
+            )
+        except sqlite3.IntegrityError:
+            raise StoreError(
+                "SOURCE_ALREADY_EXISTS",
+                "identical source already in notebook (concurrent upload)",
+            )
         self.conn.commit()
         self.touch_notebook(notebook_id)
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)

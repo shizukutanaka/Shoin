@@ -67,6 +67,7 @@ def _bib_escape(text: str) -> str:
 
 
 def export_bibtex(store: Store, notebook_id: int) -> str:
+    store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
         key = f"shoin{src.id}"
@@ -81,6 +82,7 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
 
 
 def export_ris(store: Store, notebook_id: int) -> str:
+    store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
         lines = [
