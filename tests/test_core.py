@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.18")
+        self.assertEqual(VERSION, "0.1.19")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -151,6 +151,14 @@ class TestStore(unittest.TestCase):
             updated = s.get_source(src.id)
             self.assertEqual(updated.title, "report.txt")
             self.assertEqual(updated.origin, "report.txt")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_delete_source_touches_notebook(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "a.txt", "a.txt", "ha")
+            t0 = s.get_notebook(nb.id).updated_at
+            s.delete_source(src.id)
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
 
     def test_update_source_title_missing_raises(self) -> None:

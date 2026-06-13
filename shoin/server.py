@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import threading
 import urllib.parse
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -100,6 +101,7 @@ class _Handler(BaseHTTPRequestHandler):
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
+    questions_cache_lock: threading.Lock  # guards questions_cache across threads
 
     # --- plumbing -------------------------------------------------------
 
@@ -295,7 +297,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_nb_clear_chat(self, nb_id: int) -> None:
         with Store(self.db) as store:
             store.clear_messages(nb_id)
-        self.questions_cache.pop(nb_id, None)
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
         self._json({"cleared": nb_id})
 
     def _h_src_add(self, nb_id: int) -> None:
@@ -369,7 +372,8 @@ class _Handler(BaseHTTPRequestHandler):
             # Suggestions only change when the source set changes; cache per
             # notebook so reopening the UI does not re-run the LLM every time.
             fingerprint = tuple(s.id for s in store.sources_for_notebook(nb_id))
-            cached = self.questions_cache.get(nb_id)
+            with self.questions_cache_lock:
+                cached = self.questions_cache.get(nb_id)
             if cached is not None and cached[0] == fingerprint:
                 self._json({"questions": cached[1]})
                 return
@@ -377,7 +381,8 @@ class _Handler(BaseHTTPRequestHandler):
             # Only cache non-empty results when sources exist; an empty list
             # from LLM failure would otherwise suppress questions permanently.
             if questions or not fingerprint:
-                self.questions_cache[nb_id] = (fingerprint, questions)
+                with self.questions_cache_lock:
+                    self.questions_cache[nb_id] = (fingerprint, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:
@@ -508,6 +513,7 @@ def make_server(
             "llm": llm if llm is not None else LLMClient(),
             "db": db or str(db_path()),
             "questions_cache": {},
+            "questions_cache_lock": threading.Lock(),
         },
     )
     return ThreadingHTTPServer((host, port), handler)

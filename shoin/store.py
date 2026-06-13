@@ -304,9 +304,10 @@ class Store:
         )
 
     def delete_source(self, source_id: int) -> None:
-        self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
         self.conn.commit()
+        self.touch_notebook(src.notebook_id)
 
     def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
         ids: list[int] = []

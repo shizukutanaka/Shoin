@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.19] - 2026-06-13
+### Fixed
+- **`delete_source` が `updated_at` を更新しない**: ソース削除後にノートブックの `updated_at` が更新されなかった。`add_source`・`delete_note` 等では `touch_notebook` を呼ぶのに `delete_source` だけが呼んでいなかった非対称性を修正。`get_source()` が返す `Source.notebook_id` を利用して削除後に `touch_notebook` を呼ぶ。
+- **`questions_cache` のスレッドセーフティ**: `ThreadingHTTPServer` 環境で複数スレッドが同時に `questions_cache` を読み書きする際に競合が生じる可能性があった。`threading.Lock` を追加し、`_h_questions` の読み出し・書き込みと `_h_nb_clear_chat` の削除をロックで保護。
+
 ## [v0.1.18] - 2026-06-13
 ### Fixed
 - **`add_message` / `clear_messages` が `updated_at` を更新しない**: チャットメッセージの追加・クリア後にノートブックの `updated_at` が更新されなかった。ノートブック一覧を「最近使った順」にソートする場合、会話を重ねてもノートブックが先頭に来なかった。`add_message` と `clear_messages` に `touch_notebook` 呼び出しを追加し、ソース追加・ノート追加と挙動を統一。
