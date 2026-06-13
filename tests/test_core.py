@@ -51,12 +51,23 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.28")
+        self.assertEqual(VERSION, "0.1.29")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
-            self.assertEqual(s.migrate(), 3)
-            self.assertEqual(s.migrate(), 3)
+            self.assertEqual(s.migrate(), 4)
+            self.assertEqual(s.migrate(), 4)
+
+    def test_migration_4_index_exists(self) -> None:
+        """Migration 4 must create idx_messages_notebook_id_desc for query performance."""
+        with make_store() as s:
+            names = {
+                row[0]
+                for row in s.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+        self.assertIn("idx_messages_notebook_id_desc", names)
 
     def test_notebook_crud(self) -> None:
         with make_store() as s:

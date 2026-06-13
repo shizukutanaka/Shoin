@@ -93,6 +93,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """,
     ),
+    (
+        4,
+        # Composite index lets list_messages_recent run in O(limit) instead of
+        # O(total messages for notebook) by matching notebook_id then scanning
+        # id DESC directly without a full-table sort.
+        """
+        CREATE INDEX idx_messages_notebook_id_desc ON messages(notebook_id, id DESC);
+        """,
+    ),
 ]
 
 

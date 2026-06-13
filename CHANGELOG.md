@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.1.29] - 2026-06-13
+### Fixed
+- **アップロードファイル名にパストラバーサル文字が含まれてもタイトルに保存される**: `X-Filename: ../../evil/secret.txt` のようなヘッダーが URL デコード後にそのままタイトルフィールドへ保存されていた。`Path(raw_name).name` でベースネームのみを使用するよう修正。
+- **空白のみの `SHOIN_EMBED_MODEL` が設定されているとベクター検索が有効になる**: `"  "` のような空白文字列は falsy ではないため `if not llm.embedding_model:` の判定をすり抜け、無効な設定でエンドポイントを呼び出していた。`.strip()` を追加して空白を除去してから判定するよう修正 (`qa.py`、`llm.py`)。
+- **SSE "delta" フレームに `text` フィールドがない場合に `"undefined"` がチャットに追記される**: `j.text` が `undefined` の場合 `acc += j.text` が `"...undefined"` を生成していた。`j.text ?? ""` で null/undefined を空文字列にフォールバックするよう修正。
+
+### Performance
+- **`messages(notebook_id, id DESC)` の複合インデックス追加 (Migration 4)**: `list_messages_recent()` は `ORDER BY id DESC LIMIT ?` で最新 N 件を取得するが、既存の `idx_messages_notebook` は `notebook_id` のみのインデックスのため、全行を取得してからソートする必要があった。`idx_messages_notebook_id_desc ON messages(notebook_id, id DESC)` を追加し、O(limit) でスキャンできるよう改善。
+
 ## [v0.1.28] - 2026-06-13
 ### Fixed
 - **`_notebook_json()` が壊れた `citation_report` JSON でクラッシュ**: `GET /api/notebooks/{id}` が studio_outputs と messages の `citation_report` フィールドを `json.loads()` するが、`try-except` がなかった。`export.py` と同様の問題。`_safe_report()` ヘルパーを追加し、両箇所で使用。

@@ -327,6 +327,39 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
 
+    def test_upload_source_title_path_traversal_stripped(self) -> None:
+        """Path components in X-Filename must be stripped; only the basename is stored."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "path-guard"})
+        status, body, _ = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            ("検索エンジン最適化の基礎。" * 20).encode(),
+            {"X-Filename": "../../evil/secret.txt"},
+        )
+        self.assertEqual(status, 201)
+        data = json.loads(body if isinstance(body, (str, bytes)) else "{}") if status == 201 else {}
+        # The stored title must not contain any directory separators
+        _, nb_data = self._json("GET", f"/api/notebooks/{nb['id']}")
+        titles = [s["title"] for s in (nb_data or {}).get("sources", [])]
+        self.assertTrue(all("/" not in t and "\\" not in t for t in titles), titles)
+        # Specifically, basename is preserved
+        self.assertIn("secret.txt", titles)
+
+    def test_upload_source_title_url_encoded_path_stripped(self) -> None:
+        """URL-encoded path separators in X-Filename must also be stripped."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "encoded-path"})
+        status, _, _ = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            ("テスト文書。" * 30).encode(),
+            {"X-Filename": urllib.parse.quote("../etc/passwd", safe="")},
+        )
+        self.assertEqual(status, 201)
+        _, nb_data = self._json("GET", f"/api/notebooks/{nb['id']}")
+        titles = [s["title"] for s in (nb_data or {}).get("sources", [])]
+        self.assertIn("passwd", titles)
+        self.assertTrue(all("/" not in t for t in titles), titles)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

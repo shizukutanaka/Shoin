@@ -217,7 +217,7 @@ def expand_query(question: str, history: list[Message]) -> str:
 
 
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
-    if not llm.embedding_model:
+    if not (llm.embedding_model or "").strip():
         return None
     try:
         return llm.embed_one(question)

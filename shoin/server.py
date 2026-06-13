@@ -321,7 +321,10 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
     def _h_src_upload(self, nb_id: int) -> None:
-        raw_name = urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")
+        raw_name = (
+            Path(urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")).name
+            or "upload.txt"
+        )
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)

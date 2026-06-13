@@ -532,7 +532,7 @@ $("#askForm").onsubmit = async e=>{
         if (!data) continue;
         const j = JSON.parse(data);
         if (ev==="meta") meta = j;
-        else if (ev==="delta"){ acc += j.text; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
+        else if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){
           const rpt = j.report || {};
           renderWithSeals(bd, acc, rpt);

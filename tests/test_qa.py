@@ -444,6 +444,27 @@ class TestLLMClient(unittest.TestCase):
                 client.chat([{"role": "user", "content": "hello"}])
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
 
+    def test_whitespace_embed_model_raises_disabled(self) -> None:
+        """A whitespace-only embedding model must not call the LLM endpoint."""
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(embedding_model="   ")
+        with self.assertRaises(LLMError) as ctx:
+            client.embed(["test"])
+        self.assertEqual(ctx.exception.code, "SYSTEM_EMBED_DISABLED")
+
+    def test_whitespace_embed_model_skips_vector_in_qa(self) -> None:
+        """_query_vector returns None for whitespace-only embedding_model."""
+        from unittest.mock import MagicMock
+
+        from shoin.qa import _query_vector
+
+        fake_llm = MagicMock()
+        fake_llm.embedding_model = "  "
+        result = _query_vector(fake_llm, "test question")
+        self.assertIsNone(result)
+        fake_llm.embed_one.assert_not_called()
+
 
 class TestI18n(unittest.TestCase):
     def test_default_lang_is_japanese(self) -> None:

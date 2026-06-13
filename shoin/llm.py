@@ -144,7 +144,7 @@ class LLMClient:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts*. Raises LLMError if no embedding model is configured."""
-        if not self.embedding_model:
+        if not (self.embedding_model or "").strip():
             raise LLMError("SYSTEM_EMBED_DISABLED", "no embedding model configured")
         data = self._post(
             "/embeddings",
