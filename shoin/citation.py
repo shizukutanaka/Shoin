@@ -1,9 +1,16 @@
 """Citation extraction and machine verification.
 
 Differentiator (spec REQ-006): hallucinated attributions are mechanically
-detectable (arXiv:2412.18004). Every generated text is checked against the
-actual source count; out-of-range citations are flagged, coverage is measured,
-and a source map ([S1] -> title) is attached for verifiability.
+detectable (arXiv:2412.18004). Two independent, dependency-free checks run on
+every generated text:
+
+1. Range check (`validate_citations`): an [S#] number must point at a real
+   source. Out-of-range numbers are the narrowest form of citation hallucination.
+2. Grounding check (`verify_grounding`): the *content* of a cited sentence must
+   actually overlap the cited source's text. This catches the common, harder
+   case — a claim mis-attributed to a real source that does not support it.
+   The signal is lexical (character-bigram overlap), so it is advisory: low
+   overlap flags a *weak* citation, not a definitively false one.
 """
 
 from __future__ import annotations
@@ -18,6 +25,17 @@ from typing import NotRequired, TypedDict
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _SNUM_RE = re.compile(r"[Ss]\s*(\d+)")
 
+# Sentence boundaries for JP + EN. Citations stay attached to their sentence so
+# each claim is graded against the sources it actually cites.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n])")
+
+# A cited sentence is "weak" when the fraction of its character bigrams found in
+# the cited source(s) falls below this. Calibrated for CJK: content words are
+# kanji that survive paraphrase, so genuinely grounded claims score ~0.5-1.0
+# while unrelated claims sit near 0.1-0.2 (a lone shared copula bigram such as
+# "ある" must not clear the bar). Advisory only — a flag, not a verdict.
+GROUNDING_MIN = 0.30
+
 
 class CitationReport(TypedDict):
     cited: list[int]
@@ -28,6 +46,11 @@ class CitationReport(TypedDict):
     # Maps "S1" -> actual source DB id. Present when the caller supplies source_ids,
     # absent on old persisted reports — consumers must guard with .get().
     source_id_map: NotRequired[dict[str, int]]
+    # Grounding check (present only when source bodies are supplied):
+    #   weak      -> S-numbers cited by at least one weakly-grounded sentence
+    #   grounding -> fraction of cited sentences that are well-grounded (1.0 = all)
+    weak: NotRequired[list[int]]
+    grounding: NotRequired[float]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -51,10 +74,53 @@ def validate_citations(text: str, n_sources: int) -> tuple[list[int], list[int]]
     return valid, invalid
 
 
+def _bigrams(text: str) -> set[str]:
+    """Character bigrams of NFKC-normalised, whitespace-stripped text."""
+    t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).lower())
+    if len(t) < 2:
+        return {t} if t else set()
+    return {t[i : i + 2] for i in range(len(t) - 1)}
+
+
+def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], float]:
+    """Grade each cited sentence by lexical overlap with the source(s) it cites.
+
+    Returns (weak, score): *weak* is the sorted S-numbers cited by at least one
+    weakly-grounded sentence; *score* is the fraction of cited sentences that are
+    well-grounded (1.0 when there are no cited sentences). Sentences whose cited
+    numbers are all out-of-range are skipped — that is the range check's job.
+    """
+    weak: set[int] = set()
+    cited = 0
+    grounded = 0
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        if not nums:
+            continue
+        cited += 1
+        claim = _bigrams(_BRACKET_RE.sub(" ", sentence))  # drop the [S#] markers
+        if not claim:
+            grounded += 1
+            continue
+        support: set[str] = set()
+        for n in nums:
+            support |= _bigrams(source_texts[n])
+        if len(claim & support) / len(claim) >= GROUNDING_MIN:
+            grounded += 1
+        else:
+            weak.update(nums)
+    score = grounded / cited if cited else 1.0
+    return sorted(weak), score
+
+
 def make_report(
     text: str,
     source_titles: list[str],
     source_ids: list[int] | None = None,
+    source_bodies: list[str] | None = None,
 ) -> CitationReport:
     """Build the citation_report attached to every generated answer/output."""
     n = len(source_titles)
@@ -68,4 +134,8 @@ def make_report(
     )
     if source_ids is not None:
         report["source_id_map"] = {f"S{i + 1}": sid for i, sid in enumerate(source_ids)}
+    if source_bodies is not None:
+        weak, score = verify_grounding(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        report["weak"] = weak
+        report["grounding"] = score
     return report

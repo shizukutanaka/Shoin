@@ -59,6 +59,7 @@ class GroundedContext:
     hits: list[Hit]
     snumber_by_source: dict[int, int] = field(default_factory=dict)
     source_ids: list[int] = field(default_factory=list)  # ordered: source_ids[0] == S1
+    source_bodies: list[str] = field(default_factory=list)  # grounded text shown for S1..Sn
 
 
 @dataclass
@@ -101,6 +102,7 @@ def build_context(
         grouped[h.source_id].append(h)
 
     titles: list[str] = []
+    bodies: list[str] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
     per_source = max(budget_tokens // max(len(order), 1), 64)
@@ -122,9 +124,10 @@ def build_context(
             texts.append(h.text)
             used += cost
         body = "\n…\n".join(texts)
+        bodies.append(body)
         parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
-    return GroundedContext(titles, "\n\n".join(parts), hits, snums, ordered_ids)
+    return GroundedContext(titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies)
 
 
 def history_messages(
@@ -209,7 +212,9 @@ def ask(
         try:
             text = llm.chat(build_messages(question, context, history))
             answer = Answer(
-                text, hits, make_report(text, context.source_titles, context.source_ids)
+                text,
+                hits,
+                make_report(text, context.source_titles, context.source_ids, context.source_bodies),
             )
         except LLMError:
             text = _degraded_text(hits)

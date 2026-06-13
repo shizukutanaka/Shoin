@@ -459,7 +459,9 @@ class _Handler(BaseHTTPRequestHandler):
                 parts = [text]
                 self._sse("delta", {"text": text})
             full = "".join(parts)
-            report = make_report(full, context.source_titles, context.source_ids)
+            report = make_report(
+                full, context.source_titles, context.source_ids, context.source_bodies
+            )
             self._sse("done", {"report": dict(report), "degraded": degraded})
             store.add_message(nb_id, "assistant", full, json.dumps(report))
 

@@ -12,7 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shoin.citation import extract_citations, make_report, validate_citations
+from shoin.citation import (
+    extract_citations,
+    make_report,
+    validate_citations,
+    verify_grounding,
+)
 from shoin.llm import LLMError, Message
 from shoin.qa import (
     NO_HIT_TEXT,
@@ -285,6 +290,76 @@ class TestCitationSourceIds(unittest.TestCase):
             self.assertEqual(len(ctx.source_ids), len(ctx.source_titles))
             for sid in ctx.source_ids:
                 self.assertIsInstance(sid, int)
+
+
+class TestGrounding(unittest.TestCase):
+    SOURCES = {
+        1: "書院は文書を引用付きで検索するローカルアプリである。",
+        2: "和紙は楮の繊維を漉いて作られる伝統的な紙である。",
+    }
+
+    def test_grounded_sentence_passes(self) -> None:
+        weak, score = verify_grounding("書院は引用付きで検索する[S1]。", self.SOURCES)
+        self.assertEqual(weak, [])
+        self.assertEqual(score, 1.0)
+
+    def test_misattributed_claim_flagged(self) -> None:
+        """A claim with no lexical link to its cited source is weak."""
+        weak, score = verify_grounding("月の裏側には宇宙基地が建設された[S1]。", self.SOURCES)
+        self.assertEqual(weak, [1])
+        self.assertEqual(score, 0.0)
+
+    def test_mixed_grounding_partial_score(self) -> None:
+        text = "書院は引用付きで検索する[S1]。火星には恐竜が生息している[S2]。"
+        weak, score = verify_grounding(text, self.SOURCES)
+        self.assertEqual(weak, [2])
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_uncited_sentences_ignored(self) -> None:
+        """Sentences without citations do not affect the grounding score."""
+        weak, score = verify_grounding("これは余談。書院は検索する[S1]。", self.SOURCES)
+        self.assertEqual(weak, [])
+        self.assertEqual(score, 1.0)
+
+    def test_common_copula_does_not_mask_misattribution(self) -> None:
+        """Regression: a lone shared copula bigram ('ある') must not pass a claim."""
+        sources = {1: "和紙は楮から作られる伝統的な紙である。"}
+        weak, score = verify_grounding("月面に基地がある[S1]。", sources)
+        self.assertEqual(weak, [1])
+        self.assertEqual(score, 0.0)
+
+    def test_out_of_range_citation_skipped(self) -> None:
+        """S9 is the range check's job; grounding ignores it (not in source map)."""
+        weak, score = verify_grounding("無関係な主張[S9]。", self.SOURCES)
+        self.assertEqual(weak, [])
+        self.assertEqual(score, 1.0)
+
+    def test_no_citations_score_one(self) -> None:
+        weak, score = verify_grounding("引用のない文章。", self.SOURCES)
+        self.assertEqual(weak, [])
+        self.assertEqual(score, 1.0)
+
+    def test_make_report_includes_grounding(self) -> None:
+        rep = make_report(
+            "火星には恐竜が生息している[S1]。",
+            ["論文A"],
+            source_ids=[1],
+            source_bodies=["書院は引用付き検索のローカルアプリである。"],
+        )
+        self.assertEqual(rep["weak"], [1])
+        self.assertEqual(rep["grounding"], 0.0)
+
+    def test_make_report_omits_grounding_without_bodies(self) -> None:
+        rep = make_report("根拠[S1]。", ["論文A"])
+        self.assertNotIn("weak", rep)
+        self.assertNotIn("grounding", rep)
+
+    def test_ask_attaches_grounding(self) -> None:
+        s, nb = seeded_store()
+        with s:
+            ans = ask(s, FakeLLM(reply="書斎の核は引用検証[S1]。"), nb, "差別化は？")
+            self.assertIn("grounding", ans.report)
+            self.assertIn("weak", ans.report)
 
 
 class TestClearMessages(unittest.TestCase):
