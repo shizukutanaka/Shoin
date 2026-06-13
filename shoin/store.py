@@ -361,6 +361,7 @@ class Store:
     # --- notes / studio outputs ---
 
     def add_note(self, notebook_id: int, title: str, body: str) -> int:
+        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         cur = self.conn.execute(
             "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
             (notebook_id, title, body, _now()),

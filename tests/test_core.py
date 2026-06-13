@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.32")
+        self.assertEqual(VERSION, "0.1.33")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -177,6 +177,13 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_title(99999, "x", "x")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_add_note_missing_notebook_raises(self) -> None:
+        """add_note() on a non-existent notebook must raise NOTEBOOK_NOT_FOUND."""
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.add_note(99999, "title", "body")
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_list_notebooks_with_counts_single_query(self) -> None:
         with make_store() as s:

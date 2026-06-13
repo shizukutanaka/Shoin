@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.33] - 2026-06-13
+### Fixed
+- **存在しないノートブックへのノート追加・ソースアップロードが FK 制約エラーでサイレントに失敗する**: `add_note()`, `_h_src_add()`, `_h_src_upload()` が存在しない `notebook_id` を受け取った場合、`sqlite3.IntegrityError` が発生してサーバーに未処理例外が伝播し、クライアントはレスポンスなしの接続切断を受け取っていた。各エントリーポイントに `store.get_notebook(nb_id)` ガードを追加し、`NOTEBOOK_NOT_FOUND` → 404 を返すよう修正。
+
 ## [v0.1.32] - 2026-06-13
 ### Performance
 - **埋め込みバッチのコミットを 1 チャンクごとから 1 バッチごとに削減**: `_embed_chunks()` が `store.set_embedding()` を呼び出すたびに `commit()` を実行していた。バッチ 16 チャンクを処理する場合、16 回の個別コミットが発生していた。`set_embedding(commit=False)` オプションを追加し、バッチ末尾で 1 回だけ `conn.commit()` するよう変更。100 チャンクの再インデックスで SQLite トランザクション数が 100 → 7 に削減。

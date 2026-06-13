@@ -310,6 +310,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")
         with Store(self.db) as store:
+            store.get_notebook(nb_id)  # raises NOTEBOOK_NOT_FOUND → 404 before ingesting
             result = index_source(store, nb_id, target, self.llm)
             self._json(
                 {
@@ -343,6 +344,7 @@ class _Handler(BaseHTTPRequestHandler):
             tmp_path = Path(tmp.name)
         try:
             with Store(self.db) as store:
+                store.get_notebook(nb_id)  # raises NOTEBOOK_NOT_FOUND → 404 before ingesting
                 result = index_source(store, nb_id, str(tmp_path), self.llm)
                 # keep the user's filename, not the temp path
                 store.update_source_title(result.source.id, raw_name, raw_name)

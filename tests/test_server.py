@@ -259,6 +259,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
 
+    def test_upload_to_deleted_notebook_returns_404(self) -> None:
+        """Uploading to a deleted notebook must return 404, not a silent error."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delme"})
+        self._json("DELETE", f"/api/notebooks/{nb['id']}")
+        status, _, _ = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            ("テスト文書。" * 30).encode(),
+            {"X-Filename": "t.txt"},
+        )
+        self.assertEqual(status, 404)
+
+    def test_add_note_to_deleted_notebook_returns_404(self) -> None:
+        """Adding a note to a deleted notebook must return 404."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delnb"})
+        self._json("DELETE", f"/api/notebooks/{nb['id']}")
+        status, err = self._json("POST", f"/api/notebooks/{nb['id']}/notes", {"title": "T", "body": "B"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
     def test_questions_cached_until_sources_change(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "提案キャッシュ"})
         nb_id = nb["id"]
