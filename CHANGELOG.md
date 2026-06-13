@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-13
+### Fixed
+- **`fetch_url` が旧バージョン番号の User-Agent を送信していた**: `"shoin/0.1"` とハードコードされていた User-Agent ヘッダを `f"shoin/{VERSION}"` に変更。バージョンを上げるたびに手動更新が必要な不一致を解消。
+- **PDF をコンテントタイプ非依存で検出**: `extract_url` が PDF を MIME タイプ (`application/pdf`) のみで判定していたため、`Content-Type: application/octet-stream` で配信されるサーバから取得した PDF が HTML/テキストとして誤処理されていた。マジックバイト (`%PDF`) によるフォールバック検出を追加。
+- **`delete_source` / `delete_note` が存在しない ID で無音成功していた**: 各削除メソッドに存在チェックを追加し、不明 ID に対して `SOURCE_NOT_FOUND` / `NOTE_NOT_FOUND` エラーを送出するよう変更。API の 404 処理がストア層でも一貫して適用されるようになった。
+
 ## [v0.1.8] - 2026-06-13
 ### Added
 - **Markdown エクスポートにチャット履歴を追加**: `shoin export <id>` の出力に `## チャット履歴` セクションを追加。各 Q&A ターンと、アシスタント発言に対応する `source_map`(引用元タイトルの対応表)を含む。ノートブックの研究会話を丸ごとアーカイブできるようになった。

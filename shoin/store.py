@@ -261,6 +261,8 @@ class Store:
         ]
 
     def delete_source(self, source_id: int) -> None:
+        if self.conn.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone() is None:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
         self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
         self.conn.commit()
 
@@ -317,6 +319,8 @@ class Store:
         )
 
     def delete_note(self, note_id: int) -> None:
+        if self.conn.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone() is None:
+            raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
         self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
         self.conn.commit()
 

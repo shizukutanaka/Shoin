@@ -17,7 +17,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 
-from .config import MAX_UPLOAD_BYTES, URL_MAX_REDIRECTS, URL_TIMEOUT_SEC
+from .config import MAX_UPLOAD_BYTES, URL_MAX_REDIRECTS, URL_TIMEOUT_SEC, VERSION
 
 _EXT_KIND = {
     ".txt": "txt",
@@ -231,7 +231,7 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         else:
             conn = _PinnedHTTPConnection(host, port, pinned, URL_TIMEOUT_SEC)
         try:
-            conn.request("GET", path, headers={"User-Agent": "shoin/0.1", "Host": host})
+            conn.request("GET", path, headers={"User-Agent": f"shoin/{VERSION}", "Host": host})
             resp = conn.getresponse()
             if resp.status in _REDIRECT_CODES:
                 location = resp.getheader("Location")
@@ -284,7 +284,7 @@ def extract_url(url: str) -> Extracted:
     """Fetch and extract text from a public URL (html / pdf / plain text)."""
     body, ctype, final_url = fetch_url(url)
     low = ctype.lower()
-    if "pdf" in low:
+    if "pdf" in low or body.lstrip()[:4] == b"%PDF":
         text, title = pdf_to_text(body), url
     elif "html" in low or body.lstrip()[:1] == b"<":
         title, text = html_to_text(_decode(body))
