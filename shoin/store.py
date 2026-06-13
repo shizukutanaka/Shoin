@@ -328,6 +328,7 @@ class Store:
             (notebook_id, title, body, _now()),
         )
         self.conn.commit()
+        self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
 
     def list_notes(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -338,10 +339,12 @@ class Store:
         )
 
     def delete_note(self, note_id: int) -> None:
-        if self.conn.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone() is None:
+        row = self.conn.execute("SELECT notebook_id FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row is None:
             raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
         self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
         self.conn.commit()
+        self.touch_notebook(int(row["notebook_id"]))
 
     def add_studio_output(
         self, notebook_id: int, kind: str, body: str, citation_report: str
@@ -352,6 +355,7 @@ class Store:
             (notebook_id, kind, body, citation_report, _now()),
         )
         self.conn.commit()
+        self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
 
     def latest_studio_outputs(self, notebook_id: int) -> list[sqlite3.Row]:

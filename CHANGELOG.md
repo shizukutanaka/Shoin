@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.1.12] - 2026-06-13
+### Fixed
+- **`updated_at` が note/studio 操作で更新されない**: `add_note`・`delete_note`・`add_studio_output` が `touch_notebook` を呼んでいなかったため、ノートの追加・削除や Studio 出力の生成がノートブックの更新時刻に反映されなかった。`add_source` と挙動を統一。
+- **`extract_url` の PDF マジックバイト検出テスト不在**: Content-Type が `application/octet-stream` でも `%PDF` から始まるボディを PDF として処理するコードパスにテストがなかった。モックを使ったユニットテストを追加。
+
+### Changed
+- `docs/product-review.md`: v0.1.6–v0.1.7 で実装済みの未実装項目(Studio 等間隔サンプリング、SSE 切断永続化)を実装済みテーブルに移動し、残課題を整理。
+
 ## [v0.1.11] - 2026-06-13
 ### Added
 - `Store.get_source(source_id)` — 単一ソースを ID で取得するメソッドを追加。`SOURCE_NOT_FOUND` を送出するため、404 マッピングが自動適用される。

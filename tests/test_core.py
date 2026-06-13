@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.11")
+        self.assertEqual(VERSION, "0.1.12")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -294,6 +294,20 @@ class TestIngest(unittest.TestCase):
     def test_extracted_dataclass(self) -> None:
         ex = Extracted("txt", "t", "body", "o", "h")
         self.assertEqual(ex.title, "t")
+
+    def test_extract_url_pdf_magic_bytes(self) -> None:
+        """extract_url must route to pdf_to_text when body starts with %PDF even if
+        Content-Type does not say 'pdf' (e.g. application/octet-stream)."""
+        import shoin.ingest as ing
+
+        fake_body = b"%PDF-1.4 fake"
+        with (
+            patch.object(ing, "fetch_url", return_value=(fake_body, "application/octet-stream", "http://x/f.pdf")),
+            patch.object(ing, "pdf_to_text", return_value="parsed pdf content") as mock_pdf,
+        ):
+            result = ing.extract_url("http://x/f.pdf")
+        mock_pdf.assert_called_once_with(fake_body)
+        self.assertIn("parsed pdf content", result.text)
 
 
 class TestSearch(unittest.TestCase):
