@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 
 from .citation import CitationReport, make_report
+from .llm import LLMError
 from .qa import SYSTEM_PROMPT, ChatBackend, build_context
 from .search import Hit
 from .store import Store, StoreError
@@ -98,12 +99,15 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         f"## ソース\n{context.block}\n\n"
         f"このソース群に対して読者が尋ねそうな質問を{n}個、1行1問・装飾なしで列挙。"
     )
-    text = llm.chat(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ]
-    )
+    try:
+        text = llm.chat(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ]
+        )
+    except LLMError:
+        return []
     questions: list[str] = []
     for line in text.splitlines():
         q = line.strip().lstrip("0123456789.-*・ 　").strip()

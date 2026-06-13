@@ -29,14 +29,18 @@ class FakeLLM:
         reply: str = "要点 [S1]。",
         embedding_model: str = "",
         fail_embed_after: int | None = None,
+        chat_error: bool = False,
     ) -> None:
         self.reply = reply
         self.embedding_model = embedding_model
         self.fail_embed_after = fail_embed_after
+        self.chat_error = chat_error
         self.embed_calls = 0
         self.chat_prompts: list[str] = []
 
     def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        if self.chat_error:
+            raise LLMError("SYSTEM_SERVICE_UNAVAILABLE", "down")
         self.chat_prompts.append(messages[-1]["content"])
         return self.reply
 
@@ -115,6 +119,10 @@ class StudioTest(unittest.TestCase):
     def test_suggest_questions_empty_notebook(self) -> None:
         empty = self.store.create_notebook("空")
         self.assertEqual(suggest_questions(self.store, FakeLLM(), empty.id), [])
+
+    def test_suggest_questions_llm_unavailable_returns_empty(self) -> None:
+        """DoD: suggest_questions degrades gracefully when LLM is down (graceful degradation)."""
+        self.assertEqual(suggest_questions(self.store, FakeLLM(chat_error=True), self.nb), [])
 
 
 class ExportTest(unittest.TestCase):

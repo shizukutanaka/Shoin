@@ -299,60 +299,59 @@ class TestGrounding(unittest.TestCase):
     }
 
     def test_confirmed_when_wording_overlaps(self) -> None:
-        confirmed, misattr, score = verify_grounding("書院は引用付きで検索する[S1]。", self.SOURCES)
+        confirmed, misattr = verify_grounding("書院は引用付きで検索する[S1]。", self.SOURCES)
         self.assertEqual(confirmed, [1])
         self.assertEqual(misattr, [])
-        self.assertEqual(score, 1.0)
 
     def test_synonym_paraphrase_not_accused(self) -> None:
         """The key fix: a correct synonym paraphrase must NOT be flagged."""
         src = {1: "売上高は前年比15%増加した。"}
-        confirmed, misattr, score = verify_grounding("収益が大きく伸びた[S1]。", src)
+        confirmed, misattr = verify_grounding("収益が大きく伸びた[S1]。", src)
         self.assertEqual(confirmed, [])
         self.assertEqual(misattr, [])  # silent, not a false accusation
 
     def test_full_synonym_paraphrase_not_accused(self) -> None:
         src = {1: "気候変動により海面が上昇している。"}
-        _, misattr, _ = verify_grounding("地球温暖化で水位が上がっている[S1]。", src)
+        _, misattr = verify_grounding("地球温暖化で水位が上がっている[S1]。", src)
         self.assertEqual(misattr, [])
 
     def test_wrong_number_detected(self) -> None:
         """Wording that belongs to a different source is a high-precision error."""
         src = {1: "和紙は楮から作られる。", 2: "量子コンピュータは高速に計算する。"}
-        confirmed, misattr, _ = verify_grounding("和紙は楮から作られる[S2]。", src)
+        confirmed, misattr = verify_grounding("和紙は楮から作られる[S2]。", src)
         self.assertEqual(misattr, [2])
         self.assertEqual(confirmed, [])
 
     def test_pure_misattribution_single_source_silent(self) -> None:
         """No other source to match: lexical signal is inconclusive, stay silent."""
         src = {1: "和紙は楮から作られる伝統的な紙である。"}
-        confirmed, misattr, _ = verify_grounding("月面に基地が建設された[S1]。", src)
+        confirmed, misattr = verify_grounding("月面に基地が建設された[S1]。", src)
         self.assertEqual(confirmed, [])
         self.assertEqual(misattr, [])
 
-    def test_mixed_partial_score(self) -> None:
+    def test_mixed_confirmed_only(self) -> None:
+        """S1 is confirmed; S2's claim is inconclusive — no score, just lists."""
         text = "書院は引用付きで検索する[S1]。火星には恐竜が生息している[S2]。"
-        confirmed, _, score = verify_grounding(text, self.SOURCES)
+        confirmed, misattr = verify_grounding(text, self.SOURCES)
         self.assertEqual(confirmed, [1])
-        self.assertAlmostEqual(score, 0.5)
+        self.assertEqual(misattr, [])
 
     def test_uncited_sentences_ignored(self) -> None:
-        confirmed, _, score = verify_grounding("これは余談。書院は検索する[S1]。", self.SOURCES)
+        confirmed, _ = verify_grounding("これは余談。書院は検索する[S1]。", self.SOURCES)
         self.assertEqual(confirmed, [1])
-        self.assertEqual(score, 1.0)
 
     def test_out_of_range_citation_skipped(self) -> None:
         """S9 is the range check's job; grounding ignores it (not in source map)."""
-        confirmed, misattr, score = verify_grounding("無関係な主張[S9]。", self.SOURCES)
+        confirmed, misattr = verify_grounding("無関係な主張[S9]。", self.SOURCES)
         self.assertEqual(confirmed, [])
         self.assertEqual(misattr, [])
-        self.assertEqual(score, 1.0)
 
-    def test_no_citations_score_one(self) -> None:
-        confirmed, misattr, score = verify_grounding("引用のない文章。", self.SOURCES)
-        self.assertEqual((confirmed, misattr, score), ([], [], 1.0))
+    def test_no_citations_returns_empty_lists(self) -> None:
+        confirmed, misattr = verify_grounding("引用のない文章。", self.SOURCES)
+        self.assertEqual(confirmed, [])
+        self.assertEqual(misattr, [])
 
-    def test_make_report_includes_grounding(self) -> None:
+    def test_make_report_includes_grounding_checks(self) -> None:
         rep = make_report(
             "書院は引用付きで検索する[S1]。",
             ["論文A"],
@@ -361,7 +360,7 @@ class TestGrounding(unittest.TestCase):
         )
         self.assertEqual(rep["confirmed"], [1])
         self.assertEqual(rep["misattributed"], [])
-        self.assertEqual(rep["grounding"], 1.0)
+        self.assertNotIn("grounding", rep)
 
     def test_make_report_omits_grounding_without_bodies(self) -> None:
         rep = make_report("根拠[S1]。", ["論文A"])
@@ -369,13 +368,13 @@ class TestGrounding(unittest.TestCase):
         self.assertNotIn("misattributed", rep)
         self.assertNotIn("grounding", rep)
 
-    def test_ask_attaches_grounding(self) -> None:
+    def test_ask_attaches_grounding_checks(self) -> None:
         s, nb = seeded_store()
         with s:
             ans = ask(s, FakeLLM(reply="書斎の核は引用検証[S1]。"), nb, "差別化は？")
-            self.assertIn("grounding", ans.report)
             self.assertIn("confirmed", ans.report)
             self.assertIn("misattributed", ans.report)
+            self.assertNotIn("grounding", ans.report)
 
 
 class TestClearMessages(unittest.TestCase):

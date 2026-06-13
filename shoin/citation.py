@@ -18,6 +18,11 @@ low overlap is inconclusive (a correct synonym paraphrase and a true
 misattribution both score ~0). So the checks only *assert* what they can stand
 behind — confirmation, or a wrong number — and stay silent otherwise rather
 than falsely accusing a correctly paraphrased answer.
+
+No aggregate grounding score is emitted: a ratio of confirmed/cited would be
+0.0 when all citations are valid synonym paraphrases (inconclusive, not bad),
+which contradicts the "stay silent when inconclusive" principle.  The
+`confirmed` and `misattributed` lists are the complete, honest signal.
 """
 
 from __future__ import annotations
@@ -58,10 +63,8 @@ class CitationReport(TypedDict):
     # Grounding checks (present only when source bodies are supplied):
     #   confirmed     -> S-numbers whose cited sentence is lexically supported
     #   misattributed -> S-numbers whose cited sentence clearly belongs elsewhere
-    #   grounding     -> fraction of cited sentences that are confirmed (1.0 = all)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
-    grounding: NotRequired[float]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -98,24 +101,25 @@ def _overlap(claim: set[str], source: set[str]) -> float:
     return len(claim & source) / len(claim) if claim else 1.0
 
 
-def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int], float]:
+def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int]]:
     """Check each cited sentence against the source(s) it cites, lexically.
 
-    Returns (confirmed, misattributed, score):
+    Returns (confirmed, misattributed):
     - *confirmed*: S-numbers whose cited sentence is lexically supported by them.
     - *misattributed*: S-numbers whose cited sentence matches a *different* source
       far better than the cited one — a likely wrong citation number.
-    - *score*: fraction of cited sentences that are confirmed (1.0 when none cite).
 
     Sentences whose overlap with the cited source is merely low (no other source
     matches either) are left unflagged: that is the inconclusive case a lexical
     signal cannot tell apart from a correct synonym paraphrase.
+
+    No aggregate score is returned.  A ratio of confirmed/cited would be 0.0
+    when all citations are valid synonym paraphrases, which is the inconclusive
+    case, not an error — emitting 0.0 would itself be a false negative assertion.
     """
     src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
     confirmed: set[int] = set()
     misattributed: set[int] = set()
-    cited = 0
-    grounded = 0
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
@@ -123,14 +127,11 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         nums = [n for n in extract_citations(sentence) if n in source_texts]
         if not nums:
             continue
-        cited += 1
         claim = _bigrams(_BRACKET_RE.sub(" ", sentence))  # drop the [S#] markers
         if not claim:
-            grounded += 1
             continue
         cited_best = max(_overlap(claim, src_bg[n]) for n in nums)
         if cited_best >= CONFIRM_MIN:
-            grounded += 1
             confirmed.update(n for n in nums if _overlap(claim, src_bg[n]) >= CONFIRM_MIN)
             continue
         others = [_overlap(claim, bg) for n, bg in src_bg.items() if n not in nums]
@@ -138,8 +139,7 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         if best_other >= CONFIRM_MIN and best_other - cited_best >= MISMATCH_GAP:
             misattributed.update(nums)  # wording belongs to a source it did not cite
         # otherwise inconclusive (possibly a valid paraphrase) — stay silent
-    score = grounded / cited if cited else 1.0
-    return sorted(confirmed), sorted(misattributed), score
+    return sorted(confirmed), sorted(misattributed)
 
 
 def make_report(
@@ -161,10 +161,9 @@ def make_report(
     if source_ids is not None:
         report["source_id_map"] = {f"S{i + 1}": sid for i, sid in enumerate(source_ids)}
     if source_bodies is not None:
-        confirmed, misattributed, score = verify_grounding(
+        confirmed, misattributed = verify_grounding(
             text, {i + 1: body for i, body in enumerate(source_bodies)}
         )
         report["confirmed"] = confirmed
         report["misattributed"] = misattributed
-        report["grounding"] = score
     return report
