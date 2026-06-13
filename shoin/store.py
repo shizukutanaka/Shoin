@@ -443,6 +443,27 @@ class Store:
         ).fetchone()["n"]
         return {"sources": int(n_sources), "chunks": int(n_chunks)}
 
+    def list_notebooks_with_counts(self) -> list[dict[str, object]]:
+        """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
+        rows = self.conn.execute(
+            "SELECT n.id, n.name,"
+            " COUNT(DISTINCT s.id) AS sources,"
+            " COUNT(DISTINCT c.id) AS chunks"
+            " FROM notebooks n"
+            " LEFT JOIN sources s ON s.notebook_id = n.id"
+            " LEFT JOIN chunks c ON c.source_id = s.id"
+            " GROUP BY n.id"
+            " ORDER BY n.updated_at DESC"
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "name": str(r["name"]),
+                "counts": {"sources": int(r["sources"]), "chunks": int(r["chunks"])},
+            }
+            for r in rows
+        ]
+
     # --- settings ---------------------------------------------------------
 
     def get_setting(self, key: str) -> str | None:

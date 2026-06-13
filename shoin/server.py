@@ -264,14 +264,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:
-            self._json(
-                {
-                    "notebooks": [
-                        {"id": nb.id, "name": nb.name, "counts": store.counts(nb.id)}
-                        for nb in store.list_notebooks()
-                    ]
-                }
-            )
+            self._json({"notebooks": store.list_notebooks_with_counts()})
 
     def _h_nb_create(self) -> None:
         name = self._require(self._read_json(), "name")
@@ -292,6 +285,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_nb_delete(self, nb_id: int) -> None:
         with Store(self.db) as store:
             store.delete_notebook(nb_id)
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
         self._json({"deleted": nb_id})
 
     def _h_nb_clear_chat(self, nb_id: int) -> None:

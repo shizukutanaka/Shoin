@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.22")
+        self.assertEqual(VERSION, "0.1.23")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -166,6 +166,16 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_title(99999, "x", "x")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_list_notebooks_with_counts_single_query(self) -> None:
+        with make_store() as s:
+            nb_id = seed(s)
+            rows = s.list_notebooks_with_counts()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["id"], nb_id)
+            self.assertEqual(row["counts"]["sources"], 2)
+            self.assertGreater(row["counts"]["chunks"], 0)
 
     def test_set_embedding_missing_chunk_raises(self) -> None:
         with make_store() as s:

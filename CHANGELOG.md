@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.23] - 2026-06-13
+### Fixed
+- **`GET /api/notebooks` の N+1 クエリ**: `_h_nb_list()` が各ノートブックごとに `store.counts(nb.id)` を呼んでいたため、N 冊のノートブックがある場合に 2N+1 本の SQL が発行されていた。`Store.list_notebooks_with_counts()` を新規追加し、LEFT JOIN + GROUP BY による単一クエリに置換。
+- **ノートブック削除時の `questions_cache` メモリリーク**: `_h_nb_delete()` がノートブック削除後にキャッシュエントリを残していた。`_h_nb_clear_chat()` と同様に `questions_cache.pop(nb_id, None)` を追加。
+
 ## [v0.1.22] - 2026-06-13
 ### Fixed
 - **`set_embedding()` が存在しないチャンク ID を無音で許容**: `UPDATE chunks SET embedding=? WHERE id=?` の結果を検証しておらず、`rowcount=0`(対象なし)でもエラーにならなかった。`rowcount` を確認し、0 の場合は `CHUNK_NOT_FOUND` を送出するよう修正。`get_source`・`get_chunk`・`get_notebook` 等の他のメソッドと一貫したエラーレポートになった。
