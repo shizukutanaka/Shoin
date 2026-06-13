@@ -333,9 +333,9 @@ class Store:
         cur = self.conn.execute(
             "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id)
         )
-        self.conn.commit()
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
+        self.conn.commit()
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(

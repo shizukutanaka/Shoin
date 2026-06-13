@@ -216,7 +216,11 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
     so a host cannot rebind DNS to a private address between check and connect.
     """
     current = url
+    seen_urls: set[str] = set()
     for _ in range(URL_MAX_REDIRECTS + 1):
+        if current in seen_urls:
+            raise IngestError("INGEST_URL_BLOCKED", "redirect cycle detected")
+        seen_urls.add(current)
         parsed = validate_public_url(current)
         host = parsed.hostname or ""
         pinned = _validate_resolved(host)
@@ -242,6 +246,8 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
             if resp.status >= 400:
                 raise IngestError("INGEST_FETCH_FAILED", f"HTTP {resp.status} for {current}")
             body = resp.read(MAX_UPLOAD_BYTES + 1)
+            if not body:
+                raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
             _check_size(body)
             ctype = str(resp.getheader("Content-Type", ""))
             return body, ctype, current

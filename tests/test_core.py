@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.30")
+        self.assertEqual(VERSION, "0.1.31")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -193,6 +193,20 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.set_embedding(99999, [1.0, 0.0])
             self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
+
+    def test_set_embedding_missing_chunk_does_not_commit(self) -> None:
+        """Raise must happen before commit so no corrupt data is persisted."""
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            real_id = chunks[0].id
+            try:
+                s.set_embedding(99999, [1.0, 0.0])
+            except StoreError:
+                pass
+            # Real chunk should be untouched (no embedding set by the failed call)
+            chunk = s.chunks_for_notebook(nb_id)[0]
+            self.assertIsNone(chunk.embedding)
 
     def test_persistence_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,6 +371,46 @@ class TestIngest(unittest.TestCase):
         ):
             ing.fetch_url("http://attacker.example/")
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_redirect_cycle_detected(self) -> None:
+        """fetch_url must raise INGEST_URL_BLOCKED when it detects a redirect cycle."""
+        import shoin.ingest as ing
+
+        call_count = 0
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            status = 301
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Location":
+                    return "http://example.com/page"  # cycles back to start
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return b""
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                nonlocal call_count
+                call_count += 1
+
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("http://example.com/page")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+        self.assertIn("cycle", str(cm.exception))
 
     def test_extracted_dataclass(self) -> None:
         ex = Extracted("txt", "t", "body", "o", "h")
