@@ -249,6 +249,25 @@ class TestMultiTurn(unittest.TestCase):
             ask(s, fake, nb, "書斎とは？")
             self.assertEqual([m["role"] for m in fake.chat_calls[-1]], ["system", "user"])
 
+    def test_orphaned_user_message_trimmed_from_history(self) -> None:
+        """SSE disconnect leaves a user message without an assistant reply.
+
+        history_messages must trim that trailing user turn so the LLM never
+        sees two consecutive user messages in the prompt.
+        """
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "答え1")
+            s.add_message(nb, "user", "問2")  # orphan: no assistant reply follows
+            msgs = history_messages(s, nb)
+            roles = [m["role"] for m in msgs]
+            # The orphaned user turn must not be the last entry
+            self.assertNotEqual(roles[-1] if roles else None, "user")
+            # The valid exchange before it is preserved
+            self.assertIn("user", roles)
+            self.assertIn("assistant", roles)
+
     def test_query_expand_short_followup(self) -> None:
         """Short follow-up gets the last user turn prepended for retrieval."""
         history: list[dict[str, str]] = [

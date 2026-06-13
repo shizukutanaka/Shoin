@@ -116,6 +116,12 @@ class StudioTest(unittest.TestCase):
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["目的は何か？", "仕組みはどう動きますか?", "制約は何か"])
 
+    def test_suggest_questions_accepts_ka_with_trailing_period(self) -> None:
+        """LLMs often append 。 even with 'no decoration' instructions — must not drop."""
+        llm = FakeLLM(reply="この書院はどう動くのか。\n内容について説明します。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["この書院はどう動くのか。"])
+
     def test_suggest_questions_empty_notebook(self) -> None:
         empty = self.store.create_notebook("空")
         self.assertEqual(suggest_questions(self.store, FakeLLM(), empty.id), [])

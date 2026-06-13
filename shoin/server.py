@@ -431,24 +431,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
             if not hits:
                 report = make_report(NO_HIT_TEXT, [])
-                self._sse("meta", {"sources": []})
-                self._sse("delta", {"text": NO_HIT_TEXT})
-                self._sse("done", {"report": dict(report), "degraded": False})
+                try:
+                    self._sse("meta", {"sources": []})
+                    self._sse("delta", {"text": NO_HIT_TEXT})
+                    self._sse("done", {"report": dict(report), "degraded": False})
+                except BrokenPipeError:
+                    pass  # client disconnected; still persist the assistant message below
                 store.add_message(nb_id, "assistant", NO_HIT_TEXT, json.dumps(report))
                 return
 
             context = build_context(store, hits)
-            self._sse(
-                "meta",
-                {
-                    "sources": [
-                        {"s": i + 1, "title": t, "source_id": sid}
-                        for i, (t, sid) in enumerate(zip(context.source_titles, context.source_ids))
-                    ]
-                },
-            )
+            try:
+                self._sse(
+                    "meta",
+                    {
+                        "sources": [
+                            {"s": i + 1, "title": t, "source_id": sid}
+                            for i, (t, sid) in enumerate(
+                                zip(context.source_titles, context.source_ids)
+                            )
+                        ]
+                    },
+                )
+            except BrokenPipeError:
+                store.add_message(nb_id, "assistant", "", "{}")
+                return
+
             parts: list[str] = []
             degraded = False
+            client_gone = False
             try:
                 for token in self._stream_chat(build_messages(question, context, history)):
                     parts.append(token)
@@ -457,12 +468,21 @@ class _Handler(BaseHTTPRequestHandler):
                 degraded = True
                 text = _degraded_text(hits)
                 parts = [text]
-                self._sse("delta", {"text": text})
+                try:
+                    self._sse("delta", {"text": text})
+                except BrokenPipeError:
+                    client_gone = True
+            except BrokenPipeError:
+                client_gone = True
             full = "".join(parts)
             report = make_report(
                 full, context.source_titles, context.source_ids, context.source_bodies
             )
-            self._sse("done", {"report": dict(report), "degraded": degraded})
+            if not client_gone:
+                try:
+                    self._sse("done", {"report": dict(report), "degraded": degraded})
+                except BrokenPipeError:
+                    pass
             store.add_message(nb_id, "assistant", full, json.dumps(report))
 
 

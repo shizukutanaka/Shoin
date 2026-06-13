@@ -142,6 +142,11 @@ def history_messages(
             continue
         role = "user" if str(r["role"]) == "user" else "assistant"
         out.append({"role": role, "content": _truncate_tokens(body, HISTORY_TOKENS_EACH)})
+    # A trailing user turn without an assistant reply is an orphan (e.g. from an SSE
+    # disconnect). Including it would give the LLM two consecutive user messages
+    # ([…, user:orphan, user:current]), which is semantically wrong.
+    while out and out[-1]["role"] == "user":
+        out.pop()
     return out
 
 
