@@ -331,6 +331,32 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("✓根拠確認済み", out)
 
+    def test_cli_i18n_english_output(self) -> None:
+        """SHOIN_LANG=en switches CLI messages to English."""
+        import os
+
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            env_orig = os.environ.get("SHOIN_LANG")
+            os.environ["SHOIN_LANG"] = "en"
+            try:
+                rc, out, _ = self._run(["--db", db, "notebook", "new", "MyNote"], llm)
+                self.assertEqual(rc, 0)
+                self.assertIn("Created:", out)
+                rc2, out2, _ = self._run(["--db", db, "notebook", "rename", "1", "MyNote2"], llm)
+                self.assertEqual(rc2, 0)
+                self.assertIn("Renamed:", out2)
+                rc3, out3, _ = self._run(["--db", db, "messages", "clear", "1"], llm)
+                self.assertIn("Chat history cleared", out3)
+                rc4, out4, _ = self._run(["--db", db, "notebook", "delete", "1"], llm)
+                self.assertIn("Deleted", out4)
+            finally:
+                if env_orig is None:
+                    os.environ.pop("SHOIN_LANG", None)
+                else:
+                    os.environ["SHOIN_LANG"] = env_orig
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

@@ -11,7 +11,7 @@ import sys
 from collections.abc import Sequence
 
 from .citation import CitationReport
-from .config import TOP_K, VERSION, db_path, port
+from .config import TOP_K, VERSION, db_path, port, ui_lang
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -19,6 +19,35 @@ from .pipeline import index_source
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
+
+_STRINGS: dict[str, dict[str, str]] = {
+    "ja": {
+        "nb.created": "作成: [{id}] {name}",
+        "nb.deleted": "削除完了",
+        "nb.renamed": "改名完了: [{id}] {name}",
+        "msg.cleared": "チャット履歴をクリアしました",
+        "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
+        "cite.confirmed": " ✓根拠確認済み",
+        "cite.misattr": " ⚠番号取り違えの可能性",
+        "err.prefix": "エラー[{code}] {msg}",
+    },
+    "en": {
+        "nb.created": "Created: [{id}] {name}",
+        "nb.deleted": "Deleted",
+        "nb.renamed": "Renamed: [{id}] {name}",
+        "msg.cleared": "Chat history cleared",
+        "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
+        "cite.confirmed": " ✓ grounding confirmed",
+        "cite.misattr": " ⚠ possible wrong source",
+        "err.prefix": "Error[{code}] {msg}",
+    },
+}
+
+
+def _t(key: str, **kw: str) -> str:
+    lang = ui_lang() if ui_lang() in _STRINGS else "en"
+    tmpl = _STRINGS[lang].get(key) or _STRINGS["ja"][key]
+    return tmpl.format(**kw) if kw else tmpl
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -71,15 +100,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def _print_report(report: CitationReport) -> None:
     if report["invalid"]:
         bad = ", ".join(f"S{i}" for i in report["invalid"])
-        print(f"⚠ 検証失敗の引用(ソース範囲外): {bad}")
+        print(_t("cite.invalid", bad=bad))
     confirmed: set[int] = set(report.get("confirmed") or [])
     misattr: set[int] = set(report.get("misattributed") or [])
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
         if c in confirmed:
-            marker = " ✓根拠確認済み"
+            marker = _t("cite.confirmed")
         elif c in misattr:
-            marker = " ⚠番号取り違えの可能性"
+            marker = _t("cite.misattr")
         else:
             marker = ""
         print(f"  [S{c}] {title}{marker}")
@@ -89,17 +118,17 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "new":
         nb = store.create_notebook(str(args.name))
-        print(f"作成: [{nb.id}] {nb.name}")
+        print(_t("nb.created", id=str(nb.id), name=nb.name))
     elif action == "list":
         for nb in store.list_notebooks():
             c = store.counts(nb.id)
             print(f"[{nb.id}] {nb.name}  sources={c['sources']} chunks={c['chunks']}")
     elif action == "delete":
         store.delete_notebook(int(args.notebook_id))
-        print("削除完了")
+        print(_t("nb.deleted"))
     elif action == "rename":
         store.rename_notebook(int(args.notebook_id), str(args.name))
-        print(f"改名完了: [{args.notebook_id}] {args.name}")
+        print(_t("nb.renamed", id=str(args.notebook_id), name=str(args.name)))
     return 0
 
 
@@ -107,7 +136,7 @@ def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "clear":
         store.clear_messages(int(args.notebook_id))
-        print("チャット履歴をクリアしました")
+        print(_t("msg.cleared"))
     return 0
 
 
@@ -175,7 +204,7 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0
     except (StoreError, IngestError, LLMError) as exc:
-        print(f"エラー[{exc.code}] {exc}", file=sys.stderr)
+        print(_t("err.prefix", code=exc.code, msg=str(exc)), file=sys.stderr)
         return 1
     return 0
 

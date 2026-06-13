@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.13] - 2026-06-13
+### Added
+- **CLI 国際化 (`SHOIN_LANG`)**: CLI 出力が `SHOIN_LANG=en` で英語に切り替わるように。ノートブック作成・削除・改名・メッセージクリア・引用マーカー・エラー接頭辞を i18n 辞書 `_STRINGS` で管理。UI はすでに `SHOIN_LANG` 対応済みだったが CLI は日本語固定だった矛盾を解消。
+
 ## [v0.1.12] - 2026-06-13
 ### Fixed
 - **`updated_at` が note/studio 操作で更新されない**: `add_note`・`delete_note`・`add_studio_output` が `touch_notebook` を呼んでいなかったため、ノートの追加・削除や Studio 出力の生成がノートブックの更新時刻に反映されなかった。`add_source` と挙動を統一。
