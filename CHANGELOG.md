@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.40] - 2026-06-13
+### Fixed
+- **`add_message()` がノートブック存在確認なしに INSERT し FK 制約エラーが CLI で未捕捉例外になる**: 存在しない `notebook_id` で `shoin ask 99999 "question"` を実行すると `retrieve()` は空リストを返すが、その後 `add_message()` が `sqlite3.IntegrityError` を送出し CLI の `except (StoreError, IngestError, LLMError)` に捕捉されず Python トレースバックが表示されていた。`self.get_notebook(notebook_id)` ガードを追加し、`add_note()`・`add_studio_output()` と同じパターンで `NOTEBOOK_NOT_FOUND` を送出するよう統一。
+
 ## [v0.1.39] - 2026-06-13
 ### Fixed
 - **`add_studio_output()` がノートブック存在確認なしに INSERT し FK 制約エラーで不正な例外が伝播する**: 存在しない `notebook_id` を渡すと `sqlite3.IntegrityError` (FOREIGN KEY constraint failed) が未捕捉例外として発生し、呼び出し元の Studio 生成が曖昧なエラーで失敗していた。`add_note()` と同じパターンで `self.get_notebook(notebook_id)` ガードを追加し、`NOTEBOOK_NOT_FOUND` (StoreError) を送出するよう統一。

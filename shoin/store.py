@@ -414,6 +414,7 @@ class Store:
     def add_message(
         self, notebook_id: int, role: str, body: str, citation_report: str = "{}"
     ) -> int:
+        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         cur = self.conn.execute(
             "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
             " VALUES (?,?,?,?,?)",

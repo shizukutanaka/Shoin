@@ -418,6 +418,20 @@ class TestClearMessages(unittest.TestCase):
                 s.clear_messages(999)
             self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_add_message_unknown_notebook_raises(self) -> None:
+        """add_message must raise NOTEBOOK_NOT_FOUND, not IntegrityError.
+
+        Without this guard, `shoin ask 99999 "q"` propagates a raw
+        sqlite3.IntegrityError through the CLI's unhandled exception path.
+        """
+        from shoin.store import StoreError
+
+        s = Store(":memory:")
+        with s:
+            with self.assertRaises(StoreError) as ctx:
+                s.add_message(99999, "user", "test", "{}")
+            self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
+
 
 class TestLLMClient(unittest.TestCase):
     def test_null_content_raises_llm_error(self) -> None:
