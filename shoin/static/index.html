@@ -530,7 +530,7 @@ $("#askForm").onsubmit = async e=>{
           else if (line.startsWith("data:")) data += line.slice(5).trim();
         }
         if (!data) continue;
-        const j = JSON.parse(data);
+        let j; try{ j = JSON.parse(data); }catch(_e){ continue; }
         if (ev==="meta") meta = j;
         else if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){

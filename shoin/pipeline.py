@@ -58,7 +58,8 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
             batch_ids = chunk_ids[i : i + EMBED_BATCH]
             vectors = embed(texts[i : i + EMBED_BATCH])
             for cid, vec in zip(batch_ids, vectors):
-                store.set_embedding(cid, vec)
+                store.set_embedding(cid, vec, commit=False)
+            store.conn.commit()  # one commit per batch, not per chunk
             done += len(batch_ids)
     except LLMError:
         return done  # partial embedding is fine: BM25 covers the rest

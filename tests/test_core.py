@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.31")
+        self.assertEqual(VERSION, "0.1.32")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -198,8 +198,6 @@ class TestStore(unittest.TestCase):
         """Raise must happen before commit so no corrupt data is persisted."""
         with make_store() as s:
             nb_id = seed(s)
-            chunks = s.chunks_for_notebook(nb_id)
-            real_id = chunks[0].id
             try:
                 s.set_embedding(99999, [1.0, 0.0])
             except StoreError:
@@ -207,6 +205,18 @@ class TestStore(unittest.TestCase):
             # Real chunk should be untouched (no embedding set by the failed call)
             chunk = s.chunks_for_notebook(nb_id)[0]
             self.assertIsNone(chunk.embedding)
+
+    def test_set_embedding_commit_false_defers_write(self) -> None:
+        """commit=False should not commit until the caller does so."""
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            cid = chunks[0].id
+            s.set_embedding(cid, [1.0, 0.0], commit=False)
+            # Rollback without committing — embedding must NOT be visible
+            s.conn.rollback()
+            refreshed = s.chunks_for_notebook(nb_id)[0]
+            self.assertIsNone(refreshed.embedding)
 
     def test_persistence_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -329,13 +329,14 @@ class Store:
                 ids.append(int(cur.lastrowid or 0))
         return ids
 
-    def set_embedding(self, chunk_id: int, vec: list[float]) -> None:
+    def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
         cur = self.conn.execute(
             "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id)
         )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(
