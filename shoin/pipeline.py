@@ -40,7 +40,7 @@ class _NoEmbed:
 def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: list[str]) -> int:
     """Best-effort batch embedding. Returns the number of embedded chunks."""
     embed = getattr(llm, "embed", None)
-    if not llm.embedding_model or embed is None:
+    if not (llm.embedding_model or "").strip() or embed is None:
         return 0
     stored_model = store.get_setting("embed_model")
     if stored_model is not None and stored_model != llm.embedding_model:

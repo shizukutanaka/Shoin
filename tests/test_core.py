@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.33")
+        self.assertEqual(VERSION, "0.1.34")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -508,6 +508,26 @@ class TestSearch(unittest.TestCase):
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
+
+    def test_fuse_same_chunk_in_both_lists(self) -> None:
+        """A chunk appearing in both BM25 and vector results must be merged, not duplicated."""
+        bm25 = [Hit(1, 1, "共有チャンク", 0, bm25=2.0), Hit(2, 1, "BM25のみ", 0, bm25=1.0)]
+        vec = [Hit(1, 1, "共有チャンク", 0, vec=0.9), Hit(3, 1, "ベクトルのみ", 0, vec=0.7)]
+        result = fuse(bm25, vec, alpha=0.5)
+        ids = [h.chunk_id for h in result]
+        self.assertEqual(len(set(ids)), len(ids), "duplicate chunk IDs in fuse result")
+        self.assertIn(1, ids)
+
+    def test_rerank_improves_lexical_match(self) -> None:
+        """rerank() should boost a chunk whose text closely matches the query."""
+        from shoin.search import rerank
+
+        hits = [
+            Hit(1, 1, "気候変動の影響について", 0.8),
+            Hit(2, 1, "猫は液体である説の研究", 0.9),
+        ]
+        result = rerank("気候変動 影響", hits)
+        self.assertEqual(result[0].chunk_id, 1)
 
     def test_mmr_diversity(self) -> None:
         a = Hit(1, 1, "猫は液体である。猫は液体である。", 1.0)

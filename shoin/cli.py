@@ -190,7 +190,7 @@ def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> 
 
 
 def _cmd_reindex(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
-    if not llm.embedding_model:
+    if not (llm.embedding_model or "").strip():
         print(_t("reindex.no_embed"), file=sys.stderr)
         return 1
     n, total = reindex_notebook(store, llm, int(args.notebook_id))

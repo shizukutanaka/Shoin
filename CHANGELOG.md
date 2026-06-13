@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.34] - 2026-06-13
+### Fixed
+- **`_embed_chunks()` と `_cmd_reindex()` の空白のみの埋め込みモデル判定が不一致**: v0.1.29 で `qa.py` と `llm.py` の判定を `.strip()` で修正したが、`pipeline.py` の `_embed_chunks()` と `cli.py` の `_cmd_reindex()` は `not llm.embedding_model` (`.strip()` なし) のままだった。ホワイトスペースのみの `SHOIN_EMBED_MODEL="  "` が truthy と判定され `LLMError` を経由してサイレントに 0 埋め込みになっていた。両箇所を `not (llm.embedding_model or "").strip()` に統一。
+
 ## [v0.1.33] - 2026-06-13
 ### Fixed
 - **存在しないノートブックへのノート追加・ソースアップロードが FK 制約エラーでサイレントに失敗する**: `add_note()`, `_h_src_add()`, `_h_src_upload()` が存在しない `notebook_id` を受け取った場合、`sqlite3.IntegrityError` が発生してサーバーに未処理例外が伝播し、クライアントはレスポンスなしの接続切断を受け取っていた。各エントリーポイントに `store.get_notebook(nb_id)` ガードを追加し、`NOTEBOOK_NOT_FOUND` → 404 を返すよう修正。
