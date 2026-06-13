@@ -466,6 +466,56 @@ class TestLLMClient(unittest.TestCase):
         fake_llm.embed_one.assert_not_called()
 
 
+class TestTruncateTokens(unittest.TestCase):
+    def test_zero_limit_returns_empty(self) -> None:
+        from shoin.qa import _truncate_tokens
+
+        self.assertEqual(_truncate_tokens("hello world", 0), "")
+
+    def test_negative_limit_returns_empty(self) -> None:
+        from shoin.qa import _truncate_tokens
+
+        self.assertEqual(_truncate_tokens("hello world", -5), "")
+
+    def test_positive_limit_truncates(self) -> None:
+        from shoin.qa import _truncate_tokens
+
+        # "hello world" → 2 tokens; limit=1 should truncate before "world"
+        result = _truncate_tokens("hello world", 1)
+        self.assertIn("hello", result)
+        self.assertNotIn("world", result)
+
+    def test_limit_larger_than_text_returns_full(self) -> None:
+        from shoin.qa import _truncate_tokens
+
+        text = "短い文"
+        self.assertEqual(_truncate_tokens(text, 9999), text)
+
+    def test_empty_text_any_limit_returns_empty(self) -> None:
+        from shoin.qa import _truncate_tokens
+
+        self.assertEqual(_truncate_tokens("", 10), "")
+
+
+class TestValidateCitationsEdgeCases(unittest.TestCase):
+    def test_negative_n_sources_all_invalid(self) -> None:
+        """Negative n_sources treats every citation as out-of-range."""
+        valid, invalid = validate_citations("[S1][S2]", n_sources=-1)
+        self.assertEqual(valid, [])
+        self.assertEqual(invalid, [1, 2])
+
+    def test_zero_n_sources_all_invalid(self) -> None:
+        """n_sources=0 means no real sources exist; any citation is invalid."""
+        valid, invalid = validate_citations("[S1]", n_sources=0)
+        self.assertEqual(valid, [])
+        self.assertEqual(invalid, [1])
+
+    def test_make_report_source_ids_length_mismatch_raises(self) -> None:
+        """source_ids length != source_titles length must raise ValueError."""
+        with self.assertRaises(ValueError):
+            make_report("根拠[S1]。", ["論文A", "論文B"], source_ids=[1])
+
+
 class TestI18n(unittest.TestCase):
     def test_default_lang_is_japanese(self) -> None:
         with patch.dict(os.environ, {}, clear=False):

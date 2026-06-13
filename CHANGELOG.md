@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.35] - 2026-06-13
+### Fixed
+- **`mmr()` が同一テキストを持つ Hit の削除に `pool.remove()` を使用し誤った要素を削除する可能性があった**: `list.remove(x)` はデータクラスの等価比較で最初にマッチした要素を削除するため、chunk_id が異なるが text が同一の Hit が複数存在する場合に誤って前の要素が削除されてた。インデックスで追跡する `pool.pop(best_idx)` に変更し、常に正しい要素を 1 回の O(1) 操作で取り出すよう修正。
+- **`_truncate_tokens(text, 0)` と `_truncate_tokens(text, -n)` がフルテキストを返す**: `limit <= 0` の場合、ループが開始され `acc > limit` が即座に真になるべきだが、最初のイテレーション前に評価されないためフルテキストが返っていた。`limit <= 0` の早期リターン `""` を追加。
+- **`_FALLBACK_SCAN_LIMIT` が `bm25_search()` 内部で毎回再定義されていた**: 定数がローカルスコープで定義されていたため、呼び出しのたびに再割り当てが発生し、また外部からの参照(テスト・監視等)が不可能だった。モジュールレベルに移動。
+
 ## [v0.1.34] - 2026-06-13
 ### Fixed
 - **`_embed_chunks()` と `_cmd_reindex()` の空白のみの埋め込みモデル判定が不一致**: v0.1.29 で `qa.py` と `llm.py` の判定を `.strip()` で修正したが、`pipeline.py` の `_embed_chunks()` と `cli.py` の `_cmd_reindex()` は `not llm.embedding_model` (`.strip()` なし) のままだった。ホワイトスペースのみの `SHOIN_EMBED_MODEL="  "` が truthy と判定され `LLMError` を経由してサイレントに 0 埋め込みになっていた。両箇所を `not (llm.embedding_model or "").strip()` に統一。

@@ -112,6 +112,8 @@ class Answer:
 
 def _truncate_tokens(text: str, limit: int) -> str:
     """Prefix of *text* containing at most *limit* estimated tokens."""
+    if limit <= 0:
+        return ""
     acc = 0
     prev_alnum = False
     for i, ch in enumerate(text):

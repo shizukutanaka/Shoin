@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.34")
+        self.assertEqual(VERSION, "0.1.35")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -583,6 +583,27 @@ class TestSearch(unittest.TestCase):
         result = mmr([a], k=5)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].chunk_id, 1)
+
+    def test_mmr_identical_text_chunks_all_returned(self) -> None:
+        """mmr() must not mis-remove a chunk when two hits share identical text.
+
+        pool.remove(best) would remove the FIRST equal hit, which is wrong when
+        pool[0] != best by identity. pool.pop(best_idx) is always correct.
+        """
+        text = "共通テキスト"
+        a = Hit(1, 1, text, 0.9)
+        b = Hit(2, 2, text, 0.8)
+        result = mmr([a, b], k=2, lam=1.0)  # lam=1.0: pure relevance, no diversity
+        chunk_ids = {h.chunk_id for h in result}
+        self.assertEqual(chunk_ids, {1, 2})
+
+    def test_fallback_scan_limit_is_module_constant(self) -> None:
+        """_FALLBACK_SCAN_LIMIT must be defined at module level, not inside a fn."""
+        from shoin import search
+
+        self.assertTrue(hasattr(search, "_FALLBACK_SCAN_LIMIT"))
+        self.assertIsInstance(search._FALLBACK_SCAN_LIMIT, int)
+        self.assertGreater(search._FALLBACK_SCAN_LIMIT, 0)
 
 
 if __name__ == "__main__":

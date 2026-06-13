@@ -20,6 +20,7 @@ from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _DIGIT_RE = re.compile(r"\d")
+_FALLBACK_SCAN_LIMIT = 2000  # cap for the LIKE-scan fallback in bm25_search
 
 
 @dataclass
@@ -111,7 +112,6 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     if not needles:
         return []
     # Limit the scan to avoid O(n) full-table reads on large notebooks.
-    _FALLBACK_SCAN_LIMIT = 2000
     rows = store.conn.execute(
         "SELECT c.id, c.source_id, c.text FROM chunks c"
         " JOIN sources s ON s.id = c.source_id WHERE s.notebook_id = ? LIMIT ?",
@@ -249,14 +249,13 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
     pool = list(hits)
     selected: list[Hit] = []
     while pool and len(selected) < k:
-        best, best_val = pool[0], -math.inf
-        for cand in pool:
+        best_idx, best_val = 0, -math.inf
+        for i, cand in enumerate(pool):
             redundancy = max((_sim(cand, s) for s in selected), default=0.0)
             val = lam * cand.score - (1 - lam) * redundancy
             if val > best_val:
-                best, best_val = cand, val
-        selected.append(best)
-        pool.remove(best)
+                best_idx, best_val = i, val
+        selected.append(pool.pop(best_idx))
     return selected
 
 
