@@ -274,6 +274,11 @@ class PipelineTest(unittest.TestCase):
         n, total = reindex_notebook(self.store, FakeLLM(embedding_model="m"), empty_nb)
         self.assertEqual((n, total), (0, 0))
 
+    def test_reindex_missing_notebook_raises(self) -> None:
+        with self.assertRaises(StoreError) as cm:
+            reindex_notebook(self.store, FakeLLM(embedding_model="m"), 99999)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
 
 class CliTest(unittest.TestCase):
     def _run(self, argv: list[str], llm: FakeLLM) -> tuple[int, str, str]:
@@ -402,6 +407,29 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("✓", out)
         self.assertIn("/", out)  # "n/total" format
+
+    def test_notebook_list_empty_prints_message(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            rc, out, _ = self._run(["--db", db, "notebook", "list"], llm)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.strip())  # not silent when empty
+
+    def test_ris_export_escapes_newlines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            with Store(db) as s:
+                nb = s.create_notebook("n")
+                s.add_source(nb.id, "txt", "Title\nLine2", "origin\nline2", "h1")
+            result = export(Store(db), nb.id, "ris")
+        # Each RIS field must be a single line — no raw newline inside a field value
+        ti_line = result.split("TI  - ")[1].split("\n")[0]
+        ur_line = result.split("UR  - ")[1].split("\n")[0]
+        self.assertNotIn("\n", ti_line)
+        self.assertNotIn("\n", ur_line)
+        # The escaped text should have been joined with a space
+        self.assertIn("Title Line2", ti_line)
 
 
 if __name__ == "__main__":

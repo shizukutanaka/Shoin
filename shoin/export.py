@@ -66,6 +66,11 @@ def _bib_escape(text: str) -> str:
     return text.replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
+def _ris_escape(text: str) -> str:
+    """Normalize text for a RIS field value (single-line)."""
+    return text.replace("\n", " ").replace("\r", " ")
+
+
 def export_bibtex(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
@@ -87,8 +92,8 @@ def export_ris(store: Store, notebook_id: int) -> str:
     for src in store.sources_for_notebook(notebook_id):
         lines = [
             "TY  - GEN",
-            f"TI  - {src.title}",
-            f"UR  - {src.origin}",
+            f"TI  - {_ris_escape(src.title)}",
+            f"UR  - {_ris_escape(src.origin)}",
             f"DA  - {src.added_at[:10]}",
             "ER  - ",
         ]

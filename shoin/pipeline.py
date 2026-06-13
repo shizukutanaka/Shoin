@@ -90,7 +90,9 @@ def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[
     """Re-embed all chunks for a notebook with the current embedding model.
 
     Returns (n_embedded, n_total). Useful after changing SHOIN_EMBED_MODEL.
+    Raises StoreError(NOTEBOOK_NOT_FOUND) if the notebook does not exist.
     """
+    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
     chunks = store.chunks_for_notebook(notebook_id)
     if not chunks:
         return 0, 0

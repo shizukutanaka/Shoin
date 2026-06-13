@@ -25,6 +25,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "作成: [{id}] {name}",
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
+        "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
         "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
         "cite.confirmed": " ✓根拠確認済み",
@@ -37,6 +38,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "Created: [{id}] {name}",
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
+        "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
         "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
         "cite.confirmed": " ✓ grounding confirmed",
@@ -127,7 +129,10 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
         nb = store.create_notebook(str(args.name))
         print(_t("nb.created", id=str(nb.id), name=nb.name))
     elif action == "list":
-        for nb in store.list_notebooks():
+        nbs = store.list_notebooks()
+        if not nbs:
+            print(_t("nb.empty"))
+        for nb in nbs:
             c = store.counts(nb.id)
             print(f"[{nb.id}] {nb.name}  sources={c['sources']} chunks={c['chunks']}")
     elif action == "delete":
