@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.17] - 2026-06-13
+### Added
+- **ヘルスエンドポイントに `embed_model` フィールド追加**: `GET /api/health` が `{"llm": ..., "model": ..., "embed_model": ...}` を返すようになった。埋め込みモデルが設定済みかどうかをクライアントから確認できる。
+- **UI ランプの hover ツールチップにモデル名を表示**: ランプアイコンにマウスを重ねると `LLM: <model> / embed: <embed_model>` 形式のツールチップが表示される。`/api/health` から取得した実際のモデル名を反映し、設定済みの場合のみ表示する。
+
 ## [v0.1.16] - 2026-06-13
 ### Added
 - **`shoin reindex <notebook_id>` コマンド**: `SHOIN_EMBED_MODEL` 変更後に全チャンクの埋め込みを現行モデルで再構築できるようになった。`pipeline.reindex_notebook()` が全チャンクを一括取得して `_embed_chunks` に渡し、完了後に `settings["embed_model"]` を更新。CLI は完了チャンク数 `n/total` を表示し、埋め込みモデル未設定時はエラーを返す。`SHOIN_LANG=en` にも対応。

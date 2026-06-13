@@ -629,6 +629,10 @@ async function health(){
     window._llmOn = !!j.llm;
     $("#lamp").classList.toggle("on", j.llm);
     $("#lampText").textContent = j.llm ? t("app.lamp.on") : t("app.lamp.off");
+    const parts = [];
+    if (j.model) parts.push(`LLM: ${j.model}`);
+    if (j.embed_model) parts.push(`embed: ${j.embed_model}`);
+    $("#lamp").title = parts.join(" / ");
     const b = $("#banner");
     b.style.display = j.llm ? "none" : "block";
     if (!j.llm) b.textContent = t("banner.offline");

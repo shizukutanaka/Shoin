@@ -249,7 +249,16 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_health(self) -> None:
         avail = getattr(self.llm, "available", lambda: False)()
         model = getattr(self.llm, "model", "")
-        self._json({"status": "ok", "version": VERSION, "llm": avail, "model": model})
+        embed_model = getattr(self.llm, "embedding_model", "")
+        self._json(
+            {
+                "status": "ok",
+                "version": VERSION,
+                "llm": avail,
+                "model": model,
+                "embed_model": embed_model,
+            }
+        )
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:
