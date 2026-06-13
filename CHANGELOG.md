@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.38] - 2026-06-13
+### Security
+- **HTTP API の `/sources` エンドポイントがファイルパスを `target` として受け入れ、サーバー上の任意ファイルを読み込む「混乱した代理人」攻撃が可能だった**: `_h_src_add()` が `target` をそのまま `index_source()` に渡していたため、`{"target": "/etc/passwd"}` のようなリクエストでサーバープロセスが読めるファイルをノートブックへ取り込めた。ファイルパスによる投入は CLI 専用機能であるため、HTTP API では `http://` または `https://` で始まらない `target` を `INGEST_UNSUPPORTED_FORMAT` (400) で拒否するよう修正。
+
 ## [v0.1.37] - 2026-06-13
 ### Fixed
 - **`embed()` がサーバーから要求数より少ないベクターを返された場合にサイレントにデータを欠損させる**: サーバーが 16 テキストのリクエストに対して 14 ベクターしか返さなかった場合、`_embed_chunks()` の `zip(batch_ids, vectors)` が末尾 2 チャンクの埋め込みを黙って破棄していた。`embed()` に `len(vecs) != len(texts)` の検証を追加し、不一致の場合は `SYSTEM_LLM_BAD_RESPONSE` を送出するよう修正。`embed_one()` で 0 件返却された場合の `IndexError` も同様に修正。

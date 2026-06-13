@@ -309,6 +309,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")
+        if not target.startswith(("http://", "https://")):
+            # File-path ingestion is CLI-only; the HTTP API must not act as a
+            # confused deputy to read arbitrary server-side files.
+            raise IngestError(
+                "INGEST_UNSUPPORTED_FORMAT", "target must be an http:// or https:// URL"
+            )
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # raises NOTEBOOK_NOT_FOUND → 404 before ingesting
             result = index_source(store, nb_id, target, self.llm)

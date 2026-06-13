@@ -259,6 +259,19 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
 
+    def test_src_add_file_path_rejected(self) -> None:
+        """HTTP /sources endpoint must reject file-path targets to prevent
+        the server acting as a confused deputy to read arbitrary local files."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "pathguard"})
+        for bad_target in ("/etc/passwd", "../config.py", "C:\\Windows\\system32"):
+            status, err = self._json(
+                "POST",
+                f"/api/notebooks/{nb['id']}/sources",
+                {"target": bad_target},
+            )
+            self.assertEqual(status, 400, msg=f"file path target should be rejected: {bad_target!r}")
+            self.assertEqual(err["error"]["code"], "INGEST_UNSUPPORTED_FORMAT")  # type: ignore[index]
+
     def test_upload_to_deleted_notebook_returns_404(self) -> None:
         """Uploading to a deleted notebook must return 404, not a silent error."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "delme"})
