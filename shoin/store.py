@@ -78,6 +78,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         END;
         """,
     ),
+    (
+        2,
+        """
+        CREATE INDEX idx_sources_notebook ON sources(notebook_id);
+        CREATE INDEX idx_notes_notebook ON notes(notebook_id);
+        CREATE INDEX idx_studio_notebook ON studio_outputs(notebook_id);
+        CREATE INDEX idx_messages_notebook ON messages(notebook_id);
+        """,
+    ),
 ]
 
 
