@@ -461,7 +461,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self._sse("meta", {"sources": []})
                     self._sse("delta", {"text": no_hit})
                     self._sse("done", {"report": dict(report), "degraded": False})
-                except BrokenPipeError:
+                except ConnectionError:
                     pass  # client disconnected; still persist the assistant message below
                 store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
                 return
@@ -479,7 +479,7 @@ class _Handler(BaseHTTPRequestHandler):
                         ]
                     },
                 )
-            except BrokenPipeError:
+            except ConnectionError:
                 store.add_message(nb_id, "assistant", "", "{}")
                 return
 
@@ -496,9 +496,9 @@ class _Handler(BaseHTTPRequestHandler):
                 parts = [text]
                 try:
                     self._sse("delta", {"text": text})
-                except BrokenPipeError:
+                except ConnectionError:
                     client_gone = True
-            except BrokenPipeError:
+            except ConnectionError:
                 client_gone = True
             full = "".join(parts)
             report = make_report(
@@ -507,7 +507,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not client_gone:
                 try:
                     self._sse("done", {"report": dict(report), "degraded": degraded})
-                except BrokenPipeError:
+                except ConnectionError:
                     pass
             store.add_message(nb_id, "assistant", full, json.dumps(report))
 

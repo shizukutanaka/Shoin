@@ -217,6 +217,14 @@ class ExportTest(unittest.TestCase):
         self.assertIn("title = {資料1}", bib)
         self.assertNotIn("{中括弧}", bib)  # braces never leak from titles
 
+    def test_bibtex_escapes_backslashes(self) -> None:
+        """Backslashes in titles/origins (e.g. Windows paths) must be doubled."""
+        from shoin.export import _bib_escape
+
+        self.assertEqual(_bib_escape("C:\\Users\\file.txt"), "C:\\\\Users\\\\file.txt")
+        # Braces are still escaped, and backslash is escaped first to avoid double-escaping
+        self.assertEqual(_bib_escape("a\\{b}"), "a\\\\(b)")
+
     def test_ris_structure(self) -> None:
         ris = export(self.store, self.nb, "ris")
         self.assertEqual(ris.count("TY  - GEN"), 2)

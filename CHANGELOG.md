@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.36] - 2026-06-13
+### Fixed
+- **SSE ストリーミング中の `ConnectionResetError` (ECONNRESET) が捕捉されずアシスタントメッセージが永続化されない**: `_h_ask_sse()` が `except BrokenPipeError:` (EPIPE) のみを捕捉しており、Linux でクライアントが接続を切断した際に多発する `ConnectionResetError` (ECONNRESET) が未捕捉だった。4 箇所すべてを `except ConnectionError:` (BrokenPipeError と ConnectionResetError の共通親クラス) に統一し、どちらの切断方式でもアシスタントの返答が DB に保存されるよう修正。
+- **`_bib_escape()` がバックスラッシュをエスケープしない**: Windows パス (`C:\Users\file.txt`) やバックスラッシュを含む LaTeX コマンドをソースタイトル/オリジンに持つ場合、エクスポートした BibTeX がパーサーにとって不正になる (`\U` や `\f` が LaTeX マクロとして解釈される)。`_bib_escape()` に `.replace("\\", "\\\\")` を先頭に追加し、他の置換と二重エスケープが起きないよう正しい順序で適用。
+
 ## [v0.1.35] - 2026-06-13
 ### Fixed
 - **`mmr()` が同一テキストを持つ Hit の削除に `pool.remove()` を使用し誤った要素を削除する可能性があった**: `list.remove(x)` はデータクラスの等価比較で最初にマッチした要素を削除するため、chunk_id が異なるが text が同一の Hit が複数存在する場合に誤って前の要素が削除されてた。インデックスで追跡する `pool.pop(best_idx)` に変更し、常に正しい要素を 1 回の O(1) 操作で取り出すよう修正。

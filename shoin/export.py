@@ -80,7 +80,13 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
 
 def _bib_escape(text: str) -> str:
-    return text.replace("{", "(").replace("}", ")").replace("\n", " ")
+    # Escape backslash first so subsequent replacements don't double-escape.
+    return (
+        text.replace("\\", "\\\\")
+        .replace("{", "(")
+        .replace("}", ")")
+        .replace("\n", " ")
+    )
 
 
 def _ris_escape(text: str) -> str:

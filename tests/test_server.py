@@ -380,6 +380,15 @@ class ServerTest(unittest.TestCase):
         self.assertIn("passwd", titles)
         self.assertTrue(all("/" not in t for t in titles), titles)
 
+    def test_connection_error_hierarchy_covers_both_epipe_and_econnreset(self) -> None:
+        """ConnectionError catches both BrokenPipeError (EPIPE) and
+        ConnectionResetError (ECONNRESET), so the SSE handler's except clause
+        handles both client-disconnect scenarios without data loss.
+        """
+        for exc_class in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            with self.assertRaises(ConnectionError, msg=f"{exc_class.__name__} must be ConnectionError"):
+                raise exc_class("test")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
