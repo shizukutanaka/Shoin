@@ -1,16 +1,23 @@
 """Citation extraction and machine verification.
 
 Differentiator (spec REQ-006): hallucinated attributions are mechanically
-detectable (arXiv:2412.18004). Two independent, dependency-free checks run on
+detectable (arXiv:2412.18004). Three dependency-free, LLM-free checks run on
 every generated text:
 
 1. Range check (`validate_citations`): an [S#] number must point at a real
    source. Out-of-range numbers are the narrowest form of citation hallucination.
-2. Grounding check (`verify_grounding`): the *content* of a cited sentence must
-   actually overlap the cited source's text. This catches the common, harder
-   case — a claim mis-attributed to a real source that does not support it.
-   The signal is lexical (character-bigram overlap), so it is advisory: low
-   overlap flags a *weak* citation, not a definitively false one.
+2. Grounding confirmation (`verify_grounding`): when a cited sentence's wording
+   lexically overlaps the source it cites, the citation is *confirmed* — strong
+   positive evidence the claim is supported.
+3. Mis-numbering detection (`verify_grounding`): when a cited sentence does NOT
+   match its cited source but DOES strongly match a *different* source, the
+   citation number is very likely wrong — a high-precision error signal.
+
+A lexical signal is asymmetric: high overlap reliably *confirms* support, but
+low overlap is inconclusive (a correct synonym paraphrase and a true
+misattribution both score ~0). So the checks only *assert* what they can stand
+behind — confirmation, or a wrong number — and stay silent otherwise rather
+than falsely accusing a correctly paraphrased answer.
 """
 
 from __future__ import annotations
@@ -29,12 +36,14 @@ _SNUM_RE = re.compile(r"[Ss]\s*(\d+)")
 # each claim is graded against the sources it actually cites.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n])")
 
-# A cited sentence is "weak" when the fraction of its character bigrams found in
-# the cited source(s) falls below this. Calibrated for CJK: content words are
-# kanji that survive paraphrase, so genuinely grounded claims score ~0.5-1.0
-# while unrelated claims sit near 0.1-0.2 (a lone shared copula bigram such as
-# "ある" must not clear the bar). Advisory only — a flag, not a verdict.
-GROUNDING_MIN = 0.30
+# A cited sentence whose character-bigram overlap with a source reaches this is
+# treated as lexically supported by that source. Calibrated for CJK, where
+# content words are kanji that survive paraphrase.
+CONFIRM_MIN = 0.30
+# A citation is flagged mis-numbered only when some *other* source beats the
+# cited one by at least this margin — a deliberately wide gap so synonym
+# paraphrase (which matches nothing strongly) is never mistaken for a wrong number.
+MISMATCH_GAP = 0.20
 
 
 class CitationReport(TypedDict):
@@ -46,10 +55,12 @@ class CitationReport(TypedDict):
     # Maps "S1" -> actual source DB id. Present when the caller supplies source_ids,
     # absent on old persisted reports — consumers must guard with .get().
     source_id_map: NotRequired[dict[str, int]]
-    # Grounding check (present only when source bodies are supplied):
-    #   weak      -> S-numbers cited by at least one weakly-grounded sentence
-    #   grounding -> fraction of cited sentences that are well-grounded (1.0 = all)
-    weak: NotRequired[list[int]]
+    # Grounding checks (present only when source bodies are supplied):
+    #   confirmed     -> S-numbers whose cited sentence is lexically supported
+    #   misattributed -> S-numbers whose cited sentence clearly belongs elsewhere
+    #   grounding     -> fraction of cited sentences that are confirmed (1.0 = all)
+    confirmed: NotRequired[list[int]]
+    misattributed: NotRequired[list[int]]
     grounding: NotRequired[float]
 
 
@@ -82,15 +93,27 @@ def _bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], float]:
-    """Grade each cited sentence by lexical overlap with the source(s) it cites.
+def _overlap(claim: set[str], source: set[str]) -> float:
+    """Fraction of the claim's bigrams that appear in the source."""
+    return len(claim & source) / len(claim) if claim else 1.0
 
-    Returns (weak, score): *weak* is the sorted S-numbers cited by at least one
-    weakly-grounded sentence; *score* is the fraction of cited sentences that are
-    well-grounded (1.0 when there are no cited sentences). Sentences whose cited
-    numbers are all out-of-range are skipped — that is the range check's job.
+
+def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int], float]:
+    """Check each cited sentence against the source(s) it cites, lexically.
+
+    Returns (confirmed, misattributed, score):
+    - *confirmed*: S-numbers whose cited sentence is lexically supported by them.
+    - *misattributed*: S-numbers whose cited sentence matches a *different* source
+      far better than the cited one — a likely wrong citation number.
+    - *score*: fraction of cited sentences that are confirmed (1.0 when none cite).
+
+    Sentences whose overlap with the cited source is merely low (no other source
+    matches either) are left unflagged: that is the inconclusive case a lexical
+    signal cannot tell apart from a correct synonym paraphrase.
     """
-    weak: set[int] = set()
+    src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
+    confirmed: set[int] = set()
+    misattributed: set[int] = set()
     cited = 0
     grounded = 0
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -105,15 +128,18 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         if not claim:
             grounded += 1
             continue
-        support: set[str] = set()
-        for n in nums:
-            support |= _bigrams(source_texts[n])
-        if len(claim & support) / len(claim) >= GROUNDING_MIN:
+        cited_best = max(_overlap(claim, src_bg[n]) for n in nums)
+        if cited_best >= CONFIRM_MIN:
             grounded += 1
-        else:
-            weak.update(nums)
+            confirmed.update(n for n in nums if _overlap(claim, src_bg[n]) >= CONFIRM_MIN)
+            continue
+        others = [_overlap(claim, bg) for n, bg in src_bg.items() if n not in nums]
+        best_other = max(others) if others else 0.0
+        if best_other >= CONFIRM_MIN and best_other - cited_best >= MISMATCH_GAP:
+            misattributed.update(nums)  # wording belongs to a source it did not cite
+        # otherwise inconclusive (possibly a valid paraphrase) — stay silent
     score = grounded / cited if cited else 1.0
-    return sorted(weak), score
+    return sorted(confirmed), sorted(misattributed), score
 
 
 def make_report(
@@ -135,7 +161,10 @@ def make_report(
     if source_ids is not None:
         report["source_id_map"] = {f"S{i + 1}": sid for i, sid in enumerate(source_ids)}
     if source_bodies is not None:
-        weak, score = verify_grounding(text, {i + 1: body for i, body in enumerate(source_bodies)})
-        report["weak"] = weak
+        confirmed, misattributed, score = verify_grounding(
+            text, {i + 1: body for i, body in enumerate(source_bodies)}
+        )
+        report["confirmed"] = confirmed
+        report["misattributed"] = misattributed
         report["grounding"] = score
     return report

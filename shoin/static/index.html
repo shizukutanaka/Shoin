@@ -83,8 +83,9 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .seal:hover{background:var(--seiji);color:#062A2C}
 .seal.bad{color:var(--shu);border-color:var(--shu);text-decoration:line-through}
 .seal.bad:hover{background:var(--shu);color:#fff}
-.seal.weak{color:var(--kohaku);border-color:var(--kohaku);border-style:dashed}
-.seal.weak:hover{background:var(--kohaku);color:#fff}
+.seal.mis{color:var(--kohaku);border-color:var(--kohaku);border-style:dashed}
+.seal.mis:hover{background:var(--kohaku);color:#fff}
+.seal.ok{background:var(--seiji);color:#062A2C}
 
 /* ---- sources pane ---- */
 .src{display:flex;align-items:flex-start;gap:8px;padding:8px 6px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:3px}
@@ -260,7 +261,8 @@ const I18N = {
     "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
-    "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用","chat.weak":"根拠が弱い引用",
+    "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
+    "chat.misattr":"誤ソースの可能性","chat.confirmed":"根拠確認済み",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
@@ -279,7 +281,8 @@ const I18N = {
     "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
-    "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations","chat.weak":"weakly-grounded citation",
+    "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
+    "chat.misattr":"possible wrong source","chat.confirmed":"grounding confirmed",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
@@ -383,7 +386,8 @@ function renderNotebook(){
 function renderWithSeals(container, text, report){
   container.replaceChildren();
   const invalid = new Set((report && report.invalid) || []);
-  const weak = new Set((report && report.weak) || []);
+  const misattr = new Set((report && report.misattributed) || []);
+  const confirmed = new Set((report && report.confirmed) || []);
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
   // Match a whole bracket group, then pull every S-number inside it so that
@@ -395,12 +399,14 @@ function renderWithSeals(container, text, report){
     if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
     nums.forEach((n, i) => {
       if (i) container.append(document.createTextNode(" "));
-      const cls = invalid.has(n) ? " bad" : (weak.has(n) ? " weak" : "");
+      const cls = invalid.has(n) ? " bad" : (misattr.has(n) ? " mis" : (confirmed.has(n) ? " ok" : ""));
       const chip = el("button","seal" + cls, `S${n}`);
       chip.type="button";
+      const name = srcMap[`S${n}`] || "";
       chip.title = invalid.has(n) ? t("chat.invalid")
-        : (weak.has(n) ? t("chat.weak") + (srcMap[`S${n}`] ? " — " + srcMap[`S${n}`] : "")
-        : (srcMap[`S${n}`] || ""));
+        : misattr.has(n) ? t("chat.misattr") + (name ? " — " + name : "")
+        : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + name : "")
+        : name;
       chip.onclick = () => openSeal(n, srcMap, idMap);
       container.append(chip);
     });
@@ -442,8 +448,11 @@ function addMsg(role, body, report){
       const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
       c.append(b);
     }
-    if (report.weak && report.weak.length){
-      c.append(el("span","badge warn", `${t("chat.weak")}: ` + report.weak.map(i=>"S"+i).join(", ")));
+    if (report.misattributed && report.misattributed.length){
+      c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i).join(", ")));
+    }
+    if (report.confirmed && report.confirmed.length){
+      c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
     }
     if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < 0.5){
       c.append(el("span","badge warn", t("chat.coverage.low")));
@@ -515,8 +524,10 @@ $("#askForm").onsubmit = async e=>{
           if (j.degraded) c.append(el("span","badge dim", t("chat.degraded")));
           if (j.report.invalid.length)
             c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+j.report.invalid.map(x=>"S"+x).join(", ")));
-          if (j.report.weak && j.report.weak.length)
-            c.append(el("span","badge warn", `${t("chat.weak")}: `+j.report.weak.map(x=>"S"+x).join(", ")));
+          if (j.report.misattributed && j.report.misattributed.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+j.report.misattributed.map(x=>"S"+x).join(", ")));
+          if (j.report.confirmed && j.report.confirmed.length)
+            c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+j.report.confirmed.map(x=>"S"+x).join(", ")));
           if (j.report.cited.length && j.report.coverage < 0.5)
             c.append(el("span","badge warn", t("chat.coverage.low")));
           if (c.children.length) wrap.append(c);
@@ -549,7 +560,7 @@ function renderStudio(){
     const card = el("div","card");
     const h = el("h4",null,t("studio."+o.kind));
     if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
-    if (o.report && o.report.weak && o.report.weak.length) h.append(el("span","badge warn", t("chat.weak")));
+    if (o.report && o.report.misattributed && o.report.misattributed.length) h.append(el("span","badge err", t("chat.misattr")));
     if (o.report && o.report.cited && o.report.cited.length && o.report.coverage<0.5)
       h.append(el("span","badge warn", t("chat.coverage.low")));
     card.append(h);
