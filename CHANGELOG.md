@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.24] - 2026-06-13
+### Added
+- **`qa.py` のユーザー向けメッセージを i18n 対応**: `NO_HIT_TEXT`・`_degraded_text()` のプレフィックス・`SYSTEM_PROMPT`・ユーザープロンプトテンプレートを `_STRINGS` 辞書に集約し、`_t()` ヘルパーで `SHOIN_LANG` に従って選択するよう変更。`SHOIN_LANG=en` 設定時に英語の LLM プロンプトと UI フォールバックテキストが使用される。後方互換のため `NO_HIT_TEXT` / `SYSTEM_PROMPT` はモジュールレベルの日本語定数として維持。未知の言語コードは英語にフォールバック。
+
 ## [v0.1.23] - 2026-06-13
 ### Fixed
 - **`GET /api/notebooks` の N+1 クエリ**: `_h_nb_list()` が各ノートブックごとに `store.counts(nb.id)` を呼んでいたため、N 冊のノートブックがある場合に 2N+1 本の SQL が発行されていた。`Store.list_notebooks_with_counts()` を新規追加し、LEFT JOIN + GROUP BY による単一クエリに置換。
