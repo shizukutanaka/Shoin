@@ -84,3 +84,17 @@ def index_source(
     chunk_ids = store.add_chunks(source.id, texts)
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
     return IndexResult(source, len(chunk_ids), n_embedded)
+
+
+def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[int, int]:
+    """Re-embed all chunks for a notebook with the current embedding model.
+
+    Returns (n_embedded, n_total). Useful after changing SHOIN_EMBED_MODEL.
+    """
+    chunks = store.chunks_for_notebook(notebook_id)
+    if not chunks:
+        return 0, 0
+    chunk_ids = [c.id for c in chunks]
+    texts = [c.text for c in chunks]
+    n_embedded = _embed_chunks(store, llm, chunk_ids, texts)
+    return n_embedded, len(chunks)

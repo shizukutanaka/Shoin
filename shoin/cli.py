@@ -15,7 +15,7 @@ from .config import TOP_K, VERSION, db_path, port, ui_lang
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source
+from .pipeline import index_source, reindex_notebook
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
@@ -30,6 +30,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
         "err.prefix": "エラー[{code}] {msg}",
+        "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
+        "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -40,6 +42,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
         "err.prefix": "Error[{code}] {msg}",
+        "reindex.done": "✓ Re-embedded {n}/{total} chunks",
+        "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
     },
 }
 
@@ -75,6 +79,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add", help="ソース追加(ファイル/URL)")
     add.add_argument("notebook_id", type=int)
     add.add_argument("targets", nargs="+")
+
+    ri = sub.add_parser("reindex", help="ノートブックの埋め込みを再構築")
+    ri.add_argument("notebook_id", type=int)
 
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
@@ -177,6 +184,15 @@ def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> 
     return 0
 
 
+def _cmd_reindex(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
+    if not llm.embedding_model:
+        print(_t("reindex.no_embed"), file=sys.stderr)
+        return 1
+    n, total = reindex_notebook(store, llm, int(args.notebook_id))
+    print(_t("reindex.done", n=str(n), total=str(total)))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if str(args.command) == "serve":
@@ -200,6 +216,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_questions(store, backend, args)
             if command == "messages":
                 return _cmd_messages(store, args)
+            if command == "reindex":
+                return _cmd_reindex(store, backend, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0

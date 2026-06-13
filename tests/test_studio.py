@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shoin import cli  # noqa: E402
 from shoin.export import export  # noqa: E402
 from shoin.llm import LLMError  # noqa: E402
-from shoin.pipeline import _embed_chunks, index_source  # noqa: E402
+from shoin.pipeline import _embed_chunks, index_source, reindex_notebook  # noqa: E402
 from shoin.store import Store, StoreError  # noqa: E402
 from shoin.studio import KINDS, generate, overview_hits, suggest_questions  # noqa: E402
 
@@ -257,6 +257,23 @@ class PipelineTest(unittest.TestCase):
         # After successful run the stored model is updated.
         self.assertEqual(self.store.get_setting("embed_model"), "model-B")
 
+    def test_reindex_notebook_re_embeds_all_chunks(self) -> None:
+        """reindex_notebook re-embeds every chunk and returns (n, total)."""
+        # PipelineTest has no sources by default; seed one first.
+        src = self.store.add_source(self.nb, "file", "t", "/tmp/t", "hash-ri")
+        self.store.add_chunks(src.id, ["段落A。", "段落B。", "段落C。"])
+        llm = FakeLLM(embedding_model="nomic-embed-text")
+        n, total = reindex_notebook(self.store, llm, self.nb)
+        self.assertEqual(n, total)
+        self.assertGreater(total, 0)
+        for chunk in self.store.chunks_for_notebook(self.nb):
+            self.assertIsNotNone(chunk.embedding)
+
+    def test_reindex_empty_notebook_returns_zero(self) -> None:
+        empty_nb = self.store.create_notebook("空").id
+        n, total = reindex_notebook(self.store, FakeLLM(embedding_model="m"), empty_nb)
+        self.assertEqual((n, total), (0, 0))
+
 
 class CliTest(unittest.TestCase):
     def _run(self, argv: list[str], llm: FakeLLM) -> tuple[int, str, str]:
@@ -371,6 +388,20 @@ class CliTest(unittest.TestCase):
                     os.environ.pop("SHOIN_LANG", None)
                 else:
                     os.environ["SHOIN_LANG"] = env_orig
+
+    def test_reindex_cli_command(self) -> None:
+        """shoin reindex <id> re-embeds chunks and reports count."""
+        llm = FakeLLM(embedding_model="nomic-embed-text")
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "doc.txt"
+            doc.write_text("テスト本文。" * 30, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "n"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+            rc, out, _ = self._run(["--db", db, "reindex", "1"], llm)
+        self.assertEqual(rc, 0)
+        self.assertIn("✓", out)
+        self.assertIn("/", out)  # "n/total" format
 
 
 if __name__ == "__main__":

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.16] - 2026-06-13
+### Added
+- **`shoin reindex <notebook_id>` コマンド**: `SHOIN_EMBED_MODEL` 変更後に全チャンクの埋め込みを現行モデルで再構築できるようになった。`pipeline.reindex_notebook()` が全チャンクを一括取得して `_embed_chunks` に渡し、完了後に `settings["embed_model"]` を更新。CLI は完了チャンク数 `n/total` を表示し、埋め込みモデル未設定時はエラーを返す。`SHOIN_LANG=en` にも対応。
+
 ## [v0.1.15] - 2026-06-13
 ### Added
 - **埋め込みモデル変更検出**: `SHOIN_EMBED_MODEL` を変えても旧ベクトルが DB に残り、異なるモデル間の cosine スコアが無意味になる問題を検出できるようになった。マイグレーション #3 で `settings` テーブルを追加し、初回埋め込み後に使用モデル名を永続化。次回起動時にモデル名が変わっていた場合は標準エラーに警告を出力し、再インデックスを促す。`Store.get_setting` / `Store.set_setting` API を追加。
