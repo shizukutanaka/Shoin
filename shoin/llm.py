@@ -153,9 +153,15 @@ class LLMClient:
         )
         try:
             items = sorted(data["data"], key=lambda d: int(d.get("index", 0)))
-            return [[float(x) for x in item["embedding"]] for item in items]
+            vecs = [[float(x) for x in item["embedding"]] for item in items]
         except (KeyError, TypeError, ValueError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing embeddings in response") from exc
+        if len(vecs) != len(texts):
+            raise LLMError(
+                "SYSTEM_LLM_BAD_RESPONSE",
+                f"embedding count mismatch: got {len(vecs)}, expected {len(texts)}",
+            )
+        return vecs
 
     def embed_one(self, text: str) -> list[float]:
         return self.embed([text])[0]

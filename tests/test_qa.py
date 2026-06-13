@@ -444,6 +444,33 @@ class TestLLMClient(unittest.TestCase):
                 client.chat([{"role": "user", "content": "hello"}])
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
 
+    def test_embed_count_mismatch_raises_bad_response(self) -> None:
+        """Server returning fewer vectors than requested texts must raise LLMError."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(embedding_model="nomic-embed-text")
+        # 2 texts requested, only 1 embedding returned (index 0 only)
+        fake_resp = {"data": [{"index": 0, "embedding": [0.1, 0.2]}]}
+        with patch.object(client, "_post", return_value=fake_resp):
+            with self.assertRaises(LLMError) as ctx:
+                client.embed(["text one", "text two"])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("mismatch", str(ctx.exception).lower())
+
+    def test_embed_zero_results_raises_bad_response(self) -> None:
+        """Server returning zero embeddings for non-empty input must raise LLMError."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(embedding_model="nomic-embed-text")
+        with patch.object(client, "_post", return_value={"data": []}):
+            with self.assertRaises(LLMError) as ctx:
+                client.embed_one("any text")
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
     def test_whitespace_embed_model_raises_disabled(self) -> None:
         """A whitespace-only embedding model must not call the LLM endpoint."""
         from shoin.llm import LLMClient, LLMError

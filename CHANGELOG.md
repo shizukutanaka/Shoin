@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.37] - 2026-06-13
+### Fixed
+- **`embed()` がサーバーから要求数より少ないベクターを返された場合にサイレントにデータを欠損させる**: サーバーが 16 テキストのリクエストに対して 14 ベクターしか返さなかった場合、`_embed_chunks()` の `zip(batch_ids, vectors)` が末尾 2 チャンクの埋め込みを黙って破棄していた。`embed()` に `len(vecs) != len(texts)` の検証を追加し、不一致の場合は `SYSTEM_LLM_BAD_RESPONSE` を送出するよう修正。`embed_one()` で 0 件返却された場合の `IndexError` も同様に修正。
+
 ## [v0.1.36] - 2026-06-13
 ### Fixed
 - **SSE ストリーミング中の `ConnectionResetError` (ECONNRESET) が捕捉されずアシスタントメッセージが永続化されない**: `_h_ask_sse()` が `except BrokenPipeError:` (EPIPE) のみを捕捉しており、Linux でクライアントが接続を切断した際に多発する `ConnectionResetError` (ECONNRESET) が未捕捉だった。4 箇所すべてを `except ConnectionError:` (BrokenPipeError と ConnectionResetError の共通親クラス) に統一し、どちらの切断方式でもアシスタントの返答が DB に保存されるよう修正。
