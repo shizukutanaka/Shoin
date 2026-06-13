@@ -206,6 +206,18 @@ class ExportTest(unittest.TestCase):
         self.store.delete_note(int(notes[0]["id"]))
         self.assertEqual(self.store.list_notes(self.nb), [])
 
+    def test_markdown_invalid_citation_report_ignored(self) -> None:
+        """Corrupted citation_report in DB must not crash export_markdown."""
+        self.store.conn.execute(
+            "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
+            " VALUES (?, 'assistant', 'reply text', 'NOT_VALID_JSON', '2024-01-01T00:00:00Z')",
+            (self.nb,),
+        )
+        self.store.conn.commit()
+        md = export(self.store, self.nb, "md")
+        self.assertIn("reply text", md)
+        self.assertIn("**Assistant**:", md)
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:

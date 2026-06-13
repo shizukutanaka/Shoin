@@ -24,10 +24,10 @@ from .ingest import IngestError
 from .llm import LLMClient, LLMError
 from .pipeline import index_source
 from .qa import (
-    NO_HIT_TEXT,
     ChatBackend,
     _degraded_text,
     _query_vector,
+    _t as _qa_t,
     build_context,
     build_messages,
     expand_query,
@@ -126,7 +126,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"error": {"code": code, "message": message}}, status)
 
     def _read_json(self) -> Json:
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
         if n > MAX_UPLOAD_BYTES:
             self._drain(n)  # consume (bounded) so the error response reaches the client
             raise IngestError("INGEST_FILE_TOO_LARGE", "request body too large")
@@ -312,7 +315,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_upload(self, nb_id: int) -> None:
         raw_name = urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")
         suffix = Path(raw_name).suffix.lower() or ".txt"
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise IngestError("INGEST_EMPTY", "invalid Content-Length header")
         if n <= 0:
             raise IngestError("INGEST_EMPTY", "empty upload")
         if n > MAX_UPLOAD_BYTES:
@@ -436,14 +442,15 @@ class _Handler(BaseHTTPRequestHandler):
 
             self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
             if not hits:
-                report = make_report(NO_HIT_TEXT, [])
+                no_hit = _qa_t("no_hit")
+                report = make_report(no_hit, [])
                 try:
                     self._sse("meta", {"sources": []})
-                    self._sse("delta", {"text": NO_HIT_TEXT})
+                    self._sse("delta", {"text": no_hit})
                     self._sse("done", {"report": dict(report), "degraded": False})
                 except BrokenPipeError:
                     pass  # client disconnected; still persist the assistant message below
-                store.add_message(nb_id, "assistant", NO_HIT_TEXT, json.dumps(report))
+                store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
                 return
 
             context = build_context(store, hits)

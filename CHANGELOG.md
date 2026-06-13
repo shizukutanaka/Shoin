@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.25] - 2026-06-13
+### Fixed
+- **SSE no-hit レスポンスが `SHOIN_LANG` を無視**: `_h_ask_sse()` がクエリに一致するソースなしの場合に `NO_HIT_TEXT` 定数(常に日本語)を使用していた。v0.1.24 の `_t()` 機構を利用して `_qa_t("no_hit")` に変更し、`SHOIN_LANG=en` でも英語フォールバックが表示されるよう修正。
+- **不正な `Content-Length` ヘッダーがサーバーをクラッシュさせる**: `_read_json()` と `_h_src_upload()` で `int(header)` を `try-except ValueError` でガードしていなかった。`"notanumber"` 等の非数値 `Content-Length` ヘッダーが uncaught `ValueError` となり、`ThreadingHTTPServer` のエラーハンドラに達して接続が切断されていた。`_read_json()` では `n=0` にフォールバック、`_h_src_upload()` では `INGEST_EMPTY` エラーを返すよう修正。
+- **`export_markdown` が壊れた `citation_report` JSON でクラッシュ**: `json.loads()` を `try-except (JSONDecodeError, ValueError)` で囲み、DB 上の不正 JSON は空の辞書として扱うよう修正。
+
 ## [v0.1.24] - 2026-06-13
 ### Added
 - **`qa.py` のユーザー向けメッセージを i18n 対応**: `NO_HIT_TEXT`・`_degraded_text()` のプレフィックス・`SYSTEM_PROMPT`・ユーザープロンプトテンプレートを `_STRINGS` 辞書に集約し、`_t()` ヘルパーで `SHOIN_LANG` に従って選択するよう変更。`SHOIN_LANG=en` 設定時に英語の LLM プロンプトと UI フォールバックテキストが使用される。後方互換のため `NO_HIT_TEXT` / `SYSTEM_PROMPT` はモジュールレベルの日本語定数として維持。未知の言語コードは英語にフォールバック。

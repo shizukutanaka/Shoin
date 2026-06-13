@@ -44,7 +44,10 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 parts.append(f"**User**: {body}")
                 parts.append("")
             else:
-                report: dict[str, object] = json.loads(str(m["citation_report"] or "{}"))
+                try:
+                    report: dict[str, object] = json.loads(str(m["citation_report"] or "{}"))
+                except (json.JSONDecodeError, ValueError):
+                    report = {}
                 raw_map = report.get("source_map")
                 source_map: dict[str, str] = (
                     {k: str(v) for k, v in raw_map.items()}

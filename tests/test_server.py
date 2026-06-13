@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import tempfile
@@ -292,6 +293,39 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(raw)["error"]["code"], "INGEST_FILE_TOO_LARGE")
+
+    def test_upload_malformed_content_length(self) -> None:
+        """Non-numeric Content-Length must return 400, not crash the server."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "badcl"})
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("POST", f"/api/notebooks/{nb['id']}/upload")
+        conn.putheader("Content-Length", "notanumber")
+        conn.putheader("X-Filename", "t.txt")
+        conn.endheaders()
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"]["code"], "INGEST_EMPTY")
+        conn.close()
+        # Server must still be responsive after the malformed request.
+        status, _ = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
+
+    def test_json_body_malformed_content_length(self) -> None:
+        """Non-numeric Content-Length on a JSON endpoint falls back to empty body."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("POST", "/api/notebooks")
+        conn.putheader("Content-Length", "??")
+        conn.putheader("Content-Type", "application/json")
+        conn.endheaders()
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 400)
+        # Empty body parsed as {} → missing "name" field
+        self.assertEqual(body["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        conn.close()
+        status, _ = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":
