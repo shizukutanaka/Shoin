@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.1.27] - 2026-06-13
+### Fixed
+- **`LLMClient.chat()` が `content: null` レスポンスに対して文字列 `"None"` を返す**: 一部のモデル(Qwen3 思考モード・function calling など)は `choices[0].message.content` を `null` で返す場合がある。`str(None)` = `"None"` がアシスタントメッセージとして永続化・表示されていた。`content is None` の場合は `SYSTEM_LLM_BAD_RESPONSE` を送出するよう修正。呼び出し元はこのエラーをデグラデーション処理で扱う。
+
+### Added
+- **`export_markdown()` のセクションヘッダーを i18n 対応**: `"## ソース"` / `"## ノート"` / `"## Studio出力"` / `"## チャット履歴"` / `"引用元:"` を `_STRINGS`/`_t()` で管理。`SHOIN_LANG=en` で `## Sources` / `## Notes` / `## Studio Output` / `## Chat History` / `(sources:)` が使用される。
+
 ## [v0.1.26] - 2026-06-13
 ### Fixed
 - **`generate()` が存在しない notebook に対して `NOTEBOOK_NOT_FOUND` でなく `NOTEBOOK_EMPTY` を返す**: `overview_hits()` は存在しない notebook_id に対して空リストを返すため、呼び出し元では「ソースなし」と「ノートブック不在」を区別できなかった。`store.get_notebook(notebook_id)` を `overview_hits()` の前に追加し、正しいエラーコードを送出するよう修正。

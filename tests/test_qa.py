@@ -419,6 +419,32 @@ class TestClearMessages(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
 
 
+class TestLLMClient(unittest.TestCase):
+    def test_null_content_raises_llm_error(self) -> None:
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        null_resp = {"choices": [{"message": {"content": None, "role": "assistant"}}]}
+        with patch.object(client, "_post", return_value=null_resp):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("null", str(ctx.exception).lower())
+
+    def test_missing_choices_raises_llm_error(self) -> None:
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        with patch.object(client, "_post", return_value={"choices": []}):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+
 class TestI18n(unittest.TestCase):
     def test_default_lang_is_japanese(self) -> None:
         with patch.dict(os.environ, {}, clear=False):

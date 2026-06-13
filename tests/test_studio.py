@@ -253,6 +253,31 @@ class ExportTest(unittest.TestCase):
         self.assertIn("reply text", md)
         self.assertIn("**Assistant**:", md)
 
+    def test_markdown_english_section_headers(self) -> None:
+        import os
+
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            md = export(self.store, self.nb, "md")
+        self.assertIn("## Sources", md)
+        self.assertIn("## Notes", md)
+        self.assertIn("## Studio Output", md)
+        self.assertNotIn("## ソース", md)
+        self.assertNotIn("## ノート", md)
+
+    def test_markdown_english_chat_section_and_source_label(self) -> None:
+        import json as _json
+        import os
+
+        report = _json.dumps({"source_map": {"S1": "Doc1"}, "cited": [1], "invalid": []})
+        self.store.add_message(self.nb, "user", "Question?")
+        self.store.add_message(self.nb, "assistant", "Answer [S1].", report)
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            md = export(self.store, self.nb, "md")
+        self.assertIn("## Chat History", md)
+        self.assertNotIn("## チャット履歴", md)
+        self.assertIn("(sources:", md)
+        self.assertNotIn("(引用元:", md)
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:

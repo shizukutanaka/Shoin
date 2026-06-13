@@ -4,7 +4,21 @@ from __future__ import annotations
 
 import json
 
+from .config import ui_lang
 from .store import Store
+
+_STRINGS: dict[str, dict[str, str]] = {
+    "sources_section": {"ja": "ソース", "en": "Sources"},
+    "notes_section": {"ja": "ノート", "en": "Notes"},
+    "studio_section": {"ja": "Studio出力", "en": "Studio Output"},
+    "chat_section": {"ja": "チャット履歴", "en": "Chat History"},
+    "source_label": {"ja": "引用元", "en": "sources"},
+}
+
+
+def _t(key: str) -> str:
+    lang = ui_lang()
+    return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
 FORMATS = ("md", "bibtex", "ris")
 
@@ -13,14 +27,14 @@ def export_markdown(store: Store, notebook_id: int) -> str:
     nb = store.get_notebook(notebook_id)
     parts: list[str] = [f"# {nb.name}", ""]
 
-    parts.append("## ソース")
+    parts.append(f"## {_t('sources_section')}")
     for i, src in enumerate(store.sources_for_notebook(notebook_id), start=1):
         parts.append(f"- [S{i}] {src.title} ({src.kind}) — {src.origin}")
     parts.append("")
 
     notes = store.list_notes(notebook_id)
     if notes:
-        parts.append("## ノート")
+        parts.append(f"## {_t('notes_section')}")
         for n in notes:
             parts.append(f"### {n['title']}")
             parts.append(str(n["body"]))
@@ -28,7 +42,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
     outputs = store.latest_studio_outputs(notebook_id)
     if outputs:
-        parts.append("## Studio出力")
+        parts.append(f"## {_t('studio_section')}")
         for o in outputs:
             parts.append(f"### {o['kind']}")
             parts.append(str(o["body"]))
@@ -36,7 +50,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
     messages = store.list_messages(notebook_id)
     if messages:
-        parts.append("## チャット履歴")
+        parts.append(f"## {_t('chat_section')}")
         for m in messages:
             role = str(m["role"])
             body = str(m["body"])
@@ -56,7 +70,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 )
                 if source_map:
                     legend = ", ".join(f"{k}={v}" for k, v in sorted(source_map.items()))
-                    parts.append(f"**Assistant** (引用元: {legend}):")
+                    parts.append(f"**Assistant** ({_t('source_label')}: {legend}):")
                 else:
                     parts.append("**Assistant**:")
                 parts.append(body)

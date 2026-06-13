@@ -97,6 +97,8 @@ class LLMClient:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing choices in response") from exc
+        if content is None:
+            raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "null content in LLM response")
         return str(content)
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
