@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.1.18] - 2026-06-13
+### Fixed
+- **`add_message` / `clear_messages` が `updated_at` を更新しない**: チャットメッセージの追加・クリア後にノートブックの `updated_at` が更新されなかった。ノートブック一覧を「最近使った順」にソートする場合、会話を重ねてもノートブックが先頭に来なかった。`add_message` と `clear_messages` に `touch_notebook` 呼び出しを追加し、ソース追加・ノート追加と挙動を統一。
+- **`_h_src_upload` の生 SQL をストア抽象で置換**: アップロード後のファイル名書き戻しが `store.conn.execute("UPDATE sources ...")` で直接 SQL を実行しており、Store 抽象層を迂回していた。`Store.update_source_title(source_id, title, origin)` メソッドを追加し、`server.py` を書き換え。新メソッドは `get_source` で存在確認後に更新し `touch_notebook` を呼ぶ。
+- **推奨質問キャッシュが LLM 障害を永続化**: `suggest_questions` が `LLMError` で `[]` を返した場合、その空リストをキャッシュしてしまい、LLM が復旧しても次のリクエストでは空リストが返り続けていた。ソースが存在するにもかかわらず質問が空の場合はキャッシュしないよう変更し、LLM 復旧後の再試行を可能にした。
+- **`_now()` が秒精度だったため同一秒内の `updated_at` 比較が常に等値**: ISO 8601 のタイムスタンプをマイクロ秒精度に変更。既存データとの互換性あり(ISO 8601 文字列の辞書順ソートは精度に依らず正しい)。
+
 ## [v0.1.17] - 2026-06-13
 ### Added
 - **ヘルスエンドポイントに `embed_model` フィールド追加**: `GET /api/health` が `{"llm": ..., "model": ..., "embed_model": ...}` を返すようになった。埋め込みモデルが設定済みかどうかをクライアントから確認できる。

@@ -330,11 +330,7 @@ class _Handler(BaseHTTPRequestHandler):
             with Store(self.db) as store:
                 result = index_source(store, nb_id, str(tmp_path), self.llm)
                 # keep the user's filename, not the temp path
-                store.conn.execute(
-                    "UPDATE sources SET title=?, origin=? WHERE id=?",
-                    (raw_name, raw_name, result.source.id),
-                )
-                store.conn.commit()
+                store.update_source_title(result.source.id, raw_name, raw_name)
                 self._json(
                     {
                         "source": {"id": result.source.id, "title": raw_name},
@@ -378,7 +374,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"questions": cached[1]})
                 return
             questions = suggest_questions(store, self.llm, nb_id)
-            self.questions_cache[nb_id] = (fingerprint, questions)
+            # Only cache non-empty results when sources exist; an empty list
+            # from LLM failure would otherwise suppress questions permanently.
+            if questions or not fingerprint:
+                self.questions_cache[nb_id] = (fingerprint, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:

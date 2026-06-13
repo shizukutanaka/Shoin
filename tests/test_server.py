@@ -31,7 +31,8 @@ class FakeLLM:
 
     def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
         self.chat_count += 1
-        return "".join(self.reply_parts)
+        # Return a question-compatible string so suggest_questions caches results.
+        return "これは何ですか？ [S1]。"
 
     def chat_stream(
         self, messages: list[dict[str, str]], temperature: float = 0.2

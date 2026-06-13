@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.17")
+        self.assertEqual(VERSION, "0.1.18")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -126,6 +126,38 @@ class TestStore(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             self.assertEqual(s.get_chunk(chunk.id).embedding, [1.0, 0.0])
+
+    def test_add_message_touches_notebook(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            t0 = s.get_notebook(nb.id).updated_at
+            s.add_message(nb.id, "user", "こんにちは")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_clear_messages_touches_notebook(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("clr")
+            s.add_message(nb.id, "user", "hello")
+            t0 = s.get_notebook(nb.id).updated_at
+            s.clear_messages(nb.id)
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_title(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "file", "tmp.txt", "/tmp/tmp.txt", "h1")
+            t0 = s.get_notebook(nb.id).updated_at
+            s.update_source_title(src.id, "report.txt", "report.txt")
+            updated = s.get_source(src.id)
+            self.assertEqual(updated.title, "report.txt")
+            self.assertEqual(updated.origin, "report.txt")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_title_missing_raises(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_title(99999, "x", "x")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
     def test_persistence_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

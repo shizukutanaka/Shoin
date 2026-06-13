@@ -97,7 +97,7 @@ MIGRATIONS: list[tuple[int, str]] = [
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def pack_vector(vec: list[float]) -> bytes:
@@ -264,6 +264,14 @@ class Store:
         self.touch_notebook(notebook_id)
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
+    def update_source_title(self, source_id: int, title: str, origin: str) -> None:
+        src = self.get_source(source_id)
+        self.conn.execute(
+            "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
+        )
+        self.conn.commit()
+        self.touch_notebook(src.notebook_id)
+
     def sources_for_notebook(self, notebook_id: int) -> list[Source]:
         rows = self.conn.execute(
             "SELECT * FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,)
@@ -395,6 +403,7 @@ class Store:
             (notebook_id, role, body, citation_report, _now()),
         )
         self.conn.commit()
+        self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
 
     def list_messages(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -416,6 +425,7 @@ class Store:
         self.get_notebook(notebook_id)
         self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
         self.conn.commit()
+        self.touch_notebook(notebook_id)
 
     def counts(self, notebook_id: int) -> dict[str, int]:
         n_sources = self.conn.execute(
