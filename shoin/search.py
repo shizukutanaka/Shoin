@@ -110,10 +110,12 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     needles = _fallback_needles(query)
     if not needles:
         return []
+    # Limit the scan to avoid O(n) full-table reads on large notebooks.
+    _FALLBACK_SCAN_LIMIT = 2000
     rows = store.conn.execute(
         "SELECT c.id, c.source_id, c.text FROM chunks c"
-        " JOIN sources s ON s.id = c.source_id WHERE s.notebook_id = ?",
-        (notebook_id,),
+        " JOIN sources s ON s.id = c.source_id WHERE s.notebook_id = ? LIMIT ?",
+        (notebook_id, _FALLBACK_SCAN_LIMIT),
     ).fetchall()
     for r in rows:
         text = str(r["text"])

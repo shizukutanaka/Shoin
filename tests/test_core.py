@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.29")
+        self.assertEqual(VERSION, "0.1.30")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -468,6 +468,30 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb_id = seed(s)
             self.assertEqual(retrieve(s, nb_id, "zzzz存在しない語qqqq", k=3), [])
+
+    def test_retrieve_empty_notebook(self) -> None:
+        """Retrieve on a notebook with no chunks must return empty list."""
+        with make_store() as s:
+            empty_nb = s.create_notebook("empty").id
+            self.assertEqual(retrieve(s, empty_nb, "query", k=3), [])
+
+    def test_bm25_fallback_no_matches(self) -> None:
+        """BM25 fallback LIKE scan with needles that match nothing returns empty list."""
+        with make_store() as s:
+            nb_id = seed(s)
+            hits = bm25_search(s, nb_id, "zzqqqxxx_nonexistent_token", k=5)
+            self.assertEqual(hits, [])
+
+    def test_mmr_empty_input(self) -> None:
+        """mmr() with an empty candidate list must return an empty list."""
+        self.assertEqual(mmr([], k=3), [])
+
+    def test_mmr_fewer_than_k(self) -> None:
+        """mmr() with fewer candidates than k must return all candidates."""
+        a = Hit(1, 1, "テキスト", 0.9)
+        result = mmr([a], k=5)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].chunk_id, 1)
 
 
 if __name__ == "__main__":

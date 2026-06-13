@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.1.30] - 2026-06-13
+### Fixed
+- **`bm25_search()` フォールバック LIKE スキャンが無制限のフルテーブルスキャンを実行する**: FTS5 インデックスにヒットしなかった場合のフォールバックパスで `LIMIT` 句がなく、ノートブックのチャンク数に比例した O(n) スキャンが発生していた。`LIMIT 2000` を追加し、最悪ケースを制限。
+- **`overview_hits(per_source=0)` が誤って各ソースから 1 チャンクを返す**: `per_source <= 1` の分岐が `per_source=0` も `[0]`(seq 0 のチャンク)を取得する扱いにしていた。`per_source <= 0` の場合はソースをスキップするよう修正。
+- **`export_markdown()` で note/studio_output の body が NULL の場合に `"None"` が出力される**: `str(n["body"])` が `None` に対して `"None"` を返していた。`str(n["body"] or "")` に変更。
+
+### Performance
+- `bm25_search` フォールバックの最大スキャン行数を定数 `_FALLBACK_SCAN_LIMIT = 2000` で管理
+
 ## [v0.1.29] - 2026-06-13
 ### Fixed
 - **アップロードファイル名にパストラバーサル文字が含まれてもタイトルに保存される**: `X-Filename: ../../evil/secret.txt` のようなヘッダーが URL デコード後にそのままタイトルフィールドへ保存されていた。`Path(raw_name).name` でベースネームのみを使用するよう修正。

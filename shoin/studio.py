@@ -118,6 +118,8 @@ def overview_hits(
     ).fetchall()
     hits: list[Hit] = []
     for sr in size_rows:
+        if per_source <= 0:
+            continue
         src_id: int = sr["source_id"]
         max_seq: int = sr["max_seq"]
         if max_seq + 1 <= per_source:

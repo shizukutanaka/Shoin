@@ -37,7 +37,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
         parts.append(f"## {_t('notes_section')}")
         for n in notes:
             parts.append(f"### {n['title']}")
-            parts.append(str(n["body"]))
+            parts.append(str(n["body"] or ""))
             parts.append("")
 
     outputs = store.latest_studio_outputs(notebook_id)
@@ -45,7 +45,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
         parts.append(f"## {_t('studio_section')}")
         for o in outputs:
             parts.append(f"### {o['kind']}")
-            parts.append(str(o["body"]))
+            parts.append(str(o["body"] or ""))
             parts.append("")
 
     messages = store.list_messages(notebook_id)

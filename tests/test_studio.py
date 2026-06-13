@@ -278,6 +278,46 @@ class ExportTest(unittest.TestCase):
         self.assertIn("(sources:", md)
         self.assertNotIn("(引用元:", md)
 
+    def test_markdown_message_empty_citation_report(self) -> None:
+        """Assistant message with empty citation_report '{}' must export without crash."""
+        self.store.add_message(self.nb, "user", "Q?")
+        self.store.add_message(self.nb, "assistant", "A.", "{}")
+        md = export(self.store, self.nb, "md")
+        self.assertIn("**Assistant**", md)
+        self.assertIn("A.", md)
+
+    def test_markdown_empty_notebook(self) -> None:
+        """Notebook with no sources, notes, or messages must still export cleanly."""
+        empty_nb = self.store.create_notebook("空白").id
+        md = export(self.store, empty_nb, "md")
+        self.assertIn("# 空白", md)
+        self.assertIn("ソース", md)
+
+
+class StudioHitsEdgeCaseTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = Store(":memory:")
+        self.nb = seed_notebook(self.store)
+
+    def tearDown(self) -> None:
+        self.store.close()
+
+    def test_overview_hits_per_source_zero_returns_empty(self) -> None:
+        """per_source=0 must skip all sources and return an empty list."""
+        hits = overview_hits(self.store, self.nb, per_source=0)
+        self.assertEqual(hits, [])
+
+    def test_overview_hits_single_chunk_source(self) -> None:
+        """A source with exactly 1 chunk must return that chunk for any per_source >= 1."""
+        store = Store(":memory:")
+        nb = store.create_notebook("one-chunk").id
+        src = store.add_source(nb, "txt", "tiny", "/t", "h1")
+        store.add_chunks(src.id, ["唯一のチャンク"])
+        hits = overview_hits(store, nb, per_source=3)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].text, "唯一のチャンク")
+        store.close()
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:
