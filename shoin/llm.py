@@ -62,6 +62,14 @@ class LLMClient:
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
         except OSError as exc:
+            # urllib wraps socket.timeout in URLError(reason=TimeoutError(...));
+            # bare TimeoutError also has no .reason, so fall back to exc itself.
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise LLMError(
+                    "SYSTEM_LLM_TIMEOUT",
+                    f"LLM request timed out after {timeout}s",
+                ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
                 f"LLM endpoint unreachable at {self.base_url}: {exc}",
@@ -135,6 +143,12 @@ class LLMClient:
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
         except OSError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise LLMError(
+                    "SYSTEM_LLM_TIMEOUT",
+                    f"LLM stream timed out after {CHAT_TIMEOUT_SEC}s",
+                ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
                 f"LLM endpoint unreachable at {self.base_url}: {exc}",

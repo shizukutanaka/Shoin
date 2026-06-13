@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.41] - 2026-06-13
+### Fixed
+- **LLM タイムアウトと接続拒否が同一エラーコード `SYSTEM_SERVICE_UNAVAILABLE` になる**: `_post()` と `chat_stream()` が `except OSError` でネットワークエラーを一括捕捉していたため、タイムアウト (`TimeoutError` = `socket.timeout`) と接続拒否 (`ConnectionRefusedError`) を区別できなかった。urllib は `socket.timeout` を `URLError(reason=TimeoutError(...))` にラップするため、`exc.reason` が `TimeoutError` かをチェックし、タイムアウト時は `SYSTEM_LLM_TIMEOUT` を送出するよう修正。接続拒否は引き続き `SYSTEM_SERVICE_UNAVAILABLE`。
+
 ## [v0.1.40] - 2026-06-13
 ### Fixed
 - **`add_message()` がノートブック存在確認なしに INSERT し FK 制約エラーが CLI で未捕捉例外になる**: 存在しない `notebook_id` で `shoin ask 99999 "question"` を実行すると `retrieve()` は空リストを返すが、その後 `add_message()` が `sqlite3.IntegrityError` を送出し CLI の `except (StoreError, IngestError, LLMError)` に捕捉されず Python トレースバックが表示されていた。`self.get_notebook(notebook_id)` ガードを追加し、`add_note()`・`add_studio_output()` と同じパターンで `NOTEBOOK_NOT_FOUND` を送出するよう統一。

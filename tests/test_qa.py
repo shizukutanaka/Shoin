@@ -485,6 +485,35 @@ class TestLLMClient(unittest.TestCase):
                 client.embed_one("any text")
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
 
+    def test_llm_timeout_raises_distinct_code(self) -> None:
+        """A network timeout must produce SYSTEM_LLM_TIMEOUT, not SYSTEM_SERVICE_UNAVAILABLE."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        # Simulate urllib wrapping a socket.timeout in a URLError (standard behaviour)
+        timeout_exc = URLError(TimeoutError("timed out"))
+        with patch("urllib.request.urlopen", side_effect=timeout_exc):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_TIMEOUT")
+
+    def test_llm_connection_refused_raises_unavailable(self) -> None:
+        """Connection refused must produce SYSTEM_SERVICE_UNAVAILABLE (not timeout)."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        refused_exc = URLError(ConnectionRefusedError(111, "Connection refused"))
+        with patch("urllib.request.urlopen", side_effect=refused_exc):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(ctx.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
     def test_whitespace_embed_model_raises_disabled(self) -> None:
         """A whitespace-only embedding model must not call the LLM endpoint."""
         from shoin.llm import LLMClient, LLMError
