@@ -105,6 +105,8 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 #nbList .ren{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:11px;padding:0 3px;opacity:0}
 #nbList li:hover .ren,#nbList li.cur .ren{opacity:1}
 #nbList .ren:hover{color:var(--seiji-ink)}
+#nbList .del{color:var(--shu-soft,var(--shu))}
+#nbList .del:hover{color:var(--shu)}
 
 /* ---- chat pane ---- */
 .pane-head .clear-chat{margin-left:auto;font-size:11px;border:1px solid var(--border-strong);
@@ -341,7 +343,18 @@ async function loadNotebooks(){
         loadNotebooks(); renderNotebook();
       }catch(e){ toast(e.message); }
     };
-    li.append(name,c,ren);
+    const del = el("button","ren del",null); del.textContent="×"; del.type="button";
+    del.title=t("nb.delete");
+    del.onclick = async ev=>{
+      ev.stopPropagation();
+      if (!confirm(t("nb.delete"))) return;
+      try{
+        await api(`/api/notebooks/${nb.id}`, {method:"DELETE"});
+        if (cur && cur.id===nb.id) cur=null;
+        loadNotebooks();
+      }catch(e){ toast(e.message); }
+    };
+    li.append(name,c,ren,del);
     li.onclick = () => openNotebook(nb.id);
     li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter") openNotebook(nb.id); };
     ul.append(li);
@@ -480,8 +493,10 @@ $("#clearChat").onclick = async ()=>{
 async function refreshQuestions(){
   $("#qs").replaceChildren();
   if (!cur || !cur.sources.length || !window._llmOn) return;
+  const nbId = cur.id;  // capture before await to detect notebook switches
   try{
-    const j = await (await api(`/api/notebooks/${cur.id}/questions`)).json();
+    const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();
+    if (!cur || cur.id !== nbId) return;  // notebook changed while waiting
     j.questions.forEach(q=>{
       const b = el("button","q-chip", q); b.type="button";
       b.onclick = ()=>{ $("#askInput").value=q; $("#askInput").focus(); };
@@ -626,6 +641,7 @@ $("#langBtn").onclick = ()=>{
 async function health(){
   try{
     const j = await (await api("/api/health")).json();
+    const wasOn = !!window._llmOn;
     window._llmOn = !!j.llm;
     $("#lamp").classList.toggle("on", j.llm);
     $("#lampText").textContent = j.llm ? t("app.lamp.on") : t("app.lamp.off");
@@ -636,6 +652,9 @@ async function health(){
     const b = $("#banner");
     b.style.display = j.llm ? "none" : "block";
     if (!j.llm) b.textContent = t("banner.offline");
+    // Re-fetch questions when LLM goes from off→on (e.g. first health check
+    // completes after notebook was already loaded, or LLM restarts).
+    if (!wasOn && j.llm) refreshQuestions();
   }catch(_e){ window._llmOn=false; }
 }
 

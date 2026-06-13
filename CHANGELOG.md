@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.1.20] - 2026-06-13
+### Added
+- **ノートブック削除ボタンを UI に追加**: `DELETE /api/notebooks/{id}` API とi18n文字列 `"nb.delete"` はすでに存在していたが、サイドバーにボタンがなかった。✕ボタンを改名ボタン(✎)の隣に追加し、ホバー時のみ表示(他ボタンと統一)。確認ダイアログ付き。
+
+### Fixed
+- **`refreshQuestions` の起動時レース**: `health()` が `loadNotebooks()` より後に解決した場合、`window._llmOn` が `undefined`(falsy)のまま `refreshQuestions()` が早期リターンし、LLM接続中でも推奨質問が表示されなかった。`health()` でLLMがオフ→オン に変わった時(初回チェック含む)に `refreshQuestions()` を呼ぶよう修正。
+- **推奨質問のノートブック切替レース**: ノートブックを素早く切り替えると、前のノートブックの質問取得レスポンスが後から届き、現在とは異なるノートブックの推奨質問が表示される可能性があった。`refreshQuestions()` が `await` 前にノートブックIDを捕捉し、応答受信後に `cur.id` と照合して不一致なら破棄するよう修正。
+- **`make_report()` に `source_ids` と `source_titles` の長さ不一致チェックを追加**: 長さが異なると `source_id_map` が不完全になり、UIのシール→ソースジャンプが壊れていた。`ValueError` を送出して契約違反を早期検出。
+
 ## [v0.1.19] - 2026-06-13
 ### Fixed
 - **`delete_source` が `updated_at` を更新しない**: ソース削除後にノートブックの `updated_at` が更新されなかった。`add_source`・`delete_note` 等では `touch_notebook` を呼ぶのに `delete_source` だけが呼んでいなかった非対称性を修正。`get_source()` が返す `Source.notebook_id` を利用して削除後に `touch_notebook` を呼ぶ。
