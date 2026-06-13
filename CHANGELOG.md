@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-06-13
+### Added
+- **CLI parity (REQ-103)**: `notebook rename <id> <name>` と `messages clear <notebook_id>` サブコマンドを追加。v0.1.2 でストア・API・UIに実装した改名とチャットクリアが CLI から到達不能だった。「CLIが全コア機能を露出する」という REQ-103 に違反していた。
+- `Store.list_messages_recent(notebook_id, limit)` — SQL `ORDER BY id DESC LIMIT ?` で末尾 N 件を直接取得。`list_messages()[-limit:]` はメッセージ件数分を全ロードしていたため、長期ノートブックで無駄なメモリ/IO が発生していた。
+
+### Fixed
+- `adaptive_alpha` が `か。` で終わる質問を natural-language question として認識しなかった(ベクトル重みが加算されなかった)。`suggest_questions` の第6ラウンド修正と同根: 末尾句読点を除去してから判定するよう変更。
+
+### Changed
+- Studio `overview_hits`: 先頭 N チャンク固定から**等間隔サンプリング**に変更。100 ページ PDF のブリーフィング/年表/マインドマップが序文しか参照しなかった問題を解消。per_source=3 の場合、先頭・中間・末尾チャンクを取得するため長文ソースの全体像が Studio 出力に反映される。
+
 ## [v0.1.6] - 2026-06-13
 ### Fixed
 - **SSE 切断による会話履歴の破壊**: クライアントが SSE ストリーム中に切断(`BrokenPipeError`)すると、ユーザーメッセージが DB に残りアシスタントメッセージが保存されないまま終了していた。次回の質問で `history_messages` がこの孤立ユーザーメッセージを含むプロンプトを構築し、LLM に連続する `user→user` メッセージを渡してしまう問題(ソクラテス問答 第6ラウンド)。対応二段階:

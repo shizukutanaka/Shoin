@@ -74,8 +74,23 @@ class StudioTest(unittest.TestCase):
 
     def test_overview_hits_covers_all_sources(self) -> None:
         hits = overview_hits(self.store, self.nb, per_source=3)
-        self.assertEqual(len(hits), 6)  # 2 sources × first 3 chunks
+        self.assertEqual(len(hits), 6)  # 2 sources × 3 sampled chunks
         self.assertEqual(len({h.source_id for h in hits}), 2)
+
+    def test_overview_hits_equidistant_spans_full_document(self) -> None:
+        """Long sources: sampled chunks must include content from end, not just start."""
+        store = Store(":memory:")
+        nb = store.create_notebook("n")
+        src = store.add_source(nb.id, "file", "長文資料", "/t", "h0")
+        texts = [f"段落{i}" for i in range(10)]  # 10 chunks, seq 0–9
+        store.add_chunks(src.id, texts)
+        hits = overview_hits(store, nb.id, per_source=3)
+        seqs = [h.text for h in hits]
+        # Must include first and last chunk, not [段落0, 段落1, 段落2]
+        self.assertIn("段落0", seqs)
+        self.assertIn("段落9", seqs)
+        self.assertNotEqual(seqs, ["段落0", "段落1", "段落2"])
+        store.close()
 
     def test_generate_persists_with_citation_report(self) -> None:
         llm = FakeLLM(reply="ブリーフィング [S1] と [S2]。")
@@ -247,6 +262,16 @@ class CliTest(unittest.TestCase):
 
             rc, out, _ = self._run(["--db", db, "notebook", "list"], llm)
             self.assertIn("sources=1", out)
+
+            # rename notebook
+            rc, out, _ = self._run(["--db", db, "notebook", "rename", "1", "案件A改"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("案件A改", out)
+
+            # clear messages then verify
+            rc, out, _ = self._run(["--db", db, "messages", "clear", "1"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("クリア", out)
 
             rc, _, _ = self._run(["--db", db, "notebook", "delete", "1"], llm)
             self.assertEqual(rc, 0)

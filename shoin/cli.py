@@ -34,6 +34,14 @@ def _build_parser() -> argparse.ArgumentParser:
     nbsub.add_parser("list", help="一覧")
     nb_del = nbsub.add_parser("delete", help="削除")
     nb_del.add_argument("notebook_id", type=int)
+    nb_ren = nbsub.add_parser("rename", help="改名")
+    nb_ren.add_argument("notebook_id", type=int)
+    nb_ren.add_argument("name")
+
+    msgs = sub.add_parser("messages", help="チャット履歴管理")
+    msgssub = msgs.add_subparsers(dest="action", required=True)
+    msgs_clear = msgssub.add_parser("clear", help="履歴クリア")
+    msgs_clear.add_argument("notebook_id", type=int)
 
     add = sub.add_parser("add", help="ソース追加(ファイル/URL)")
     add.add_argument("notebook_id", type=int)
@@ -81,6 +89,17 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
     elif action == "delete":
         store.delete_notebook(int(args.notebook_id))
         print("削除完了")
+    elif action == "rename":
+        store.rename_notebook(int(args.notebook_id), str(args.name))
+        print(f"改名完了: [{args.notebook_id}] {args.name}")
+    return 0
+
+
+def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
+    action = str(args.action)
+    if action == "clear":
+        store.clear_messages(int(args.notebook_id))
+        print("チャット履歴をクリアしました")
     return 0
 
 
@@ -142,6 +161,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_studio(store, backend, args)
             if command == "questions":
                 return _cmd_questions(store, backend, args)
+            if command == "messages":
+                return _cmd_messages(store, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0

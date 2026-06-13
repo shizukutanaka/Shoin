@@ -362,6 +362,14 @@ class Store:
             ).fetchall()
         )
 
+    def list_messages_recent(self, notebook_id: int, limit: int) -> list[sqlite3.Row]:
+        """Most recent *limit* messages in chronological order (avoids full scan)."""
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE notebook_id=? ORDER BY id DESC LIMIT ?",
+            (notebook_id, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
     def clear_messages(self, notebook_id: int) -> None:
         self.get_notebook(notebook_id)
         self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))

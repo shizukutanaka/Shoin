@@ -134,7 +134,7 @@ def history_messages(
     store: Store, notebook_id: int, limit: int = HISTORY_MESSAGES
 ) -> list[Message]:
     """Recent chat turns as prompt messages (multi-turn follow-up support)."""
-    rows = store.list_messages(notebook_id)[-limit:]
+    rows = store.list_messages_recent(notebook_id, limit)
     out: list[Message] = []
     for r in rows:
         body = _HISTORY_CITE_RE.sub("", str(r["body"])).strip()

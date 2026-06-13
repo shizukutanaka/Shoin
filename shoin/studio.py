@@ -52,15 +52,42 @@ class StudioResult:
 def overview_hits(
     store: Store, notebook_id: int, per_source: int = OVERVIEW_CHUNKS_PER_SOURCE
 ) -> list[Hit]:
-    """Representative chunks: the first *per_source* chunks of every source."""
-    rows = store.conn.execute(
-        "SELECT c.id, c.source_id, c.text FROM chunks c"
-        " JOIN sources s ON s.id = c.source_id"
-        " WHERE s.notebook_id=? AND c.seq < ?"
-        " ORDER BY c.source_id, c.seq",
-        (notebook_id, per_source),
+    """Representative chunks: equidistant across each source's full length.
+
+    Sampling from positions 0, mid, end (rather than the first *per_source* chunks)
+    ensures that long documents contribute content from their full span — not just
+    their introduction — to Studio outputs like timelines and mindmaps.
+    """
+    size_rows = store.conn.execute(
+        "SELECT c.source_id, MAX(c.seq) AS max_seq"
+        " FROM chunks c JOIN sources s ON s.id=c.source_id"
+        " WHERE s.notebook_id=? GROUP BY c.source_id ORDER BY c.source_id",
+        (notebook_id,),
     ).fetchall()
-    return [Hit(r["id"], r["source_id"], r["text"], score=1.0) for r in rows]
+    hits: list[Hit] = []
+    for sr in size_rows:
+        src_id: int = sr["source_id"]
+        max_seq: int = sr["max_seq"]
+        if max_seq + 1 <= per_source:
+            rows = store.conn.execute(
+                "SELECT id, source_id, text FROM chunks WHERE source_id=? ORDER BY seq",
+                (src_id,),
+            ).fetchall()
+        else:
+            if per_source <= 1:
+                target_seqs: list[int] = [0]
+            else:
+                target_seqs = sorted(
+                    {i * max_seq // (per_source - 1) for i in range(per_source)}
+                )
+            ph = ",".join("?" * len(target_seqs))
+            rows = store.conn.execute(
+                f"SELECT id, source_id, text FROM chunks"
+                f" WHERE source_id=? AND seq IN ({ph}) ORDER BY seq",
+                (src_id, *target_seqs),
+            ).fetchall()
+        hits.extend(Hit(r["id"], r["source_id"], r["text"], score=1.0) for r in rows)
+    return hits
 
 
 def generate(
