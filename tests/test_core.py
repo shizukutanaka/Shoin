@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.21")
+        self.assertEqual(VERSION, "0.1.22")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -166,6 +166,12 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_title(99999, "x", "x")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_set_embedding_missing_chunk_raises(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.set_embedding(99999, [1.0, 0.0])
+            self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
 
     def test_persistence_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

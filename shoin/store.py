@@ -321,8 +321,12 @@ class Store:
         return ids
 
     def set_embedding(self, chunk_id: int, vec: list[float]) -> None:
-        self.conn.execute("UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id))
+        cur = self.conn.execute(
+            "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id)
+        )
         self.conn.commit()
+        if cur.rowcount == 0:
+            raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(

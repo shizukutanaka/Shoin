@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.22] - 2026-06-13
+### Fixed
+- **`set_embedding()` が存在しないチャンク ID を無音で許容**: `UPDATE chunks SET embedding=? WHERE id=?` の結果を検証しておらず、`rowcount=0`(対象なし)でもエラーにならなかった。`rowcount` を確認し、0 の場合は `CHUNK_NOT_FOUND` を送出するよう修正。`get_source`・`get_chunk`・`get_notebook` 等の他のメソッドと一貫したエラーレポートになった。
+
 ## [v0.1.21] - 2026-06-13
 ### Fixed
 - **`reindex_notebook()` が存在しない notebook_id で無音成功**: `store.get_notebook()` を先頭に追加し、存在しないノートブックでは `NOTEBOOK_NOT_FOUND` を送出するように変更。以前は `✓ 0/0 チャンクを再埋め込みしました` と表示して成功扱いになっていた。
