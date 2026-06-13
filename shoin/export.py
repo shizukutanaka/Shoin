@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from .store import Store
 
 FORMATS = ("md", "bibtex", "ris")
@@ -31,6 +33,31 @@ def export_markdown(store: Store, notebook_id: int) -> str:
             parts.append(f"### {o['kind']}")
             parts.append(str(o["body"]))
             parts.append("")
+
+    messages = store.list_messages(notebook_id)
+    if messages:
+        parts.append("## チャット履歴")
+        for m in messages:
+            role = str(m["role"])
+            body = str(m["body"])
+            if role == "user":
+                parts.append(f"**User**: {body}")
+                parts.append("")
+            else:
+                report: dict[str, object] = json.loads(str(m["citation_report"] or "{}"))
+                raw_map = report.get("source_map")
+                source_map: dict[str, str] = (
+                    {k: str(v) for k, v in raw_map.items()}
+                    if isinstance(raw_map, dict)
+                    else {}
+                )
+                if source_map:
+                    legend = ", ".join(f"{k}={v}" for k, v in sorted(source_map.items()))
+                    parts.append(f"**Assistant** (引用元: {legend}):")
+                else:
+                    parts.append("**Assistant**:")
+                parts.append(body)
+                parts.append("")
 
     return "\n".join(parts).rstrip() + "\n"
 

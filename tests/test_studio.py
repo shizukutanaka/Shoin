@@ -163,6 +163,19 @@ class ExportTest(unittest.TestCase):
         self.assertIn("### メモ1", md)
         self.assertIn("### briefing", md)
 
+    def test_markdown_includes_chat_history(self) -> None:
+        import json as _json
+
+        report = _json.dumps({"source_map": {"S1": "資料1"}, "cited": [1], "invalid": []})
+        self.store.add_message(self.nb, "user", "質問：主要点は？")
+        self.store.add_message(self.nb, "assistant", "要約[S1]。", report)
+        md = export(self.store, self.nb, "md")
+        self.assertIn("## チャット履歴", md)
+        self.assertIn("**User**: 質問：主要点は？", md)
+        self.assertIn("**Assistant**", md)
+        self.assertIn("S1=資料1", md)
+        self.assertIn("要約[S1]。", md)
+
     def test_bibtex_escapes_braces(self) -> None:
         bib = export(self.store, self.nb, "bibtex")
         self.assertIn("@misc{shoin1,", bib)
@@ -293,6 +306,21 @@ class CliTest(unittest.TestCase):
             rc, _, err = self._run(["--db", db, "studio", "1", "briefing"], llm)
         self.assertEqual(rc, 1)
         self.assertIn("NOTEBOOK_EMPTY", err)
+
+    def test_ask_shows_confirmed_marker(self) -> None:
+        """CLI _print_report surfaces grounding confirmation (three-stage verification)."""
+        # Reply that lexically overlaps the source text → confirmed
+        content = "会議メモ。決定事項あり。" * 20
+        llm = FakeLLM(reply="会議メモの決定事項[S1]。")
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "memo.txt"
+            doc.write_text(content, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "n"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+            rc, out, _ = self._run(["--db", db, "ask", "1", "決定事項は？"], llm)
+        self.assertEqual(rc, 0)
+        self.assertIn("✓根拠確認済み", out)
 
 
 if __name__ == "__main__":

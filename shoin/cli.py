@@ -72,9 +72,17 @@ def _print_report(report: CitationReport) -> None:
     if report["invalid"]:
         bad = ", ".join(f"S{i}" for i in report["invalid"])
         print(f"⚠ 検証失敗の引用(ソース範囲外): {bad}")
+    confirmed: set[int] = set(report.get("confirmed") or [])
+    misattr: set[int] = set(report.get("misattributed") or [])
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
-        print(f"  [S{c}] {title}")
+        if c in confirmed:
+            marker = " ✓根拠確認済み"
+        elif c in misattr:
+            marker = " ⚠番号取り違えの可能性"
+        else:
+            marker = ""
+        print(f"  [S{c}] {title}{marker}")
 
 
 def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
