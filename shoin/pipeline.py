@@ -6,6 +6,7 @@ retrieval (degradation is a first-class mode, see spec REQ-004/008).
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from .chunk import split_text
@@ -41,6 +42,16 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
     embed = getattr(llm, "embed", None)
     if not llm.embedding_model or embed is None:
         return 0
+    stored_model = store.get_setting("embed_model")
+    if stored_model is not None and stored_model != llm.embedding_model:
+        # Vectors in the DB were produced by a different model; cosine scores
+        # between old and new embeddings are meaningless. The user should
+        # re-index to rebuild all embeddings with the new model.
+        print(
+            f"Warning: embedding model changed from {stored_model!r} to"
+            f" {llm.embedding_model!r}. Re-index sources to rebuild embeddings.",
+            file=sys.stderr,
+        )
     done = 0
     try:
         for i in range(0, len(texts), EMBED_BATCH):
@@ -51,6 +62,7 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
             done += len(batch_ids)
     except LLMError:
         return done  # partial embedding is fine: BM25 covers the rest
+    store.set_setting("embed_model", llm.embedding_model)
     return done
 
 

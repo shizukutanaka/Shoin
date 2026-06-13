@@ -242,6 +242,21 @@ class PipelineTest(unittest.TestCase):
             done = _embed_chunks(self.store, llm, ids, texts)
         self.assertEqual(done, 2)  # first batch persisted, second failed
 
+    def test_embed_model_change_warns(self) -> None:
+        """Changing SHOIN_EMBED_MODEL prints a warning to stderr."""
+        src = self.store.add_source(self.nb, "file", "t2", "/tmp/t2", "y")
+        ids = self.store.add_chunks(src.id, ["text"])
+        # First embedding run with model-A.
+        self.store.set_setting("embed_model", "model-A")
+        llm_b = FakeLLM(embedding_model="model-B")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _embed_chunks(self.store, llm_b, ids, ["text"])
+        self.assertIn("model-A", err.getvalue())
+        self.assertIn("model-B", err.getvalue())
+        # After successful run the stored model is updated.
+        self.assertEqual(self.store.get_setting("embed_model"), "model-B")
+
 
 class CliTest(unittest.TestCase):
     def _run(self, argv: list[str], llm: FakeLLM) -> tuple[int, str, str]:

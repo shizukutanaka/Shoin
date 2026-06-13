@@ -87,6 +87,12 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX idx_messages_notebook ON messages(notebook_id);
         """,
     ),
+    (
+        3,
+        """
+        CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """,
+    ),
 ]
 
 
@@ -421,3 +427,18 @@ class Store:
             (notebook_id,),
         ).fetchone()["n"]
         return {"sources": int(n_sources), "chunks": int(n_chunks)}
+
+    # --- settings ---------------------------------------------------------
+
+    def get_setting(self, key: str) -> str | None:
+        """Return a stored setting value, or None if the key has never been set."""
+        row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Upsert a setting key/value pair."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)",
+            (key, value),
+        )
+        self.conn.commit()

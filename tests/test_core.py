@@ -51,12 +51,12 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.14")
+        self.assertEqual(VERSION, "0.1.15")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
-            self.assertEqual(s.migrate(), 2)
-            self.assertEqual(s.migrate(), 2)
+            self.assertEqual(s.migrate(), 3)
+            self.assertEqual(s.migrate(), 3)
 
     def test_notebook_crud(self) -> None:
         with make_store() as s:
