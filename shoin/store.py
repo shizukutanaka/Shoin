@@ -388,6 +388,7 @@ class Store:
     def add_studio_output(
         self, notebook_id: int, kind: str, body: str, citation_report: str
     ) -> int:
+        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         cur = self.conn.execute(
             "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
             " created_at) VALUES (?,?,?,?,?)",

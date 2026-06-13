@@ -155,6 +155,12 @@ class StudioTest(unittest.TestCase):
             suggest_questions(self.store, FakeLLM(), 99999)
         self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_add_studio_output_missing_notebook_raises(self) -> None:
+        """add_studio_output must raise NOTEBOOK_NOT_FOUND, not IntegrityError."""
+        with self.assertRaises(StoreError) as ctx:
+            self.store.add_studio_output(99999, "briefing", "body", "{}")
+        self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
+
     def test_generate_english_instructions(self) -> None:
         import os
 

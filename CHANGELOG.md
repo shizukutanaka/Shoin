@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.39] - 2026-06-13
+### Fixed
+- **`add_studio_output()` がノートブック存在確認なしに INSERT し FK 制約エラーで不正な例外が伝播する**: 存在しない `notebook_id` を渡すと `sqlite3.IntegrityError` (FOREIGN KEY constraint failed) が未捕捉例外として発生し、呼び出し元の Studio 生成が曖昧なエラーで失敗していた。`add_note()` と同じパターンで `self.get_notebook(notebook_id)` ガードを追加し、`NOTEBOOK_NOT_FOUND` (StoreError) を送出するよう統一。
+
 ## [v0.1.38] - 2026-06-13
 ### Security
 - **HTTP API の `/sources` エンドポイントがファイルパスを `target` として受け入れ、サーバー上の任意ファイルを読み込む「混乱した代理人」攻撃が可能だった**: `_h_src_add()` が `target` をそのまま `index_source()` に渡していたため、`{"target": "/etc/passwd"}` のようなリクエストでサーバープロセスが読めるファイルをノートブックへ取り込めた。ファイルパスによる投入は CLI 専用機能であるため、HTTP API では `http://` または `https://` で始まらない `target` を `INGEST_UNSUPPORTED_FORMAT` (400) で拒否するよう修正。
