@@ -18,7 +18,7 @@ from .citation import CitationReport, make_report
 from .config import TOP_K
 from .llm import LLMError, Message
 from .search import Hit, retrieve
-from .store import Store
+from .store import Store, StoreError
 
 CONTEXT_TOKENS = 2400  # lightweight-LLM friendly context budget
 HISTORY_MESSAGES = 6  # recent turns carried into the prompt (REQ-005 follow-ups)
@@ -107,8 +107,10 @@ def build_context(
     snums: dict[int, int] = {}
     per_source = max(budget_tokens // max(len(order), 1), 64)
     for idx, source_id in enumerate(order, start=1):
-        row = store.conn.execute("SELECT title FROM sources WHERE id=?", (source_id,)).fetchone()
-        title = str(row["title"]) if row else f"source-{source_id}"
+        try:
+            title = store.get_source(source_id).title
+        except StoreError:
+            title = f"source-{source_id}"
         titles.append(title)
         snums[source_id] = idx
         used = 0

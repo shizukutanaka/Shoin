@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.10")
+        self.assertEqual(VERSION, "0.1.11")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -82,6 +82,16 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_source(nb.id, "txt", "b", "o2", "same-hash")
             self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+
+    def test_get_source_returns_source_and_raises_on_missing(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "title", "origin", "abc123")
+            fetched = s.get_source(src.id)
+            self.assertEqual(fetched.title, "title")
+            with self.assertRaises(StoreError) as cm:
+                s.get_source(99999)
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
     def test_delete_nonexistent_source_raises_404(self) -> None:
         """Deleting a non-existent source must raise, not silently succeed."""

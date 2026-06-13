@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.1.11] - 2026-06-13
+### Added
+- `Store.get_source(source_id)` — 単一ソースを ID で取得するメソッドを追加。`SOURCE_NOT_FOUND` を送出するため、404 マッピングが自動適用される。
+
+### Changed
+- `Store.delete_source`: 内部の存在チェック SELECT を `get_source()` 呼び出しに置換し、ロジックの重複を解消。
+- `server._h_src_text`: `store.conn.execute` による直接 SQL を `store.get_source()` に置換。Store 抽象を経由することで SQL が一か所に集約された。
+- `qa.build_context`: `store.conn.execute` による直接 SQL をソース取得の `try/except StoreError` パターンに置換。ソースが削除されていても `"source-{id}"` にフォールバックする安全な挙動を維持。
+
 ## [v0.1.10] - 2026-06-13
 ### Fixed
 - **`export_bibtex` / `export_ris` が存在しないノートブックで空文字列を返していた**: `export_markdown` は先頭で `store.get_notebook()` を呼び出して存在確認しているが、`bibtex` / `ris` 系はそれをせず空結果を 200 OK で返していた。API の `StoreError("NOTEBOOK_NOT_FOUND")` → 404 変換に引っかからないため、削除済みノートブックへのエクスポートが無音で空ファイルになっていた。各フォーマット関数の先頭に `store.get_notebook()` を追加し挙動を統一。

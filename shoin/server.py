@@ -344,9 +344,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:
-            exists = store.conn.execute("SELECT 1 FROM sources WHERE id=?", (src_id,)).fetchone()
-            if exists is None:
-                raise StoreError("SOURCE_NOT_FOUND", f"source {src_id} not found")
+            store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
             rows = store.conn.execute(
                 "SELECT seq, text FROM chunks WHERE source_id=? ORDER BY seq", (src_id,)
             ).fetchall()

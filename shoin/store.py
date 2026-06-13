@@ -266,9 +266,22 @@ class Store:
             for r in rows
         ]
 
-    def delete_source(self, source_id: int) -> None:
-        if self.conn.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone() is None:
+    def get_source(self, source_id: int) -> Source:
+        row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if row is None:
             raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
+        return Source(
+            row["id"],
+            row["notebook_id"],
+            row["kind"],
+            row["title"],
+            row["origin"],
+            row["sha256"],
+            row["added_at"],
+        )
+
+    def delete_source(self, source_id: int) -> None:
+        self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
         self.conn.commit()
 
