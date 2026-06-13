@@ -387,7 +387,7 @@ function renderNotebook(){
       row.onclick = () => showSource(s.id, s.title);
       list.append(row);
     });
-    $("#srcEmpty").hidden = cur.sources.length>0;
+    $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
     $("#exMd").href = `/api/notebooks/${cur.id}/export?format=md`;
     $("#exBib").href = `/api/notebooks/${cur.id}/export?format=bibtex`;
@@ -492,7 +492,7 @@ $("#clearChat").onclick = async ()=>{
 };
 async function refreshQuestions(){
   $("#qs").replaceChildren();
-  if (!cur || !cur.sources.length || !window._llmOn) return;
+  if (!cur || !cur.sources?.length || !window._llmOn) return;
   const nbId = cur.id;  // capture before await to detect notebook switches
   try{
     const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();
@@ -532,20 +532,22 @@ $("#askForm").onsubmit = async e=>{
         if (!data) continue;
         const j = JSON.parse(data);
         if (ev==="meta") meta = j;
-        else if (ev==="delta"){ acc += j.text; bd.textContent = acc; }
+        else if (ev==="delta"){ acc += j.text; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){
-          renderWithSeals(bd, acc, j.report);
+          const rpt = j.report || {};
+          renderWithSeals(bd, acc, rpt);
           const wrap = bd.parentElement, c = el("div","cites");
           if (j.degraded) c.append(el("span","badge dim", t("chat.degraded")));
-          if (j.report.invalid.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+j.report.invalid.map(x=>"S"+x).join(", ")));
-          if (j.report.misattributed && j.report.misattributed.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+j.report.misattributed.map(x=>"S"+x).join(", ")));
-          if (j.report.confirmed && j.report.confirmed.length)
-            c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+j.report.confirmed.map(x=>"S"+x).join(", ")));
-          if (j.report.cited.length && j.report.coverage < 0.5)
+          if (rpt.invalid?.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
+          if (rpt.misattributed?.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x).join(", ")));
+          if (rpt.confirmed?.length)
+            c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
+          if (rpt.cited?.length && rpt.coverage < 0.5)
             c.append(el("span","badge warn", t("chat.coverage.low")));
           if (c.children.length) wrap.append(c);
+          $("#chat").scrollTop = $("#chat").scrollHeight;
         }
       }
     }
@@ -560,7 +562,7 @@ function buildKindButtons(){
   KINDS.forEach(kind=>{
     const b = el("button","btn", t("studio."+kind)); b.type="button";
     b.onclick = async ()=>{
-      if (!cur || !cur.sources.length) return;
+      if (!cur || !cur.sources?.length) return;
       b.disabled = true; const old=b.textContent; b.textContent=t("busy");
       try{ await jpost(`/api/notebooks/${cur.id}/studio`, {kind}); openNotebook(cur.id); }
       catch(e){ toast(e.message); }

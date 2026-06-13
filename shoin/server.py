@@ -64,6 +64,14 @@ def _hostname_of(netloc_like: str) -> str:
 Json = dict[str, Any]
 
 
+def _safe_report(raw: Any) -> dict[str, Any]:
+    """Parse a citation_report JSON blob; return empty dict on corrupt data."""
+    try:
+        return json.loads(str(raw) or "{}") or {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
 def _notebook_json(store: Store, nb_id: int) -> Json:
     nb = store.get_notebook(nb_id)
     return {
@@ -81,7 +89,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
             {
                 "kind": o["kind"],
                 "body": o["body"],
-                "report": json.loads(str(o["citation_report"]) or "{}"),
+                "report": _safe_report(o["citation_report"]),
             }
             for o in store.latest_studio_outputs(nb_id)
         ],
@@ -89,7 +97,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
             {
                 "role": m["role"],
                 "body": m["body"],
-                "report": json.loads(str(m["citation_report"]) or "{}"),
+                "report": _safe_report(m["citation_report"]),
             }
             for m in store.list_messages(nb_id)
         ],

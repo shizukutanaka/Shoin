@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.1.28] - 2026-06-13
+### Fixed
+- **`_notebook_json()` が壊れた `citation_report` JSON でクラッシュ**: `GET /api/notebooks/{id}` が studio_outputs と messages の `citation_report` フィールドを `json.loads()` するが、`try-except` がなかった。`export.py` と同様の問題。`_safe_report()` ヘルパーを追加し、両箇所で使用。
+- **SSE "done" イベントで `j.report` が存在しない場合に TypeError**: `j.report.invalid.length` が `j.report` 未定義でクラッシュしていた。`const rpt = j.report || {}` でガードし、全プロパティアクセスをオプショナルチェーン(`?.`)に変更。
+- **チャット SSE ストリーミング中に自動スクロールしない**: `ev==="delta"` でテキストを更新するたびに `#chat.scrollTop = #chat.scrollHeight` を呼び出すよう修正。`ev==="done"` 時にも追加。
+
+### Changed
+- **UI の `cur.sources.length` をオプショナルチェーンに変更**: `cur.sources?.length` を使用し、API レスポンスの形式変更に対して堅牢にした。
+
 ## [v0.1.27] - 2026-06-13
 ### Fixed
 - **`LLMClient.chat()` が `content: null` レスポンスに対して文字列 `"None"` を返す**: 一部のモデル(Qwen3 思考モード・function calling など)は `choices[0].message.content` を `null` で返す場合がある。`str(None)` = `"None"` がアシスタントメッセージとして永続化・表示されていた。`content is None` の場合は `SYSTEM_LLM_BAD_RESPONSE` を送出するよう修正。呼び出し元はこのエラーをデグラデーション処理で扱う。
