@@ -187,14 +187,22 @@ class Store:
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)"
         )
+        self.conn.commit()
         row = self.conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
         current = int(row["v"] or 0)
         for version, sql in MIGRATIONS:
             if version <= current:
                 continue
-            with self.conn:
-                self.conn.executescript(sql)
-                self.conn.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
+            # executescript() issues COMMIT before running, so `with self.conn:` cannot
+            # protect the DDL + version-INSERT atomically — a crash between them leaves
+            # tables in place but no version record, breaking every subsequent startup.
+            # Embedding the INSERT inside BEGIN/COMMIT makes the whole migration one
+            # atomic SQLite write (SQLite DDL is transactional).
+            self.conn.executescript(
+                f"BEGIN;\n{sql.strip()}\n"
+                f"INSERT INTO schema_migrations(version) VALUES ({int(version)});\n"
+                "COMMIT;"
+            )
             current = version
         return current
 

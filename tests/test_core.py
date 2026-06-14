@@ -52,12 +52,57 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.56")
+        self.assertEqual(VERSION, "0.1.57")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
             self.assertEqual(s.migrate(), 4)
             self.assertEqual(s.migrate(), 4)
+
+    def test_migration_schema_version_and_tables_always_consistent(self) -> None:
+        """After migrate() on a fresh file DB, all version records and their corresponding
+        tables must co-exist — proving the DDL + INSERT write is atomic (no crash window)."""
+        import sqlite3 as sqlite3_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            db_path = str(Path(d) / "atomic.db")
+            with Store(db_path):
+                pass
+
+            conn = sqlite3_mod.connect(db_path)
+            try:
+                versions = {
+                    row[0]
+                    for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+                }
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type IN ('table','index')"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+        from shoin.store import MIGRATIONS
+
+        self.assertEqual(versions, {v for v, _ in MIGRATIONS})
+        # Spot-check tables from migration 1 and indexes from migration 2
+        for name in ("notebooks", "sources", "chunks", "messages", "settings"):
+            self.assertIn(name, tables, f"table {name} missing after migration")
+        self.assertIn("idx_sources_notebook", tables)
+
+    def test_migration_scripts_contain_begin_commit(self) -> None:
+        """The executescript calls produced by migrate() must embed BEGIN/COMMIT so
+        the DDL and version-INSERT are one atomic SQLite write."""
+        from shoin.store import MIGRATIONS
+
+        for version, sql in MIGRATIONS:
+            script = f"BEGIN;\n{sql.strip()}\nINSERT INTO schema_migrations(version) VALUES ({int(version)});\nCOMMIT;"
+            stripped = script.strip()
+            self.assertTrue(stripped.startswith("BEGIN;"), f"v{version}: missing BEGIN")
+            self.assertTrue(stripped.endswith("COMMIT;"), f"v{version}: missing COMMIT")
+            self.assertIn(f"VALUES ({version})", stripped)
 
     def test_migration_4_index_exists(self) -> None:
         """Migration 4 must create idx_messages_notebook_id_desc for query performance."""
