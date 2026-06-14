@@ -572,6 +572,25 @@ class TestLLMClient(unittest.TestCase):
         self.assertIsNone(result)
         fake_llm.embed_one.assert_not_called()
 
+    def test_chat_stream_error_event_raises_llm_error(self) -> None:
+        """SSE event with {"error": ...} must raise LLMError, not be silently swallowed."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        error_payload = b'data: {"error": "context length exceeded"}\n\ndata: [DONE]\n\n'
+        mock_resp = io.BytesIO(error_payload)
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with self.assertRaises(LLMError) as ctx:
+                list(client.chat_stream([{"role": "user", "content": "hello"}]))
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("context length exceeded", str(ctx.exception))
+
 
 class TestTruncateTokens(unittest.TestCase):
     def test_zero_limit_returns_empty(self) -> None:

@@ -135,7 +135,16 @@ class LLMClient:
                         return
                     try:
                         obj = json.loads(payload)
+                        if "error" in obj:
+                            err = obj["error"]
+                            msg = err if isinstance(err, str) else json.dumps(err)
+                            raise LLMError(
+                                "SYSTEM_LLM_BAD_RESPONSE",
+                                f"LLM stream error: {str(msg)[:200]}",
+                            )
                         delta = obj["choices"][0]["delta"].get("content")
+                    except LLMError:
+                        raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
                         continue
                     if delta:

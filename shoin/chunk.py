@@ -15,6 +15,7 @@ _CJK_RANGES = (
     (0x0E80, 0x0EFF),  # Lao
     (0x1000, 0x109F),  # Myanmar
     (0x1780, 0x17FF),  # Khmer
+    (0x3000, 0x303F),  # CJK symbols and punctuation (。、　〆々 etc.)
     (0x3040, 0x30FF),  # hiragana + katakana
     (0x3400, 0x4DBF),  # CJK ext A
     (0x4E00, 0x9FFF),  # CJK unified

@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.47")
+        self.assertEqual(VERSION, "0.1.48")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -273,6 +273,15 @@ class TestChunk(unittest.TestCase):
         for script_text in (thai, myanmar, khmer):
             tokens = estimate_tokens(script_text)
             self.assertGreater(tokens, 0, msg=f"zero tokens for: {script_text!r}")
+
+    def test_cjk_punctuation_counted_as_tokens(self) -> None:
+        """CJK Symbols and Punctuation (U+3000-U+303F) must each count as one token."""
+        # 「書院」 = 2 CJK chars + 。= 1 CJK punct → 3 tokens total
+        self.assertTrue(is_cjk("。"))   # U+3002 ideographic full stop
+        self.assertTrue(is_cjk("、"))   # U+3001 ideographic comma
+        self.assertTrue(is_cjk("　"))   # U+3000 ideographic space
+        self.assertEqual(estimate_tokens("書院。"), 3)
+        self.assertEqual(estimate_tokens("猫、犬。"), 4)
 
     def test_is_cjk_thai(self) -> None:
         self.assertTrue(is_cjk("ส"))   # U+0E2A Thai
