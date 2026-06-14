@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.42")
+        self.assertEqual(VERSION, "0.1.43")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -524,6 +524,13 @@ class TestSearch(unittest.TestCase):
         fused = fuse(hits, [], alpha=0.5)
         self.assertEqual(fused[0].chunk_id, 1)
         self.assertEqual(fused[0].score, 1.0)
+
+    def test_fuse_bm25_only_populates_detail(self) -> None:
+        """BM25-only path must populate detail['bm25_norm'] like the merged path does."""
+        hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]
+        fused = fuse(hits, [], alpha=0.5)
+        for h in fused:
+            self.assertIn("bm25_norm", h.detail, "detail['bm25_norm'] must be set in BM25-only path")
 
     def test_fuse_combines(self) -> None:
         b = [Hit(1, 1, "a", 0, bm25=1.0)]

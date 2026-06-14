@@ -39,7 +39,7 @@ _SNUM_RE = re.compile(r"[Ss]\s*(\d+)")
 
 # Sentence boundaries for JP + EN. Citations stay attached to their sentence so
 # each claim is graded against the sources it actually cites.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n])")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])")
 
 # A cited sentence whose character-bigram overlap with a source reaches this is
 # treated as lexically supported by that source. Calibrated for CJK, where

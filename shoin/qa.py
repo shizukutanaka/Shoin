@@ -265,7 +265,7 @@ def ask(
             answer = Answer(
                 text,
                 hits,
-                make_report(text, context.source_titles, context.source_ids),
+                make_report(text, context.source_titles, context.source_ids, context.source_bodies),
                 degraded=True,
             )
 

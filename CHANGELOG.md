@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.1.43] - 2026-06-14
+### Fixed
+- **`citation.py` の `_SENTENCE_SPLIT_RE` が `chunk.py` と乖離し `；` を文末記号として扱わない**: v0.1.42 で `chunk.py` のチャンク分割用正規表現に `；` (U+FF1B) を追加したが、`citation.py` は独自の `_SENTENCE_SPLIT_RE` を持ち更新されなかった。`verify_grounding()` が `；` で区切られた 2 文を 1 文として処理するため、前の文の引用番号が `CONFIRM_MIN` を超えた場合に `continue` が実行され、後の文の誤引用検出がスキップされていた。`citation.py` の正規表現に `；` を追加し `chunk.py` と同期。
+- **`ask()` の LLM 障害時 (degraded) パスで `source_bodies` が `make_report()` に渡されない**: 通常パス (line 261) は `context.source_bodies` を渡してグラウンディング検証 (`confirmed` / `misattributed` リスト) を実行するが、`except LLMError` パス (line 268) はこれを省略していた。LLM がダウンしているときに生成された degraded 回答の引用レポートには `confirmed` / `misattributed` キーが存在せず、フロントエンドがグラウンディング状態を表示できなかった。`context.source_bodies` を追加し通常パスと統一。
+- **`fuse()` の BM25 専用パスが `Hit.detail["bm25_norm"]` を設定しない**: ベクター検索がない場合 (`vec_hits` が空) の早期リターンパスは `h.score = n` のみ設定し、マージパスで設定される `h.detail["bm25_norm"] = n` を設定していなかった。BM25 専用モードで動作中のノートブックでは `h.detail` が不完全になり、`detail` を参照するデバッグ・監視コードが `bm25_norm` キーを見つけられなかった。BM25 専用パスに `h.detail["bm25_norm"] = n` を追加し両パスの構造を統一。
+
 ## [v0.1.42] - 2026-06-14
 ### Fixed
 - **`_CJK_RANGES` がタイ語・ラオス語・ミャンマー語・クメール語を含まずトークン推定が大幅に過小評価される**: タイ語などの東南アジアスクリプトが `is_cjk()` に認識されず、`estimate_tokens()` が 0 または著しく少ない値を返していた。これにより `_hard_split()` のチャンク境界判定が不正確になり、長い東南アジア語テキストでコンテキスト超過が発生する可能性があった。タイ語 (U+0E00–0E7F)・ラオス語 (U+0E80–0EFF)・ミャンマー語 (U+1000–109F)・クメール語 (U+1780–17FF) を追加。ハングル上限も公式ブロック末尾 U+D7A3 に修正 (旧: U+D7AF)。

@@ -191,6 +191,7 @@ def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
     if not vec_hits:
         for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
             h.score = n
+            h.detail["bm25_norm"] = n
         return sorted(bm25_hits, key=lambda h: h.score, reverse=True)
     merged: dict[int, Hit] = {}
     for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):

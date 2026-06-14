@@ -194,6 +194,16 @@ class TestAsk(unittest.TestCase):
             self.assertTrue(ans.hits)
             self.assertIn("接続できない", ans.text)
 
+    def test_degraded_path_includes_grounding_checks(self) -> None:
+        """Degraded answer must carry confirmed/misattributed — source_bodies must be passed."""
+        s, nb = seeded_store()
+        with s:
+            ans = ask(s, FakeLLM(chat_error=True), nb, "書斎とは？")
+            self.assertTrue(ans.degraded)
+            # Grounding keys must be present regardless of degraded state.
+            self.assertIn("confirmed", ans.report)
+            self.assertIn("misattributed", ans.report)
+
     def test_embed_failure_falls_back_to_bm25(self) -> None:
         s, nb = seeded_store()
         with s:
@@ -372,6 +382,23 @@ class TestGrounding(unittest.TestCase):
         confirmed, misattr = verify_grounding("引用のない文章。", self.SOURCES)
         self.assertEqual(confirmed, [])
         self.assertEqual(misattr, [])
+
+    def test_fullwidth_semicolon_enables_misattribution_detection(self) -> None:
+        """；must split into separate sentences for correct per-sentence grounding.
+
+        Without ；splitting, the first clause's confirmed [S1] triggers a
+        `continue` that skips misattribution detection for the entire combined
+        "sentence", letting the wrongly-attributed second [S1] escape detection.
+        """
+        src = {
+            1: "書院は引用付きで文書を検索するローカルアプリである。",
+            2: "和紙は楮の繊維を漉いて作られる伝統的な紙である。",
+        }
+        # First clause correctly cites S1. Second clause has S2's content but
+        # wrongly cites S1 — a wrong citation number that should be detected.
+        text = "書院は引用付きで検索する[S1]；和紙は楮から作られる[S1]。"
+        confirmed, misattr = verify_grounding(text, src)
+        self.assertIn(1, misattr, "second clause misattribution should be detected via ；split")
 
     def test_make_report_includes_grounding_checks(self) -> None:
         rep = make_report(
