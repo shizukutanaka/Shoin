@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.55] - 2026-06-14
+### Fixed
+- **`_post()` が `resp.read().decode("utf-8")` を `errors="replace"` なしで呼んでおり、LLM が非 UTF-8 バイト (Latin-1 エラーメッセージ、バイナリレスポンスなど) を返すと `UnicodeDecodeError` が `LLMError` に変換されずに伝播する**: `_post()` 内の `try` ブロックは `urllib.error.HTTPError`、`OSError`、`json.JSONDecodeError` を捕捉するが `UnicodeDecodeError` (= `ValueError` のサブクラス) を含まない。LLM が不正な UTF-8 バイト列を返した場合、例外は `chat()` → `suggest_questions()`/`generate()` → `_h_questions()`/`_h_studio()` へと伝播し、`_dispatch()` の `except LLMError` で捕捉されずにハンドラがクラッシュする。`chat_stream()` (行 130) と `HTTPError` ボディ読み取り (行 60) は既に `errors="replace"` を使用していたが、`_post()` 本体 (行 58) だけ抜けていた。ソクラテス式問いかけ「3か所のデコードで一貫性があるか？」によって発見。`decode("utf-8", errors="replace")` に統一し、不正バイトは置換文字に変換後 `json.JSONDecodeError` として `LLMError("SYSTEM_LLM_BAD_RESPONSE", ...)` に昇格させる。
+
 ## [v0.1.54] - 2026-06-14
 ### Fixed
 - **`adaptive_alpha()` の `q_tail.endswith(("?", "？"))` が `rstrip` による除去後に確認されるため到達不能コード (v0.1.50 の `suggest_questions` と同一パターン)**: `q_tail = query.rstrip("。．!！?？ 　\t\n")` が半角 `?` と全角 `？` を除去したあとで `q_tail.endswith(("?", "？", "か"))` を評価しているため、`"?"` と `"？"` の分岐は構造的に到達不能だった。英語の質問文 "What is Shoin?" は `len(terms) >= 6` にも満たないため、alpha の semantic バンプ (+0.15) が付与されず、ベクター検索の重みが適切に高まらない問題があった。日本語の `か` 判定には rstrip が必要 (`か？` を検出するため) だが、`?` / `？` の判定は除去前の形で確認する必要がある。`q_ws = query.rstrip(" 　\t\n")` (空白のみ除去) を追加し `q_ws.endswith(("?", "？"))` で検出するよう修正。ソクラテス式問いかけ「この条件は本当に到達可能か？」によって発見。

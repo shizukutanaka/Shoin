@@ -572,6 +572,30 @@ class TestLLMClient(unittest.TestCase):
         self.assertIsNone(result)
         fake_llm.embed_one.assert_not_called()
 
+    def test_non_utf8_response_body_raises_llm_error_not_unicode_error(self) -> None:
+        """Non-UTF-8 bytes in LLM response body must produce LLMError, not UnicodeDecodeError.
+
+        _post() calls resp.read().decode("utf-8") without errors="replace"; if the
+        LLM returns Latin-1 or binary content, UnicodeDecodeError escapes all except
+        handlers and becomes an unhandled exception in _dispatch.
+        """
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        # Bytes that are invalid UTF-8 (valid Latin-1 but not UTF-8).
+        latin1_body = "Réponse".encode("latin-1")
+        mock_resp = io.BytesIO(latin1_body)
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
     def test_chat_stream_error_event_raises_llm_error(self) -> None:
         """SSE event with {"error": ...} must raise LLMError, not be silently swallowed."""
         import io
