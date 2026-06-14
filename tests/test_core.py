@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.41")
+        self.assertEqual(VERSION, "0.1.42")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -264,6 +264,32 @@ class TestChunk(unittest.TestCase):
     def test_pathological_unbroken(self) -> None:
         chunks = split_text("x" * 5000, chunk_tokens=100, overlap_tokens=10)
         self.assertGreater(len(chunks), 0)
+
+    def test_southeast_asian_scripts_counted_as_tokens(self) -> None:
+        """Thai, Myanmar, Khmer, Lao chars must each count as one token (REQ-003)."""
+        thai = "สวัสดี"  # 6 Thai chars → 6 tokens
+        myanmar = "မင်္ဂလာပါ"  # 9 Myanmar chars → 9 tokens (some combining, still counted)
+        khmer = "សួស្តី"  # Khmer chars
+        for script_text in (thai, myanmar, khmer):
+            tokens = estimate_tokens(script_text)
+            self.assertGreater(tokens, 0, msg=f"zero tokens for: {script_text!r}")
+
+    def test_is_cjk_thai(self) -> None:
+        self.assertTrue(is_cjk("ส"))   # U+0E2A Thai
+        self.assertTrue(is_cjk("မ"))   # U+1019 Myanmar
+        self.assertTrue(is_cjk("ស"))   # U+179F Khmer
+
+    def test_hangul_upper_bound_corrected(self) -> None:
+        """D7A3 is the last Hangul syllable; D7A4–D7AF must not count as CJK."""
+        self.assertTrue(is_cjk("힣"))   # last syllable — should be CJK
+        self.assertFalse(is_cjk("힤"))  # one past the syllable block — not CJK
+
+    def test_sentence_split_on_fullwidth_semicolon(self) -> None:
+        """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""
+        text = "前段落；後段落。"
+        chunks = split_text(text, chunk_tokens=2, overlap_tokens=0)
+        # With token budget=2, the two clauses separated by ； should split
+        self.assertGreater(len(chunks), 1, msg="；should trigger a sentence split")
 
 
 class TestIngest(unittest.TestCase):

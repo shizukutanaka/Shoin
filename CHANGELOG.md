@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.1.42] - 2026-06-14
+### Fixed
+- **`_CJK_RANGES` がタイ語・ラオス語・ミャンマー語・クメール語を含まずトークン推定が大幅に過小評価される**: タイ語などの東南アジアスクリプトが `is_cjk()` に認識されず、`estimate_tokens()` が 0 または著しく少ない値を返していた。これにより `_hard_split()` のチャンク境界判定が不正確になり、長い東南アジア語テキストでコンテキスト超過が発生する可能性があった。タイ語 (U+0E00–0E7F)・ラオス語 (U+0E80–0EFF)・ミャンマー語 (U+1000–109F)・クメール語 (U+1780–17FF) を追加。ハングル上限も公式ブロック末尾 U+D7A3 に修正 (旧: U+D7AF)。
+- **`_SENTENCE_SPLIT_RE` が全角セミコロン `；` を文末記号として扱わない**: 日中文での `；` 区切りが単一センテンスとして扱われ、2 文のバッファが分割されなかった。正規表現に `；` (U+FF1B) を追加。
+- **`studio.generate()` が LLM から空文字列が返却された場合にサイレントで空出力を永続化する**: OpenAI 互換 API は `content: ""` を返すことがあり、その場合 `make_report()` に空文字列が渡され空の Studio 出力が DB に保存されユーザーに白紙が表示されていた。`body.strip()` が空の場合に `SYSTEM_LLM_BAD_RESPONSE` を送出するよう修正。
+- **`fetch_url()` の `Content-Type` 取得で `str(None)` が `"None"` になるリスクを排除**: `str(resp.getheader("Content-Type", ""))` はデフォルト引数がある限り問題ないが、将来的な変更で `None` が文字列 `"None"` に変換されると PDF/HTML 判定が全て失敗しプレーンテキストとして処理される。`resp.getheader("Content-Type") or ""` に変更し `None` と空文字列を統一的に処理。
+
 ## [v0.1.41] - 2026-06-13
 ### Fixed
 - **LLM タイムアウトと接続拒否が同一エラーコード `SYSTEM_SERVICE_UNAVAILABLE` になる**: `_post()` と `chat_stream()` が `except OSError` でネットワークエラーを一括捕捉していたため、タイムアウト (`TimeoutError` = `socket.timeout`) と接続拒否 (`ConnectionRefusedError`) を区別できなかった。urllib は `socket.timeout` を `URLError(reason=TimeoutError(...))` にラップするため、`exc.reason` が `TimeoutError` かをチェックし、タイムアウト時は `SYSTEM_LLM_TIMEOUT` を送出するよう修正。接続拒否は引き続き `SYSTEM_SERVICE_UNAVAILABLE`。

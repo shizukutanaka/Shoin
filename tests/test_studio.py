@@ -150,6 +150,18 @@ class StudioTest(unittest.TestCase):
             generate(self.store, FakeLLM(), 99999, "briefing")
         self.assertEqual(ctx.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_generate_empty_llm_response_raises(self) -> None:
+        """Empty string from LLM must raise SYSTEM_LLM_BAD_RESPONSE, not silently persist."""
+        with self.assertRaises(LLMError) as ctx:
+            generate(self.store, FakeLLM(reply=""), self.nb, "briefing")
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_generate_whitespace_only_llm_response_raises(self) -> None:
+        """Whitespace-only LLM response must also raise SYSTEM_LLM_BAD_RESPONSE."""
+        with self.assertRaises(LLMError) as ctx:
+            generate(self.store, FakeLLM(reply="   \n  "), self.nb, "briefing")
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
     def test_suggest_questions_missing_notebook_raises(self) -> None:
         with self.assertRaises(StoreError) as ctx:
             suggest_questions(self.store, FakeLLM(), 99999)

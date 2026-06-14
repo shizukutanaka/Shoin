@@ -11,17 +11,21 @@ import re
 from .config import CHUNK_OVERLAP, CHUNK_TOKENS
 
 _CJK_RANGES = (
+    (0x0E00, 0x0E7F),  # Thai
+    (0x0E80, 0x0EFF),  # Lao
+    (0x1000, 0x109F),  # Myanmar
+    (0x1780, 0x17FF),  # Khmer
     (0x3040, 0x30FF),  # hiragana + katakana
     (0x3400, 0x4DBF),  # CJK ext A
     (0x4E00, 0x9FFF),  # CJK unified
     (0xF900, 0xFAFF),  # CJK compat
     (0xFF66, 0xFF9D),  # halfwidth katakana
-    (0xAC00, 0xD7AF),  # hangul
+    (0xAC00, 0xD7A3),  # Hangul syllables
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n])")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])")
 
 
 def is_cjk(ch: str) -> bool:

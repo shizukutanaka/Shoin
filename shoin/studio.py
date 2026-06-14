@@ -165,6 +165,8 @@ def generate(
             {"role": "user", "content": user},
         ]
     )
+    if not body or not body.strip():
+        raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "empty response from LLM")
     report = make_report(body, context.source_titles, context.source_ids, context.source_bodies)
     if persist:
         store.add_studio_output(notebook_id, kind, body, json.dumps(report))

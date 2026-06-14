@@ -249,7 +249,7 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
             if not body:
                 raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
             _check_size(body)
-            ctype = str(resp.getheader("Content-Type", ""))
+            ctype = resp.getheader("Content-Type") or ""
             return body, ctype, current
         except (OSError, http.client.HTTPException) as exc:
             raise IngestError("INGEST_FETCH_FAILED", f"fetch failed: {exc}") from exc
