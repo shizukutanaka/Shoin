@@ -261,6 +261,25 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(ris.count("TY  - GEN"), 2)
         self.assertEqual(ris.count("ER  - "), 2)
 
+    def test_ris_entries_separated_by_blank_line(self) -> None:
+        """RIS 2001 spec requires a blank line between entries (two or more sources)."""
+        ris = export(self.store, self.nb, "ris")
+        # With 2 sources the output must contain a blank line between the two entries.
+        self.assertIn("ER  - \n\nTY  - GEN", ris, "RIS entries must be separated by a blank line")
+
+    def test_ris_escape_handles_crlf(self) -> None:
+        """CRLF (Windows) line endings in field values must collapse to a single space."""
+        from shoin.export import _ris_escape
+
+        self.assertEqual(_ris_escape("line1\r\nline2"), "line1 line2")
+        self.assertEqual(_ris_escape("line1\rline2"), "line1 line2")
+
+    def test_bib_escape_handles_crlf(self) -> None:
+        """CRLF (Windows) line endings in BibTeX field values must collapse to a single space."""
+        from shoin.export import _bib_escape
+
+        self.assertEqual(_bib_escape("line1\r\nline2"), "line1 line2")
+
     def test_unknown_format(self) -> None:
         with self.assertRaises(ValueError):
             export(self.store, self.nb, "docx")

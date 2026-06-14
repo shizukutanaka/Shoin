@@ -81,17 +81,14 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
 def _bib_escape(text: str) -> str:
     # Escape backslash first so subsequent replacements don't double-escape.
-    return (
-        text.replace("\\", "\\\\")
-        .replace("{", "(")
-        .replace("}", ")")
-        .replace("\n", " ")
-    )
+    # splitlines() handles \n, \r\n, and bare \r uniformly.
+    single = " ".join(text.splitlines())
+    return single.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
 
 
 def _ris_escape(text: str) -> str:
     """Normalize text for a RIS field value (single-line)."""
-    return text.replace("\n", " ").replace("\r", " ")
+    return " ".join(text.splitlines())
 
 
 def export_bibtex(store: Store, notebook_id: int) -> str:
@@ -121,7 +118,7 @@ def export_ris(store: Store, notebook_id: int) -> str:
             "ER  - ",
         ]
         entries.append("\n".join(lines))
-    return "\n".join(entries) + ("\n" if entries else "")
+    return "\n\n".join(entries) + ("\n" if entries else "")
 
 
 def export(store: Store, notebook_id: int, fmt: str = "md") -> str:
