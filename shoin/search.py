@@ -187,9 +187,12 @@ def adaptive_alpha(query: str) -> float:
     """Vector weight in [0.2, 0.8]. Lexical-looking queries push toward BM25."""
     alpha = 0.5
     terms = query_terms(query)
-    # Strip trailing punctuation (。or ？ after か is common in LLM-generated questions)
+    # Strip sentence-final punctuation so that か (the JP question particle) can be
+    # detected even when followed by ？.  Check ? / ？ against the whitespace-only
+    # stripped form because rstrip above already removes them.
     q_tail = query.rstrip("。．!！?？ 　\t\n")
-    if len(terms) >= 6 or q_tail.endswith(("?", "？", "か")):
+    q_ws = query.rstrip(" 　\t\n")
+    if len(terms) >= 6 or q_tail.endswith("か") or q_ws.endswith(("?", "？")):
         alpha += 0.15  # natural-language question: semantics matter
     if _DIGIT_RE.search(query) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
         alpha -= 0.15  # identifiers / numbers: exact match matters

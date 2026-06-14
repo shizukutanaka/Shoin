@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.53")
+        self.assertEqual(VERSION, "0.1.54")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -573,6 +573,16 @@ class TestSearch(unittest.TestCase):
             self.assertLessEqual(a, 0.8)
         self.assertGreater(adaptive_alpha("この論文の主要な貢献は何ですか？"), 0.5)
         self.assertLess(adaptive_alpha("error code 12345"), 0.5)
+
+    def test_adaptive_alpha_english_question_gets_semantic_bump(self) -> None:
+        """English ? at end must raise alpha above 0.5 (rstrip removed ? so endswith was dead code)."""
+        self.assertGreater(adaptive_alpha("What is Shoin?"), 0.5)
+        self.assertGreater(adaptive_alpha("Does Shoin support PDF?"), 0.5)
+
+    def test_adaptive_alpha_fullwidth_question_mark_semantic_bump(self) -> None:
+        """Full-width ？ alone (no か suffix) must also trigger the semantic bump."""
+        self.assertGreater(adaptive_alpha("Shoin？"), 0.5)
+        self.assertGreater(adaptive_alpha("書院とは？"), 0.5)
 
     def test_fuse_bm25_only(self) -> None:
         hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]

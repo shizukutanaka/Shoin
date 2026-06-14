@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v0.1.54] - 2026-06-14
+### Fixed
+- **`adaptive_alpha()` の `q_tail.endswith(("?", "？"))` が `rstrip` による除去後に確認されるため到達不能コード (v0.1.50 の `suggest_questions` と同一パターン)**: `q_tail = query.rstrip("。．!！?？ 　\t\n")` が半角 `?` と全角 `？` を除去したあとで `q_tail.endswith(("?", "？", "か"))` を評価しているため、`"?"` と `"？"` の分岐は構造的に到達不能だった。英語の質問文 "What is Shoin?" は `len(terms) >= 6` にも満たないため、alpha の semantic バンプ (+0.15) が付与されず、ベクター検索の重みが適切に高まらない問題があった。日本語の `か` 判定には rstrip が必要 (`か？` を検出するため) だが、`?` / `？` の判定は除去前の形で確認する必要がある。`q_ws = query.rstrip(" 　\t\n")` (空白のみ除去) を追加し `q_ws.endswith(("?", "？"))` で検出するよう修正。ソクラテス式問いかけ「この条件は本当に到達可能か？」によって発見。
+
 ## [v0.1.53] - 2026-06-14
 ### Fixed
 - **`_h_questions()` の questions_cache に TOCTOU 競合状態: 並行ソース追加時に古い fingerprint がより新しいキャッシュエントリを上書きする**: `ThreadingHTTPServer` の並行リクエスト処理において、Thread A が fingerprint (fp_old) を取得→LLM 呼び出し中に Thread B が新ソースを追加してより新しい (fp_new, qs_new) をキャッシュ書き込み→Thread A が LLM 終了後に (fp_old, qs_old) を書き込む、という順序が起こりうる。この結果、より新しいキャッシュエントリが古いものに上書きされ、次のリクエストで fingerprint 不一致によるキャッシュミス→不要な LLM 再呼び出しが発生する。ロック取得時に既存エントリの fingerprint を確認し、より新しいものが既にある場合は書き込みを省略するガードを追加した。
