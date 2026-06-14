@@ -37,12 +37,24 @@ class Hit:
 # --- query helpers --------------------------------------------------------
 
 
+def _is_cjk_word(ch: str) -> bool:
+    """CJK content character (letter/syllable), excluding CJK Symbols and Punctuation.
+
+    CJK Symbols and Punctuation (U+3000–U+303F) includes 。、　々 etc. which
+    act as word-boundary characters, not word-content, in query tokenisation.
+    is_cjk() now includes that block (for token-budget estimation) so we need
+    a separate predicate for building FTS query terms.
+    """
+    cp = ord(ch)
+    return is_cjk(ch) and not (0x3000 <= cp <= 0x303F)
+
+
 def query_terms(query: str) -> list[str]:
     """Split a query into terms: ascii words plus contiguous CJK runs."""
     terms = _WORD_RE.findall(query)
     run = ""
     for ch in query:
-        if is_cjk(ch):
+        if _is_cjk_word(ch):
             run += ch
         elif run:
             terms.append(run)
@@ -215,7 +227,9 @@ def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
 
 def _char_bigrams(text: str) -> set[str]:
     t = text.lower()
-    return {t[i : i + 2] for i in range(len(t) - 1)} if len(t) > 1 else {t}
+    if len(t) > 1:
+        return {t[i : i + 2] for i in range(len(t) - 1)}
+    return {t} if t else set()
 
 
 def lexical_overlap(query: str, text: str) -> float:

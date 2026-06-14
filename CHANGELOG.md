@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v0.1.49] - 2026-06-14
+### Fixed
+- **v0.1.48 リグレッション: `query_terms()` が CJK 記号・句読点 (U+3000–U+303F) を語の一部として扱い、BM25 FTS クエリに `。` `、` を含むトライグラムを生成する**: v0.1.48 で `is_cjk("。") = True` になったことで `query_terms()` の CJK ラン構築ループが `。` `、` `　` を語に含めるようになった。例えば `query_terms("書院。")` が `["書院。"]` を返すようになり、`fts_query` が `"書院。"` というトライグラムを生成してしまう。FTS5 trigram インデックスにはテキスト内の `書院` と `。` は別々にインデックスされるため `"書院。"` トライグラムは存在せずマッチ失敗となり、BM25 検索が LIKE フォールバックへ降格していた。`_is_cjk_word()` ヘルパーを追加し U+3000–U+303F を除外。`query_terms()` でこれを使用することで句読点を語境界として扱う。`is_cjk()` 自体は変更せず、`estimate_tokens()` や `_truncate_tokens()` での正確なトークン数計算は維持。
+- **`_char_bigrams("")` が `set()` でなく `{""}` を返すため `_sim()` の空テキストガードが機能しない**: `_sim(a, b)` は `if not ga or not gb: return 0.0` でテキストが空の Hit を弾く意図だが、`_char_bigrams("") = {""}` (空文字列を含む集合) は truthy のため ガードが発動せず、空テキスト同士の Hit が MMR 内で類似度 1.0 (完全重複) と判定されていた。`if t else set()` に修正し空文字列に対して空集合を返すよう変更。
+
 ## [v0.1.48] - 2026-06-14
 ### Fixed
 - **`chat_stream()` が SSE エラーイベント `{"error": "..."}` をサイレントに飲み込む**: Ollama / llama.cpp は `choices` キーの代わりに `{"error": "context length exceeded"}` などのエラーオブジェクトを SSE ストリームに送出することがある。以前のコードは `obj["choices"]` への `KeyError` を `except (KeyError, ...)` で捕捉し `continue` していたため、エラーが検出されず最終的に `[DONE]` が届いて空の成功応答として処理されていた。送信前に `"error"` キーの有無を検査し、存在する場合は即座に `LLMError("SYSTEM_LLM_BAD_RESPONSE", ...)` を送出するよう修正。これにより呼び出し元 (`_h_ask_sse()`) がエラーを受け取りフロントエンドへ適切なエラー SSE イベントを送信できる。

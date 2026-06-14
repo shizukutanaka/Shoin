@@ -27,9 +27,10 @@ from shoin.search import (
     fuse,
     lexical_overlap,
     mmr,
+    query_terms,
     retrieve,
 )
-from shoin.search import Hit
+from shoin.search import Hit, _char_bigrams
 from shoin.store import Store, StoreError, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -51,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.48")
+        self.assertEqual(VERSION, "0.1.49")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -489,6 +490,24 @@ class TestSearch(unittest.TestCase):
         expr = fts_query("書院は知の書斎")
         self.assertIn('"書院は"', expr)  # CJK runs decompose into trigrams
         self.assertIn(" OR ", expr)
+
+    def test_query_terms_cjk_punctuation_acts_as_boundary(self) -> None:
+        """CJK punctuation (U+3000-U+303F) must split CJK runs, not extend them."""
+        # 。and 、 were added to is_cjk() in v0.1.48; they must NOT join CJK word runs
+        terms = query_terms("書院。")
+        self.assertIn("書院", terms)
+        self.assertNotIn("書院。", terms)  # punctuation must not be included in run
+        terms2 = query_terms("猫、犬。")
+        self.assertIn("猫", terms2)
+        self.assertIn("犬", terms2)
+        # Punctuation alone is not a term (not alphanumeric, not a CJK word char)
+        self.assertNotIn("。", terms2)
+        self.assertNotIn("、", terms2)
+
+    def test_char_bigrams_empty_returns_empty_set(self) -> None:
+        """_char_bigrams('') must return set(), not {''}."""
+        self.assertEqual(_char_bigrams(""), set())
+        self.assertFalse(_char_bigrams(""))  # falsy — triggers the guard in _sim()
 
     def test_bm25_japanese(self) -> None:
         with make_store() as s:
