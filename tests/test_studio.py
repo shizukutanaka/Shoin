@@ -125,17 +125,30 @@ class StudioTest(unittest.TestCase):
             self.assertEqual(result.kind, kind)
 
     def test_suggest_questions_parses_lines(self) -> None:
+        # NFKC normalization converts full-width ？ → ASCII ? in output questions.
         llm = FakeLLM(
             reply="1. 目的は何か？\n- 仕組みはどう動きますか?\n* 装飾のみのノイズ行\n結論として要約\n2. 制約は何か"
         )
         qs = suggest_questions(self.store, llm, self.nb)
-        self.assertEqual(qs, ["目的は何か？", "仕組みはどう動きますか?", "制約は何か"])
+        self.assertEqual(qs, ["目的は何か?", "仕組みはどう動きますか?", "制約は何か"])
 
     def test_suggest_questions_accepts_ka_with_trailing_period(self) -> None:
         """LLMs often append 。 even with 'no decoration' instructions — must not drop."""
         llm = FakeLLM(reply="この書院はどう動くのか。\n内容について説明します。")
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["この書院はどう動くのか。"])
+
+    def test_suggest_questions_strips_fullwidth_list_prefixes(self) -> None:
+        """CJK-first LLMs often emit １. or ２） prefixes — NFKC normalization must strip them."""
+        llm = FakeLLM(
+            reply="１. 目的は何か？\n２） 仕組みはどう動きますか？\n３、制約は何か"
+        )
+        qs = suggest_questions(self.store, llm, self.nb)
+        # Full-width numbers/punctuation must be stripped; bare question text remains.
+        # NFKC also converts full-width ？ → ASCII ?, so check for ASCII ?.
+        self.assertIn("目的は何か?", qs)
+        self.assertIn("仕組みはどう動きますか?", qs)
+        self.assertIn("制約は何か", qs)
 
     def test_suggest_questions_empty_notebook(self) -> None:
         empty = self.store.create_notebook("空")
@@ -451,7 +464,7 @@ class CliTest(unittest.TestCase):
 
             rc, out, _ = self._run(["--db", db, "questions", "1"], llm)
             self.assertEqual(rc, 0)
-            self.assertIn("- 質問ですか？", out)
+            self.assertIn("- 質問ですか?", out)
 
             rc, out, _ = self._run(["--db", db, "export", "1", "--format", "bibtex"], llm)
             self.assertEqual(rc, 0)
