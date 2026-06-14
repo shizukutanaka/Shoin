@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shoin.citation import (
+    _overlap,
     extract_citations,
     make_report,
     validate_citations,
@@ -382,6 +383,15 @@ class TestGrounding(unittest.TestCase):
         confirmed, misattr = verify_grounding("引用のない文章。", self.SOURCES)
         self.assertEqual(confirmed, [])
         self.assertEqual(misattr, [])
+
+    def test_overlap_empty_claim_returns_zero(self) -> None:
+        """Empty claim bigram set must return 0.0, not the vacuously-true 1.0.
+
+        An empty claim (sentence reduced to only [S#] markers) has no lexical
+        content, so it cannot be confirmed as supported by any source.
+        """
+        source = {"書院", "検索", "引用"}
+        self.assertEqual(_overlap(set(), source), 0.0)
 
     def test_fullwidth_semicolon_enables_misattribution_detection(self) -> None:
         """；must split into separate sentences for correct per-sentence grounding.

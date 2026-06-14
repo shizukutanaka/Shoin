@@ -51,7 +51,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.44")
+        self.assertEqual(VERSION, "0.1.45")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -524,6 +524,25 @@ class TestSearch(unittest.TestCase):
         fused = fuse(hits, [], alpha=0.5)
         self.assertEqual(fused[0].chunk_id, 1)
         self.assertEqual(fused[0].score, 1.0)
+
+    def test_fuse_all_zero_bm25_scores_stay_zero(self) -> None:
+        """All-zero BM25 scores (IDF=0 for ubiquitous terms) must normalize to 0.0.
+
+        Previously _minmax returned [1.0, 1.0] for equal values regardless of
+        whether they were 0, causing zero-relevance hits to receive the maximum
+        BM25 weight in fusion and potentially outrank genuinely relevant results.
+        """
+        hits = [Hit(1, 1, "a", 0, bm25=0.0), Hit(2, 1, "b", 0, bm25=0.0)]
+        fused = fuse(hits, [], alpha=0.5)
+        for h in fused:
+            self.assertEqual(h.score, 0.0, "zero BM25 scores must normalize to 0.0 not 1.0")
+
+    def test_fuse_equal_nonzero_bm25_scores_stay_one(self) -> None:
+        """All equal but non-zero BM25 scores should still normalize to 1.0 (undifferentiated tie)."""
+        hits = [Hit(1, 1, "a", 0, bm25=3.5), Hit(2, 1, "b", 0, bm25=3.5)]
+        fused = fuse(hits, [], alpha=0.5)
+        for h in fused:
+            self.assertAlmostEqual(h.score, 1.0, msg="equal non-zero BM25 scores must normalize to 1.0")
 
     def test_fuse_bm25_only_populates_detail(self) -> None:
         """BM25-only path must populate detail['bm25_norm'] like the merged path does."""

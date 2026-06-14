@@ -98,7 +98,7 @@ def _bigrams(text: str) -> set[str]:
 
 def _overlap(claim: set[str], source: set[str]) -> float:
     """Fraction of the claim's bigrams that appear in the source."""
-    return len(claim & source) / len(claim) if claim else 1.0
+    return len(claim & source) / len(claim) if claim else 0.0
 
 
 def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int]]:

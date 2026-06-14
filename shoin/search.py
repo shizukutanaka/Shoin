@@ -182,7 +182,9 @@ def _minmax(values: list[float]) -> list[float]:
         return []
     lo, hi = min(values), max(values)
     if hi - lo < 1e-12:
-        return [1.0 for _ in values]
+        # All values are essentially equal. Near-zero means no signal → 0.0.
+        # Equal and non-zero means undifferentiated relevance → 1.0 (tie).
+        return [0.0 if lo < 1e-12 else 1.0 for _ in values]
     return [(v - lo) / (hi - lo) for v in values]
 
 
