@@ -486,8 +486,7 @@ class _Handler(BaseHTTPRequestHandler):
                     },
                 )
             except ConnectionError:
-                store.add_message(nb_id, "assistant", "", "{}")
-                return
+                return  # Nothing sent yet; orphaned user message handled by history_messages()
 
             parts: list[str] = []
             degraded = False
@@ -515,7 +514,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._sse("done", {"report": dict(report), "degraded": degraded})
                 except ConnectionError:
                     pass
-            store.add_message(nb_id, "assistant", full, json.dumps(report))
+            if full:  # Don't persist empty assistant turns (client disconnected before tokens)
+                store.add_message(nb_id, "assistant", full, json.dumps(report))
 
 
 def make_server(
