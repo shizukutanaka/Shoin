@@ -403,5 +403,95 @@ class ServerTest(unittest.TestCase):
                 raise exc_class("test")
 
 
+class MidStreamLLMErrorTest(unittest.TestCase):
+    """Server persists the complete client-visible content when LLM fails mid-stream."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from shoin.llm import LLMError
+
+        class PartialThenErrorLLM(FakeLLM):
+            """Yields one token then raises LLMError to simulate mid-stream failure."""
+
+            def chat_stream(self, messages, temperature=0.2):
+                yield "部分的な回答"
+                raise LLMError("SYSTEM_LLM_TIMEOUT", "timed out mid-stream")
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = PartialThenErrorLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "mid.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def _sse(self, path, payload):
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            self._url(path), data=body, method="POST",
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            return resp.read().decode()
+
+    def test_mid_stream_llm_error_persists_partial_plus_degraded(self) -> None:
+        """When LLM fails after yielding some tokens, the persisted message must include
+        both the partial real tokens AND the degraded fallback text — matching what the
+        client actually received."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "mid-stream-test"})
+        nb_id = nb["id"]
+        content = "和紙は楮から作られる。" * 30
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=content.encode(),
+            method="POST",
+            headers={"X-Filename": "washi.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        raw = self._sse(
+            f"/api/notebooks/{nb_id}/ask",
+            {"question": "和紙の原料は？"},
+        )
+        events = parse_sse(raw)
+        event_kinds = [e for e, _ in events]
+        self.assertIn("delta", event_kinds)
+        self.assertEqual(event_kinds[-1], "done")
+        # Client received the partial token AND the degraded text
+        full_client = "".join(str(d["text"]) for e, d in events if e == "delta")
+        self.assertIn("部分的な回答", full_client)
+        # done event must flag degraded
+        done_data = events[-1][1]
+        self.assertTrue(done_data["degraded"])
+        # Persisted message must match what the client saw
+        _, nb_data = self._json("GET", f"/api/notebooks/{nb_id}")
+        msgs = nb_data["messages"]
+        assistant_msgs = [m for m in msgs if m["role"] == "assistant"]
+        self.assertEqual(len(assistant_msgs), 1)
+        persisted_body = assistant_msgs[0]["body"]
+        self.assertIn("部分的な回答", persisted_body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)

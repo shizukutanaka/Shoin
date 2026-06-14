@@ -498,7 +498,7 @@ class _Handler(BaseHTTPRequestHandler):
             except LLMError:
                 degraded = True
                 text = _degraded_text(hits)
-                parts = [text]
+                parts.append(text)
                 try:
                     self._sse("delta", {"text": text})
                 except ConnectionError:
