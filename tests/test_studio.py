@@ -256,6 +256,32 @@ class ExportTest(unittest.TestCase):
         # Braces are still escaped, and backslash is escaped first to avoid double-escaping
         self.assertEqual(_bib_escape("a\\{b}"), "a\\\\(b)")
 
+    def test_bibtex_escapes_tex_special_chars(self) -> None:
+        """TeX special characters must be escaped so LaTeX can compile the .bib file.
+
+        % causes silent truncation (comment); & causes a LaTeX error outside tabular;
+        $ starts math mode; # is a parameter marker; _ causes errors outside math.
+        """
+        from shoin.export import _bib_escape
+
+        # percent sign: most destructive — silently truncates rest of field in TeX
+        self.assertEqual(_bib_escape("100%"), "100\\%")
+        # URL with percent-encoded space (%20) and ampersand must both be escaped
+        url = "https://example.com/page?q=hello%20world&lang=en"
+        escaped = _bib_escape(url)
+        self.assertIn("\\%20", escaped)   # %20 → \%20 (percent sign escaped, digits untouched)
+        self.assertIn("\\&", escaped)     # & → \&
+        # ampersand
+        self.assertEqual(_bib_escape("foo & bar"), "foo \\& bar")
+        # dollar sign
+        self.assertEqual(_bib_escape("$5 off"), "\\$5 off")
+        # hash
+        self.assertEqual(_bib_escape("item #1"), "item \\#1")
+        # underscore (common in filenames and URLs)
+        self.assertEqual(_bib_escape("my_file.txt"), "my\\_file.txt")
+        # backslash before percent must not produce \\% (already escaped)
+        self.assertEqual(_bib_escape("\\%"), "\\\\\\%")
+
     def test_ris_structure(self) -> None:
         ris = export(self.store, self.nb, "ris")
         self.assertEqual(ris.count("TY  - GEN"), 2)

@@ -83,7 +83,17 @@ def _bib_escape(text: str) -> str:
     # Escape backslash first so subsequent replacements don't double-escape.
     # splitlines() handles \n, \r\n, and bare \r uniformly.
     single = " ".join(text.splitlines())
-    return single.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+    return (
+        single
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")   # TeX comment — silently truncates remainder of field
+        .replace("&", "\\&")   # TeX tab-stop — LaTeX error outside tabular
+        .replace("$", "\\$")   # TeX math delimiter
+        .replace("#", "\\#")   # TeX macro parameter
+        .replace("_", "\\_")   # TeX subscript — LaTeX error outside math
+        .replace("{", "(")
+        .replace("}", ")")
+    )
 
 
 def _ris_escape(text: str) -> str:
