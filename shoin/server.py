@@ -473,7 +473,10 @@ class _Handler(BaseHTTPRequestHandler):
                     self._sse("done", {"report": dict(report), "degraded": False})
                 except ConnectionError:
                     pass  # client disconnected; still persist the assistant message below
-                store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
+                try:
+                    store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
+                except StoreError:
+                    pass  # notebook deleted after headers committed; stream already clean
                 return
 
             context = build_context(store, hits)
@@ -519,7 +522,10 @@ class _Handler(BaseHTTPRequestHandler):
                 except ConnectionError:
                     pass
             if full:  # Don't persist empty assistant turns (client disconnected before tokens)
-                store.add_message(nb_id, "assistant", full, json.dumps(report))
+                try:
+                    store.add_message(nb_id, "assistant", full, json.dumps(report))
+                except StoreError:
+                    pass  # notebook deleted after headers committed; stream already clean
 
 
 def make_server(

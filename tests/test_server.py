@@ -531,5 +531,105 @@ class MidStreamLLMErrorTest(unittest.TestCase):
         self.assertIn("部分的な回答", persisted_body)
 
 
+class PostStreamStoreErrorTest(unittest.TestCase):
+    """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "ps.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def _sse(self, path, payload):
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            self._url(path), data=body, method="POST",
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode()
+
+    def test_store_error_on_assistant_persist_does_not_corrupt_sse(self) -> None:
+        """StoreError from add_message(assistant) after 200 SSE headers are committed must be
+        swallowed — the stream stays clean and the server remains responsive."""
+        from unittest.mock import patch
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "persist-fail"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("和紙は楮から作られる。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "washi.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-stream")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        with patch.object(Store, "add_message", failing):
+            status, raw = self._sse(f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"})
+
+        self.assertEqual(status, 200)
+        kinds = [ev for ev, _ in parse_sse(raw)]
+        self.assertIn("done", kinds)
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_no_hit_store_error_on_assistant_persist_does_not_corrupt_sse(self) -> None:
+        """Same guard applies to the no-hit branch (notebook with no sources)."""
+        from unittest.mock import patch
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "no-hit-persist-fail"})
+        nb_id = nb["id"]
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-stream")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        with patch.object(Store, "add_message", failing):
+            status, raw = self._sse(f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"})
+
+        self.assertEqual(status, 200)
+        kinds = [ev for ev, _ in parse_sse(raw)]
+        self.assertIn("done", kinds)
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)
