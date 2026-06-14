@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.50")
+        self.assertEqual(VERSION, "0.1.51")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -503,6 +503,33 @@ class TestSearch(unittest.TestCase):
         # Punctuation alone is not a term (not alphanumeric, not a CJK word char)
         self.assertNotIn("。", terms2)
         self.assertNotIn("、", terms2)
+
+    def test_query_terms_iteration_mark_stays_in_word_run(self) -> None:
+        """々 (U+3005, ideographic iteration mark) must NOT break CJK word runs."""
+        # 々 is used inside words: 人々, 様々, 様様 etc.  It is NOT punctuation.
+        terms = query_terms("人々の生活")
+        self.assertIn("人々の生活", terms)
+        # 。 still acts as a boundary — 々 is the exception within U+3000-U+303F
+        terms2 = query_terms("人々。")
+        self.assertIn("人々", terms2)
+        self.assertNotIn("人々。", terms2)
+
+    def test_cosine_nan_returns_zero(self) -> None:
+        """cosine() with NaN/Inf in a vector must return 0.0, not propagate NaN."""
+        from shoin.search import cosine
+
+        nan = float("nan")
+        inf = float("inf")
+        self.assertEqual(cosine([nan, 1.0], [1.0, 1.0]), 0.0)
+        self.assertEqual(cosine([inf, 0.0], [1.0, 0.0]), 0.0)
+
+    def test_vector_search_none_query_returns_empty(self) -> None:
+        """vector_search(None) must return [] without crashing."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            self.assertEqual(vector_search(s, nb_id, None, 10), [])
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""

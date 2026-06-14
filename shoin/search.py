@@ -40,13 +40,19 @@ class Hit:
 def _is_cjk_word(ch: str) -> bool:
     """CJK content character (letter/syllable), excluding CJK Symbols and Punctuation.
 
-    CJK Symbols and Punctuation (U+3000–U+303F) includes 。、　々 etc. which
-    act as word-boundary characters, not word-content, in query tokenisation.
-    is_cjk() now includes that block (for token-budget estimation) so we need
-    a separate predicate for building FTS query terms.
+    CJK Symbols and Punctuation (U+3000–U+303F) includes 。、　 etc. which
+    act as word-boundary characters in query tokenisation. is_cjk() includes
+    that block (for token-budget estimation) so we need a separate predicate.
+
+    Exception: 々 (U+3005, ideographic iteration mark) appears inside words
+    (人々, 様々) and must stay part of CJK word runs, not break them.
     """
     cp = ord(ch)
-    return is_cjk(ch) and not (0x3000 <= cp <= 0x303F)
+    if not is_cjk(ch):
+        return False
+    if 0x3000 <= cp <= 0x303F:
+        return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
+    return True
 
 
 def query_terms(query: str) -> list[str]:
@@ -147,10 +153,13 @@ def cosine(a: list[float], b: list[float]) -> float:
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return dot / (na * nb)
+    result = dot / (na * nb)
+    return result if math.isfinite(result) else 0.0
 
 
-def vector_search(store: Store, notebook_id: int, query_vec: list[float], k: int) -> list[Hit]:
+def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None, k: int) -> list[Hit]:
+    if not query_vec:
+        return []
     rows = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.embedding FROM chunks c"
         " JOIN sources s ON s.id = c.source_id"
