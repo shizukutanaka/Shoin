@@ -62,8 +62,11 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
             store.conn.commit()  # one commit per batch, not per chunk
             done += len(batch_ids)
     except LLMError:
-        return done  # partial embedding is fine: BM25 covers the rest
-    store.set_setting("embed_model", llm.embedding_model)
+        pass  # partial embedding is fine: BM25 covers the rest
+    if done:
+        # Record the model used so a future model change triggers the mismatch
+        # warning even when a previous run only partially succeeded.
+        store.set_setting("embed_model", llm.embedding_model)
     return done
 
 

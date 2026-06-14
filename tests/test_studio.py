@@ -412,6 +412,17 @@ class PipelineTest(unittest.TestCase):
             done = _embed_chunks(self.store, llm, ids, texts)
         self.assertEqual(done, 2)  # first batch persisted, second failed
 
+    def test_embed_partial_failure_records_model(self) -> None:
+        """embed_model is recorded even on partial LLM failure so future model-change warnings fire."""
+        src = self.store.add_source(self.nb, "file", "tp", "/tmp/tp", "xp")
+        texts = ["a", "b", "c", "d"]
+        ids = self.store.add_chunks(src.id, texts)
+        llm = FakeLLM(embedding_model="nomic-embed-text", fail_embed_after=1)
+        with patch("shoin.pipeline.EMBED_BATCH", 2):
+            done = _embed_chunks(self.store, llm, ids, texts)
+        self.assertEqual(done, 2)
+        self.assertEqual(self.store.get_setting("embed_model"), "nomic-embed-text")
+
     def test_embed_model_change_warns(self) -> None:
         """Changing SHOIN_EMBED_MODEL prints a warning to stderr."""
         src = self.store.add_source(self.nb, "file", "t2", "/tmp/t2", "y")

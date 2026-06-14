@@ -706,5 +706,36 @@ class TestI18n(unittest.TestCase):
             self.assertIn("<<<SOURCE", msgs[1]["content"])
 
 
+class TestHistoryConsecutiveRoles(unittest.TestCase):
+    def test_citation_only_assistant_no_consecutive_user_turns(self) -> None:
+        """Citation-only assistant reply stripped to empty must not leave consecutive user turns."""
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "[S1]")  # citation-only; stripped to empty
+            s.add_message(nb, "user", "問2")
+            s.add_message(nb, "assistant", "答え2")
+            msgs = history_messages(s, nb)
+            roles = [m["role"] for m in msgs]
+            for i in range(len(roles) - 1):
+                self.assertNotEqual(
+                    roles[i],
+                    roles[i + 1],
+                    f"consecutive {roles[i]!r} turns at positions {i},{i + 1}",
+                )
+
+    def test_citation_only_assistant_context_preserved(self) -> None:
+        """The valid assistant reply before the citation-only one is kept."""
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "[S1]")
+            s.add_message(nb, "user", "問2")
+            s.add_message(nb, "assistant", "正しい答え")
+            msgs = history_messages(s, nb)
+            contents = [m["content"] for m in msgs]
+            self.assertTrue(any("問2" in c or "正しい答え" in c for c in contents))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

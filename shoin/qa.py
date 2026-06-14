@@ -186,6 +186,15 @@ def history_messages(
             continue
         role = "user" if str(r["role"]) == "user" else "assistant"
         out.append({"role": role, "content": _truncate_tokens(body, HISTORY_TOKENS_EACH)})
+    # Citation stripping can reduce an assistant message to empty (skipped above),
+    # producing consecutive same-role pairs ([user, user] or [asst, asst]).
+    # Remove the earlier message of each such pair so the sequence stays alternating.
+    i = 0
+    while i < len(out) - 1:
+        if out[i]["role"] == out[i + 1]["role"]:
+            out.pop(i)
+        else:
+            i += 1
     # A trailing user turn without an assistant reply is an orphan (e.g. from an SSE
     # disconnect). Including it would give the LLM two consecutive user messages
     # ([…, user:orphan, user:current]), which is semantically wrong.
