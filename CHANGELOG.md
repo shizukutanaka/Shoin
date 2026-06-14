@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.1.53] - 2026-06-14
+### Fixed
+- **`_h_questions()` の questions_cache に TOCTOU 競合状態: 並行ソース追加時に古い fingerprint がより新しいキャッシュエントリを上書きする**: `ThreadingHTTPServer` の並行リクエスト処理において、Thread A が fingerprint (fp_old) を取得→LLM 呼び出し中に Thread B が新ソースを追加してより新しい (fp_new, qs_new) をキャッシュ書き込み→Thread A が LLM 終了後に (fp_old, qs_old) を書き込む、という順序が起こりうる。この結果、より新しいキャッシュエントリが古いものに上書きされ、次のリクエストで fingerprint 不一致によるキャッシュミス→不要な LLM 再呼び出しが発生する。ロック取得時に既存エントリの fingerprint を確認し、より新しいものが既にある場合は書き込みを省略するガードを追加した。
+
+### Refactored
+- **`_SENTENCE_SPLIT_RE` が `chunk.py` と `citation.py` の二箇所に重複定義されており、一方が変更されても他方が追従しないドリフトリスクがある**: ソクラテス式問いかけ「何を自明視しているか」の観点からコードの重複を発見。`citation.py` が `chunk.py` から `_SENTENCE_SPLIT_RE` をインポートする単一の真実の源 (single source of truth) 構造に変更し、定義の乖離を構造的に防止する。
+
 ## [v0.1.52] - 2026-06-14
 ### Fixed
 - **`history_messages()` が引用符のみのアシスタントメッセージをスキップした際に連続する同ロール発話を生成しうる**: `_HISTORY_CITE_RE` による引用除去後にアシスタントメッセージが空文字列になると `continue` でスキップされる。パターン `[user1, asst1_引用のみ, user2, asst2]` の場合、スキップ後に `[user1, user2, asst2]` という連続する user ターンが生成され、OpenAI 形式メッセージの「user/assistant 交互」制約に違反した。末尾の孤立 user ターン除去ループはこの中間の連続ターンを捕捉できなかった。ループ後に連続同ロールペアを走査・除去するパスを追加し、スキップによって崩れたシーケンスを修復する。

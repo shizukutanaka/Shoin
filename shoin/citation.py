@@ -31,15 +31,13 @@ import re
 import unicodedata
 from typing import NotRequired, TypedDict
 
+from .chunk import _SENTENCE_SPLIT_RE  # single source of truth for sentence boundaries
+
 # A citation lives inside square brackets and may combine several sources:
 # [S1] / [S1, S2] / [S1; S3] / [S1 and S2] / [S1][S2]. Full-width brackets,
 # digits and 'Ｓ' (common from JP-first models) are normalized via NFKC first.
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _SNUM_RE = re.compile(r"[Ss]\s*(\d+)")
-
-# Sentence boundaries for JP + EN. Citations stay attached to their sentence so
-# each claim is graded against the sources it actually cites.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])")
 
 # A cited sentence whose character-bigram overlap with a source reaches this is
 # treated as lexically supported by that source. Calibrated for CJK, where

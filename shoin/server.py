@@ -400,9 +400,13 @@ class _Handler(BaseHTTPRequestHandler):
             questions = suggest_questions(store, self.llm, nb_id)
             # Only cache non-empty results when sources exist; an empty list
             # from LLM failure would otherwise suppress questions permanently.
+            # Guard: only write if no newer fingerprint was stored while the LLM
+            # was running (concurrent source-add could otherwise be overwritten).
             if questions or not fingerprint:
                 with self.questions_cache_lock:
-                    self.questions_cache[nb_id] = (fingerprint, questions)
+                    existing = self.questions_cache.get(nb_id)
+                    if existing is None or existing[0] == fingerprint:
+                        self.questions_cache[nb_id] = (fingerprint, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:

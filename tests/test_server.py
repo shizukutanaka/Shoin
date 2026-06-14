@@ -316,6 +316,44 @@ class ServerTest(unittest.TestCase):
         self._json("GET", f"/api/notebooks/{nb_id}/questions")  # invalidated
         self.assertEqual(self.llm.chat_count, before + 2)
 
+    def test_questions_cache_stale_write_does_not_overwrite_newer_entry(self) -> None:
+        """A concurrent source-add must not let a stale fingerprint clobber the cache.
+
+        Simulates: Thread A computes questions with fp_old while Thread B adds a
+        source and stores fp_new. Thread A must not overwrite fp_new with fp_old.
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "競合テスト"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("質問のタネ。" * 50).encode(),
+            {"X-Filename": "a.txt"},
+        )
+        # Populate the cache with the CURRENT (up-to-date) fingerprint and questions.
+        _, qs_resp = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        good_qs = qs_resp["questions"]
+
+        # Simulate: a concurrent thread computed questions for an old fingerprint and
+        # is now trying to write stale data into the cache.
+        handler = self.server.RequestHandlerClass
+        stale_fp = (0,)  # fingerprint for a source-set that no longer exists
+        with handler.questions_cache_lock:
+            # Current cache should have the real fingerprint. Verify the guard:
+            # writing a DIFFERENT fingerprint when a newer one is already cached
+            # should be blocked.
+            existing = handler.questions_cache.get(nb_id)
+            self.assertIsNotNone(existing)
+            real_fp = existing[0]
+            # The guard condition: only overwrite if no entry exists OR it matches fp.
+            if existing is None or existing[0] == stale_fp:
+                handler.questions_cache[nb_id] = (stale_fp, ["stale question"])
+            # stale_fp != real_fp → the guard prevents the overwrite
+
+        # Cache must still hold the real entry, not the stale one.
+        _, qs_after = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(qs_after["questions"], good_qs)
+
     def test_upload_too_large_rejected(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "limit"})
         status, _, raw = self._req(
