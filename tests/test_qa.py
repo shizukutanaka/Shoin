@@ -761,5 +761,74 @@ class TestHistoryConsecutiveRoles(unittest.TestCase):
             self.assertTrue(any("問2" in c or "正しい答え" in c for c in contents))
 
 
+class TestCheckEmbedModelOk(unittest.TestCase):
+    """_check_embed_model_ok guards ask() against mixed-model cosine scores."""
+
+    def _make_llm(self, model: str) -> FakeLLM:
+        return FakeLLM(embedding_model=model)
+
+    def test_no_stored_model_returns_true(self) -> None:
+        """When no embed_model is stored yet, any current model is fine."""
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        with s:
+            # No set_setting("embed_model") call — get_setting returns None.
+            self.assertIsNone(s.get_setting("embed_model"))
+            self.assertTrue(_check_embed_model_ok(s, self._make_llm("nomic-embed-text")))
+
+    def test_matching_models_returns_true(self) -> None:
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        with s:
+            s.set_setting("embed_model", "nomic-embed-text")
+            self.assertTrue(_check_embed_model_ok(s, self._make_llm("nomic-embed-text")))
+
+    def test_mismatched_models_returns_false(self) -> None:
+        """Stored model differs from current — cosine scores would be garbage."""
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            self.assertFalse(_check_embed_model_ok(s, self._make_llm("model-B")))
+
+    def test_empty_current_model_returns_true(self) -> None:
+        """Embedding disabled (empty model) — nothing to mismatch."""
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            self.assertTrue(_check_embed_model_ok(s, self._make_llm("")))
+
+    def test_whitespace_current_model_returns_true(self) -> None:
+        """Whitespace-only embedding model is treated as disabled."""
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            self.assertTrue(_check_embed_model_ok(s, self._make_llm("  ")))
+
+    def test_ask_skips_vector_on_mismatch(self) -> None:
+        """ask() falls back to BM25-only when stored embed model != current model."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.qa import _check_embed_model_ok, _query_vector, ask
+
+        s, nb = seeded_store()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            llm = self._make_llm("model-B")
+            # Patch _query_vector to track whether it's called.
+            with patch("shoin.qa._query_vector", wraps=_query_vector) as mock_qv:
+                ask(s, llm, nb, "書斎とは？", persist=False)
+            # _check_embed_model_ok is False for "model-B" vs stored "model-A",
+            # so _query_vector should NOT have been called.
+            mock_qv.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

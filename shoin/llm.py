@@ -61,6 +61,10 @@ class LLMClient:
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
+        except json.JSONDecodeError as exc:
+            # Must precede (OSError, ValueError): json.JSONDecodeError is a ValueError
+            # subclass and would otherwise be misrouted to SYSTEM_SERVICE_UNAVAILABLE.
+            raise LLMError("SYSTEM_LLM_BAD_RESPONSE", f"invalid JSON from {path}") from exc
         except (OSError, ValueError) as exc:
             # urllib wraps socket.timeout in URLError(reason=TimeoutError(...));
             # bare TimeoutError also has no .reason, so fall back to exc itself.
@@ -75,8 +79,6 @@ class LLMClient:
                 "SYSTEM_SERVICE_UNAVAILABLE",
                 f"LLM endpoint unreachable at {self.base_url}: {exc}",
             ) from exc
-        except json.JSONDecodeError as exc:
-            raise LLMError("SYSTEM_LLM_BAD_RESPONSE", f"invalid JSON from {path}") from exc
 
     # --- capabilities ---
 

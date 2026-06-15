@@ -227,6 +227,19 @@ def expand_query(question: str, history: list[Message]) -> str:
     return f"{prev} {question}" if prev else question
 
 
+def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
+    """Return False when the DB contains embeddings from a different model.
+
+    Mixing embeddings from two models makes cosine scores meaningless, so
+    vector search is disabled until the notebook is re-indexed.
+    """
+    current = (llm.embedding_model or "").strip()
+    if not current:
+        return True  # embedding disabled: nothing to mismatch
+    stored = store.get_setting("embed_model")
+    return stored is None or stored == current
+
+
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
     if not (llm.embedding_model or "").strip():
         return None
@@ -252,7 +265,7 @@ def ask(
     """Grounded Q&A over a notebook. Never raises on LLM unavailability."""
     history = history_messages(store, notebook_id)  # before persisting this turn
     retrieval_q = expand_query(question, history)
-    qvec = _query_vector(llm, retrieval_q)
+    qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
     hits = retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
     if persist:
         store.add_message(notebook_id, "user", question, "{}")

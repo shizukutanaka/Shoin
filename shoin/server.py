@@ -25,6 +25,7 @@ from .llm import LLMClient, LLMError
 from .pipeline import index_source
 from .qa import (
     ChatBackend,
+    _check_embed_model_ok,
     _degraded_text,
     _query_vector,
     _t as _qa_t,
@@ -457,7 +458,7 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)  # 404 before headers go out
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
-            qvec = _query_vector(self.llm, retrieval_q)
+            qvec = _query_vector(self.llm, retrieval_q) if _check_embed_model_ok(store, self.llm) else None
             hits = retrieve(store, nb_id, retrieval_q, query_vec=qvec)
             store.add_message(nb_id, "user", question, "{}")
 

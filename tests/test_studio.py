@@ -449,20 +449,22 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(done, 2)
         self.assertEqual(self.store.get_setting("embed_model"), "nomic-embed-text")
 
-    def test_embed_model_change_warns(self) -> None:
-        """Changing SHOIN_EMBED_MODEL prints a warning to stderr."""
+    def test_embed_model_change_warns_and_returns_zero(self) -> None:
+        """Changing SHOIN_EMBED_MODEL prints a warning and skips embedding to keep DB coherent."""
         src = self.store.add_source(self.nb, "file", "t2", "/tmp/t2", "y")
         ids = self.store.add_chunks(src.id, ["text"])
-        # First embedding run with model-A.
+        # Seed a first embedding run with model-A.
         self.store.set_setting("embed_model", "model-A")
         llm_b = FakeLLM(embedding_model="model-B")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            _embed_chunks(self.store, llm_b, ids, ["text"])
+            done = _embed_chunks(self.store, llm_b, ids, ["text"])
         self.assertIn("model-A", err.getvalue())
         self.assertIn("model-B", err.getvalue())
-        # After successful run the stored model is updated.
-        self.assertEqual(self.store.get_setting("embed_model"), "model-B")
+        # Mismatch must skip all embedding so the DB stays coherent.
+        self.assertEqual(done, 0)
+        # Stored model must not be updated — old embeddings are still model-A.
+        self.assertEqual(self.store.get_setting("embed_model"), "model-A")
 
     def test_reindex_notebook_re_embeds_all_chunks(self) -> None:
         """reindex_notebook re-embeds every chunk and returns (n, total)."""

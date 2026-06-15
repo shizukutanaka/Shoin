@@ -45,13 +45,14 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
     stored_model = store.get_setting("embed_model")
     if stored_model is not None and stored_model != llm.embedding_model:
         # Vectors in the DB were produced by a different model; cosine scores
-        # between old and new embeddings are meaningless. The user should
-        # re-index to rebuild all embeddings with the new model.
+        # between old and new embeddings are meaningless. Skip embedding so the
+        # DB stays coherent; the user should re-index to rebuild all embeddings.
         print(
             f"Warning: embedding model changed from {stored_model!r} to"
             f" {llm.embedding_model!r}. Re-index sources to rebuild embeddings.",
             file=sys.stderr,
         )
+        return 0
     done = 0
     try:
         for i in range(0, len(texts), EMBED_BATCH):
