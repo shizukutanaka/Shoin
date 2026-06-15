@@ -342,12 +342,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._drain(n)
             raise IngestError("INGEST_FILE_TOO_LARGE", "upload exceeds 10MB limit")
         data = self.rfile.read(n)
-        with tempfile.NamedTemporaryFile(
-            prefix=Path(raw_name).stem[:40] or "upload", suffix=suffix, delete=False
-        ) as tmp:
-            tmp.write(data)
-            tmp_path = Path(tmp.name)
+        # tmp_path is set as soon as the temp file is created — before the write —
+        # so the finally always has a valid path to unlink even if write() fails.
+        tmp_path: Path | None = None
         try:
+            with tempfile.NamedTemporaryFile(
+                prefix=Path(raw_name).stem[:40] or "upload", suffix=suffix, delete=False
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+                tmp.write(data)
             with Store(self.db) as store:
                 store.get_notebook(nb_id)  # raises NOTEBOOK_NOT_FOUND → 404 before ingesting
                 result = index_source(store, nb_id, str(tmp_path), self.llm)
@@ -362,7 +365,8 @@ class _Handler(BaseHTTPRequestHandler):
                     201,
                 )
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     def _h_src_delete(self, src_id: int) -> None:
         with Store(self.db) as store:

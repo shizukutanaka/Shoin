@@ -431,6 +431,61 @@ class ServerTest(unittest.TestCase):
         self.assertIn("passwd", titles)
         self.assertTrue(all("/" not in t for t in titles), titles)
 
+    def test_upload_tempfile_write_failure_does_not_leak_temp_file(self) -> None:
+        """If tmp.write() raises mid-upload, the temp file must be cleaned up.
+
+        Before the fix:
+          tmp_path = Path(tmp.name)  was assigned AFTER  tmp.write(data)
+          The try:...finally: block came AFTER the with-NamedTemporaryFile block,
+          so when write() raised, the finally was never entered → temp file leaked.
+        After the fix:
+          tmp_path is set BEFORE write(), and the whole block is inside try:...finally:,
+          so the finally always unlinks the (now correctly known) temp file.
+        """
+        import types
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "write-fail"})
+        real_ntf = tempfile.NamedTemporaryFile
+        leaked: list[str] = []
+
+        class BrokenWriteNTF:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self._inner = real_ntf(*args, **kwargs)  # type: ignore[arg-type]
+                self.name = self._inner.name
+                leaked.append(self.name)
+
+            def write(self, data: bytes) -> None:
+                raise OSError("simulated disk full")
+
+            def __enter__(self) -> "BrokenWriteNTF":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self._inner.__exit__(*args)
+
+        fake_tempfile = types.SimpleNamespace(NamedTemporaryFile=BrokenWriteNTF)
+        with patch.object(srv_mod, "tempfile", fake_tempfile):
+            try:
+                self._req(
+                    "POST",
+                    f"/api/notebooks/{nb['id']}/upload",
+                    b"some content",
+                    {"X-Filename": "test.txt"},
+                )
+            except (urllib.error.URLError, OSError):
+                pass  # server closes connection on unhandled OSError
+
+        self.assertTrue(leaked, "no temp file was created — test setup broken")
+        for p in leaked:
+            self.assertFalse(Path(p).exists(), f"temp file leaked after write() failure: {p}")
+
+        # Server must remain responsive after a failed handler thread.
+        status, _ = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
+
     def test_connection_error_hierarchy_covers_both_epipe_and_econnreset(self) -> None:
         """ConnectionError catches both BrokenPipeError (EPIPE) and
         ConnectionResetError (ECONNRESET), so the SSE handler's except clause
