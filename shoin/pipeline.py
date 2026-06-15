@@ -37,13 +37,24 @@ class _NoEmbed:
         raise LLMError("SYSTEM_EMBED_DISABLED", "no embedding backend")
 
 
-def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: list[str]) -> int:
-    """Best-effort batch embedding. Returns the number of embedded chunks."""
+def _embed_chunks(
+    store: Store,
+    llm: ChatBackend,
+    chunk_ids: list[int],
+    texts: list[str],
+    *,
+    force: bool = False,
+) -> int:
+    """Best-effort batch embedding. Returns the number of embedded chunks.
+
+    force=True skips the model-mismatch guard. Pass it only from reindex_notebook,
+    which is specifically designed to rebuild embeddings after a model change.
+    """
     embed = getattr(llm, "embed", None)
     if not (llm.embedding_model or "").strip() or embed is None:
         return 0
     stored_model = store.get_setting("embed_model")
-    if stored_model is not None and stored_model != llm.embedding_model:
+    if not force and stored_model is not None and stored_model != llm.embedding_model:
         # Vectors in the DB were produced by a different model; cosine scores
         # between old and new embeddings are meaningless. Skip embedding so the
         # DB stays coherent; the user should re-index to rebuild all embeddings.
@@ -111,5 +122,5 @@ def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[
         return 0, 0
     chunk_ids = [c.id for c in chunks]
     texts = [c.text for c in chunks]
-    n_embedded = _embed_chunks(store, llm, chunk_ids, texts)
+    n_embedded = _embed_chunks(store, llm, chunk_ids, texts, force=True)
     return n_embedded, len(chunks)

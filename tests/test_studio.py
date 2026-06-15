@@ -488,6 +488,29 @@ class PipelineTest(unittest.TestCase):
             reindex_notebook(self.store, FakeLLM(embedding_model="m"), 99999)
         self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_reindex_after_model_change_succeeds(self) -> None:
+        """reindex_notebook must bypass the mismatch guard — it IS the migration path.
+
+        Bug introduced in v0.1.61: _embed_chunks returned 0 when stored_model !=
+        current_model, blocking the one command meant to fix that mismatch.
+        Fix: reindex_notebook passes force=True to _embed_chunks.
+        """
+        src = self.store.add_source(self.nb, "file", "t-rm", "/tmp/t-rm", "hash-rm")
+        ids = self.store.add_chunks(src.id, ["段落X。"])
+        # First pass: embed with model-A, store records "model-A".
+        llm_a = FakeLLM(embedding_model="model-A")
+        _embed_chunks(self.store, llm_a, ids, ["段落X。"])
+        self.assertEqual(self.store.get_setting("embed_model"), "model-A")
+
+        # User switches to model-B and runs reindex — must not be blocked.
+        llm_b = FakeLLM(embedding_model="model-B")
+        n, total = reindex_notebook(self.store, llm_b, self.nb)
+
+        self.assertEqual(n, total, "reindex must embed all chunks")
+        self.assertGreater(total, 0)
+        # After reindex the stored model must reflect the new model.
+        self.assertEqual(self.store.get_setting("embed_model"), "model-B")
+
     def test_embed_chunks_chunk_deleted_mid_batch_does_not_raise(self) -> None:
         """set_embedding raises StoreError when a chunk is concurrently deleted.
         _embed_chunks must absorb it (best-effort), not propagate it to the caller."""
