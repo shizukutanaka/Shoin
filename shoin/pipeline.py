@@ -13,7 +13,7 @@ from .chunk import split_text
 from .ingest import extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
-from .store import Source, Store
+from .store import Source, Store, StoreError
 
 EMBED_BATCH = 16
 
@@ -64,6 +64,14 @@ def _embed_chunks(store: Store, llm: ChatBackend, chunk_ids: list[int], texts: l
             done += len(batch_ids)
     except LLMError:
         pass  # partial embedding is fine: BM25 covers the rest
+    except StoreError:
+        # A chunk was concurrently deleted mid-batch. Roll back the partial
+        # uncommitted batch so its embeddings aren't silently committed later
+        # (set_setting() below issues conn.commit(), which would flush them).
+        try:
+            store.conn.rollback()
+        except Exception:
+            pass
     if done:
         # Record the model used so a future model change triggers the mismatch
         # warning even when a previous run only partially succeeded.

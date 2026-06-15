@@ -488,6 +488,57 @@ class PipelineTest(unittest.TestCase):
             reindex_notebook(self.store, FakeLLM(embedding_model="m"), 99999)
         self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_embed_chunks_chunk_deleted_mid_batch_does_not_raise(self) -> None:
+        """set_embedding raises StoreError when a chunk is concurrently deleted.
+        _embed_chunks must absorb it (best-effort), not propagate it to the caller."""
+        from unittest.mock import patch
+
+        from shoin.store import StoreError as SE
+
+        src = self.store.add_source(self.nb, "file", "td", "/tmp/td", "zz")
+        ids = self.store.add_chunks(src.id, ["a", "b", "c", "d"])
+        llm = FakeLLM(embedding_model="model-x")
+        call_count = 0
+
+        def _set_embedding_raises_on_third(chunk_id, vec, *, commit=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                raise SE("CHUNK_NOT_FOUND", "chunk deleted mid-batch")
+
+        with patch.object(self.store, "set_embedding", side_effect=_set_embedding_raises_on_third):
+            done = _embed_chunks(self.store, llm, ids, ["a", "b", "c", "d"])
+        # First batch had 4 chunks; failed on the 3rd → 0 committed from this batch.
+        self.assertEqual(done, 0)
+
+    def test_embed_chunks_chunk_deleted_partial_batch_not_committed(self) -> None:
+        """When set_embedding raises mid-batch, the uncommitted partial-batch
+        writes must be rolled back so they aren't silently flushed by set_setting()."""
+        from unittest.mock import patch
+
+        from shoin.store import StoreError as SE
+
+        src = self.store.add_source(self.nb, "file", "tc", "/tmp/tc", "zz2")
+        ids = self.store.add_chunks(src.id, ["p", "q", "r", "s"])
+        llm = FakeLLM(embedding_model="model-y")
+        call_count = 0
+
+        real_set_embedding = self.store.set_embedding
+
+        def _spy_raises_on_third(chunk_id, vec, *, commit=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                raise SE("CHUNK_NOT_FOUND", "chunk deleted mid-batch")
+            real_set_embedding(chunk_id, vec, commit=commit)
+
+        with patch.object(self.store, "set_embedding", side_effect=_spy_raises_on_third):
+            _embed_chunks(self.store, llm, ids, ["p", "q", "r", "s"])
+
+        # After the StoreError abort and rollback, no chunks should have embeddings.
+        for chunk in self.store.chunks_for_notebook(self.nb):
+            self.assertIsNone(chunk.embedding, f"chunk {chunk.id} should not have embedding")
+
 
 class CliTest(unittest.TestCase):
     def _run(self, argv: list[str], llm: FakeLLM) -> tuple[int, str, str]:

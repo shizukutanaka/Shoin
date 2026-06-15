@@ -88,7 +88,8 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC):
                 return True
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
             return False
 
     # --- chat ---

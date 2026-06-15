@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.61")
+        self.assertEqual(VERSION, "0.1.62")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -826,6 +826,14 @@ class TestLLMClient(unittest.TestCase):
         with self.assertRaises(LLMError) as cm:
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_available_returns_false_for_invalid_url_scheme(self) -> None:
+        """available() must return False (not raise ValueError) for unknown URL schemes.
+        _post and chat_stream already catch ValueError; available() had the same gap."""
+        from shoin.llm import LLMClient
+
+        client = LLMClient(base_url="ftp://invalid-scheme")
+        self.assertFalse(client.available())
 
 
 if __name__ == "__main__":
