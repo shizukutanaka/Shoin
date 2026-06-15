@@ -124,7 +124,7 @@ def export_ris(store: Store, notebook_id: int) -> str:
             "TY  - GEN",
             f"TI  - {_ris_escape(src.title)}",
             f"UR  - {_ris_escape(src.origin)}",
-            f"DA  - {src.added_at[:10]}",
+            f"DA  - {src.added_at[:10].replace('-', '/')}",
             "ER  - ",
         ]
         entries.append("\n".join(lines))

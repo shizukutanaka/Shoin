@@ -150,6 +150,23 @@ class StudioTest(unittest.TestCase):
         self.assertIn("仕組みはどう動きますか?", qs)
         self.assertIn("制約は何か", qs)
 
+    def test_suggest_questions_preserves_digit_leading_questions(self) -> None:
+        """Questions that legitimately start with digits must not be corrupted.
+
+        lstrip("0123456789...") was used before v0.1.66 and stripped any leading
+        digit, turning "2024年の出来事は？" into "年の出来事は？".  The regex
+        replacement only strips recognised list-prefix patterns (e.g. "1. ", "3、")
+        so questions about years or 3D/IPv6 topics survive intact.
+        """
+        llm = FakeLLM(reply="1. 目的は何か？\n2024年の出来事は？\n3Dモデリングとは何ですか？")
+        qs = suggest_questions(self.store, llm, self.nb)
+        # numbered prefix must be stripped from first question
+        self.assertIn("目的は何か?", qs)
+        # year-leading question must not have its digits stripped
+        self.assertIn("2024年の出来事は?", qs)
+        # alphanumeric-code question must survive intact
+        self.assertIn("3Dモデリングとは何ですか?", qs)
+
     def test_suggest_questions_empty_notebook(self) -> None:
         empty = self.store.create_notebook("空")
         self.assertEqual(suggest_questions(self.store, FakeLLM(), empty.id), [])
@@ -281,6 +298,14 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(_bib_escape("my_file.txt"), "my\\_file.txt")
         # backslash before percent must not produce \\% (already escaped)
         self.assertEqual(_bib_escape("\\%"), "\\\\\\%")
+
+    def test_ris_date_uses_slash_format(self) -> None:
+        """RIS 2001 spec requires DA  - YYYY/MM/DD (slashes), not ISO 8601 dashes."""
+        ris = export(self.store, self.nb, "ris")
+        import re as _re
+        # Every DA field must use slashes, not dashes.
+        for da_val in _re.findall(r"DA  - (\S+)", ris):
+            self.assertRegex(da_val, r"^\d{4}/\d{2}/\d{2}$", f"DA field {da_val!r} must use YYYY/MM/DD")
 
     def test_ris_structure(self) -> None:
         ris = export(self.store, self.nb, "ris")
