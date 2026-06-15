@@ -74,6 +74,12 @@ def _decode(data: bytes) -> str:
 class _HTMLText(HTMLParser):
     """Minimal stdlib HTML -> text extractor (skips script/style, keeps blocks)."""
 
+    # Remove "title" from Python's RCDATA_CONTENT_ELEMENTS so the tokenizer does
+    # not enter raw-text mode on <title> — otherwise </noscript> (or any other tag)
+    # inside an unclosed <title> is consumed as text rather than fired as a closing
+    # tag, leaving _skip_depth permanently > 0 and silently swallowing the body.
+    RCDATA_CONTENT_ELEMENTS = ("textarea",)
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
@@ -84,7 +90,7 @@ class _HTMLText(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in ("script", "style", "noscript", "template"):
             self._skip_depth += 1
-        elif tag == "title":
+        elif tag == "title" and not self._skip_depth:
             self._in_title = True
         elif tag in _BLOCK_TAGS:
             self.parts.append("\n")

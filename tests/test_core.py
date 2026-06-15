@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.59")
+        self.assertEqual(VERSION, "0.1.60")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -394,6 +394,20 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(title, "題名")
         self.assertIn("本文段落", text)
         self.assertNotIn("bad()", text)
+
+    def test_html_title_inside_noscript_does_not_pollute_body(self) -> None:
+        """An unclosed <title> inside <noscript> must not route body content to
+        title_parts after </noscript> closes the skip context."""
+        html = (
+            "<html><head>"
+            "<noscript><title>Fake</noscript>"  # <title> never closed before </noscript>
+            "</head><body><p>Real content here.</p></body></html>"
+        )
+        title, text = html_to_text(html)
+        # Title must be empty (no real <title> tag outside skip context)
+        self.assertEqual(title, "")
+        # Body content must NOT have been routed to title_parts
+        self.assertIn("Real content here", text)
 
     def test_unsupported_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -788,6 +802,30 @@ class TestSearch(unittest.TestCase):
         self.assertTrue(hasattr(search, "_FALLBACK_SCAN_LIMIT"))
         self.assertIsInstance(search._FALLBACK_SCAN_LIMIT, int)
         self.assertGreater(search._FALLBACK_SCAN_LIMIT, 0)
+
+
+class TestLLMClient(unittest.TestCase):
+    def test_invalid_url_scheme_raises_llmerror_not_valueerror(self) -> None:
+        """urllib.request.urlopen raises ValueError for unknown schemes (e.g. file://).
+        _post() must convert it to LLMError so callers degrade gracefully instead
+        of propagating a bare ValueError after SSE headers are committed."""
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(base_url="ftp://invalid-scheme")
+        with self.assertRaises(LLMError) as cm:
+            client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_invalid_url_scheme_stream_raises_llmerror(self) -> None:
+        """Same guard applies to chat_stream — an invalid URL scheme must produce
+        LLMError, not a bare ValueError that bypasses the SSE error handlers."""
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(base_url="ftp://invalid-scheme")
+        gen = client.chat_stream([{"role": "user", "content": "hi"}])
+        with self.assertRaises(LLMError) as cm:
+            next(gen)
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
 
 if __name__ == "__main__":

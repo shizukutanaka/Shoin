@@ -61,9 +61,10 @@ class LLMClient:
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # urllib wraps socket.timeout in URLError(reason=TimeoutError(...));
             # bare TimeoutError also has no .reason, so fall back to exc itself.
+            # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, TimeoutError):
                 raise LLMError(
@@ -151,7 +152,8 @@ class LLMClient:
                         yield str(delta)
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, TimeoutError):
                 raise LLMError(
