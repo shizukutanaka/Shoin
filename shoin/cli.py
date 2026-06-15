@@ -129,12 +129,12 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
         nb = store.create_notebook(str(args.name))
         print(_t("nb.created", id=str(nb.id), name=nb.name))
     elif action == "list":
-        nbs = store.list_notebooks()
-        if not nbs:
+        rows = store.list_notebooks_with_counts()
+        if not rows:
             print(_t("nb.empty"))
-        for nb in nbs:
-            c = store.counts(nb.id)
-            print(f"[{nb.id}] {nb.name}  sources={c['sources']} chunks={c['chunks']}")
+        for row in rows:
+            c = row["counts"]
+            print(f"[{row['id']}] {row['name']}  sources={c['sources']} chunks={c['chunks']}")
     elif action == "delete":
         store.delete_notebook(int(args.notebook_id))
         print(_t("nb.deleted"))
