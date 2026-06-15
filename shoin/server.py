@@ -303,8 +303,6 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_nb_clear_chat(self, nb_id: int) -> None:
         with Store(self.db) as store:
             store.clear_messages(nb_id)
-        with self.questions_cache_lock:
-            self.questions_cache.pop(nb_id, None)
         self._json({"cleared": nb_id})
 
     def _h_src_add(self, nb_id: int) -> None:

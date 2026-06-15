@@ -631,5 +631,84 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         self.assertEqual(health_status, 200)
 
 
+class ClearChatCacheTest(unittest.TestCase):
+    """Clearing chat history must NOT invalidate the questions cache.
+
+    The cache fingerprint is based on source IDs, not messages. Clearing
+    messages used to incorrectly pop the cache entry, forcing an unnecessary
+    LLM re-call on the next /questions request.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "cc.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_clear_chat_does_not_invalidate_questions_cache(self) -> None:
+        """After the cache is warm, clearing chat must not trigger a second LLM call."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "チャットクリアキャッシュ"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("知識ベース文書。" * 50).encode(),
+            method="POST",
+            headers={"X-Filename": "kb.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        # Add a chat message so we have something to clear.
+        req2 = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/ask"),
+            data=json.dumps({"question": "何の文書？"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req2):
+            pass
+
+        # Warm the questions cache.
+        before = self.llm.chat_count
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        after_warm = self.llm.chat_count
+        self.assertEqual(after_warm, before + 1)  # one LLM call to warm the cache
+
+        # Clear chat history.
+        status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}/messages")
+        self.assertEqual(status, 200)
+
+        # Questions request must be a cache HIT — sources unchanged, no LLM call.
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.llm.chat_count, after_warm,
+                         "clearing chat must not invalidate the questions cache")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)

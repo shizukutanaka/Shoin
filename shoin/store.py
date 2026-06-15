@@ -272,10 +272,15 @@ class Store:
                 " VALUES (?,?,?,?,?,?)",
                 (notebook_id, kind, title, origin, sha256, ts),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise StoreError(
+                    "SOURCE_ALREADY_EXISTS",
+                    "identical source already in notebook (concurrent upload)",
+                )
             raise StoreError(
-                "SOURCE_ALREADY_EXISTS",
-                "identical source already in notebook (concurrent upload)",
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {notebook_id} was deleted during source addition",
             )
         self.conn.commit()
         self.touch_notebook(notebook_id)
@@ -328,13 +333,16 @@ class Store:
 
     def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
         ids: list[int] = []
-        with self.conn:
-            for seq, text in enumerate(texts):
-                cur = self.conn.execute(
-                    "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
-                    (source_id, seq, text),
-                )
-                ids.append(int(cur.lastrowid or 0))
+        try:
+            with self.conn:
+                for seq, text in enumerate(texts):
+                    cur = self.conn.execute(
+                        "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
+                        (source_id, seq, text),
+                    )
+                    ids.append(int(cur.lastrowid or 0))
+        except sqlite3.IntegrityError:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk insertion")
         return ids
 
     def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:

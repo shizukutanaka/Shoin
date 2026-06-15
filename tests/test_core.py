@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.58")
+        self.assertEqual(VERSION, "0.1.59")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -246,6 +246,28 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.set_embedding(99999, [1.0, 0.0])
             self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
+
+    def test_add_chunks_with_deleted_source_raises_source_not_found(self) -> None:
+        """add_chunks() must raise StoreError(SOURCE_NOT_FOUND) — not a bare
+        sqlite3.IntegrityError — when the source is deleted concurrently."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "a", "o", "h1")
+            s.delete_source(src.id)  # simulate concurrent deletion
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, ["chunk text"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_add_source_fk_violation_raises_notebook_not_found(self) -> None:
+        """If the notebook is deleted between get_notebook() and the INSERT,
+        the FK IntegrityError must be surfaced as NOTEBOOK_NOT_FOUND, not
+        the misleading SOURCE_ALREADY_EXISTS code."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.delete_notebook(nb.id)  # simulate concurrent deletion
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "txt", "title", "origin", "unique-hash")
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_set_embedding_missing_chunk_does_not_commit(self) -> None:
         """Raise must happen before commit so no corrupt data is persisted."""
