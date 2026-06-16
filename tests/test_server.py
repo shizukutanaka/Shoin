@@ -285,6 +285,21 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(status, 400, msg=f"file path target should be rejected: {bad_target!r}")
             self.assertEqual(err["error"]["code"], "INGEST_UNSUPPORTED_FORMAT")  # type: ignore[index]
 
+    def test_upload_duplicate_content_returns_400(self) -> None:
+        """Uploading identical content twice must return 400 SOURCE_ALREADY_EXISTS."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "dup-upload"})
+        nb_id = nb["id"]
+        content = ("重複テスト用の文書。" * 30).encode()
+        s1, _, _ = self._req(
+            "POST", f"/api/notebooks/{nb_id}/upload", content, {"X-Filename": "dup.txt"}
+        )
+        self.assertEqual(s1, 201)
+        s2, _, raw = self._req(
+            "POST", f"/api/notebooks/{nb_id}/upload", content, {"X-Filename": "dup2.txt"}
+        )
+        self.assertEqual(s2, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "SOURCE_ALREADY_EXISTS")
+
     def test_upload_to_deleted_notebook_returns_404(self) -> None:
         """Uploading to a deleted notebook must return 404, not a silent error."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "delme"})

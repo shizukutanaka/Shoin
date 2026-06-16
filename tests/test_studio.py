@@ -148,6 +148,22 @@ class StudioTest(unittest.TestCase):
         # q is the NFKC-normalised form (fullwidth period → ASCII period); still kept in output.
         self.assertEqual(qs, ["この書院はどう動くのか."])
 
+    def test_suggest_questions_accepts_kudasai_form(self) -> None:
+        """Polite request form 〜てください must be accepted as a question.
+
+        Before the fix only '?' and lines ending with 'か' were accepted, so
+        a valid question like '主要なポイントを教えてください。' was silently dropped.
+        """
+        llm = FakeLLM(reply="主要なポイントを教えてください。\n通常の文です。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["主要なポイントを教えてください。"])
+
+    def test_suggest_questions_accepts_deshou_form(self) -> None:
+        """Soft-question form 〜でしょう (without trailing か) must be accepted."""
+        llm = FakeLLM(reply="この方法はどうでしょう。\n普通の文。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["この方法はどうでしょう。"])
+
     def test_suggest_questions_strips_katakana_middle_dot_bullet(self) -> None:
         """Katakana middle dot ・ (U+30FB) must be stripped as a bullet prefix.
 
