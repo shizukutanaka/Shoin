@@ -360,6 +360,21 @@ class ExportTest(unittest.TestCase):
         for da_val in _re.findall(r"DA  - (\S+)", ris):
             self.assertRegex(da_val, r"^\d{4}/\d{2}/\d{2}$", f"DA field {da_val!r} must use YYYY/MM/DD")
 
+    def test_bibtex_note_uses_date_only(self) -> None:
+        """BibTeX note field must use just the date (YYYY-MM-DD), not a full timestamp."""
+        import re as _re
+
+        bib = export(self.store, self.nb, "bibtex")
+        notes = _re.findall(r"note\s*=\s*\{([^}]+)\}", bib)
+        self.assertTrue(notes, "no note fields found in BibTeX output")
+        for note in notes:
+            # The timestamp portion must be date-only (10 chars: YYYY-MM-DD)
+            m = _re.search(r"added (\S+)", note)
+            self.assertIsNotNone(m, f"'added <date>' not found in note: {note!r}")
+            date_val = m.group(1)  # type: ignore[union-attr]
+            self.assertRegex(date_val, r"^\d{4}-\d{2}-\d{2}$",
+                             f"note date must be YYYY-MM-DD, got {date_val!r}")
+
     def test_ris_structure(self) -> None:
         ris = export(self.store, self.nb, "ris")
         self.assertEqual(ris.count("TY  - GEN"), 2)

@@ -368,6 +368,12 @@ class Store:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         return self._row_to_chunk(row)
 
+    def chunks_for_source(self, source_id: int) -> list[Chunk]:
+        rows = self.conn.execute(
+            "SELECT * FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
+        ).fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
     @staticmethod
     def _row_to_chunk(r: sqlite3.Row) -> Chunk:
         blob: Any = r["embedding"]

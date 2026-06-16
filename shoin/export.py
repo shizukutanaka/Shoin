@@ -123,7 +123,7 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
             "@misc{" + key + ",\n"
             f"  title = {{{_bib_escape(src.title)}}},\n"
             f"  howpublished = {{{_bib_escape(src.origin)}}},\n"
-            f"  note = {{Shoin source, added {src.added_at}}}\n"
+            f"  note = {{Shoin source, added {src.added_at[:10]}}}\n"
             "}"
         )
     return "\n\n".join(entries) + ("\n" if entries else "")

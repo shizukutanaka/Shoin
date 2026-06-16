@@ -378,10 +378,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:
             store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
-            rows = store.conn.execute(
-                "SELECT seq, text FROM chunks WHERE source_id=? ORDER BY seq", (src_id,)
-            ).fetchall()
-            self._json({"chunks": [{"seq": r["seq"], "text": r["text"]} for r in rows]})
+            chunks = store.chunks_for_source(src_id)
+            self._json({"chunks": [{"seq": c.seq, "text": c.text} for c in chunks]})
 
     def _h_studio(self, nb_id: int) -> None:
         kind = self._require(self._read_json(), "kind")

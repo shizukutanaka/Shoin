@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.82")
+        self.assertEqual(VERSION, "0.1.83")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1073,6 +1073,54 @@ class TestQA(unittest.TestCase):
             _HISTORY_CITE_RE.sub("", "refs [issue 5]"), "refs [issue 5]",
             "[issue 5] must not be stripped — no S-number inside",
         )
+
+
+class TestCitation(unittest.TestCase):
+    def test_make_report_source_bodies_length_mismatch_raises(self) -> None:
+        """source_bodies length != source_titles length must raise ValueError (defensive check)."""
+        from shoin.citation import make_report
+
+        with self.assertRaises(ValueError):
+            make_report("answer [S1].", ["title1", "title2"], source_bodies=["only one body"])
+
+    def test_make_report_source_bodies_correct_length_accepted(self) -> None:
+        """source_bodies with matching length must be accepted without error."""
+        from shoin.citation import make_report
+
+        report = make_report("answer [S1].", ["t1"], source_bodies=["body text here"])
+        self.assertIn("confirmed", report)
+
+    def test_make_report_source_ids_and_bodies_both_checked(self) -> None:
+        """Both source_ids and source_bodies must match source_titles length."""
+        from shoin.citation import make_report
+
+        with self.assertRaises(ValueError):
+            make_report("text.", ["t1", "t2"], source_ids=[1], source_bodies=["b1", "b2"])
+        with self.assertRaises(ValueError):
+            make_report("text.", ["t1", "t2"], source_ids=[1, 2], source_bodies=["b1"])
+
+
+class TestStoreChunksForSource(unittest.TestCase):
+    def test_chunks_for_source_returns_correct_chunks(self) -> None:
+        """chunks_for_source must return only chunks belonging to the given source."""
+        with Store(":memory:") as s:
+            nb = s.create_notebook("test")
+            src1 = s.add_source(nb.id, "txt", "doc1", "orig1", "sha1")
+            src2 = s.add_source(nb.id, "txt", "doc2", "orig2", "sha2")
+            s.add_chunks(src1.id, ["chunk A", "chunk B"])
+            s.add_chunks(src2.id, ["chunk C"])
+            chunks1 = s.chunks_for_source(src1.id)
+            chunks2 = s.chunks_for_source(src2.id)
+        self.assertEqual([c.text for c in chunks1], ["chunk A", "chunk B"])
+        self.assertEqual([c.seq for c in chunks1], [0, 1])
+        self.assertEqual([c.text for c in chunks2], ["chunk C"])
+
+    def test_chunks_for_source_empty_when_no_chunks(self) -> None:
+        """chunks_for_source returns [] for a source with no chunks yet."""
+        with Store(":memory:") as s:
+            nb = s.create_notebook("test")
+            src = s.add_source(nb.id, "txt", "empty", "orig", "shax")
+            self.assertEqual(s.chunks_for_source(src.id), [])
 
 
 class TestLLMClient(unittest.TestCase):

@@ -163,6 +163,10 @@ def make_report(
             )
         report["source_id_map"] = {f"S{i + 1}": sid for i, sid in enumerate(source_ids)}
     if source_bodies is not None:
+        if len(source_bodies) != n:
+            raise ValueError(
+                f"source_bodies length {len(source_bodies)} must match source_titles length {n}"
+            )
         confirmed, misattributed = verify_grounding(
             text, {i + 1: body for i, body in enumerate(source_bodies)}
         )
