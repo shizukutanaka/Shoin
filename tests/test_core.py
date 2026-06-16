@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.68")
+        self.assertEqual(VERSION, "0.1.69")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -834,13 +834,59 @@ class TestSearch(unittest.TestCase):
         chunk_ids = {h.chunk_id for h in result}
         self.assertEqual(chunk_ids, {1, 2})
 
-    def test_fallback_scan_limit_is_module_constant(self) -> None:
-        """_FALLBACK_SCAN_LIMIT must be defined at module level, not inside a fn."""
+    def test_fallback_no_row_cap(self) -> None:
+        """The LIKE fallback must not silently truncate to the first N chunks.
+
+        The old implementation fetched chunks with LIMIT 2000 and scanned them in
+        Python, missing sources added after the 2000th chunk.  The fix pushes the
+        LIKE filter into SQL so every chunk in the notebook is searched.
+
+        We verify the absence of _FALLBACK_SCAN_LIMIT (the old cap constant) and
+        confirm that a short-query hit found via LIKE is still returned even when
+        it is the last of many chunks added to a source.
+        """
         from shoin import search
 
-        self.assertTrue(hasattr(search, "_FALLBACK_SCAN_LIMIT"))
-        self.assertIsInstance(search._FALLBACK_SCAN_LIMIT, int)
-        self.assertGreater(search._FALLBACK_SCAN_LIMIT, 0)
+        self.assertFalse(
+            hasattr(search, "_FALLBACK_SCAN_LIMIT"),
+            "_FALLBACK_SCAN_LIMIT must not exist after switching to SQL LIKE",
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("cap-test").id
+            src = s.add_source(nb_id, "txt", "many chunks", "t", "sha-cap")
+            # 30 generic chunks then the needle at the end
+            texts = [f"汎用テキスト行{i}" for i in range(30)] + ["固有キーワード猫発見"]
+            s.add_chunks(src.id, texts)
+            # "猫" is 1 char → FTS5 trigram can't match → LIKE fallback fires
+            hits = bm25_search(s, nb_id, "猫", k=5)
+            self.assertTrue(hits, "LIKE fallback must find the needle chunk")
+            self.assertTrue(any("猫" in h.text for h in hits))
+
+    def test_fallback_like_wildcards_escaped(self) -> None:
+        """Underscore in a needle must be escaped so LIKE treats it as a literal.
+
+        query_terms() includes '_' in its [A-Za-z0-9_]+ word pattern, so identifiers
+        like "exact_match" produce a needle with a literal underscore.  Without
+        _esc_like(), LIKE '%exact_match%' treats '_' as "any single character" and
+        returns "exactXmatch" as a false positive.  With '|' as the ESCAPE sentinel
+        the needle becomes '%exact|_match%' ESCAPE '|', matching only literal '_'.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("escape-test").id
+            src = s.add_source(nb_id, "txt", "escape chunks", "t", "sha-esc")
+            s.add_chunks(src.id, [
+                "exact_match found here",  # must match (has literal '_')
+                "exactXmatch also here",   # must NOT match (X ≠ '_')
+                "exactmatch no separator", # must NOT match (no separator)
+            ])
+            hits = bm25_search(s, nb_id, "exact_match", k=5)
+            texts = [h.text for h in hits]
+            self.assertTrue(any("exact_match" in t for t in texts),
+                            "chunk with literal underscore must be found")
+            self.assertFalse(any("exactXmatch" in t for t in texts),
+                             "underscore must not act as LIKE wildcard (false positive)")
+            self.assertFalse(any("exactmatch no separator" in t for t in texts),
+                             "chunk without underscore must not match")
 
 
 class TestLLMClient(unittest.TestCase):

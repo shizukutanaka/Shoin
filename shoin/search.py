@@ -20,7 +20,11 @@ from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _DIGIT_RE = re.compile(r"\d")
-_FALLBACK_SCAN_LIMIT = 2000  # cap for the LIKE-scan fallback in bm25_search
+
+
+def _esc_like(s: str) -> str:
+    """Escape SQL LIKE special characters using '|' as the escape sentinel."""
+    return s.replace("|", "||").replace("%", "|%").replace("_", "|_")
 
 
 @dataclass
@@ -125,15 +129,22 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             hits.append(Hit(r["id"], r["source_id"], r["text"], 0.0, bm25=-float(r["rank"])))
         if hits:
             return hits
-    # fallback: substring scan (short/inflected queries the trigram index misses)
+    # fallback: SQL LIKE scan for short queries the trigram index can't serve.
+    # Pushing the filter into SQL means every chunk in the notebook is searched
+    # regardless of insertion order — no silent truncation for recently-added
+    # sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
+    # (correct in both cases since CJK has no case).  Special LIKE characters in
+    # the needle ('|', '%', '_') are escaped with '|' as the sentinel.
     needles = _fallback_needles(query)
     if not needles:
         return []
-    # Limit the scan to avoid O(n) full-table reads on large notebooks.
+    conditions = " OR ".join(f"c.text LIKE ? ESCAPE '|'" for _ in needles)
+    like_params = [f"%{_esc_like(n)}%" for n in needles]
     rows = store.conn.execute(
-        "SELECT c.id, c.source_id, c.text FROM chunks c"
-        " JOIN sources s ON s.id = c.source_id WHERE s.notebook_id = ? LIMIT ?",
-        (notebook_id, _FALLBACK_SCAN_LIMIT),
+        f"SELECT c.id, c.source_id, c.text FROM chunks c"
+        f" JOIN sources s ON s.id = c.source_id"
+        f" WHERE s.notebook_id = ? AND ({conditions})",
+        [notebook_id, *like_params],
     ).fetchall()
     for r in rows:
         text = str(r["text"])
