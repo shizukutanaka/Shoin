@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.92")
+        self.assertEqual(VERSION, "0.1.93")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -840,6 +840,24 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(cosine([nan, 1.0], [1.0, 1.0]), 0.0)
         self.assertEqual(cosine([inf, 0.0], [1.0, 0.0]), 0.0)
 
+    def test_cosine_empty_or_length_mismatch_returns_zero(self) -> None:
+        """cosine() must return 0.0 for empty inputs or length-mismatched vectors."""
+        from shoin.search import cosine
+        self.assertEqual(cosine([], []), 0.0)
+        self.assertEqual(cosine([1.0], []), 0.0)
+        self.assertEqual(cosine([1.0], [1.0, 2.0]), 0.0)
+
+    def test_cosine_zero_vector_returns_zero(self) -> None:
+        """cosine() must return 0.0 when either vector is all-zeros (no direction)."""
+        from shoin.search import cosine
+        self.assertEqual(cosine([0.0, 0.0], [1.0, 0.0]), 0.0)
+        self.assertEqual(cosine([1.0, 0.0], [0.0, 0.0]), 0.0)
+
+    def test_lexical_overlap_empty_query_returns_zero(self) -> None:
+        """lexical_overlap() must return 0.0 when the query has no terms."""
+        self.assertEqual(lexical_overlap("", "any text"), 0.0)
+        self.assertEqual(lexical_overlap("   ", "any text"), 0.0)
+
     def test_vector_search_none_query_returns_empty(self) -> None:
         """vector_search(None) must return [] without crashing."""
         from shoin.search import vector_search
@@ -1007,6 +1025,21 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb_id, "zzqqqxxx_nonexistent_token", k=5)
             self.assertEqual(hits, [])
 
+    def test_bm25_empty_query_returns_empty(self) -> None:
+        """bm25_search() with an empty query string must return [] without crashing."""
+        with make_store() as s:
+            nb_id = seed(s)
+            self.assertEqual(bm25_search(s, nb_id, "", k=5), [])
+
+    def test_sim_empty_text_returns_zero(self) -> None:
+        """_sim() must return 0.0 when a Hit has empty text (no bigrams to compare)."""
+        from shoin.search import _sim
+        a = Hit(1, 1, "", 0.9)
+        b = Hit(2, 1, "通常テキスト", 0.5)
+        self.assertEqual(_sim(a, b), 0.0)
+        self.assertEqual(_sim(b, a), 0.0)
+        self.assertEqual(_sim(a, a), 0.0)
+
     def test_mmr_empty_input(self) -> None:
         """mmr() with an empty candidate list must return an empty list."""
         self.assertEqual(mmr([], k=3), [])
@@ -1141,6 +1174,16 @@ class TestCitation(unittest.TestCase):
             make_report("text.", ["t1", "t2"], source_ids=[1], source_bodies=["b1", "b2"])
         with self.assertRaises(ValueError):
             make_report("text.", ["t1", "t2"], source_ids=[1, 2], source_bodies=["b1"])
+
+    def test_verify_grounding_citation_only_sentence_skipped(self) -> None:
+        """A sentence consisting only of citation brackets (no claim text) must be skipped."""
+        from shoin.citation import verify_grounding
+        # "[S1][S2]" stripped of brackets → empty bigrams → continue without error
+        confirmed, misattributed = verify_grounding(
+            "[S1][S2]", {1: "some source body text here", 2: "another source body"}
+        )
+        self.assertEqual(confirmed, [])
+        self.assertEqual(misattributed, [])
 
 
 class TestStoreChunksForSource(unittest.TestCase):
