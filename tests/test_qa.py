@@ -663,6 +663,143 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
         self.assertIn("context length exceeded", str(ctx.exception))
 
+    def test_post_http_error_raises_llm_http_error(self) -> None:
+        """HTTPError from the LLM endpoint must produce SYSTEM_LLM_HTTP_ERROR."""
+        import io
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        http_err = HTTPError("http://url", 429, "Too Many Requests", {}, io.BytesIO(b"rate limited"))
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        self.assertIn("429", str(cm.exception))
+
+    def test_available_returns_true_when_endpoint_reachable(self) -> None:
+        """available() must return True when the /models endpoint responds."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient()
+        mock_resp = io.BytesIO(b'{"models": []}')
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertTrue(client.available())
+
+    def test_chat_returns_content_string(self) -> None:
+        """chat() with a valid response must return the content as a string."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient()
+        valid_resp = {"choices": [{"message": {"content": "hello", "role": "assistant"}}]}
+        with patch.object(client, "_post", return_value=valid_resp):
+            result = client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(result, "hello")
+
+    def test_chat_stream_yields_content_and_terminates_at_done(self) -> None:
+        """Normal SSE stream: non-data lines skipped, content yielded, [DONE] exits."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient()
+        # Include a non-data comment line to exercise the 'continue' at line 136,
+        # a normal delta to exercise line 149, and [DONE] to exercise line 139.
+        payload = (
+            b": comment line\n"
+            b'data: {"choices": [{"delta": {"content": "hi"}}]}\n'
+            b"data: [DONE]\n\n"
+        )
+        mock_resp = io.BytesIO(payload)
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            tokens = list(client.chat_stream([{"role": "user", "content": "q"}]))
+        self.assertEqual(tokens, ["hi"])
+
+    def test_chat_stream_skips_invalid_json_delta(self) -> None:
+        """Malformed JSON in a delta line must be silently skipped (continue)."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient()
+        payload = (
+            b"data: NOT_JSON\n"
+            b'data: {"choices": [{"delta": {"content": "ok"}}]}\n'
+            b"data: [DONE]\n\n"
+        )
+        mock_resp = io.BytesIO(payload)
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            tokens = list(client.chat_stream([{"role": "user", "content": "q"}]))
+        self.assertEqual(tokens, ["ok"])
+
+    def test_chat_stream_http_error_raises_llm_http_error(self) -> None:
+        """HTTPError during streaming must raise SYSTEM_LLM_HTTP_ERROR."""
+        import io
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        http_err = HTTPError("url", 503, "Service Unavailable", {}, io.BytesIO(b""))
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with self.assertRaises(LLMError) as cm:
+                list(client.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+
+    def test_chat_stream_timeout_raises_llm_timeout(self) -> None:
+        """TimeoutError during streaming must raise SYSTEM_LLM_TIMEOUT."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        timeout_exc = URLError(TimeoutError("timed out"))
+        with patch("urllib.request.urlopen", side_effect=timeout_exc):
+            with self.assertRaises(LLMError) as cm:
+                list(client.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_TIMEOUT")
+
+    def test_embed_missing_data_key_raises_bad_response(self) -> None:
+        """embed() when response lacks 'data' key must raise SYSTEM_LLM_BAD_RESPONSE."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(embedding_model="test-model")
+        with patch.object(client, "_post", return_value={"wrong_key": []}):
+            with self.assertRaises(LLMError) as cm:
+                client.embed(["hello"])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_embed_returns_vectors_on_success(self) -> None:
+        """embed() with a valid response must return the embedding vectors."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient(embedding_model="test-model")
+        fake_resp = {"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}
+        with patch.object(client, "_post", return_value=fake_resp):
+            result = client.embed(["hello"])
+        self.assertEqual(result, [[0.1, 0.2, 0.3]])
+
 
 class TestTruncateTokens(unittest.TestCase):
     def test_zero_limit_returns_empty(self) -> None:
