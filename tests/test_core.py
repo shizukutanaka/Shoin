@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.91")
+        self.assertEqual(VERSION, "0.1.92")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -437,6 +437,36 @@ class TestChunk(unittest.TestCase):
         result_en = _tail("alpha beta gamma", 2)
         self.assertEqual(result_en, "beta gamma")
         self.assertEqual(estimate_tokens(result_en), 2)
+
+    def test_tail_shorter_than_budget_returns_full_text(self) -> None:
+        """_tail must return the whole text when it has fewer tokens than requested."""
+        from shoin.chunk import _tail
+        short = "猫"  # 1 CJK token
+        result = _tail(short, 10)  # budget larger than available tokens
+        self.assertEqual(result, short)
+
+    def test_heading_after_content_creates_block_boundary(self) -> None:
+        """A heading that immediately follows content (no blank line) must flush the buffer."""
+        from shoin.chunk import _blocks
+        # _blocks() must split at the heading boundary even without a blank line between.
+        text = "序文の内容。\n# 見出し\n本文。"
+        blocks = _blocks(text)
+        # First block must contain the pre-heading text; second must start with the heading.
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("序文", blocks[0])
+        self.assertTrue(blocks[1].startswith("# 見出し"))
+
+    def test_hard_split_sentence_fits_within_limit(self) -> None:
+        """_hard_split: when sentence pieces fit within the limit they must not be windowed."""
+        from shoin.chunk import _hard_split
+        # Build a block that exceeds the token limit but splits into sentence-sized pieces
+        sentence = "これは長めの文章です。"  # ~10 tokens
+        block = sentence * 20  # ~200 tokens — exceeds limit=50
+        parts = _hard_split(block, 50)
+        # Every part must be a stripped, non-empty string and fit within limit
+        for p in parts:
+            self.assertTrue(p)
+            self.assertLessEqual(estimate_tokens(p), 50 + 10)  # small slack
 
 
 class TestIngest(unittest.TestCase):
