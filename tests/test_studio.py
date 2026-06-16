@@ -795,6 +795,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out.strip())  # not silent when empty
 
+    def test_reindex_no_embed_model_returns_error(self) -> None:
+        """shoin reindex exits with rc=1 and stderr message when no embedding model is configured."""
+        llm = FakeLLM(embedding_model="")  # no embed model
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "doc.txt"
+            doc.write_text("テスト。" * 30, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "n"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+            rc, _, err = self._run(["--db", db, "reindex", "1"], llm)
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.strip(), "stderr must explain why reindex was skipped")
+
     def test_ris_export_escapes_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db = str(Path(td) / "shoin.db")

@@ -776,6 +776,41 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
+    def test_operational_error_on_assistant_persist_does_not_kill_server(self) -> None:
+        """sqlite3.OperationalError (disk full / lock timeout) after SSE headers must be
+        swallowed just like StoreError — the server thread must survive."""
+        import sqlite3
+        from unittest.mock import patch
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "op-err-persist"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise sqlite3.OperationalError("disk I/O error")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        with patch.object(Store, "add_message", failing):
+            status, raw = self._sse(f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"})
+
+        self.assertEqual(status, 200)
+        kinds = [ev for ev, _ in parse_sse(raw)]
+        self.assertIn("done", kinds)
+        # Server must still be alive and responsive after an OperationalError in persist.
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
 
 class ClearChatCacheTest(unittest.TestCase):
     """Clearing chat history must NOT invalidate the questions cache.
