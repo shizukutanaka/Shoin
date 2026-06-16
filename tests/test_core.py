@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.79")
+        self.assertEqual(VERSION, "0.1.80")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -441,6 +441,15 @@ class TestIngest(unittest.TestCase):
             p = Path(tmp) / "sjis.txt"
             p.write_bytes("日本語テキスト".encode("cp932"))
             self.assertIn("日本語", extract_file(p).text)
+
+    def test_utf8_bom_stripped(self) -> None:
+        """UTF-8 BOM (EF BB BF) from Windows Notepad must be stripped, not left as U+FEFF."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "bom.txt"
+            p.write_bytes(b"\xef\xbb\xbf" + "BOM付きテキスト。".encode("utf-8"))
+            text = extract_file(p).text
+            self.assertNotIn("﻿", text, "BOM character must not appear in extracted text")
+            self.assertIn("BOM付きテキスト", text)
 
     def test_html_extract(self) -> None:
         html = (

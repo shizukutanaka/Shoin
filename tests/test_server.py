@@ -472,6 +472,24 @@ class ServerTest(unittest.TestCase):
         self.assertIn("passwd", titles)
         self.assertTrue(all("/" not in t for t in titles), titles)
 
+    def test_upload_null_byte_in_filename_does_not_crash(self) -> None:
+        """Null byte in X-Filename must not crash the server (ValueError → unhandled).
+
+        Before the fix, the null byte propagated to NamedTemporaryFile's prefix
+        argument, raising ValueError which was not caught by _dispatch and caused
+        the server to close the connection instead of returning an HTTP status.
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "null-fix"})
+        # urllib.parse.quote encodes \x00 as %00 (standard percent-encoding)
+        status, _, _ = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            ("テスト文書。" * 30).encode(),
+            {"X-Filename": urllib.parse.quote("\x00evil.txt", safe="")},
+        )
+        # Null byte is stripped → filename becomes "evil.txt" → upload succeeds
+        self.assertEqual(status, 201)
+
     def test_upload_tempfile_write_failure_does_not_leak_temp_file(self) -> None:
         """If tmp.write() raises mid-upload, the temp file must be cleaned up.
 

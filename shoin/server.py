@@ -332,7 +332,7 @@ class _Handler(BaseHTTPRequestHandler):
         raw_name = (
             Path(urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")).name
             or "upload.txt"
-        )
+        ).replace("\x00", "") or "upload.txt"  # null bytes → ValueError in NamedTemporaryFile
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)

@@ -63,7 +63,9 @@ def _check_size(data: bytes) -> None:
 
 
 def _decode(data: bytes) -> str:
-    for enc in ("utf-8", "cp932"):
+    for enc in ("utf-8-sig", "cp932"):
+        # utf-8-sig handles plain UTF-8 and strips BOM (U+FEFF) when present;
+        # Windows Notepad and some editors emit BOM-prefixed UTF-8 files.
         try:
             return data.decode(enc)
         except UnicodeDecodeError:
