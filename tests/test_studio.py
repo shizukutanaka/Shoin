@@ -857,6 +857,63 @@ class CliTest(unittest.TestCase):
         # The escaped text should have been joined with a space
         self.assertIn("Title Line2", ti_line)
 
+    def test_ask_shows_invalid_citation_marker(self) -> None:
+        """CLI must print the invalid-citation warning when LLM references [S99]."""
+        content = "会議テスト文書の詳細な内容。" * 20
+        # LLM cites S99 which doesn't exist — should appear in invalid list
+        llm = FakeLLM(reply="回答 [S99]。")
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "doc.txt"
+            doc.write_text(content, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "n"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+            rc, out, _ = self._run(["--db", db, "ask", "1", "会議テスト文書の内容は？"], llm)
+        self.assertEqual(rc, 0)
+        # S99 is invalid; the warning line must appear in output
+        self.assertIn("S99", out)
+
+    def test_ask_shows_misattr_citation_marker(self) -> None:
+        """CLI _print_report must print the misattribution marker for misattributed citations."""
+        import io as _io, contextlib as _cl, shoin.cli as _cli
+
+        report = {
+            "cited": [1],
+            "invalid": [],
+            "confirmed": [],
+            "misattributed": [1],
+            "source_map": {"S1": "ソースA"},
+            "coverage": 0.0,
+        }
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            _cli._print_report(report)
+        output = buf.getvalue()
+        self.assertIn("[S1]", output)
+        self.assertIn("ソースA", output)
+        # The misattribution i18n key "cite.misattr" must appear as a marker
+        from shoin.cli import _t
+        self.assertIn(_t("cite.misattr"), output)
+
+    def test_unknown_lang_falls_back_to_english(self) -> None:
+        """SHOIN_LANG set to an unknown code must fall back to English, not raise KeyError."""
+        import os
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            env_orig = os.environ.get("SHOIN_LANG")
+            os.environ["SHOIN_LANG"] = "zz"  # unknown language code
+            try:
+                rc, out, _ = self._run(["--db", db, "notebook", "new", "TestNB"], llm)
+            finally:
+                if env_orig is None:
+                    os.environ.pop("SHOIN_LANG", None)
+                else:
+                    os.environ["SHOIN_LANG"] = env_orig
+        self.assertEqual(rc, 0)
+        # English fallback: "Created:" message should appear
+        self.assertIn("Created:", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
