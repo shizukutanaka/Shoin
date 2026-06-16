@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.76")
+        self.assertEqual(VERSION, "0.1.77")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -557,6 +557,70 @@ class TestIngest(unittest.TestCase):
         # exactly one DNS lookup per hop — not two (the old double-resolution bug)
         self.assertEqual(dns_calls, ["example.com"],
                          "fetch_url must resolve DNS once per hop, not twice")
+
+    def test_fetch_url_host_header_includes_non_default_port(self) -> None:
+        """RFC 7230 §5.4: Host header must include port when it is not the default.
+
+        Sending 'Host: example.com' for 'http://example.com:8080/' causes virtual-
+        host routing failures.  The correct header is 'Host: example.com:8080'.
+        """
+        import shoin.ingest as ing
+
+        captured_headers: dict[str, str] = {}
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeConn:
+            def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+                captured_headers.update(headers)
+                raise OSError("short-circuit")
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError),
+        ):
+            ing.fetch_url("http://example.com:8080/path")
+
+        self.assertEqual(
+            captured_headers.get("Host"),
+            "example.com:8080",
+            "non-default port must appear in the Host header",
+        )
+
+    def test_fetch_url_host_header_omits_default_port(self) -> None:
+        """Default port (80 for http, 443 for https) must NOT appear in Host header."""
+        import shoin.ingest as ing
+
+        captured_headers: dict[str, str] = {}
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeConn:
+            def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+                captured_headers.update(headers)
+                raise OSError("short-circuit")
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError),
+        ):
+            ing.fetch_url("http://example.com/path")
+
+        self.assertEqual(
+            captured_headers.get("Host"),
+            "example.com",
+            "default port 80 must not appear in the Host header",
+        )
 
     def test_ssrf_rebinding_to_private_blocked(self) -> None:
         """A host resolving to a private address is rejected even at fetch time."""

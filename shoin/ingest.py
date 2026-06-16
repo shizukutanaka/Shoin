@@ -233,7 +233,10 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         seen_urls.add(current)
         parsed, pinned = validate_public_url(current)
         host = parsed.hostname or ""
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        default_port = 443 if parsed.scheme == "https" else 80
+        port = parsed.port or default_port
+        # RFC 7230 §5.4: Host header must include port when non-default.
+        host_header = host if port == default_port else f"{host}:{port}"
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
@@ -244,7 +247,7 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         else:
             conn = _PinnedHTTPConnection(host, port, pinned, URL_TIMEOUT_SEC)
         try:
-            conn.request("GET", path, headers={"User-Agent": f"shoin/{VERSION}", "Host": host})
+            conn.request("GET", path, headers={"User-Agent": f"shoin/{VERSION}", "Host": host_header})
             resp = conn.getresponse()
             if resp.status in _REDIRECT_CODES:
                 location = resp.getheader("Location")
