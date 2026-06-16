@@ -305,6 +305,19 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_studio_on_empty_notebook_returns_400(self) -> None:
+        """Studio on a notebook with no sources must return 400 NOTEBOOK_EMPTY."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "空ノートブック"})
+        status, err = self._json("POST", f"/api/notebooks/{nb['id']}/studio", {"kind": "briefing"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_EMPTY")  # type: ignore[index]
+
+    def test_studio_on_missing_notebook_returns_404(self) -> None:
+        """Studio on a non-existent notebook must return 404 NOTEBOOK_NOT_FOUND."""
+        status, err = self._json("POST", "/api/notebooks/99999/studio", {"kind": "briefing"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
     def test_questions_cached_until_sources_change(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "提案キャッシュ"})
         nb_id = nb["id"]
