@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.94")
+        self.assertEqual(VERSION, "0.1.96")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1239,6 +1239,128 @@ class TestLLMClient(unittest.TestCase):
 
         client = LLMClient(base_url="ftp://invalid-scheme")
         self.assertFalse(client.available())
+
+
+class TestPipeline(unittest.TestCase):
+    def test_noembed_chat_raises_service_unavailable(self) -> None:
+        """_NoEmbed.chat() must raise LLMError so the 'no LLM' path is explicit."""
+        from shoin.llm import LLMError
+        from shoin.pipeline import _NoEmbed
+
+        ne = _NoEmbed()
+        with self.assertRaises(LLMError) as cm:
+            ne.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_noembed_embed_one_raises_disabled(self) -> None:
+        """_NoEmbed.embed_one() must raise LLMError to signal embedding is unavailable."""
+        from shoin.llm import LLMError
+        from shoin.pipeline import _NoEmbed
+
+        ne = _NoEmbed()
+        with self.assertRaises(LLMError) as cm:
+            ne.embed_one("any text")
+        self.assertEqual(cm.exception.code, "SYSTEM_EMBED_DISABLED")
+
+    def test_embed_chunks_store_error_rolls_back(self) -> None:
+        """StoreError during set_embedding triggers rollback; n_embedded stays 0."""
+        from unittest.mock import patch
+
+        from shoin.pipeline import _embed_chunks
+        from shoin.store import StoreError
+
+        class BatchEmbedLLM:
+            embedding_model = "test-model"
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1, 0.2] for _ in texts]
+
+        with make_store() as s:
+            nb_id = s.create_notebook("rollback-test").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-r")
+            chunk_ids = s.add_chunks(src.id, ["text chunk"])
+            with patch.object(
+                s, "set_embedding", side_effect=StoreError("CHUNK_NOT_FOUND", "gone")
+            ):
+                n = _embed_chunks(s, BatchEmbedLLM(), chunk_ids, ["text chunk"])
+        self.assertEqual(n, 0)
+
+    def test_embed_chunks_rollback_exception_silenced(self) -> None:
+        """Exception raised by conn.rollback() during StoreError recovery must be silenced."""
+        from unittest.mock import patch
+
+        from shoin.pipeline import _embed_chunks
+        from shoin.store import StoreError
+
+        class BatchEmbedLLM:
+            embedding_model = "test-model"
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1, 0.2] for _ in texts]
+
+        class _FailRollback:
+            """Delegates all conn calls to the real conn except rollback()."""
+            def __init__(self, real):
+                self._real = real
+            def rollback(self):
+                raise Exception("rollback failed")
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with make_store() as s:
+            nb_id = s.create_notebook("rollback-err-test").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-re")
+            chunk_ids = s.add_chunks(src.id, ["text chunk"])
+            # Pre-store the matching embed model so the mismatch guard doesn't early-exit.
+            s.set_setting("embed_model", "test-model")
+            # Wrap conn so rollback() raises (covers lines 84-85).
+            s.__dict__["conn"] = _FailRollback(s.conn)
+            try:
+                with patch.object(
+                    s, "set_embedding", side_effect=StoreError("CHUNK_NOT_FOUND", "gone")
+                ):
+                    n = _embed_chunks(s, BatchEmbedLLM(), chunk_ids, ["text chunk"])
+            finally:
+                s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
+        self.assertEqual(n, 0)
+
+    def test_index_source_url_path_calls_extract_url(self) -> None:
+        """index_source with an http:// target must call extract_url, not extract_file."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source
+
+        fake = Extracted(kind="url", title="Mock Page", origin="http://x.test", sha256="abc", text="page content")
+        with patch("shoin.pipeline.extract_url", return_value=fake) as mock_eu:
+            with make_store() as s:
+                nb_id = s.create_notebook("url-test").id
+                result = index_source(s, nb_id, "http://x.test")
+        mock_eu.assert_called_once_with("http://x.test")
+        self.assertEqual(result.source.title, "Mock Page")
+
+
+class TestConfigXDG(unittest.TestCase):
+    def test_data_dir_uses_shoin_data_dir_env(self) -> None:
+        """When SHOIN_DATA_DIR is set, data_dir() must return that path directly."""
+        import os
+        from shoin.config import data_dir
+
+        with patch.dict(os.environ, {"SHOIN_DATA_DIR": "/tmp/shoin_custom"}):
+            result = data_dir()
+        self.assertEqual(str(result), "/tmp/shoin_custom")
+
+    def test_data_dir_uses_xdg_data_home(self) -> None:
+        """SHOIN_DATA_DIR not set and XDG_DATA_HOME set: data_dir() uses XDG path."""
+        import os
+        from shoin.config import data_dir
+
+        env = {"XDG_DATA_HOME": "/tmp/xdgtest"}
+        env.pop("SHOIN_DATA_DIR", None)
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("SHOIN_DATA_DIR", None)
+            result = data_dir()
+        self.assertEqual(str(result), "/tmp/xdgtest/shoin")
 
 
 if __name__ == "__main__":

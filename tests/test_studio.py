@@ -914,6 +914,14 @@ class CliTest(unittest.TestCase):
         # English fallback: "Created:" message should appear
         self.assertIn("Created:", out)
 
+    def test_keyboard_interrupt_returns_130(self) -> None:
+        """KeyboardInterrupt during a command must exit with code 130, not crash."""
+        from shoin.cli import main
+
+        with patch("shoin.store.Store.__enter__", side_effect=KeyboardInterrupt):
+            rc = main(["--db", ":memory:", "notebook", "list"])
+        self.assertEqual(rc, 130)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

@@ -152,6 +152,34 @@ class TestContext(unittest.TestCase):
         self.assertEqual(msgs[0]["role"], "system")
         self.assertIn("<<<SOURCE", msgs[1]["content"])
 
+    def test_build_context_missing_source_uses_fallback_title(self) -> None:
+        """If a source is deleted between retrieval and context building, fallback title is used."""
+        from shoin.search import Hit
+
+        with Store(":memory:") as s:
+            s.migrate()
+            # Hit references source_id=9999 which doesn't exist
+            hits = [Hit(chunk_id=1, source_id=9999, text="some content here", score=0.9)]
+            ctx = build_context(s, hits)
+        # Fallback title must be "source-9999", not raise StoreError
+        self.assertEqual(ctx.source_titles, ["source-9999"])
+
+    def test_build_context_second_chunk_exceeds_per_source_budget_breaks(self) -> None:
+        """Second chunk that would exceed per_source budget must be excluded (qa.py line 165)."""
+        from shoin.search import Hit
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("budget-test")
+            src = s.add_source(nb.id, "txt", "doc", "t", "sha-b")
+            text1 = "あ" * 30  # 30 tokens
+            text2 = "い" * 35  # 35 tokens; 30+35=65 > budget 64 → break
+            h1 = Hit(chunk_id=1, source_id=src.id, text=text1, score=0.9)
+            h2 = Hit(chunk_id=2, source_id=src.id, text=text2, score=0.8)
+            # budget_tokens=64, per_source=64; after h1, 30+35=65>64 triggers break
+            ctx = build_context(s, [h1, h2], budget_tokens=64)
+        self.assertIn(text1, ctx.block)
+        self.assertNotIn(text2, ctx.block)
+
 
 def _ctx_args() -> tuple[Store, list]:  # type: ignore[type-arg]
     s, nb = seeded_store()

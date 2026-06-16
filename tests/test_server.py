@@ -1106,5 +1106,18 @@ class SafeReportTest(unittest.TestCase):
         self.assertIn("corrupt citation_report", buf.getvalue())
 
 
+class HostnameOfTest(unittest.TestCase):
+    def test_malformed_netloc_returns_empty_string(self) -> None:
+        """_hostname_of must return '' when urlsplit raises ValueError (e.g. IDNA-invalid host)."""
+        import urllib.parse
+        from unittest.mock import patch
+
+        from shoin.server import _hostname_of
+
+        with patch.object(urllib.parse, "urlsplit", side_effect=ValueError("bad")):
+            result = _hostname_of("//some-bad-host")
+        self.assertEqual(result, "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)
