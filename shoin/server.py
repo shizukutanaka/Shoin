@@ -45,6 +45,8 @@ _EXPORT_MIME = {
     "bibtex": "application/x-bibtex; charset=utf-8",
     "ris": "application/x-research-info-systems; charset=utf-8",
 }
+# BibTeX files are universally expected to have the .bib extension, not .bibtex.
+_EXPORT_EXT = {"md": "md", "bibtex": "bib", "ris": "ris"}
 
 # Hostnames a browser may legitimately use to reach this loopback server.
 # Anything else (e.g. attacker.example rebound to 127.0.0.1) is rejected:
@@ -437,7 +439,7 @@ class _Handler(BaseHTTPRequestHandler):
             _EXPORT_MIME[fmt],
             {
                 "Content-Length": str(len(body)),
-                "Content-Disposition": f'attachment; filename="notebook-{nb_id}.{fmt}"',
+                "Content-Disposition": f'attachment; filename="notebook-{nb_id}.{_EXPORT_EXT[fmt]}"',
             },
         )
         self.wfile.write(body)

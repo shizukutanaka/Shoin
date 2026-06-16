@@ -187,10 +187,13 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("DELETE", f"/api/notes/{note['id']}")
         self.assertEqual(status, 200)
 
-        # export
+        # export — BibTeX must use .bib extension, not .bibtex
         status, headers, raw = self._req("GET", f"/api/notebooks/{nb_id}/export?format=bibtex")
         self.assertEqual(status, 200)
-        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+        cd = headers.get("Content-Disposition", "")
+        self.assertIn("attachment", cd)
+        self.assertIn(".bib\"", cd, "BibTeX download must use .bib extension (not .bibtex)")
+        self.assertNotIn(".bibtex", cd)
         self.assertIn("@misc{shoin", raw.decode())
 
         # rename notebook
