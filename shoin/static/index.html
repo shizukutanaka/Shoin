@@ -267,7 +267,9 @@ const I18N = {
     "chat.misattr":"誤ソースの可能性","chat.confirmed":"根拠確認済み",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
+    "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
+    "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…"
@@ -287,7 +289,9 @@ const I18N = {
     "chat.misattr":"possible wrong source","chat.confirmed":"grounding confirmed",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
+    "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
+    "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "export.head":"Export","viewer.close":"Close",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…"
@@ -331,7 +335,7 @@ async function loadNotebooks(){
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
     const name = el("span","name", nb.name);
     const c = el("span","c", `${nb.counts.sources}册`);
-    const ren = el("button","ren","✎"); ren.type="button"; ren.title=t("nb.rename");
+    const ren = el("button","ren","✎"); ren.type="button"; ren.title=t("nb.rename"); ren.setAttribute("aria-label",t("nb.rename"));
     ren.onclick = async ev=>{
       ev.stopPropagation();
       const newName = prompt(t("nb.rename"), nb.name);
@@ -356,7 +360,7 @@ async function loadNotebooks(){
     };
     li.append(name,c,ren,del);
     li.onclick = () => openNotebook(nb.id);
-    li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter") openNotebook(nb.id); };
+    li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openNotebook(nb.id); } };
     ul.append(li);
   }
   if (!notebooks.length){
@@ -424,6 +428,7 @@ function renderWithSeals(container, text, report){
         : misattr.has(n) ? t("chat.misattr") + (name ? " — " + name : "")
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + name : "")
         : name;
+      chip.setAttribute("aria-label", `Citation S${n}` + (name ? ": " + name : ""));
       chip.onclick = () => openSeal(n, srcMap, idMap);
       container.append(chip);
     });
@@ -439,14 +444,19 @@ function openSeal(n, srcMap, idMap){
   for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title); return; } }
   if (title) toast(title);
 }
+let _srcAbort = null;
 async function showSource(id, title){
+  if (_srcAbort) _srcAbort.abort();
+  _srcAbort = new AbortController();
+  const sig = _srcAbort.signal;
   try{
-    const j = await (await api(`/api/sources/${id}/text`)).json();
+    const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
+    if (sig.aborted) return;
     $("#viewerTitle").textContent = title;
     $("#viewerText").textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
     $("#viewer").classList.add("open");
     $("#viewerClose").focus();
-  }catch(e){ toast(e.message); }
+  }catch(e){ if (!sig.aborted) toast(e.message); }
 }
 $("#viewerClose").onclick = () => $("#viewer").classList.remove("open");
 $("#viewer").onclick = e => { if (e.target.id==="viewer") $("#viewer").classList.remove("open"); };
@@ -511,6 +521,7 @@ async function refreshQuestions(){
 $("#askForm").onsubmit = async e=>{
   e.preventDefault();
   if (!cur) return;
+  const nbId = cur.id;
   const q = $("#askInput").value.trim(); if(!q) return;
   $("#askInput").value=""; $("#chatEmpty").hidden=true;
   addMsg("user", q, null);
@@ -519,7 +530,7 @@ $("#askForm").onsubmit = async e=>{
   $("#askBtn").disabled = true;
   let acc = "", meta=null;
   try{
-    const r = await jpost(`/api/notebooks/${cur.id}/ask`, {question:q});
+    const r = await jpost(`/api/notebooks/${nbId}/ask`, {question:q});
     const reader = r.body.getReader(); const dec = new TextDecoder();
     let buf = "";
     for(;;){
@@ -577,7 +588,12 @@ function buildKindButtons(){
 }
 function renderStudio(){
   const out = $("#studioOut"); out.replaceChildren();
-  (cur.studio||[]).forEach(o=>{
+  const items = cur.studio||[];
+  if (!items.length){
+    const e0 = el("div","empty"); e0.append(el("b",null,t("studio.empty.title")), el("span",null,t("studio.empty.body")));
+    out.append(e0); return;
+  }
+  items.forEach(o=>{
     const card = el("div","card");
     const h = el("h4",null,t("studio."+o.kind));
     if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
@@ -591,7 +607,12 @@ function renderStudio(){
 }
 function renderNotes(){
   const out = $("#noteList"); out.replaceChildren();
-  (cur.notes||[]).forEach(n=>{
+  const items = cur.notes||[];
+  if (!items.length){
+    const e0 = el("div","empty"); e0.append(el("b",null,t("notes.empty.title")), el("span",null,t("notes.empty.body")));
+    out.append(e0); return;
+  }
+  items.forEach(n=>{
     const card = el("div","card");
     const x = el("button","x","×"); x.setAttribute("aria-label","delete note");
     x.onclick = async ()=>{ try{ await api(`/api/notes/${n.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
@@ -601,9 +622,10 @@ function renderNotes(){
 }
 $("#noteForm").onsubmit = async e=>{
   e.preventDefault(); if(!cur) return;
+  const nbId = cur.id;
   try{
-    await jpost(`/api/notebooks/${cur.id}/notes`, {title:$("#noteTitle").value, body:$("#noteBody").value});
-    $("#noteTitle").value=""; $("#noteBody").value=""; openNotebook(cur.id);
+    await jpost(`/api/notebooks/${nbId}/notes`, {title:$("#noteTitle").value, body:$("#noteBody").value});
+    $("#noteTitle").value=""; $("#noteBody").value=""; openNotebook(nbId);
   }catch(err){ toast(err.message); }
 };
 
@@ -617,17 +639,18 @@ $("#nbForm").onsubmit = async e=>{
 };
 $("#fileInput").onchange = async e=>{
   const f = e.target.files[0]; if(!f || !cur) return;
+  const nbId = cur.id;
   try{
-    await api(`/api/notebooks/${cur.id}/upload`, {method:"POST",
+    await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
       headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f});
-    toast(t("sources.added")); openNotebook(cur.id);
-  }catch(err){ toast(err.message); }
-  e.target.value="";
+    e.target.value=""; toast(t("sources.added")); openNotebook(nbId);
+  }catch(err){ e.target.value=""; toast(err.message); }
 };
 $("#urlBtn").onclick = async ()=>{
   const u = $("#urlInput").value.trim(); if(!u || !cur) return;
-  try{ await jpost(`/api/notebooks/${cur.id}/sources`, {target:u});
-    $("#urlInput").value=""; toast(t("sources.added")); openNotebook(cur.id);
+  const nbId = cur.id;
+  try{ await jpost(`/api/notebooks/${nbId}/sources`, {target:u});
+    $("#urlInput").value=""; toast(t("sources.added")); openNotebook(nbId);
   }catch(err){ toast(err.message); }
 };
 
