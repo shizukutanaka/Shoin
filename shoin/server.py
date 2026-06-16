@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -69,9 +70,12 @@ Json = dict[str, Any]
 
 def _safe_report(raw: Any) -> dict[str, Any]:
     """Parse a citation_report JSON blob; return empty dict on corrupt data."""
+    if raw is None:
+        return {}
     try:
-        return json.loads(str(raw) or "{}") or {}
+        return json.loads(raw) or {}
     except (json.JSONDecodeError, ValueError):
+        print(f"Warning: corrupt citation_report in DB (ignored): {raw!r:.120}", file=sys.stderr)
         return {}
 
 
@@ -222,7 +226,12 @@ class _Handler(BaseHTTPRequestHandler):
                 try:
                     handler(*[int(g) for g in m.groups()])
                 except StoreError as exc:
-                    status = 404 if exc.code.endswith("_NOT_FOUND") else 400
+                    if exc.code.endswith("_NOT_FOUND"):
+                        status = 404
+                    elif exc.code.endswith("_ALREADY_EXISTS"):
+                        status = 409
+                    else:
+                        status = 400
                     self._error(status, exc.code, str(exc))
                 except IngestError as exc:
                     self._error(400, exc.code, str(exc))

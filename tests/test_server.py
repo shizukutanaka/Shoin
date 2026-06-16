@@ -317,8 +317,8 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(status, 400, msg=f"file path target should be rejected: {bad_target!r}")
             self.assertEqual(err["error"]["code"], "INGEST_UNSUPPORTED_FORMAT")  # type: ignore[index]
 
-    def test_upload_duplicate_content_returns_400(self) -> None:
-        """Uploading identical content twice must return 400 SOURCE_ALREADY_EXISTS."""
+    def test_upload_duplicate_content_returns_409(self) -> None:
+        """Uploading identical content twice must return 409 SOURCE_ALREADY_EXISTS."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "dup-upload"})
         nb_id = nb["id"]
         content = ("重複テスト用の文書。" * 30).encode()
@@ -329,7 +329,7 @@ class ServerTest(unittest.TestCase):
         s2, _, raw = self._req(
             "POST", f"/api/notebooks/{nb_id}/upload", content, {"X-Filename": "dup2.txt"}
         )
-        self.assertEqual(s2, 400)
+        self.assertEqual(s2, 409)
         self.assertEqual(json.loads(raw)["error"]["code"], "SOURCE_ALREADY_EXISTS")
 
     def test_upload_to_deleted_notebook_returns_404(self) -> None:
@@ -920,6 +920,48 @@ class ClearChatCacheTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.llm.chat_count, after_warm,
                          "clearing chat must not invalidate the questions cache")
+
+
+class SafeReportTest(unittest.TestCase):
+    """Unit tests for the _safe_report helper in server.py."""
+
+    def setUp(self) -> None:
+        from shoin.server import _safe_report  # noqa: PLC0415
+        self._fn = _safe_report
+
+    def test_none_returns_empty_silently(self) -> None:
+        """NULL citation_report in DB (None) must return {} without printing."""
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            result = self._fn(None)
+        self.assertEqual(result, {})
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_valid_json_parsed(self) -> None:
+        result = self._fn('{"confirmed": [1], "misattributed": []}')
+        self.assertEqual(result["confirmed"], [1])
+
+    def test_corrupt_json_returns_empty_and_warns(self) -> None:
+        """Corrupt DB value must return {} and print a stderr warning."""
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            result = self._fn("NOT-JSON{{{")
+        self.assertEqual(result, {})
+        self.assertIn("corrupt citation_report", buf.getvalue())
+
+    def test_empty_string_returns_empty_and_warns(self) -> None:
+        """Empty string in the DB is corrupt; must return {} and warn, like any bad JSON."""
+        import io
+        from unittest.mock import patch
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            result = self._fn("")
+        self.assertEqual(result, {})
+        self.assertIn("corrupt citation_report", buf.getvalue())
 
 
 if __name__ == "__main__":
