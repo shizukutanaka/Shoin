@@ -138,6 +138,16 @@ class StudioTest(unittest.TestCase):
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["この書院はどう動くのか。"])
 
+    def test_suggest_questions_accepts_ka_with_fullwidth_period(self) -> None:
+        """Fullwidth period ． (U+FF0E) becomes ASCII . after NFKC; rstrip must still strip it."""
+        # Before the fix, rstrip("。．!?") contained U+FF0E (fullwidth period) but not
+        # U+002E (ASCII period).  After NFKC normalization the string contains U+002E,
+        # so the trailing period was never stripped and the question was silently dropped.
+        llm = FakeLLM(reply="この書院はどう動くのか．\n内容について説明します。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        # q is the NFKC-normalised form (fullwidth period → ASCII period); still kept in output.
+        self.assertEqual(qs, ["この書院はどう動くのか."])
+
     def test_suggest_questions_strips_fullwidth_list_prefixes(self) -> None:
         """CJK-first LLMs often emit １. or ２） prefixes — NFKC normalization must strip them."""
         llm = FakeLLM(
