@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.97")
+        self.assertEqual(VERSION, "0.1.98")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -320,6 +320,66 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_source(nb.id, "txt", "title", "origin", "unique-hash")
             self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_source_concurrent_unique_violation_raises_already_exists(self) -> None:
+        """Concurrent UNIQUE IntegrityError on INSERT must map to SOURCE_ALREADY_EXISTS.
+
+        The explicit pre-check SELECT prevents the common case, but a race between
+        the SELECT and INSERT still raises IntegrityError; store.py lines 275-279.
+        """
+        import sqlite3
+
+        class _InsertFailConn:
+            """Delegates all conn calls to the real conn except INSERT INTO sources."""
+            def __init__(self, real):
+                self._real = real
+            def execute(self, sql: str, *args, **kwargs):
+                if "INSERT INTO sources" in sql:
+                    raise sqlite3.IntegrityError(
+                        "UNIQUE constraint failed: sources.notebook_id, sources.sha256"
+                    )
+                return self._real.execute(sql, *args, **kwargs)
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with make_store() as s:
+            nb = s.create_notebook("concurrent-unique")
+            s.__dict__["conn"] = _InsertFailConn(s.conn)
+            try:
+                with self.assertRaises(StoreError) as cm:
+                    s.add_source(nb.id, "txt", "title", "origin", "sha-concurrent")
+            finally:
+                s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
+        self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+
+    def test_add_source_concurrent_fk_violation_raises_notebook_not_found(self) -> None:
+        """Non-UNIQUE IntegrityError on INSERT (FK) must map to NOTEBOOK_NOT_FOUND.
+
+        If the notebook is deleted between get_notebook() and INSERT, a FK
+        IntegrityError fires; store.py lines 281-284.
+        """
+        import sqlite3
+
+        class _InsertFKFailConn:
+            """Raises FK IntegrityError only on INSERT INTO sources."""
+            def __init__(self, real):
+                self._real = real
+            def execute(self, sql: str, *args, **kwargs):
+                if "INSERT INTO sources" in sql:
+                    raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+                return self._real.execute(sql, *args, **kwargs)
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with make_store() as s:
+            nb = s.create_notebook("concurrent-fk")
+            s.__dict__["conn"] = _InsertFKFailConn(s.conn)
+            try:
+                with self.assertRaises(StoreError) as cm:
+                    s.add_source(nb.id, "txt", "title", "origin", "sha-fk")
+            finally:
+                s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_set_embedding_missing_chunk_does_not_commit(self) -> None:
         """Raise must happen before commit so no corrupt data is persisted."""

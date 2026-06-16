@@ -1106,6 +1106,137 @@ class SafeReportTest(unittest.TestCase):
         self.assertIn("corrupt citation_report", buf.getvalue())
 
 
+class LLMErrorDispatchTest(unittest.TestCase):
+    """Verify that LLMError propagating out of a route handler returns HTTP 502."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from shoin.llm import LLMError as _LLMError
+
+        cls.tmp = tempfile.TemporaryDirectory()
+
+        class BrokenChatLLM:
+            """LLM that always raises LLMError from chat() (simulates endpoint down)."""
+            embedding_model = ""
+            model = "broken"
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
+
+            def chat_stream(self, messages: list[dict[str, str]], temperature: float = 0.2) -> Iterator[str]:
+                raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
+                yield  # noqa: unreachable
+
+            def embed_one(self, text: str) -> list[float]:
+                return [1.0, 0.0]
+
+        cls.llm = BrokenChatLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "llmerr.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_studio_llm_error_returns_502(self) -> None:
+        """LLMError from a route handler must produce HTTP 502 (covers server.py:239)."""
+        # Create a notebook with content so studio generation reaches the LLM.
+        _, nb = self._json("POST", "/api/notebooks", {"name": "502-test"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テストドキュメントの内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "test.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        # POST to /studio — the LLM will raise LLMError → 502
+        status, body = self._json("POST", f"/api/notebooks/{nb_id}/studio", {"kind": "briefing"})
+        self.assertEqual(status, 502)
+        self.assertEqual(body["error"]["code"], "SYSTEM_SERVICE_UNAVAILABLE")
+
+
+class UrlSourceIngestionTest(unittest.TestCase):
+    """Verify that the /sources endpoint accepts http:// targets (covers server.py:328-331)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "url.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_url_source_ingestion_succeeds(self) -> None:
+        """POST /sources with http:// target must call index_source and return 201."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import IndexResult, index_source
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "url-ingest"})
+        nb_id = nb["id"]
+
+        fake_extracted = Extracted(
+            kind="url", title="Mock Page", origin="http://example.test",
+            sha256="abc123", text="This is mock page content for testing."
+        )
+        with patch("shoin.pipeline.extract_url", return_value=fake_extracted):
+            status, body = self._json(
+                "POST",
+                f"/api/notebooks/{nb_id}/sources",
+                {"target": "http://example.test"},
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["source"]["title"], "Mock Page")
+        self.assertGreater(body["n_chunks"], 0)
+
+
 class HostnameOfTest(unittest.TestCase):
     def test_malformed_netloc_returns_empty_string(self) -> None:
         """_hostname_of must return '' when urlsplit raises ValueError (e.g. IDNA-invalid host)."""
