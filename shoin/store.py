@@ -227,7 +227,7 @@ class Store:
         return Notebook(row["id"], row["name"], row["created_at"], row["updated_at"])
 
     def list_notebooks(self) -> list[Notebook]:
-        rows = self.conn.execute("SELECT * FROM notebooks ORDER BY id").fetchall()
+        rows = self.conn.execute("SELECT * FROM notebooks ORDER BY updated_at DESC").fetchall()
         return [Notebook(r["id"], r["name"], r["created_at"], r["updated_at"]) for r in rows]
 
     def rename_notebook(self, notebook_id: int, name: str) -> None:
@@ -247,8 +247,8 @@ class Store:
         self.conn.commit()
 
     def touch_notebook(self, notebook_id: int) -> None:
+        """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""
         self.conn.execute("UPDATE notebooks SET updated_at=? WHERE id=?", (_now(), notebook_id))
-        self.conn.commit()
 
     # --- sources / chunks ---
 
@@ -282,8 +282,8 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during source addition",
             )
-        self.conn.commit()
         self.touch_notebook(notebook_id)
+        self.conn.commit()
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
@@ -291,8 +291,8 @@ class Store:
         self.conn.execute(
             "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
         )
-        self.conn.commit()
         self.touch_notebook(src.notebook_id)
+        self.conn.commit()
 
     def sources_for_notebook(self, notebook_id: int) -> list[Source]:
         rows = self.conn.execute(
@@ -328,8 +328,8 @@ class Store:
     def delete_source(self, source_id: int) -> None:
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
-        self.conn.commit()
         self.touch_notebook(src.notebook_id)
+        self.conn.commit()
 
     def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
         ids: list[int] = []
@@ -394,8 +394,8 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during note insertion",
             )
-        self.conn.commit()
         self.touch_notebook(notebook_id)
+        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def list_notes(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -410,8 +410,8 @@ class Store:
         if row is None:
             raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
         self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
-        self.conn.commit()
         self.touch_notebook(int(row["notebook_id"]))
+        self.conn.commit()
 
     def add_studio_output(
         self, notebook_id: int, kind: str, body: str, citation_report: str
@@ -428,8 +428,8 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during studio output insertion",
             )
-        self.conn.commit()
         self.touch_notebook(notebook_id)
+        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def latest_studio_outputs(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -460,8 +460,8 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during message insertion",
             )
-        self.conn.commit()
         self.touch_notebook(notebook_id)
+        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def list_messages(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -482,8 +482,8 @@ class Store:
     def clear_messages(self, notebook_id: int) -> None:
         self.get_notebook(notebook_id)
         self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
-        self.conn.commit()
         self.touch_notebook(notebook_id)
+        self.conn.commit()
 
     def counts(self, notebook_id: int) -> dict[str, int]:
         n_sources = self.conn.execute(
