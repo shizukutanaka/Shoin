@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.70")
+        self.assertEqual(VERSION, "0.1.71")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -509,12 +509,18 @@ class TestIngest(unittest.TestCase):
             self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
 
     def test_ssrf_fetch_pins_validated_ip(self) -> None:
-        """fetch_url must connect to the IP it validated, never re-resolve the host."""
+        """fetch_url must connect to the IP it validated with exactly one DNS call per hop.
+
+        validate_public_url() now returns (parsed, pinned_ip) so fetch_url no longer
+        calls _validate_resolved() a second time — one DNS lookup per hop, not two.
+        """
         import shoin.ingest as ing
 
         captured: dict[str, object] = {}
+        dns_calls: list[str] = []
 
         def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            dns_calls.append(host)
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
         def fake_create_connection(addr: tuple[str, int], *a: object, **k: object) -> object:
@@ -530,6 +536,9 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
         # connected to the validated public IP literal, not the hostname
         self.assertEqual(captured["addr"], ("93.184.216.34", 80))
+        # exactly one DNS lookup per hop — not two (the old double-resolution bug)
+        self.assertEqual(dns_calls, ["example.com"],
+                         "fetch_url must resolve DNS once per hop, not twice")
 
     def test_ssrf_rebinding_to_private_blocked(self) -> None:
         """A host resolving to a private address is rejected even at fetch time."""

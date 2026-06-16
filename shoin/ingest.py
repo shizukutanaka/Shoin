@@ -170,15 +170,19 @@ def _validate_resolved(host: str) -> str:
     return chosen
 
 
-def validate_public_url(url: str) -> urllib.parse.ParseResult:
-    """Reject non-http(s) schemes and hosts resolving to non-public addresses."""
+def validate_public_url(url: str) -> tuple[urllib.parse.ParseResult, str]:
+    """Reject non-http(s) schemes and hosts resolving to non-public addresses.
+
+    Returns (parsed_url, pinned_ip) so callers can connect to the validated IP
+    directly without a second DNS lookup.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise IngestError("INGEST_URL_BLOCKED", f"scheme not allowed: {parsed.scheme!r}")
     if not parsed.hostname:
         raise IngestError("INGEST_URL_BLOCKED", "URL has no host")
-    _validate_resolved(parsed.hostname)
-    return parsed
+    pinned = _validate_resolved(parsed.hostname)
+    return parsed, pinned
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -227,9 +231,8 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         if current in seen_urls:
             raise IngestError("INGEST_URL_BLOCKED", "redirect cycle detected")
         seen_urls.add(current)
-        parsed = validate_public_url(current)
+        parsed, pinned = validate_public_url(current)
         host = parsed.hostname or ""
-        pinned = _validate_resolved(host)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         path = parsed.path or "/"
         if parsed.query:
