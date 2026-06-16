@@ -189,6 +189,12 @@ class LLMClient:
                 "SYSTEM_LLM_BAD_RESPONSE",
                 f"embedding count mismatch: got {len(vecs)}, expected {len(texts)}",
             )
+        dims = {len(v) for v in vecs}
+        if len(dims) > 1:
+            raise LLMError(
+                "SYSTEM_LLM_BAD_RESPONSE",
+                f"inconsistent embedding dimensions in response: {dims}",
+            )
         return vecs
 
     def embed_one(self, text: str) -> list[float]:

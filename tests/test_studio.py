@@ -216,6 +216,14 @@ class StudioTest(unittest.TestCase):
         """DoD: suggest_questions degrades gracefully when LLM is down (graceful degradation)."""
         self.assertEqual(suggest_questions(self.store, FakeLLM(chat_error=True), self.nb), [])
 
+    def test_suggest_questions_bare_question_mark_rejected(self) -> None:
+        """A lone '?' (1 char) must not be accepted as a question — minimum length is 2."""
+        llm = FakeLLM(reply="?\n??\n本当にそうですか?")
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertNotIn("?", qs)
+        self.assertIn("本当にそうですか?", qs)
+        self.assertIn("??", qs)  # 2-char bare "??" still accepted (edge case, not harmful)
+
     def test_generate_missing_notebook_raises(self) -> None:
         with self.assertRaises(StoreError) as ctx:
             generate(self.store, FakeLLM(), 99999, "briefing")

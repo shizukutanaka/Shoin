@@ -522,6 +522,26 @@ class TestLLMClient(unittest.TestCase):
                 client.embed_one("any text")
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
 
+    def test_embed_inconsistent_dimensions_raises_bad_response(self) -> None:
+        """Embeddings with mismatched dimensions must raise LLMError, not silently corrupt search."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(embedding_model="nomic-embed-text")
+        # API returns two vectors with different lengths (768 vs 384 dimensions)
+        fake_resp = {
+            "data": [
+                {"index": 0, "embedding": [0.1] * 768},
+                {"index": 1, "embedding": [0.2] * 384},
+            ]
+        }
+        with patch.object(client, "_post", return_value=fake_resp):
+            with self.assertRaises(LLMError) as ctx:
+                client.embed(["text one", "text two"])
+        self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("dimension", str(ctx.exception).lower())
+
     def test_llm_timeout_raises_distinct_code(self) -> None:
         """A network timeout must produce SYSTEM_LLM_TIMEOUT, not SYSTEM_SERVICE_UNAVAILABLE."""
         from unittest.mock import patch

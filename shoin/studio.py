@@ -205,6 +205,6 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
         q_base = q.rstrip("。.!?")  # strip trailing punctuation for endswith check
-        if q and ("?" in q or q_base.endswith(("か", "ください", "でしょう"))):
+        if len(q) >= 2 and ("?" in q or q_base.endswith(("か", "ください", "でしょう"))):
             questions.append(q)
     return questions[:n]
