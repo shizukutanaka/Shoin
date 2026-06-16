@@ -540,7 +540,7 @@ def make_server(
     llm: ChatBackend | None = None,
 ) -> ThreadingHTTPServer:
     """Build a configured server. host is pinned to loopback by design."""
-    if not host.startswith("127."):
+    if not (host.startswith("127.") or host == "::1"):
         raise ValueError("Shoin binds to loopback only (privacy by design)")
     handler = type(
         "ShoinHandler",

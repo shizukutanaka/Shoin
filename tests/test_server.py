@@ -230,6 +230,16 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_server(host="0.0.0.0")
 
+    def test_loopback_only_accepts_ipv6_loopback(self) -> None:
+        """::1 is a valid loopback address; make_server must not reject it with ValueError."""
+        try:
+            svr = make_server(host="::1", port=0)
+            svr.server_close()
+        except ValueError:
+            self.fail("make_server(host='::1') must not raise ValueError — ::1 is loopback")
+        except OSError:
+            pass  # IPv6 unavailable in this environment — acceptable
+
     def test_dns_rebinding_host_rejected(self) -> None:
         """A rebound hostname must not reach the API even though it hits 127.0.0.1."""
         status, _, raw = self._req("GET", "/api/health", headers={"Host": "evil.example"})

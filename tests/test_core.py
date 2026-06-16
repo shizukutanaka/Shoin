@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.74")
+        self.assertEqual(VERSION, "0.1.75")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -611,6 +611,45 @@ class TestIngest(unittest.TestCase):
             result = ing.extract_url("http://x/f.pdf")
         mock_pdf.assert_called_once_with(fake_body)
         self.assertIn("parsed pdf content", result.text)
+
+    def test_extract_url_uses_final_url_as_title_after_redirect(self) -> None:
+        """When a URL redirects, the title must be the *final* URL, not the original.
+
+        Short/canonical links (DOI, URL shorteners) redirect to the real page.
+        Using the original URL as title would show the redirector, not the resource.
+        """
+        import shoin.ingest as ing
+
+        fake_body = b"%PDF-1.4 fake"
+        with (
+            patch.object(
+                ing,
+                "fetch_url",
+                return_value=(fake_body, "application/pdf", "https://journal.example/paper.pdf"),
+            ),
+            patch.object(ing, "pdf_to_text", return_value="paper content"),
+        ):
+            result = ing.extract_url("https://doi.org/10.9999/fake")
+        self.assertEqual(
+            result.title,
+            "https://journal.example/paper.pdf",
+            "title must be the final (post-redirect) URL, not the original short URL",
+        )
+        # origin is always the final URL regardless
+        self.assertEqual(result.origin, "https://journal.example/paper.pdf")
+
+    def test_extract_url_plaintext_uses_final_url_as_title(self) -> None:
+        """Plain-text responses also fall back to final_url, not the original URL."""
+        import shoin.ingest as ing
+
+        fake_body = b"Hello world, this is plain text."
+        with patch.object(
+            ing,
+            "fetch_url",
+            return_value=(fake_body, "text/plain", "https://cdn.example/notes.txt"),
+        ):
+            result = ing.extract_url("https://short.example/abc")
+        self.assertEqual(result.title, "https://cdn.example/notes.txt")
 
 
 class TestSearch(unittest.TestCase):

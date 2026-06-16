@@ -300,12 +300,12 @@ def extract_url(url: str) -> Extracted:
     body, ctype, final_url = fetch_url(url)
     low = ctype.lower()
     if "pdf" in low or body.lstrip()[:4] == b"%PDF":
-        text, title = pdf_to_text(body), url
+        text, title = pdf_to_text(body), final_url
     elif "html" in low or body.lstrip()[:1] == b"<":
         title, text = html_to_text(_decode(body))
-        title = title or url
+        title = title or final_url
     else:
-        text, title = _decode(body), url
+        text, title = _decode(body), final_url
     text = text.strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
