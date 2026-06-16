@@ -272,6 +272,38 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
 
+    def test_ris_export_format(self) -> None:
+        """RIS export must use .ris extension and include TY/ER record markers."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "RIS出力テスト"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("RISエクスポート用文書。" * 20).encode(),
+            {"X-Filename": "ris_test.txt"},
+        )
+        status, headers, raw = self._req("GET", f"/api/notebooks/{nb_id}/export?format=ris")
+        self.assertEqual(status, 200)
+        cd = headers.get("Content-Disposition", "")
+        self.assertIn("attachment", cd)
+        self.assertIn(".ris\"", cd, "RIS download must use .ris extension")
+        body = raw.decode()
+        self.assertIn("TY  - GEN", body)
+        self.assertIn("ER  - ", body)
+        self.assertIn("ris_test.txt", body)
+
+    def test_delete_nonexistent_note_returns_404(self) -> None:
+        """Deleting a note that does not exist must return 404 NOTE_NOT_FOUND."""
+        status, err = self._json("DELETE", "/api/notes/99999")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTE_NOT_FOUND")  # type: ignore[index]
+
+    def test_rename_nonexistent_notebook_returns_404(self) -> None:
+        """Renaming a notebook that does not exist must return 404 NOTEBOOK_NOT_FOUND."""
+        status, err = self._json("PATCH", "/api/notebooks/99999", {"name": "ghost"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
     def test_src_add_file_path_rejected(self) -> None:
         """HTTP /sources endpoint must reject file-path targets to prevent
         the server acting as a confused deputy to read arbitrary local files."""
