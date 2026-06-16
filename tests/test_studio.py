@@ -148,6 +148,21 @@ class StudioTest(unittest.TestCase):
         # q is the NFKC-normalised form (fullwidth period → ASCII period); still kept in output.
         self.assertEqual(qs, ["この書院はどう動くのか."])
 
+    def test_suggest_questions_strips_katakana_middle_dot_bullet(self) -> None:
+        """Katakana middle dot ・ (U+30FB) must be stripped as a bullet prefix.
+
+        NFKC does NOT convert ・ (U+30FB) to · (U+00B7) — they stay distinct —
+        so the regex must include U+30FB explicitly.  Without the fix, questions
+        prefixed with ・ were returned with the bullet still attached.
+        """
+        llm = FakeLLM(reply="・ 目的は何か？\n・仕組みはどう動きますか？\n通常の回答文。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        # The ・ prefix must be stripped; NFKC converts ？ → ?
+        self.assertIn("目的は何か?", qs)
+        self.assertIn("仕組みはどう動きますか?", qs)
+        # Neither question should retain the ・ bullet
+        self.assertFalse(any(q.startswith("・") for q in qs))
+
     def test_suggest_questions_strips_fullwidth_list_prefixes(self) -> None:
         """CJK-first LLMs often emit １. or ２） prefixes — NFKC normalization must strip them."""
         llm = FakeLLM(
