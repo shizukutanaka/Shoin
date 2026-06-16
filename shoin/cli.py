@@ -231,6 +231,12 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     except (StoreError, IngestError, LLMError) as exc:
         print(_t("err.prefix", code=exc.code, msg=str(exc)), file=sys.stderr)
         return 1
+    except OverflowError:
+        print(
+            _t("err.prefix", code="VALIDATION_INTEGER_OVERFLOW", msg="ID value too large for SQLite"),
+            file=sys.stderr,
+        )
+        return 1
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130

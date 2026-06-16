@@ -922,6 +922,18 @@ class CliTest(unittest.TestCase):
             rc = main(["--db", ":memory:", "notebook", "list"])
         self.assertEqual(rc, 130)
 
+    def test_overflow_notebook_id_returns_1_not_crash(self) -> None:
+        """A notebook ID too large for SQLite int64 must print an error and return 1."""
+        from shoin.cli import main
+        import io
+
+        huge_id = str(2**64)  # well beyond int64 range
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = main(["--db", ":memory:", "ask", huge_id, "question?"])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_INTEGER_OVERFLOW", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
