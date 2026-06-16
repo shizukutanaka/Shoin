@@ -273,6 +273,18 @@ class TestMultiTurn(unittest.TestCase):
             self.assertNotIn("[S3]", msgs[1]["content"])
             self.assertIn("基づく", msgs[1]["content"])
 
+    def test_history_citation_removal_collapses_interior_spaces(self) -> None:
+        """Removing an inline [S#] must not leave a double space in the body."""
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問")
+            s.add_message(nb, "assistant", "前の文章 [S1] 後の文章。")
+            msgs = history_messages(s, nb)
+            body = msgs[1]["content"]
+            self.assertNotIn("  ", body)
+            self.assertIn("前の文章", body)
+            self.assertIn("後の文章", body)
+
     def test_history_is_bounded(self) -> None:
         s, nb = seeded_store()
         with s:

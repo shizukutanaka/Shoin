@@ -183,7 +183,7 @@ def history_messages(
     rows = store.list_messages_recent(notebook_id, limit)
     out: list[Message] = []
     for r in rows:
-        body = _HISTORY_CITE_RE.sub("", str(r["body"])).strip()
+        body = re.sub(r" {2,}", " ", _HISTORY_CITE_RE.sub("", str(r["body"]))).strip()
         if not body:
             continue
         role = "user" if str(r["role"]) == "user" else "assistant"
