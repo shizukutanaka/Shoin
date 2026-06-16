@@ -369,8 +369,10 @@ async function loadNotebooks(){
   } else if (!cur){ openNotebook(notebooks[0].id); }
 }
 async function openNotebook(id){
-  const j = await (await api(`/api/notebooks/${id}`)).json();
-  cur = j; renderNotebook(); loadNotebooks();
+  try{
+    const j = await (await api(`/api/notebooks/${id}`)).json();
+    cur = j; renderNotebook(); loadNotebooks();
+  }catch(e){ toast(e.message); }
 }
 function renderNotebook(){
   $("#nbTitle").textContent = cur ? `${t("app.title")} — ${cur.name}` : t("app.title");
@@ -444,7 +446,11 @@ function openSeal(n, srcMap, idMap){
   for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title); return; } }
   if (title) toast(title);
 }
-let _srcAbort = null;
+let _srcAbort = null, _viewerOpener = null;
+function closeViewer(){
+  $("#viewer").classList.remove("open");
+  if (_viewerOpener) { _viewerOpener.focus(); _viewerOpener = null; }
+}
 async function showSource(id, title){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
@@ -452,15 +458,28 @@ async function showSource(id, title){
   try{
     const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
     if (sig.aborted) return;
+    _viewerOpener = document.activeElement;
     $("#viewerTitle").textContent = title;
     $("#viewerText").textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
     $("#viewer").classList.add("open");
     $("#viewerClose").focus();
   }catch(e){ if (!sig.aborted) toast(e.message); }
 }
-$("#viewerClose").onclick = () => $("#viewer").classList.remove("open");
-$("#viewer").onclick = e => { if (e.target.id==="viewer") $("#viewer").classList.remove("open"); };
-document.addEventListener("keydown", e=>{ if(e.key==="Escape") $("#viewer").classList.remove("open"); });
+$("#viewerClose").onclick = () => closeViewer();
+$("#viewer").onclick = e => { if (e.target.id==="viewer") closeViewer(); };
+// Focus trap: keep Tab/Shift-Tab within the dialog when open
+$("#viewer").addEventListener("keydown", e=>{
+  if (!$("#viewer").classList.contains("open")) return;
+  if (e.key==="Escape"){ closeViewer(); return; }
+  if (e.key!=="Tab") return;
+  const focusable = Array.from($("#viewer").querySelectorAll(
+    'button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'));
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length-1];
+  if (e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+});
+document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
 
 /* ---------- chat ---------- */
 function addMsg(role, body, report){
