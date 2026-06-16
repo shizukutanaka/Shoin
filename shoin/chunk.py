@@ -99,7 +99,10 @@ def _tail(text: str, tokens: int) -> str:
         elif not ch.isalnum() and i + 1 < len(text) and text[i + 1].isalnum():
             acc += 1  # word boundary crossed
         if acc >= tokens:
-            return text[i + 1 :].lstrip()
+            # For CJK, position i IS the token — include it.
+            # For word boundaries, i is the non-alnum separator before the word
+            # that starts at i+1 — exclude the separator.
+            return (text[i:] if is_cjk(ch) else text[i + 1 :]).lstrip()
     return text
 
 

@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.75")
+        self.assertEqual(VERSION, "0.1.76")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -406,6 +406,24 @@ class TestChunk(unittest.TestCase):
         chunks = split_text(text, chunk_tokens=2, overlap_tokens=0)
         # With token budget=2, the two clauses separated by ； should split
         self.assertGreater(len(chunks), 1, msg="；should trigger a sentence split")
+
+    def test_tail_cjk_includes_trigger_token(self) -> None:
+        """_tail must include the CJK character that triggered acc >= tokens, not skip it.
+
+        Without the fix, returning text[i+1:] after a CJK character increments acc
+        excludes that character, yielding one fewer token than requested.
+        """
+        from shoin.chunk import _tail
+
+        text = "東西南北上下"  # 6 CJK tokens
+        result = _tail(text, 3)
+        self.assertEqual(result, "北上下", "_tail(text, 3) must return exactly 3 CJK tokens")
+        self.assertEqual(estimate_tokens(result), 3)
+
+        # Verify ASCII words are unaffected (word boundary is the space before the word).
+        result_en = _tail("alpha beta gamma", 2)
+        self.assertEqual(result_en, "beta gamma")
+        self.assertEqual(estimate_tokens(result_en), 2)
 
 
 class TestIngest(unittest.TestCase):
