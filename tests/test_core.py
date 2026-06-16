@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.98")
+        self.assertEqual(VERSION, "0.1.99")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -844,6 +844,330 @@ class TestIngest(unittest.TestCase):
         ):
             result = ing.extract_url("https://short.example/abc")
         self.assertEqual(result.title, "https://cdn.example/notes.txt")
+
+    def test_decode_fallback_to_replace_on_non_utf8_non_cp932(self) -> None:
+        """Bytes that fail both UTF-8 and cp932 must fall back to utf-8 replace (line 73)."""
+        from shoin.ingest import _decode
+
+        # b'\x80\x81' fails both utf-8-sig and cp932.
+        result = _decode(b"\x80\x81")
+        # Should not raise; replacement characters indicate the fallback was used.
+        self.assertIsInstance(result, str)
+
+    def test_pdf_to_text_parse_error_raises_ingest_error(self) -> None:
+        """Corrupt PDF bytes must raise INGEST_PARSE_FAILED, not a bare exception."""
+        from shoin.ingest import IngestError, pdf_to_text
+
+        try:
+            from pypdf import PdfReader  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+        with self.assertRaises(IngestError) as cm:
+            pdf_to_text(b"not a real pdf at all")
+        self.assertEqual(cm.exception.code, "INGEST_PARSE_FAILED")
+
+    def test_validate_resolved_dns_failure(self) -> None:
+        """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
+        import socket
+        import shoin.ingest as ing
+
+        with patch.object(ing.socket, "getaddrinfo", side_effect=socket.gaierror("NXDOMAIN")):
+            with self.assertRaises(IngestError) as cm:
+                ing._validate_resolved("nonexistent.invalid")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertIn("DNS", str(cm.exception))
+
+    def test_validate_resolved_no_addresses_raises_fetch_failed(self) -> None:
+        """Empty address list from getaddrinfo must raise INGEST_FETCH_FAILED (line 171)."""
+        import shoin.ingest as ing
+
+        with patch.object(ing.socket, "getaddrinfo", return_value=[]):
+            with self.assertRaises(IngestError) as cm:
+                ing._validate_resolved("example.com")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertIn("no address", str(cm.exception))
+
+    def test_validate_public_url_no_host_raises_blocked(self) -> None:
+        """URL with no host must raise INGEST_URL_BLOCKED (line 185)."""
+        from shoin.ingest import IngestError, validate_public_url
+
+        with self.assertRaises(IngestError) as cm:
+            validate_public_url("http:///path/only")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+        self.assertIn("no host", str(cm.exception))
+
+    def test_fetch_url_query_string_included_in_path(self) -> None:
+        """URL with query string must pass '?foo=bar' in the request path (line 244)."""
+        import shoin.ingest as ing
+
+        captured_path: list[str] = []
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeConn:
+            def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+                captured_path.append(path)
+                raise OSError("short-circuit")
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError),
+        ):
+            ing.fetch_url("http://example.com/path?foo=bar")
+        self.assertTrue(any("foo=bar" in p for p in captured_path))
+
+    def test_fetch_url_https_path_uses_https_connection(self) -> None:
+        """HTTPS URL must use _PinnedHTTPSConnection (line 246)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeHTTPSConn:
+            def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+                raise OSError("short-circuit-https")
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPSConnection", lambda *a, **k: FakeHTTPSConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("https://example.com/page")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
+    def test_fetch_url_redirect_without_location_raises(self) -> None:
+        """301 response with no Location header must raise INGEST_FETCH_FAILED (line 257)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeResp:
+            status = 301
+            def getheader(self, name: str, default: str = "") -> str:
+                return default  # no Location
+            def read(self, n: int = -1) -> bytes:
+                return b""
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("http://example.com/page")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertIn("redirect without Location", str(cm.exception))
+
+    def test_fetch_url_http_error_status_raises(self) -> None:
+        """HTTP 404 response must raise INGEST_FETCH_FAILED (line 261)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeResp:
+            status = 404
+            def getheader(self, name: str, default: str = "") -> str:
+                return default
+            def read(self, n: int = -1) -> bytes:
+                return b""
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("http://example.com/missing")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertIn("404", str(cm.exception))
+
+    def test_fetch_url_empty_body_raises_ingest_empty(self) -> None:
+        """Server returning empty body must raise INGEST_EMPTY (line 264)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeResp:
+            status = 200
+            def getheader(self, name: str, default: str = "") -> str:
+                return "text/plain"
+            def read(self, n: int = -1) -> bytes:
+                return b""  # empty body
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("http://example.com/empty")
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+
+    def test_fetch_url_too_many_redirects_raises(self) -> None:
+        """More than URL_MAX_REDIRECTS hops must raise INGEST_URL_BLOCKED (line 272)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        hop = [0]
+
+        class FakeResp:
+            status = 301
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Location":
+                    hop[0] += 1
+                    return f"http://example.com/hop{hop[0]}"
+                return default
+            def read(self, n: int = -1) -> bytes:
+                return b""
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url("http://example.com/start")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+        self.assertIn("redirect", str(cm.exception))
+
+    def test_extract_file_html_uses_html_title(self) -> None:
+        """HTML files must use the <title> tag as their title (lines 293-294)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "page.html"
+            p.write_text("<html><head><title>My Title</title></head><body><p>Content here.</p></body></html>", encoding="utf-8")
+            result = extract_file(p)
+        self.assertEqual(result.title, "My Title")
+        self.assertIn("Content here", result.text)
+
+    def test_extract_url_html_content_uses_page_title(self) -> None:
+        """HTML response in extract_url must use <title> as the source title (lines 310-311)."""
+        import shoin.ingest as ing
+
+        html_body = b"<html><head><title>Article Title</title></head><body><p>Article text here.</p></body></html>"
+        with patch.object(
+            ing, "fetch_url",
+            return_value=(html_body, "text/html; charset=utf-8", "http://example.com/article")
+        ):
+            result = ing.extract_url("http://example.com/article")
+        self.assertEqual(result.title, "Article Title")
+        self.assertIn("Article text", result.text)
+
+    def test_extract_url_empty_html_raises_ingest_empty(self) -> None:
+        """HTML that produces empty text after extraction must raise INGEST_EMPTY (line 316)."""
+        import shoin.ingest as ing
+
+        html_body = b"<html><head><title>Empty Page</title></head><body></body></html>"
+        with (
+            patch.object(
+                ing, "fetch_url",
+                return_value=(html_body, "text/html", "http://example.com/empty")
+            ),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.extract_url("http://example.com/empty")
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+
+    def test_pinned_https_connection_connect(self) -> None:
+        """_PinnedHTTPSConnection.connect() must use the pinned IP and wrap with SSL (lines 217-218)."""
+        import ssl
+        import shoin.ingest as ing
+
+        ctx = ssl.create_default_context()
+        conn = ing._PinnedHTTPSConnection("example.com", 443, "1.2.3.4", 5.0, ctx)
+
+        captured_addr: list[tuple[str, int]] = []
+        wrapped: list[bool] = []
+
+        class FakeSocket:
+            pass
+
+        def fake_create_connection(addr: tuple[str, int], timeout: float) -> FakeSocket:
+            captured_addr.append(addr)
+            return FakeSocket()
+
+        class FakeSSLContext:
+            def wrap_socket(self, raw: object, server_hostname: str = "") -> object:
+                wrapped.append(True)
+                raise OSError("ssl wrap short-circuit")
+
+        conn._ssl_context = FakeSSLContext()
+        with patch.object(ing.socket, "create_connection", fake_create_connection):
+            try:
+                conn.connect()
+            except OSError:
+                pass
+        self.assertEqual(captured_addr, [("1.2.3.4", 443)])
+        self.assertTrue(wrapped, "wrap_socket must be called (line 218)")
+
+    def test_fetch_url_success_returns_body_ctype_url(self) -> None:
+        """A 200 response must return (body, content_type, url) (lines 265-267)."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(None, None, None, None, ("1.2.3.4", 0))]
+
+        class FakeResp:
+            status = 200
+            def getheader(self, name: str, default: str = "") -> str:
+                return "text/html" if name == "Content-Type" else default
+            def read(self, n: int = -1) -> bytes:
+                return b"<html><body>Hello world</body></html>"
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+        ):
+            body, ctype, url = ing.fetch_url("http://example.com/page")
+        self.assertEqual(body, b"<html><body>Hello world</body></html>")
+        self.assertEqual(ctype, "text/html")
+        self.assertEqual(url, "http://example.com/page")
 
 
 class TestSearch(unittest.TestCase):
