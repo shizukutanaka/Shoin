@@ -458,6 +458,66 @@ class ServerTest(unittest.TestCase):
         _, qs_after = self._json("GET", f"/api/notebooks/{nb_id}/questions")
         self.assertEqual(qs_after["questions"], good_qs)
 
+    def test_source_delete_returns_200(self) -> None:
+        """DELETE /api/sources/{id} must return 200 with the deleted source id."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "del-src"})
+        nb_id = nb["id"]
+        s1, _, _ = self._req(
+            "POST", f"/api/notebooks/{nb_id}/upload",
+            ("削除テスト用文書。" * 20).encode(), {"X-Filename": "del.txt"}
+        )
+        self.assertEqual(s1, 201)
+        _, nb_data = self._json("GET", f"/api/notebooks/{nb_id}")
+        src_id = nb_data["sources"][0]["id"]  # type: ignore[index]
+        status, resp = self._json("DELETE", f"/api/sources/{src_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["deleted"], src_id)  # type: ignore[index]
+
+    def test_source_delete_nonexistent_returns_404(self) -> None:
+        """DELETE /api/sources/{id} with unknown id must return 404 SOURCE_NOT_FOUND."""
+        status, err = self._json("DELETE", "/api/sources/99999")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
+
+    def test_json_body_too_large_returns_400(self) -> None:
+        """A JSON-body request exceeding 10 MB must return 400 INGEST_FILE_TOO_LARGE."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        big_body = json.dumps({"name": "x" * (10 * 1024 * 1024 + 1)}).encode()
+        conn.putrequest("POST", "/api/notebooks")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(len(big_body)))
+        conn.endheaders(big_body)
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"]["code"], "INGEST_FILE_TOO_LARGE")
+
+    def test_json_body_array_returns_400(self) -> None:
+        """A JSON array body (not an object) must return 400 VALIDATION_FIELD_FORMAT_INVALID."""
+        status, err = self._json("POST", "/api/notebooks", None)
+        # Send a raw array instead of the normal dict
+        status2, _, raw = self._req(
+            "POST", "/api/notebooks", b"[1,2,3]",
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(status2, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_upload_zero_length_rejected(self) -> None:
+        """An upload with Content-Length: 0 must return 400 INGEST_EMPTY."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "zero-upload"})
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("POST", f"/api/notebooks/{nb['id']}/upload")
+        conn.putheader("Content-Length", "0")
+        conn.putheader("X-Filename", "empty.txt")
+        conn.endheaders()
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"]["code"], "INGEST_EMPTY")
+
     def test_upload_too_large_rejected(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "limit"})
         status, _, raw = self._req(
@@ -501,6 +561,14 @@ class ServerTest(unittest.TestCase):
         conn.close()
         status, _ = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
+
+    def test_json_body_invalid_syntax_returns_400(self) -> None:
+        """A syntactically broken JSON body must return 400 VALIDATION_FIELD_FORMAT_INVALID."""
+        status, _, raw = self._req(
+            "POST", "/api/notebooks", b"{broken:", {"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
     def test_upload_source_title_path_traversal_stripped(self) -> None:
         """Path components in X-Filename must be stripped; only the basename is stored."""
@@ -616,6 +684,80 @@ class ServerTest(unittest.TestCase):
         for exc_class in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             with self.assertRaises(ConnectionError, msg=f"{exc_class.__name__} must be ConnectionError"):
                 raise exc_class("test")
+
+
+class NonStreamingLLMTest(unittest.TestCase):
+    """Server falls back to non-streaming chat() when LLM has no chat_stream method."""
+
+    class ChatOnlyLLM:
+        """LLM backend with chat() but no chat_stream — tests the fallback code path."""
+        embedding_model = ""
+        model = "sync-only"
+
+        def available(self) -> bool:
+            return True
+
+        def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+            return "同期応答 [S1]。"
+
+        def embed_one(self, text: str) -> list[float]:
+            return [1.0, 0.0]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = cls.ChatOnlyLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "s.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method: str, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object]]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+        return resp.status, json.loads(raw) if raw else {}
+
+    def test_non_streaming_llm_returns_done_event(self) -> None:
+        """When the LLM has no chat_stream, _stream_chat falls back to chat(); ask must succeed."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "同期テスト"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("これは同期テストの内容です。内容について説明します。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "sync.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        req2 = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/ask"),
+            data=json.dumps({"question": "内容について教えてください"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req2) as resp:
+            raw = resp.read().decode()
+        events = parse_sse(raw)
+        event_types = [e for e, _ in events]
+        self.assertIn("done", event_types)
+        self.assertIn("delta", event_types)
 
 
 class MidStreamLLMErrorTest(unittest.TestCase):

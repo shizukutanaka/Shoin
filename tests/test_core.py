@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.88")
+        self.assertEqual(VERSION, "0.1.89")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -131,6 +131,19 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.create_notebook("   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_rename_notebook_empty_name_rejected(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            with self.assertRaises(StoreError) as cm:
+                s.rename_notebook(nb.id, "   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_get_chunk_unknown_id_raises(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.get_chunk(99999)
+            self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
 
     def test_duplicate_source_rejected(self) -> None:
         with make_store() as s:
