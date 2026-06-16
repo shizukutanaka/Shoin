@@ -521,6 +521,17 @@ class StudioHitsEdgeCaseTest(unittest.TestCase):
         self.assertEqual(hits[0].text, "唯一のチャンク")
         store.close()
 
+    def test_overview_hits_per_source_one_returns_first_chunk(self) -> None:
+        """per_source=1 on a multi-chunk source must return exactly one chunk (seq=0)."""
+        store = Store(":memory:")
+        nb = store.create_notebook("one-sample").id
+        src = store.add_source(nb, "txt", "multi", "/m", "h2")
+        store.add_chunks(src.id, ["序章", "第一章", "第二章", "結論"])
+        hits = overview_hits(store, nb, per_source=1)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].text, "序章")  # seq=0, the first chunk
+        store.close()
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:
