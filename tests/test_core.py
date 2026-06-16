@@ -741,6 +741,21 @@ class TestSearch(unittest.TestCase):
         self.assertIn('"書院は"', expr)  # CJK runs decompose into trigrams
         self.assertIn(" OR ", expr)
 
+    def test_fts_query_cjk_3char_used_as_single_term(self) -> None:
+        """A 3-char CJK term is exactly one trigram — used as-is, not decomposed.
+
+        The condition `len(term) > 3` means exactly-3-char CJK terms skip
+        decomposition and are passed whole to FTS5 (which is correct: they ARE
+        a single trigram).  A 4-char CJK term produces two overlapping trigrams.
+        """
+        three_char = fts_query("書院は")  # single 3-char CJK run
+        self.assertEqual(three_char, '"書院は"', "3-char CJK term must be used as-is")
+
+        four_char = fts_query("書院はな")  # 4-char → decomposes into 2 trigrams
+        self.assertIn('"書院は"', four_char)
+        self.assertIn('"院はな"', four_char)
+        self.assertEqual(four_char, '"書院は" OR "院はな"')
+
     def test_query_terms_cjk_punctuation_acts_as_boundary(self) -> None:
         """CJK punctuation (U+3000-U+303F) must split CJK runs, not extend them."""
         # 。and 、 were added to is_cjk() in v0.1.48; they must NOT join CJK word runs
