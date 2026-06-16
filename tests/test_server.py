@@ -1452,5 +1452,57 @@ class HostnameOfTest(unittest.TestCase):
         self.assertEqual(result, "")
 
 
+class InputValidationSecurityTest(unittest.TestCase):
+    """Tests for the security fixes: integer overflow and negative Content-Length."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "sec.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _raw_post(self, path: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", path, body=body, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, resp.read()
+
+    def test_huge_notebook_id_returns_400_not_crash(self) -> None:
+        """A path ID larger than int64 max must return 400, not propagate OverflowError."""
+        huge_id = "9" * 30  # >>> 2**63-1
+        status, raw = self._raw_post(
+            f"/api/notebooks/{huge_id}/sources",
+            b'{"url":"http://example.com"}',
+            {"Content-Type": "application/json", "Content-Length": "28"},
+        )
+        data = json.loads(raw)
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_INTEGER_OVERFLOW")
+
+    def test_negative_content_length_returns_400(self) -> None:
+        """A negative Content-Length on a JSON endpoint must return 400, not read until EOF."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "POST",
+            "/api/notebooks",
+            body=b"",
+            headers={"Content-Type": "application/json", "Content-Length": "-1"},
+        )
+        resp = conn.getresponse()
+        raw = resp.read()
+        data = json.loads(raw)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)

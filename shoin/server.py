@@ -145,6 +145,8 @@ class _Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = 0
+        if n < 0:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", "invalid Content-Length")
         if n > MAX_UPLOAD_BYTES:
             self._drain(n)  # consume (bounded) so the error response reaches the client
             raise IngestError("INGEST_FILE_TOO_LARGE", "request body too large")
@@ -224,7 +226,13 @@ class _Handler(BaseHTTPRequestHandler):
             if m:
                 handler: Callable[..., None] = getattr(self, f"_h_{name}")
                 try:
-                    handler(*[int(g) for g in m.groups()])
+                    args = [int(g) for g in m.groups()]
+                    # SQLite integers are 64-bit signed; reject out-of-range IDs before
+                    # they reach the driver and raise an uncaught OverflowError.
+                    _I64 = 2**63
+                    if any(a >= _I64 or a < -_I64 for a in args):
+                        raise StoreError("VALIDATION_INTEGER_OVERFLOW", "ID out of range")
+                    handler(*args)
                 except StoreError as exc:
                     if exc.code.endswith("_NOT_FOUND"):
                         status = 404
@@ -341,7 +349,7 @@ class _Handler(BaseHTTPRequestHandler):
         raw_name = (
             Path(urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")).name
             or "upload.txt"
-        ).replace("\x00", "") or "upload.txt"  # null bytes → ValueError in NamedTemporaryFile
+        ).replace("\x00", "").replace("\r", "").replace("\n", "") or "upload.txt"
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)
