@@ -385,6 +385,10 @@ function renderNotebook(){
         try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
       row.append(del);
       row.onclick = () => showSource(s.id, s.title);
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-label", `View source: ${s.title}`);
+      row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showSource(s.id, s.title); } };
       list.append(row);
     });
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
