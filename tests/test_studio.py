@@ -278,6 +278,7 @@ class ExportTest(unittest.TestCase):
 
         % causes silent truncation (comment); & causes a LaTeX error outside tabular;
         $ starts math mode; # is a parameter marker; _ causes errors outside math.
+        ^ is the superscript operator; ~ is a non-breaking space (active character).
         """
         from shoin.export import _bib_escape
 
@@ -298,6 +299,17 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(_bib_escape("my_file.txt"), "my\\_file.txt")
         # backslash before percent must not produce \\% (already escaped)
         self.assertEqual(_bib_escape("\\%"), "\\\\\\%")
+        # caret: TeX superscript operator — LaTeX error in text mode.
+        # \^{} produces a circumflex accent over an empty box (visually ^).
+        # The {} must NOT be corrupted to () by the {/} → (/) substitution.
+        self.assertEqual(_bib_escape("O(n^2)"), "O(n\\^{}2)")
+        self.assertNotIn("\\^()", _bib_escape("x^y"),
+                         "\\^{} must keep LaTeX braces, not () from the literal-brace substitution")
+        # tilde: TeX active char (non-breaking space) — common in academic URLs.
+        # \~{} produces a tilde accent over an empty box (visually ~).
+        url_tilde = "http://example.com/~user/paper.pdf"
+        self.assertIn("\\~{}", _bib_escape(url_tilde))
+        self.assertEqual(_bib_escape("~"), "\\~{}")
 
     def test_ris_date_uses_slash_format(self) -> None:
         """RIS 2001 spec requires DA  - YYYY/MM/DD (slashes), not ISO 8601 dashes."""

@@ -79,21 +79,28 @@ def export_markdown(store: Store, notebook_id: int) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
+_BIB_ESC: dict[str, str] = {
+    # Backslash must be listed first; the other entries add backslashes.
+    "\\": "\\\\",
+    "%": "\\%",    # TeX comment — silently truncates remainder of field
+    "&": "\\&",    # TeX tab-stop — LaTeX error outside tabular
+    "$": "\\$",    # TeX math delimiter
+    "#": "\\#",    # TeX macro parameter
+    "_": "\\_",    # TeX subscript — LaTeX error outside math
+    # \^{} / \~{} produce circumflex / tilde over an empty box — visually correct
+    # and avoid issues in text mode.  Character-by-character replacement prevents
+    # the subsequent {}→() substitution from corrupting these two-char sequences.
+    "^": "\\^{}",
+    "~": "\\~{}",
+    "{": "(",       # Literal braces → parens to avoid unbalanced BibTeX delimiters
+    "}": ")",
+}
+
+
 def _bib_escape(text: str) -> str:
-    # Escape backslash first so subsequent replacements don't double-escape.
     # splitlines() handles \n, \r\n, and bare \r uniformly.
     single = " ".join(text.splitlines())
-    return (
-        single
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")   # TeX comment — silently truncates remainder of field
-        .replace("&", "\\&")   # TeX tab-stop — LaTeX error outside tabular
-        .replace("$", "\\$")   # TeX math delimiter
-        .replace("#", "\\#")   # TeX macro parameter
-        .replace("_", "\\_")   # TeX subscript — LaTeX error outside math
-        .replace("{", "(")
-        .replace("}", ")")
-    )
+    return "".join(_BIB_ESC.get(ch, ch) for ch in single)
 
 
 def _ris_escape(text: str) -> str:
