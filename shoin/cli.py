@@ -51,7 +51,9 @@ _STRINGS: dict[str, dict[str, str]] = {
 
 
 def _t(key: str, **kw: str) -> str:
-    lang = ui_lang() if ui_lang() in _STRINGS else "en"
+    lang = ui_lang()
+    if lang not in _STRINGS:
+        lang = "en"
     tmpl = _STRINGS[lang].get(key) or _STRINGS["ja"][key]
     return tmpl.format(**kw) if kw else tmpl
 

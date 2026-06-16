@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.72")
+        self.assertEqual(VERSION, "0.1.73")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -896,6 +896,38 @@ class TestSearch(unittest.TestCase):
                              "underscore must not act as LIKE wildcard (false positive)")
             self.assertFalse(any("exactmatch no separator" in t for t in texts),
                              "chunk without underscore must not match")
+
+
+class TestQA(unittest.TestCase):
+    def test_history_cite_re_strips_normal_citations(self) -> None:
+        """_HISTORY_CITE_RE must strip [S1], [S1, S2], and full-width [Ｓ１] markers."""
+        from shoin.qa import _HISTORY_CITE_RE
+
+        self.assertEqual(_HISTORY_CITE_RE.sub("", "answer [S1] here"), "answer  here")
+        self.assertEqual(_HISTORY_CITE_RE.sub("", "[S1, S2] context"), " context")
+        self.assertEqual(_HISTORY_CITE_RE.sub("", "text [Ｓ１]"), "text ")
+
+    def test_history_cite_re_no_false_positive_for_word_embedded_s(self) -> None:
+        """_HISTORY_CITE_RE must NOT strip brackets where 's' is inside a word.
+
+        Before the \\b word-boundary guard, [vs 3.0] or [figs 1] matched because
+        the regex only required any 's' followed by whitespace and digits inside a
+        bracket — it couldn't tell 's' in "vs" from a standalone S-number.
+        """
+        from shoin.qa import _HISTORY_CITE_RE
+
+        self.assertEqual(
+            _HISTORY_CITE_RE.sub("", "compare [vs 3.0]"), "compare [vs 3.0]",
+            "[vs 3.0] must not be stripped — 's' is embedded in 'vs', not a citation",
+        )
+        self.assertEqual(
+            _HISTORY_CITE_RE.sub("", "see [figs 1]"), "see [figs 1]",
+            "[figs 1] must not be stripped — 's' is embedded in 'figs', not a citation",
+        )
+        self.assertEqual(
+            _HISTORY_CITE_RE.sub("", "refs [issue 5]"), "refs [issue 5]",
+            "[issue 5] must not be stripped — no S-number inside",
+        )
 
 
 class TestLLMClient(unittest.TestCase):
