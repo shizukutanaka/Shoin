@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.1.66")
+        self.assertEqual(VERSION, "0.1.67")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -230,6 +230,45 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_note(99999, "title", "body")
             self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_message_notebook_deleted_between_check_and_insert(self) -> None:
+        """Race: notebook deleted after get_notebook() passes but before INSERT.
+        Must raise StoreError(NOTEBOOK_NOT_FOUND), not bare sqlite3.IntegrityError,
+        so callers that guard 'except StoreError' work correctly (e.g. SSE handler).
+        Simulated by bypassing get_notebook with a mock and then deleting the notebook."""
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("race-msg")
+            s.delete_notebook(nb.id)
+            with patch.object(s, "get_notebook"):  # bypass the pre-check
+                with self.assertRaises(StoreError) as cm:
+                    s.add_message(nb.id, "user", "hello", "{}")
+                self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_note_notebook_deleted_between_check_and_insert(self) -> None:
+        """Same FK-race as add_message but for add_note — must not leak IntegrityError."""
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("race-note")
+            s.delete_notebook(nb.id)
+            with patch.object(s, "get_notebook"):
+                with self.assertRaises(StoreError) as cm:
+                    s.add_note(nb.id, "t", "b")
+                self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
+        """Same FK-race as add_message but for add_studio_output."""
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("race-studio")
+            s.delete_notebook(nb.id)
+            with patch.object(s, "get_notebook"):
+                with self.assertRaises(StoreError) as cm:
+                    s.add_studio_output(nb.id, "briefing", "body", "{}")
+                self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_list_notebooks_with_counts_single_query(self) -> None:
         with make_store() as s:

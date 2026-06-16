@@ -378,10 +378,16 @@ class Store:
 
     def add_note(self, notebook_id: int, title: str, body: str) -> int:
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-        cur = self.conn.execute(
-            "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
-            (notebook_id, title, body, _now()),
-        )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
+                (notebook_id, title, body, _now()),
+            )
+        except sqlite3.IntegrityError:
+            raise StoreError(
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {notebook_id} was deleted during note insertion",
+            )
         self.conn.commit()
         self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
@@ -405,11 +411,17 @@ class Store:
         self, notebook_id: int, kind: str, body: str, citation_report: str
     ) -> int:
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-        cur = self.conn.execute(
-            "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
-            " created_at) VALUES (?,?,?,?,?)",
-            (notebook_id, kind, body, citation_report, _now()),
-        )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
+                " created_at) VALUES (?,?,?,?,?)",
+                (notebook_id, kind, body, citation_report, _now()),
+            )
+        except sqlite3.IntegrityError:
+            raise StoreError(
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {notebook_id} was deleted during studio output insertion",
+            )
         self.conn.commit()
         self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
@@ -431,11 +443,17 @@ class Store:
         self, notebook_id: int, role: str, body: str, citation_report: str = "{}"
     ) -> int:
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-        cur = self.conn.execute(
-            "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
-            " VALUES (?,?,?,?,?)",
-            (notebook_id, role, body, citation_report, _now()),
-        )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (notebook_id, role, body, citation_report, _now()),
+            )
+        except sqlite3.IntegrityError:
+            raise StoreError(
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {notebook_id} was deleted during message insertion",
+            )
         self.conn.commit()
         self.touch_notebook(notebook_id)
         return int(cur.lastrowid or 0)
