@@ -378,6 +378,24 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_clear_chat_nonexistent_notebook_returns_404(self) -> None:
+        """Clearing messages on a nonexistent notebook must return 404 NOTEBOOK_NOT_FOUND."""
+        status, err = self._json("DELETE", "/api/notebooks/99999/messages")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
+    def test_questions_nonexistent_notebook_returns_404(self) -> None:
+        """Fetching questions for a nonexistent notebook must return 404 NOTEBOOK_NOT_FOUND."""
+        status, err = self._json("GET", "/api/notebooks/99999/questions")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
+    def test_ask_nonexistent_notebook_returns_404_before_sse(self) -> None:
+        """ask on a nonexistent notebook must return 404 JSON (not start SSE headers)."""
+        status, err = self._json("POST", "/api/notebooks/99999/ask", {"question": "何？"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
     def test_questions_cached_until_sources_change(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "提案キャッシュ"})
         nb_id = nb["id"]
