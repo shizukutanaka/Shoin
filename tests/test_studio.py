@@ -439,6 +439,24 @@ class ExportTest(unittest.TestCase):
         self.assertIn("# 空白", md)
         self.assertIn("ソース", md)
 
+    def test_markdown_source_map_sorted_numerically_with_10_plus_sources(self) -> None:
+        """source_map legend with S1..S10+ must be sorted numerically, not lexicographically.
+
+        Lexicographic sort gives S1, S10, S2, S3 ... ; numeric gives S1, S2, S3, ... S10.
+        """
+        import json as _json
+
+        source_map = {f"S{i}": f"資料{i}" for i in range(1, 12)}
+        report = _json.dumps({"source_map": source_map, "cited": list(range(1, 12)), "invalid": []})
+        self.store.add_message(self.nb, "user", "質問")
+        self.store.add_message(self.nb, "assistant", "回答", report)
+        md = export(self.store, self.nb, "md")
+        # Extract the legend line
+        legend_line = next(l for l in md.splitlines() if "S1=" in l and "S10=" in l)
+        keys_in_order = [part.split("=")[0] for part in legend_line.split("(引用元: ")[-1].rstrip("):").split(", ")]
+        expected = [f"S{i}" for i in range(1, 12)]
+        self.assertEqual(keys_in_order, expected, "source_map legend must be in numeric order S1, S2, ..., S10, S11")
+
 
 class StudioHitsEdgeCaseTest(unittest.TestCase):
     def setUp(self) -> None:

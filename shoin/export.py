@@ -69,7 +69,13 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                     else {}
                 )
                 if source_map:
-                    legend = ", ".join(f"{k}={v}" for k, v in sorted(source_map.items()))
+                    legend = ", ".join(
+                        f"{k}={v}"
+                        for k, v in sorted(
+                            source_map.items(),
+                            key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,
+                        )
+                    )
                     parts.append(f"**Assistant** ({_t('source_label')}: {legend}):")
                 else:
                     parts.append("**Assistant**:")
