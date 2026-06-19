@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import MAX_NAME_LEN
+from .config import MAX_NAME_LEN, MAX_TITLE_LEN
 
 # --- schema migrations (append-only; never edit a shipped entry) ---
 
@@ -261,6 +261,7 @@ class Store:
     def add_source(
         self, notebook_id: int, kind: str, title: str, origin: str, sha256: str
     ) -> Source:
+        title = title[:MAX_TITLE_LEN]  # silently truncate; titles come from external content
         self.get_notebook(notebook_id)
         dup = self.conn.execute(
             "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
@@ -293,6 +294,7 @@ class Store:
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
+        title = title[:MAX_TITLE_LEN]
         src = self.get_source(source_id)
         self.conn.execute(
             "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)

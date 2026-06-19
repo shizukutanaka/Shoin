@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.6")
+        self.assertEqual(VERSION, "0.2.7")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -255,6 +255,25 @@ class TestStore(unittest.TestCase):
             self.assertEqual(updated.title, "report.txt")
             self.assertEqual(updated.origin, "report.txt")
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_add_source_long_title_truncated(self) -> None:
+        from shoin.config import MAX_TITLE_LEN
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            long_title = "x" * (MAX_TITLE_LEN + 100)
+            src = s.add_source(nb.id, "url", long_title, "https://example.com", "h99")
+            self.assertEqual(len(s.get_source(src.id).title), MAX_TITLE_LEN)
+
+    def test_update_source_title_long_truncated(self) -> None:
+        from shoin.config import MAX_TITLE_LEN
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "short.txt", "short.txt", "hx")
+            long_name = "a" * (MAX_TITLE_LEN + 50)
+            s.update_source_title(src.id, long_name, long_name)
+            self.assertEqual(len(s.get_source(src.id).title), MAX_TITLE_LEN)
 
     def test_delete_source_touches_notebook(self) -> None:
         with make_store() as s:
