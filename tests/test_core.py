@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.5")
+        self.assertEqual(VERSION, "0.2.6")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -137,6 +137,39 @@ class TestStore(unittest.TestCase):
             nb = s.create_notebook("研究")
             with self.assertRaises(StoreError) as cm:
                 s.rename_notebook(nb.id, "   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_create_notebook_name_too_long_rejected(self) -> None:
+        from shoin.config import MAX_NAME_LEN
+
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.create_notebook("a" * (MAX_NAME_LEN + 1))
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_rename_notebook_name_too_long_rejected(self) -> None:
+        from shoin.config import MAX_NAME_LEN
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            with self.assertRaises(StoreError) as cm:
+                s.rename_notebook(nb.id, "a" * (MAX_NAME_LEN + 1))
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_add_note_title_too_long_rejected(self) -> None:
+        from shoin.config import MAX_NAME_LEN
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            with self.assertRaises(StoreError) as cm:
+                s.add_note(nb.id, "a" * (MAX_NAME_LEN + 1), "body")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_add_note_empty_title_rejected(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            with self.assertRaises(StoreError) as cm:
+                s.add_note(nb.id, "   ", "body")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_get_chunk_unknown_id_raises(self) -> None:

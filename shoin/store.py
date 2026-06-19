@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import MAX_NAME_LEN
+
 # --- schema migrations (append-only; never edit a shipped entry) ---
 
 MIGRATIONS: list[tuple[int, str]] = [
@@ -212,6 +214,8 @@ class Store:
         name = name.strip()
         if not name:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
+        if len(name) > MAX_NAME_LEN:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"name too long (max {MAX_NAME_LEN} chars)")
         ts = _now()
         cur = self.conn.execute(
             "INSERT INTO notebooks(name, created_at, updated_at) VALUES (?,?,?)",
@@ -234,6 +238,8 @@ class Store:
         name = name.strip()
         if not name:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
+        if len(name) > MAX_NAME_LEN:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"name too long (max {MAX_NAME_LEN} chars)")
         self.get_notebook(notebook_id)
         self.conn.execute(
             "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
@@ -383,6 +389,11 @@ class Store:
     # --- notes / studio outputs ---
 
     def add_note(self, notebook_id: int, title: str, body: str) -> int:
+        title = title.strip()
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "note title is empty")
+        if len(title) > MAX_NAME_LEN:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"title too long (max {MAX_NAME_LEN} chars)")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             cur = self.conn.execute(
