@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
+MAX_QUESTION_LEN = 2000  # chars; a longer FTS5 OR-expression becomes pathologically slow
 CHUNK_TOKENS = 512  # REQ-003: target tokens per chunk
 CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth

@@ -1503,6 +1503,31 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_overlong_question_returns_400(self) -> None:
+        """A question exceeding MAX_QUESTION_LEN must be rejected before FTS evaluation."""
+        import json as _json
+
+        # Create a notebook first so the rejection happens in _h_ask_sse, not at 404
+        nb_body = _json.dumps({"name": "q-len-test"}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "POST", "/api/notebooks", body=nb_body,
+            headers={"Content-Type": "application/json"},
+        )
+        nb_resp = conn.getresponse()
+        nb_data = _json.loads(nb_resp.read())
+        nb_id = nb_data.get("id", 1)
+
+        ask_body = _json.dumps({"question": "あ" * 2001}).encode()
+        status, raw = self._raw_post(
+            f"/api/notebooks/{nb_id}/ask",
+            ask_body,
+            {"Content-Type": "application/json"},
+        )
+        data = _json.loads(raw)
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

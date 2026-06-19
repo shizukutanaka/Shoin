@@ -11,7 +11,7 @@ import sys
 from collections.abc import Sequence
 
 from .citation import CitationReport
-from .config import TOP_K, VERSION, db_path, port, ui_lang
+from .config import MAX_QUESTION_LEN, TOP_K, VERSION, db_path, port, ui_lang
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -169,7 +169,13 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
-    answer = ask(store, llm, int(args.notebook_id), str(args.question), k=int(args.k))
+    question = str(args.question)
+    if len(question) > MAX_QUESTION_LEN:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"question too long (max {MAX_QUESTION_LEN} characters)",
+        )
+    answer = ask(store, llm, int(args.notebook_id), question, k=int(args.k))
     print(answer.text)
     if answer.hits:
         print("---")

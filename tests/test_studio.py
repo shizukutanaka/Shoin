@@ -934,6 +934,17 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("VALIDATION_INTEGER_OVERFLOW", err.getvalue())
 
+    def test_overlong_question_cli_returns_1(self) -> None:
+        """A question longer than MAX_QUESTION_LEN must be rejected by the CLI."""
+        from shoin.cli import main
+        import io
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = main(["--db", ":memory:", "ask", "1", "あ" * 2001])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

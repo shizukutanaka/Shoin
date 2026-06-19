@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .citation import make_report
-from .config import MAX_UPLOAD_BYTES, VERSION, db_path
+from .config import MAX_QUESTION_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -475,6 +475,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_ask_sse(self, nb_id: int) -> None:
         question = self._require(self._read_json(), "question")
+        if len(question) > MAX_QUESTION_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"question too long (max {MAX_QUESTION_LEN} characters)",
+            )
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404 before headers go out
             history = history_messages(store, nb_id)  # before persisting this turn
