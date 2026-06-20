@@ -26,7 +26,7 @@ _CJK_RANGES = (
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])|(?<=\.)(?=\s)")
 
 
 def is_cjk(ch: str) -> bool:

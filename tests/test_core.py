@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shoin import VERSION
-from shoin.chunk import estimate_tokens, is_cjk, split_text
+from shoin.chunk import _SENTENCE_SPLIT_RE, estimate_tokens, is_cjk, split_text
 from shoin.ingest import (
     Extracted,
     IngestError,
@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.13")
+        self.assertEqual(VERSION, "0.2.14")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -579,6 +579,33 @@ class TestChunk(unittest.TestCase):
         for p in parts:
             self.assertTrue(p)
             self.assertLessEqual(estimate_tokens(p), 50 + 10)  # small slack
+
+    def test_sentence_split_ascii_period_space(self) -> None:
+        """_SENTENCE_SPLIT_RE must split English sentences at period-space boundaries.
+
+        Without the fix, '. ' is not a split point and the entire English answer
+        is treated as a single sentence in verify_grounding, making per-citation
+        grounding checks less precise.
+        """
+        text = "Python is fast. Use it for data science."
+        parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+        self.assertGreater(len(parts), 1, "period-space must produce at least two pieces")
+        # The period must stay with the first sentence, not be discarded
+        self.assertIn(".", parts[0])
+
+    def test_sentence_split_period_space_cjk_unaffected(self) -> None:
+        """CJK sentence splitting must be unaffected by the period-space addition."""
+        text = "これは文章一。これは文章二。"
+        parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(parts[0], "これは文章一。")
+
+    def test_sentence_split_no_split_on_decimal(self) -> None:
+        """A decimal number like 3.14 must not trigger a sentence split (no space after dot)."""
+        text = "Pi is 3.14 approximately."
+        parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+        # No split should occur inside '3.14' because '4' is not whitespace
+        self.assertEqual(len(parts), 1)
 
 
 class TestIngest(unittest.TestCase):
@@ -1698,6 +1725,33 @@ class TestCitation(unittest.TestCase):
             "[S1][S2]", {1: "some source body text here", 2: "another source body"}
         )
         self.assertEqual(confirmed, [])
+        self.assertEqual(misattributed, [])
+
+    def test_verify_grounding_english_period_sentences_split(self) -> None:
+        """Two English sentences each citing different sources must be evaluated separately.
+
+        Without the period-space split, both citations are treated as one long
+        claim and evaluated against both sources simultaneously, producing a false
+        confirmation or missing a misattribution.
+        """
+        from shoin.citation import verify_grounding
+
+        # S1 body uses the word 'notebook'; S2 body uses the word 'citation'.
+        # Answer sentence 1 says 'notebook' and cites S1 → should be confirmed.
+        # Answer sentence 2 says 'citation' and cites S2 → should be confirmed.
+        # If they're not split, the merged bigram set overlaps both sources equally
+        # and confirmation is less reliable.
+        src_texts = {
+            1: "shoin is a notebook application for local research",
+            2: "citations are machine verified using lexical overlap",
+        }
+        answer = (
+            "Shoin is a notebook application [S1]. "
+            "Citations are machine verified [S2]."
+        )
+        confirmed, misattributed = verify_grounding(answer, src_texts)
+        self.assertIn(1, confirmed, "S1 must be confirmed when claim text matches its source")
+        self.assertIn(2, confirmed, "S2 must be confirmed when claim text matches its source")
         self.assertEqual(misattributed, [])
 
 

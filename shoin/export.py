@@ -86,7 +86,6 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
 
 _BIB_ESC: dict[str, str] = {
-    # Backslash must be listed first; the other entries add backslashes.
     "\\": "\\\\",
     "%": "\\%",    # TeX comment — silently truncates remainder of field
     "&": "\\&",    # TeX tab-stop — LaTeX error outside tabular
