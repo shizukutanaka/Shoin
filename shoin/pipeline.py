@@ -125,10 +125,10 @@ def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[
     Raises StoreError(NOTEBOOK_NOT_FOUND) if the notebook does not exist.
     """
     store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    chunks = store.chunks_for_notebook(notebook_id)
-    if not chunks:
+    rows = store.id_text_chunks_for_notebook(notebook_id)
+    if not rows:
         return 0, 0
-    chunk_ids = [c.id for c in chunks]
-    texts = [c.text for c in chunks]
+    chunk_ids = [r[0] for r in rows]
+    texts = [r[1] for r in rows]
     n_embedded = _embed_chunks(store, llm, chunk_ids, texts, force=True)
-    return n_embedded, len(chunks)
+    return n_embedded, len(rows)

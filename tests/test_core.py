@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.15")
+        self.assertEqual(VERSION, "0.2.16")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1776,6 +1776,34 @@ class TestStoreChunksForSource(unittest.TestCase):
             nb = s.create_notebook("test")
             src = s.add_source(nb.id, "txt", "empty", "orig", "shax")
             self.assertEqual(s.chunks_for_source(src.id), [])
+
+    def test_text_chunks_for_source_returns_seq_text_without_embeddings(self) -> None:
+        """text_chunks_for_source must return (seq, text) tuples in seq order.
+
+        The method must not SELECT the embedding column so it doesn't waste time
+        unpacking BLOBs that callers (e.g. _h_src_text) will immediately discard.
+        """
+        with Store(":memory:") as s:
+            nb = s.create_notebook("txt-test")
+            src = s.add_source(nb.id, "txt", "doc", "orig", "sha-t")
+            s.add_chunks(src.id, ["alpha chunk", "beta chunk", "gamma chunk"])
+            pairs = s.text_chunks_for_source(src.id)
+        self.assertEqual(pairs, [(0, "alpha chunk"), (1, "beta chunk"), (2, "gamma chunk")])
+
+    def test_id_text_chunks_for_notebook_returns_all_sources(self) -> None:
+        """id_text_chunks_for_notebook must return (id, text) for every chunk across all
+        sources in the notebook, ordered by chunk id, without loading embeddings."""
+        with Store(":memory:") as s:
+            nb = s.create_notebook("nb-test")
+            src1 = s.add_source(nb.id, "txt", "d1", "o1", "s1")
+            src2 = s.add_source(nb.id, "txt", "d2", "o2", "s2")
+            ids1 = s.add_chunks(src1.id, ["a", "b"])
+            ids2 = s.add_chunks(src2.id, ["c"])
+            rows = s.id_text_chunks_for_notebook(nb.id)
+        chunk_ids = [r[0] for r in rows]
+        texts = [r[1] for r in rows]
+        self.assertEqual(texts, ["a", "b", "c"])
+        self.assertEqual(chunk_ids, sorted(ids1 + ids2))
 
 
 class TestLLMClient(unittest.TestCase):

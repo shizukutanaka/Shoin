@@ -382,6 +382,22 @@ class Store:
         ).fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
+    def text_chunks_for_source(self, source_id: int) -> list[tuple[int, str]]:
+        """Return (seq, text) pairs for a source without loading embedding data."""
+        rows = self.conn.execute(
+            "SELECT seq, text FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
+        ).fetchall()
+        return [(int(r["seq"]), str(r["text"])) for r in rows]
+
+    def id_text_chunks_for_notebook(self, notebook_id: int) -> list[tuple[int, str]]:
+        """Return (chunk_id, text) pairs for all chunks in a notebook without embeddings."""
+        rows = self.conn.execute(
+            "SELECT c.id, c.text FROM chunks c JOIN sources s ON s.id=c.source_id"
+            " WHERE s.notebook_id=? ORDER BY c.id",
+            (notebook_id,),
+        ).fetchall()
+        return [(int(r["id"]), str(r["text"])) for r in rows]
+
     @staticmethod
     def _row_to_chunk(r: sqlite3.Row) -> Chunk:
         blob: Any = r["embedding"]
