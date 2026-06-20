@@ -179,6 +179,14 @@ class StudioTest(unittest.TestCase):
         # Neither question should retain the ・ bullet
         self.assertFalse(any(q.startswith("・") for q in qs))
 
+    def test_suggest_questions_strips_parenthesized_number_prefix(self) -> None:
+        """Full-width （1） is NFKC-normalized to (1) and must be stripped as a list prefix."""
+        llm = FakeLLM(reply="（1）目的は何か？\n（2）仕組みはどう動きますか？\n通常の回答文。")
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertIn("目的は何か?", qs)
+        self.assertIn("仕組みはどう動きますか?", qs)
+        self.assertFalse(any(q.startswith("(") for q in qs), "parenthesized prefix must be stripped")
+
     def test_suggest_questions_strips_fullwidth_list_prefixes(self) -> None:
         """CJK-first LLMs often emit １. or ２） prefixes — NFKC normalization must strip them."""
         llm = FakeLLM(

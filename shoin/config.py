@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
