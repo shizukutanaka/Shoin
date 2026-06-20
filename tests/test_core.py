@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.12")
+        self.assertEqual(VERSION, "0.2.13")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1610,6 +1610,28 @@ class TestSearch(unittest.TestCase):
                              "underscore must not act as LIKE wildcard (false positive)")
             self.assertFalse(any("exactmatch no separator" in t for t in texts),
                              "chunk without underscore must not match")
+
+    def test_fallback_needles_drops_single_ascii_chars(self) -> None:
+        """Single-char ASCII terms must be excluded from LIKE needles.
+
+        '%A%' or '%I%' matches nearly every English chunk; including them floods
+        results with irrelevant hits.  Single-char CJK content words (猫, 木) are
+        still kept because they are selective filters in Japanese text.
+        """
+        from shoin.search import _fallback_needles
+
+        # Single ASCII char → excluded
+        self.assertEqual(_fallback_needles("A"), [])
+        self.assertEqual(_fallback_needles("I"), [])
+        # 2-char ASCII → kept (selective enough)
+        self.assertIn("AI", _fallback_needles("AI"))
+        # Single CJK content word → kept (selective in Japanese text)
+        self.assertIn("猫", _fallback_needles("猫"))
+        # Mixed: single-char ASCII dropped, rest kept
+        needles = _fallback_needles("A love story")
+        self.assertNotIn("A", needles)
+        self.assertIn("love", needles)
+        self.assertIn("story", needles)
 
 
 class TestQA(unittest.TestCase):

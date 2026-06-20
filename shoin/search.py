@@ -100,12 +100,21 @@ def fts_query(query: str) -> str:
 
 
 def _fallback_needles(query: str) -> list[str]:
-    """Substring needles for the LIKE-scan fallback (CJK bigrams + words)."""
+    """Substring needles for the LIKE-scan fallback (CJK bigrams + words ≥ 2 chars).
+
+    Single-character ASCII terms (A, I, …) are excluded: '%A%' matches almost
+    every English chunk and floods results with irrelevant hits.  Single-char CJK
+    terms (猫, 木, …) are kept because they can be meaningful content words and
+    a LIKE like '%猫%' is still a selective filter.
+    """
     needles: list[str] = []
     for term in query_terms(query):
-        if is_cjk(term[0]) and len(term) >= 2:
-            needles.extend(term[i : i + 2] for i in range(len(term) - 1))
-        else:
+        if is_cjk(term[0]):
+            if len(term) >= 2:
+                needles.extend(term[i : i + 2] for i in range(len(term) - 1))
+            else:
+                needles.append(term)  # 1-char CJK content word: keep
+        elif len(term) >= 2:  # skip single ASCII chars like "A", "I"
             needles.append(term)
     return list(dict.fromkeys(needles))
 
