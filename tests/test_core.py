@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.9")
+        self.assertEqual(VERSION, "0.2.10")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1780,6 +1780,40 @@ class TestPipeline(unittest.TestCase):
             finally:
                 s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
         self.assertEqual(n, 0)
+
+    def test_embed_chunks_model_name_whitespace_normalized(self) -> None:
+        """Model name with leading/trailing whitespace must not cause false mismatch.
+
+        _embed_chunks stores the stripped model name, and _check_embed_model_ok
+        strips both sides before comparing — so "nomic " and "nomic" are the same model.
+        """
+        from shoin.pipeline import _embed_chunks
+        from shoin.qa import _check_embed_model_ok
+
+        class SpaceyLLM:
+            embedding_model = " nomic-embed-text "
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1] * 3 for _ in texts]
+
+            def embed_one(self, text: str) -> list[float]:
+                return self.embed([text])[0]
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+        with make_store() as s:
+            nb_id = s.create_notebook("ws-test").id
+            src = s.add_source(nb_id, "txt", "doc", "d", "sha-ws")
+            chunk_ids = s.add_chunks(src.id, ["hello world"])
+            llm = SpaceyLLM()
+            # First ingestion: stores stripped model name "nomic-embed-text"
+            n = _embed_chunks(s, llm, chunk_ids, ["hello world"])
+            self.assertEqual(n, 1)
+            stored = s.get_setting("embed_model")
+            self.assertEqual(stored, "nomic-embed-text")  # stripped, no surrounding spaces
+            # check_embed_model_ok must see same-model: no false mismatch
+            self.assertTrue(_check_embed_model_ok(s, llm))
 
     def test_index_source_url_path_calls_extract_url(self) -> None:
         """index_source with an http:// target must call extract_url, not extract_file."""

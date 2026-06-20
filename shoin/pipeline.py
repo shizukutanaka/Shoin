@@ -51,16 +51,17 @@ def _embed_chunks(
     which is specifically designed to rebuild embeddings after a model change.
     """
     embed = getattr(llm, "embed", None)
-    if not (llm.embedding_model or "").strip() or embed is None:
+    current_model = (llm.embedding_model or "").strip()
+    if not current_model or embed is None:
         return 0
-    stored_model = store.get_setting("embed_model")
-    if not force and stored_model is not None and stored_model != llm.embedding_model:
+    stored_model = (store.get_setting("embed_model") or "").strip()
+    if not force and stored_model and stored_model != current_model:
         # Vectors in the DB were produced by a different model; cosine scores
         # between old and new embeddings are meaningless. Skip embedding so the
         # DB stays coherent; the user should re-index to rebuild all embeddings.
         print(
             f"Warning: embedding model changed from {stored_model!r} to"
-            f" {llm.embedding_model!r}. Re-index sources to rebuild embeddings.",
+            f" {current_model!r}. Re-index sources to rebuild embeddings.",
             file=sys.stderr,
         )
         return 0
@@ -86,7 +87,7 @@ def _embed_chunks(
     if done:
         # Record the model used so a future model change triggers the mismatch
         # warning even when a previous run only partially succeeded.
-        store.set_setting("embed_model", llm.embedding_model)
+        store.set_setting("embed_model", current_model)
     return done
 
 

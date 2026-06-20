@@ -238,8 +238,8 @@ def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     current = (llm.embedding_model or "").strip()
     if not current:
         return True  # embedding disabled: nothing to mismatch
-    stored = store.get_setting("embed_model")
-    return stored is None or stored == current
+    stored = (store.get_setting("embed_model") or "").strip()
+    return not stored or stored == current
 
 
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
