@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.17")
+        self.assertEqual(VERSION, "0.2.18")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -208,6 +208,35 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.delete_note(99999)
             self.assertEqual(cm.exception.code, "NOTE_NOT_FOUND")
+
+    def test_counts_empty_notebook(self) -> None:
+        """counts() must return zeros for a notebook with no sources or chunks."""
+        with make_store() as s:
+            nb = s.create_notebook("empty")
+            c = s.counts(nb.id)
+        self.assertEqual(c["sources"], 0)
+        self.assertEqual(c["chunks"], 0)
+
+    def test_counts_source_without_chunks(self) -> None:
+        """counts() must count sources even when they have no chunks yet."""
+        with make_store() as s:
+            nb = s.create_notebook("partial")
+            s.add_source(nb.id, "txt", "t", "o", "sha-p")
+            c = s.counts(nb.id)
+        self.assertEqual(c["sources"], 1)
+        self.assertEqual(c["chunks"], 0)
+
+    def test_counts_two_sources_multiple_chunks(self) -> None:
+        """counts() must aggregate correctly across sources using a single query."""
+        with make_store() as s:
+            nb = s.create_notebook("multi")
+            src1 = s.add_source(nb.id, "txt", "d1", "o1", "s1")
+            src2 = s.add_source(nb.id, "txt", "d2", "o2", "s2")
+            s.add_chunks(src1.id, ["a", "b", "c"])
+            s.add_chunks(src2.id, ["d", "e"])
+            c = s.counts(nb.id)
+        self.assertEqual(c["sources"], 2)
+        self.assertEqual(c["chunks"], 5)
 
     def test_cascade_delete_cleans_fts(self) -> None:
         with make_store() as s:

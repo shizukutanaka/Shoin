@@ -515,15 +515,13 @@ class Store:
         self.conn.commit()
 
     def counts(self, notebook_id: int) -> dict[str, int]:
-        n_sources = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM sources WHERE notebook_id=?", (notebook_id,)
-        ).fetchone()["n"]
-        n_chunks = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM chunks c JOIN sources s ON s.id=c.source_id"
-            " WHERE s.notebook_id=?",
+        row = self.conn.execute(
+            "SELECT COUNT(DISTINCT s.id) AS sources, COUNT(c.id) AS chunks"
+            " FROM sources s LEFT JOIN chunks c ON c.source_id = s.id"
+            " WHERE s.notebook_id = ?",
             (notebook_id,),
-        ).fetchone()["n"]
-        return {"sources": int(n_sources), "chunks": int(n_chunks)}
+        ).fetchone()
+        return {"sources": int(row["sources"]), "chunks": int(row["chunks"])}
 
     def list_notebooks_with_counts(self) -> list[dict[str, object]]:
         """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
