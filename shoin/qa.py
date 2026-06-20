@@ -183,10 +183,17 @@ def history_messages(
     rows = store.list_messages_recent(notebook_id, limit)
     out: list[Message] = []
     for r in rows:
-        body = re.sub(r" {2,}", " ", _HISTORY_CITE_RE.sub("", str(r["body"]))).strip()
+        role = "user" if str(r["role"]) == "user" else "assistant"
+        raw = str(r["body"])
+        # Strip stale [S#] citation markers only from assistant messages: assistant
+        # answers reference the *previous* retrieval context whose numbering is gone,
+        # so echoing them into the next prompt confuses the model.  User messages are
+        # preserved verbatim so that references like "tell me more about [S1]" survive.
+        if role == "assistant":
+            raw = _HISTORY_CITE_RE.sub("", raw)
+        body = re.sub(r" {2,}", " ", raw).strip()
         if not body:
             continue
-        role = "user" if str(r["role"]) == "user" else "assistant"
         out.append({"role": role, "content": _truncate_tokens(body, HISTORY_TOKENS_EACH)})
     # Citation stripping can reduce an assistant message to empty (skipped above),
     # producing consecutive same-role pairs ([user, user] or [asst, asst]).

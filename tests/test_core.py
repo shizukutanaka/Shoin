@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.16")
+        self.assertEqual(VERSION, "0.2.17")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1691,6 +1691,33 @@ class TestQA(unittest.TestCase):
             _HISTORY_CITE_RE.sub("", "refs [issue 5]"), "refs [issue 5]",
             "[issue 5] must not be stripped — no S-number inside",
         )
+
+    def test_history_messages_preserves_user_citations(self) -> None:
+        """Citation markers in user messages must NOT be stripped.
+
+        User questions like 'tell me more about [S1]' reference a source the
+        user observed in the previous answer.  Stripping them corrupts the
+        user's intent in the history window.  Only assistant messages carry
+        stale numbering that needs removal.
+        """
+        from shoin.qa import history_messages
+
+        with make_store() as s:
+            nb = s.create_notebook("hist-test")
+            s.add_message(nb.id, "user", "Tell me about [S1]", "{}")
+            s.add_message(nb.id, "assistant", "It is important [S1].", "{}")
+            msgs = history_messages(s, nb.id)
+
+        user_msgs = [m for m in msgs if m["role"] == "user"]
+        asst_msgs = [m for m in msgs if m["role"] == "assistant"]
+        # User message must preserve [S1]
+        self.assertEqual(len(user_msgs), 1)
+        self.assertIn("[S1]", user_msgs[0]["content"],
+                      "user's [S1] reference must survive — it is the user's own words")
+        # Assistant message must have [S1] stripped (stale previous-context numbering)
+        self.assertEqual(len(asst_msgs), 1)
+        self.assertNotIn("[S1]", asst_msgs[0]["content"],
+                         "assistant's stale [S1] must be stripped from history")
 
 
 class TestCitation(unittest.TestCase):
