@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.8")
+        self.assertEqual(VERSION, "0.2.9")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -629,6 +629,27 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(title, "")
         # Body content must NOT have been routed to title_parts
         self.assertIn("Real content here", text)
+
+    def test_html_unclosed_title_via_head_close_does_not_swallow_body(self) -> None:
+        """</head> seen while _in_title must implicitly close the title so body text is extracted."""
+        html = "<html><head><title>My Page</head><body><p>Content here.</p></body></html>"
+        title, text = html_to_text(html)
+        self.assertEqual(title, "My Page")
+        self.assertIn("Content here", text)
+
+    def test_html_unclosed_title_via_block_tag_does_not_swallow_body(self) -> None:
+        """A block-level tag while _in_title must implicitly close the title."""
+        html = "<html><title>Page<p>Important text.</p></html>"
+        title, text = html_to_text(html)
+        self.assertEqual(title, "Page")
+        self.assertIn("Important text", text)
+
+    def test_html_unclosed_title_via_body_tag_does_not_swallow_body(self) -> None:
+        """<body> start tag while _in_title must implicitly close the title."""
+        html = "<html><title>Title<body><p>Body text.</p></body></html>"
+        title, text = html_to_text(html)
+        self.assertEqual(title, "Title")
+        self.assertIn("Body text", text)
 
     def test_unsupported_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

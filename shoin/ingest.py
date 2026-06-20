@@ -95,13 +95,19 @@ class _HTMLText(HTMLParser):
         elif tag == "title" and not self._skip_depth:
             self._in_title = True
         elif tag in _BLOCK_TAGS:
+            if self._in_title:
+                self._in_title = False  # implicit close: block content can't appear inside <title>
             self.parts.append("\n")
+        elif tag in ("body", "html") and self._in_title:
+            self._in_title = False  # structural tag implies <title> was never properly closed
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ("script", "style", "noscript", "template"):
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag == "title":
             self._in_title = False
+        elif tag == "head" and self._in_title:
+            self._in_title = False  # </head> without </title> implicitly closes the title
         elif tag in _BLOCK_TAGS:
             self.parts.append("\n")
 
