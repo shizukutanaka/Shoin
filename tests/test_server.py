@@ -226,6 +226,25 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
         self.assertEqual(status, 200)
 
+    def test_unexpected_exception_in_handler_returns_500(self) -> None:
+        """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
+        (e.g. sqlite3.OperationalError: database is locked) must return HTTP 500
+        with SYSTEM_INTERNAL_ERROR rather than closing the connection with no response.
+        """
+        import sqlite3
+        from unittest.mock import patch
+        import shoin.store as store_mod
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "crash-test"})
+        nb_id = nb["id"]
+        with patch.object(
+            store_mod.Store, "get_notebook",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            status, err = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")  # type: ignore[index]
+
     def test_loopback_only(self) -> None:
         with self.assertRaises(ValueError):
             make_server(host="0.0.0.0")

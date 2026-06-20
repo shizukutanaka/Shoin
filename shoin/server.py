@@ -245,6 +245,13 @@ class _Handler(BaseHTTPRequestHandler):
                     self._error(400, exc.code, str(exc))
                 except LLMError as exc:
                     self._error(502, exc.code, str(exc))
+                except Exception as exc:
+                    print(
+                        f"Internal error handling {method} {parsed.path}: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    self._error(500, "SYSTEM_INTERNAL_ERROR", type(exc).__name__)
                 return
         self._error(404, "ROUTE_NOT_FOUND", f"no route: {method} {parsed.path}")
 
