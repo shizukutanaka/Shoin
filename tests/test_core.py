@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.14")
+        self.assertEqual(VERSION, "0.2.15")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1926,6 +1926,36 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(stored, "nomic-embed-text")  # stripped, no surrounding spaces
             # check_embed_model_ok must see same-model: no false mismatch
             self.assertTrue(_check_embed_model_ok(s, llm))
+
+    def test_embed_chunks_falls_back_to_embed_one_when_no_embed(self) -> None:
+        """_embed_chunks must embed chunks via embed_one when the backend has no batch embed.
+
+        ChatBackend protocol only guarantees embed_one, so a conforming implementation
+        without embed() must still get chunks embedded rather than silently getting 0.
+        """
+        from shoin.pipeline import _embed_chunks
+
+        embedded: list[str] = []
+
+        class EmbedOnlyLLM:
+            """ChatBackend that satisfies the protocol but has no batch embed method."""
+            embedding_model = "protocol-only-model"
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text: str) -> list[float]:
+                embedded.append(text)
+                return [0.5, 0.5]
+
+        with make_store() as s:
+            nb_id = s.create_notebook("embed-one-fallback").id
+            src = s.add_source(nb_id, "txt", "doc", "o", "sha-eo")
+            chunk_ids = s.add_chunks(src.id, ["alpha", "beta"])
+            n = _embed_chunks(s, EmbedOnlyLLM(), chunk_ids, ["alpha", "beta"])
+
+        self.assertEqual(n, 2, "both chunks must be embedded via embed_one fallback")
+        self.assertEqual(embedded, ["alpha", "beta"])
 
     def test_index_source_url_path_calls_extract_url(self) -> None:
         """index_source with an http:// target must call extract_url, not extract_file."""

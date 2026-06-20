@@ -50,10 +50,17 @@ def _embed_chunks(
     force=True skips the model-mismatch guard. Pass it only from reindex_notebook,
     which is specifically designed to rebuild embeddings after a model change.
     """
-    embed = getattr(llm, "embed", None)
     current_model = (llm.embedding_model or "").strip()
-    if not current_model or embed is None:
+    if not current_model:
         return 0
+    # Prefer the batch method; fall back to embed_one so any ChatBackend conforming
+    # to the protocol (which only requires embed_one) gets full embedding support.
+    embed = getattr(llm, "embed", None)
+    if embed is None:
+        embed_one = getattr(llm, "embed_one", None)
+        if embed_one is None:
+            return 0
+        embed = lambda batch: [embed_one(t) for t in batch]  # noqa: E731
     stored_model = (store.get_setting("embed_model") or "").strip()
     if not force and stored_model and stored_model != current_model:
         # Vectors in the DB were produced by a different model; cosine scores
