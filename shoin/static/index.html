@@ -364,6 +364,7 @@ async function loadNotebooks(){
     ul.append(li);
   }
   if (!notebooks.length){
+    cur = null; renderNotebook();
     const e0 = el("div","empty"); e0.append(el("b",null,t("nb.empty.title")), el("span",null,t("nb.empty.body")));
     ul.append(e0);
   } else if (!cur){ openNotebook(notebooks[0].id); }
@@ -402,6 +403,17 @@ function renderNotebook(){
     $("#exMd").href = `/api/notebooks/${cur.id}/export?format=md`;
     $("#exBib").href = `/api/notebooks/${cur.id}/export?format=bibtex`;
     $("#exRis").href = `/api/notebooks/${cur.id}/export?format=ris`;
+  } else {
+    // No notebook selected: clear all dependent panes so deleted-notebook content
+    // does not persist in the UI after the last notebook is removed.
+    $("#srcEmpty").hidden = true;
+    $("#chat").replaceChildren();
+    $("#chatEmpty").hidden = false;
+    $("#clearChat").hidden = true;
+    $("#degBadge").hidden = true;
+    $("#studioOut").replaceChildren();
+    $("#noteList").replaceChildren();
+    $("#qs").replaceChildren();
   }
 }
 
@@ -510,6 +522,7 @@ function addMsg(role, body, report){
   return bd;
 }
 function renderChatHistory(){
+  $("#degBadge").hidden = true;
   $("#chat").replaceChildren();
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
   const hasChat = (cur.messages||[]).length > 0;
