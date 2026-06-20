@@ -204,6 +204,13 @@ def history_messages(
             out.pop(i)
         else:
             i += 1
+    # The history window may start mid-pair when the window size falls between two
+    # stored message IDs and the oldest message in the window is the assistant half
+    # of a pair (the paired user question is outside the window).  An assistant
+    # message with no preceding user turn in the history gives the model an
+    # unanchored assertion ([system, asst, user, ...]) which is protocol-unusual.
+    while out and out[0]["role"] == "assistant":
+        out.pop(0)
     # A trailing user turn without an assistant reply is an orphan (e.g. from an SSE
     # disconnect). Including it would give the LLM two consecutive user messages
     # ([…, user:orphan, user:current]), which is semantically wrong.
