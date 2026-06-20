@@ -25,18 +25,18 @@ FORMATS = ("md", "bibtex", "ris")
 
 def export_markdown(store: Store, notebook_id: int) -> str:
     nb = store.get_notebook(notebook_id)
-    parts: list[str] = [f"# {nb.name}", ""]
+    parts: list[str] = [f"# {_md_line(nb.name)}", ""]
 
     parts.append(f"## {_t('sources_section')}")
     for i, src in enumerate(store.sources_for_notebook(notebook_id), start=1):
-        parts.append(f"- [S{i}] {src.title} ({src.kind}) — {src.origin}")
+        parts.append(f"- [S{i}] {_md_line(src.title)} ({src.kind}) — {_md_line(src.origin)}")
     parts.append("")
 
     notes = store.list_notes(notebook_id)
     if notes:
         parts.append(f"## {_t('notes_section')}")
         for n in notes:
-            parts.append(f"### {n['title']}")
+            parts.append(f"### {_md_line(n['title'])}")
             parts.append(str(n["body"] or ""))
             parts.append("")
 
@@ -83,6 +83,11 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 parts.append("")
 
     return "\n".join(parts).rstrip() + "\n"
+
+
+def _md_line(text: str) -> str:
+    """Collapse multiline text to a single line for Markdown structural elements."""
+    return " ".join(text.splitlines())
 
 
 _BIB_ESC: dict[str, str] = {

@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.18")
+        self.assertEqual(VERSION, "0.2.19")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2055,6 +2055,56 @@ class TestPipeline(unittest.TestCase):
                 result = index_source(s, nb_id, "http://x.test")
         mock_eu.assert_called_once_with("http://x.test")
         self.assertEqual(result.source.title, "Mock Page")
+
+
+class TestExport(unittest.TestCase):
+    def test_md_line_collapses_lf(self) -> None:
+        from shoin.export import _md_line
+        self.assertEqual(_md_line("foo\nbar"), "foo bar")
+
+    def test_md_line_collapses_crlf(self) -> None:
+        from shoin.export import _md_line
+        self.assertEqual(_md_line("foo\r\nbar"), "foo bar")
+
+    def test_md_line_collapses_bare_cr(self) -> None:
+        from shoin.export import _md_line
+        self.assertEqual(_md_line("foo\rbar"), "foo bar")
+
+    def test_md_line_no_op_on_plain_text(self) -> None:
+        from shoin.export import _md_line
+        self.assertEqual(_md_line("plain text"), "plain text")
+
+    def test_export_markdown_newline_in_source_title_single_list_item(self) -> None:
+        """Embedded newline in source title must not break the Markdown list item."""
+        from shoin.export import export_markdown
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_source(nb.id, "url", "Title\nSecond line", "http://x.com", "sha1")
+            md = export_markdown(s, nb.id)
+        item_lines = [l for l in md.splitlines() if l.startswith("- [S1]")]
+        self.assertEqual(len(item_lines), 1)
+        self.assertIn("Title Second line", item_lines[0])
+
+    def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
+        """Embedded newline in note title must not break the Markdown heading."""
+        from shoin.export import export_markdown
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_note(nb.id, "Note\nTitle", "body")
+            md = export_markdown(s, nb.id)
+        heading_lines = [l for l in md.splitlines() if l.startswith("### ")]
+        self.assertEqual(len(heading_lines), 1)
+        self.assertIn("Note Title", heading_lines[0])
+
+    def test_export_markdown_newline_in_notebook_name_single_heading(self) -> None:
+        """Embedded newline in notebook name must not break the H1 heading."""
+        from shoin.export import export_markdown
+        with make_store() as s:
+            nb = s.create_notebook("My\nNotebook")
+            md = export_markdown(s, nb.id)
+        h1_lines = [l for l in md.splitlines() if l.startswith("# ")]
+        self.assertEqual(len(h1_lines), 1)
+        self.assertIn("My Notebook", h1_lines[0])
 
 
 class TestConfigXDG(unittest.TestCase):
