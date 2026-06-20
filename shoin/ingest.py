@@ -29,7 +29,10 @@ _EXT_KIND = {
 }
 
 _BLOCK_TAGS = frozenset(
-    "p div br li ul ol h1 h2 h3 h4 h5 h6 tr table section article header footer blockquote pre".split()
+    "p div br li ul ol h1 h2 h3 h4 h5 h6"
+    " tr td th table caption thead tbody tfoot"
+    " section article header footer nav aside main"
+    " blockquote pre dd dt dl figure figcaption".split()
 )
 
 

@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.11")
+        self.assertEqual(VERSION, "0.2.12")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -650,6 +650,42 @@ class TestIngest(unittest.TestCase):
         title, text = html_to_text(html)
         self.assertEqual(title, "Title")
         self.assertIn("Body text", text)
+
+    def test_html_table_cells_separated_by_newlines(self) -> None:
+        """<td> and <th> must produce newline boundaries so cell values don't merge."""
+        html = (
+            "<table>"
+            "<tr><th>Name</th><th>Value</th></tr>"
+            "<tr><td>Alice</td><td>42</td></tr>"
+            "</table>"
+        )
+        _, text = html_to_text(html)
+        # Cell values must be on separate lines, not concatenated as "NameValueAlice42"
+        self.assertIn("Name", text)
+        self.assertIn("Value", text)
+        self.assertIn("Alice", text)
+        self.assertIn("42", text)
+        # Crucially: adjacent cell values must NOT be run together
+        self.assertNotIn("NameValue", text)
+        self.assertNotIn("Alice42", text)
+
+    def test_html_semantic_tags_produce_newline_boundaries(self) -> None:
+        """nav, aside, main, figure, figcaption, dd/dt must produce line breaks."""
+        html = (
+            "<main><p>Main content.</p></main>"
+            "<aside>Side note.</aside>"
+            "<figure><img/><figcaption>Caption here.</figcaption></figure>"
+            "<dl><dt>Term</dt><dd>Definition</dd></dl>"
+        )
+        _, text = html_to_text(html)
+        self.assertIn("Main content", text)
+        self.assertIn("Side note", text)
+        self.assertIn("Caption here", text)
+        self.assertIn("Term", text)
+        self.assertIn("Definition", text)
+        # Semantic boundaries must not merge adjacent content
+        self.assertNotIn("contentSide", text)
+        self.assertNotIn("CaptionTerm", text)
 
     def test_unsupported_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
