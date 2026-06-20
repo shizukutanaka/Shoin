@@ -922,6 +922,37 @@ class CliTest(unittest.TestCase):
         # English fallback: "Created:" message should appear
         self.assertIn("Created:", out)
 
+    def test_cli_t_fallback_is_english_not_japanese(self) -> None:
+        """_t must fall back to English (not Japanese) when a key is absent from the active lang dict.
+
+        The old implementation used _STRINGS['ja'][key] as fallback, which would silently
+        return Japanese text to English users if a key were ever added to 'ja' but not 'en'.
+        The fix uses _STRINGS['en'][key] so the fallback is always English.
+        """
+        import os
+        import shoin.cli as cli_mod
+        from unittest.mock import patch
+
+        # Construct a _STRINGS dict where a key exists only in "ja"
+        patched = {
+            "en": {"existing_key": "English value"},
+            "ja": {"existing_key": "日本語の値", "ja_only_key": "日本語のみ"},
+        }
+        env_orig = os.environ.get("SHOIN_LANG")
+        os.environ["SHOIN_LANG"] = "en"
+        try:
+            with patch.object(cli_mod, "_STRINGS", patched):
+                # key present in "en" → English returned
+                self.assertEqual(cli_mod._t("existing_key"), "English value")
+                # key absent from "en" → must raise KeyError (not silently return Japanese)
+                with self.assertRaises(KeyError):
+                    cli_mod._t("ja_only_key")
+        finally:
+            if env_orig is None:
+                os.environ.pop("SHOIN_LANG", None)
+            else:
+                os.environ["SHOIN_LANG"] = env_orig
+
     def test_keyboard_interrupt_returns_130(self) -> None:
         """KeyboardInterrupt during a command must exit with code 130, not crash."""
         from shoin.cli import main
