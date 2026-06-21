@@ -222,6 +222,11 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("GET", "/api/nope")
         self.assertEqual(status, 404)
 
+        # 405: known path, wrong method (DELETE /api/notebooks — only GET/POST exist)
+        status, err = self._json("DELETE", "/api/notebooks")
+        self.assertEqual(status, 405)
+        self.assertEqual(err.get("error", {}).get("code"), "METHOD_NOT_ALLOWED")
+
         # delete notebook
         status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
         self.assertEqual(status, 200)

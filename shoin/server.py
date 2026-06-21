@@ -253,7 +253,11 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                     self._error(500, "SYSTEM_INTERNAL_ERROR", type(exc).__name__)
                 return
-        self._error(404, "ROUTE_NOT_FOUND", f"no route: {method} {parsed.path}")
+        path_matched = any(re.match(pattern, parsed.path) for _, pattern, _ in self._ROUTES)
+        if path_matched:
+            self._error(405, "METHOD_NOT_ALLOWED", f"{method} not allowed on {parsed.path}")
+        else:
+            self._error(404, "ROUTE_NOT_FOUND", f"no route: {method} {parsed.path}")
 
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         self._dispatch("GET")
