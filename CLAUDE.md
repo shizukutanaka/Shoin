@@ -308,7 +308,22 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.1.55
+## Version History: v0.1.37 → v0.2.21
+
+### v0.2.21 (2026-06-21)
+**Fixed**: Deleting the last notebook left the header title, source list, chat, and studio showing stale content from the deleted notebook. `loadNotebooks()` entered the `!notebooks.length` branch without calling `renderNotebook()`. Fix: call `renderNotebook()` (with `cur=null`) and add an `else` branch in `renderNotebook()` that explicitly clears chat, studio, notes, question chips, and hides the source-empty indicator when `cur === null`.
+
+**Fixed**: The degraded-mode badge (`#degBadge`, "検索のみ" / "search only") was only reset in the SSE `done` handler and was never cleared when switching notebooks. After switching away from a notebook whose last answer was degraded, the badge remained visible for the new (non-degraded) notebook. Fix: hide `#degBadge` at the start of `renderChatHistory()`.
+
+### v0.2.20 (2026-06-21)
+**Fixed**: `history_messages()` had a trailing-user guard (`while out and out[-1]["role"] == "user": out.pop()`) but no symmetric leading-assistant guard. When the `HISTORY_MESSAGES=6` window landed mid-pair (the paired user question is outside the window), the history started with an assistant message, giving the LLM the sequence `[system, asst, user, ...]` — protocol-unusual for OpenAI-compatible APIs. Fix: add `while out and out[0]["role"] == "assistant": out.pop(0)`.
+
+### v0.2.19 (2026-06-21)
+**Fixed**: `export_markdown()` lacked newline normalization on notebook name, source titles, source origins, and note titles. A title containing `\n` (e.g., from a source with a multiline HTML title) would silently produce two separate Markdown list items or headings instead of one. BibTeX (`_bib_escape`) and RIS (`_ris_escape`) already normalized newlines; added `_md_line()` helper to match.
+
+**Fixed**: Unexpected exceptions in `_dispatch()` (e.g., `sqlite3.OperationalError: database is locked` after busy_timeout expires) were unhandled — the HTTP framework logged a traceback but sent no response, so the client received an abrupt connection close. Fix: add catch-all `except Exception` in `_dispatch()` that logs to stderr and returns HTTP 500 with error code `SYSTEM_INTERNAL_ERROR`.
+
+### v0.1.37 → v0.1.55
 
 ### v0.1.55 (2026-06-14)
 **Fixed**: `_post()` not using `errors="replace"` when decoding LLM response; non-UTF-8 bytes (Latin-1 error messages, binary junk) would raise `UnicodeDecodeError` instead of being caught and converted to `LLMError`. Discovered via Socratic question "do all 3 decode sites have consistent error handling?"
