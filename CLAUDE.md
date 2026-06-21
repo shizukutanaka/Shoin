@@ -106,7 +106,7 @@ See `chunk.py` `_hard_split()` and citation.py `_SENTENCE_SPLIT_RE`.
 
 SQLite persistence uses Write-Ahead Logging (WAL) mode to allow concurrent reads while writes are pending. This is essential for the web server's `ThreadingHTTPServer` which spawns a thread per request.
 
-**Cascade Deletes**: Every foreign key is `ON DELETE CASCADE`. When a source is deleted, all its chunks are deleted; when a notebook is deleted, all sources/chunks/notes/messages/studio_outputs in that notebook are deleted. The FTS5 virtual table is kept in sync via triggers (`chunks_ai`, `chunks_ad`, `chunks_ad`), so the trigram index never accumulates orphaned entries.
+**Cascade Deletes**: Every foreign key is `ON DELETE CASCADE`. When a source is deleted, all its chunks are deleted; when a notebook is deleted, all sources/chunks/notes/messages/studio_outputs in that notebook are deleted. The FTS5 virtual table is kept in sync via triggers (`chunks_ai`, `chunks_ad`), so the trigram index never accumulates orphaned entries.
 
 **Migrations**: Schema changes are recorded in `MIGRATIONS` list (append-only). Each migration is tagged with a version number and applied once at startup. Migrations 1–4 are:
 1. Initial schema (notebooks, sources, chunks, FTS5, notes, studio_outputs, messages)
@@ -308,7 +308,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.21
+## Version History: v0.1.37 → v0.2.22
+
+### v0.2.22 (2026-06-21)
+**Fixed**: `_dispatch()` returned HTTP 404 `ROUTE_NOT_FOUND` when a known path was accessed with an unsupported HTTP method (e.g. `DELETE /api/notebooks`). Per RFC 9110 §15.5.6, the correct status is 405 `METHOD_NOT_ALLOWED`. Fix: after the main route-matching loop, do a second pass checking whether any route's path pattern matches — if yes, return 405; if no path matches at all, return 404.
+
+**Fixed (docs)**: CLAUDE.md incorrectly stated `SHOIN_EMBED_MODEL` defaults to empty (BM25-only). Actual default is `nomic-embed-text`; set it to empty string to disable embeddings.
+
+**Fixed (docs)**: CLAUDE.md listed FTS5 triggers as `chunks_ai`, `chunks_ad`, `chunks_ad` (duplicate). Correct list is `chunks_ai` (after insert) and `chunks_ad` (after delete).
 
 ### v0.2.21 (2026-06-21)
 **Fixed**: Deleting the last notebook left the header title, source list, chat, and studio showing stale content from the deleted notebook. `loadNotebooks()` entered the `!notebooks.length` branch without calling `renderNotebook()`. Fix: call `renderNotebook()` (with `cur=null`) and add an `else` branch in `renderNotebook()` that explicitly clears chat, studio, notes, question chips, and hides the source-empty indicator when `cur === null`.
@@ -415,7 +422,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 **Configuration** via `~/.config/shoin/config.json` or environment variables:
 - `SHOIN_LLM_URL`: Base URL (default `http://localhost:11434/v1`)
 - `SHOIN_LLM_MODEL`: Generation model (default `qwen3:4b`)
-- `SHOIN_EMBED_MODEL`: Embedding model (default empty; BM25-only if unset)
+- `SHOIN_EMBED_MODEL`: Embedding model (default `nomic-embed-text`; set to empty string to force BM25-only mode)
 - `SHOIN_DATA_DIR`: SQLite path (default `~/.local/share/shoin`)
 - `SHOIN_PORT`: HTTP port (default 7440, 127.0.0.1 only)
 - `SHOIN_LANG`: UI language (ja/en)
