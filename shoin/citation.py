@@ -63,6 +63,9 @@ class CitationReport(TypedDict):
     #   misattributed -> S-numbers whose cited sentence clearly belongs elsewhere
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
+    # True when the LLM was unreachable and the answer is search-only excerpts.
+    # Absent on non-degraded responses and old persisted reports.
+    degraded: NotRequired[bool]
 
 
 def extract_citations(text: str) -> list[int]:

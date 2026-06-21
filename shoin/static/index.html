@@ -502,6 +502,7 @@ function addMsg(role, body, report){
   wrap.append(bd);
   if (report && role!=="user"){
     const c = el("div","cites");
+    if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
     if (report.invalid && report.invalid.length){
       const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
       c.append(b);
@@ -584,7 +585,7 @@ $("#askForm").onsubmit = async e=>{
           const rpt = j.report || {};
           renderWithSeals(bd, acc, rpt);
           const wrap = bd.parentElement, c = el("div","cites");
-          if (j.degraded) c.append(el("span","badge dim", t("chat.degraded")));
+          if (rpt.degraded) c.append(el("span","badge dim", t("chat.degraded")));
           if (rpt.invalid?.length)
             c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
           if (rpt.misattributed?.length)

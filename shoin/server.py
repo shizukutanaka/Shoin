@@ -559,6 +559,8 @@ class _Handler(BaseHTTPRequestHandler):
             report = make_report(
                 full, context.source_titles, context.source_ids, context.source_bodies
             )
+            if degraded:
+                report["degraded"] = True
             if not client_gone:
                 try:
                     self._sse("done", {"report": dict(report), "degraded": degraded})

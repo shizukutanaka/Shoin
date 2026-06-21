@@ -300,12 +300,9 @@ def ask(
             )
         except LLMError:
             text = _degraded_text(hits)
-            answer = Answer(
-                text,
-                hits,
-                make_report(text, context.source_titles, context.source_ids, context.source_bodies),
-                degraded=True,
-            )
+            report = make_report(text, context.source_titles, context.source_ids, context.source_bodies)
+            report["degraded"] = True
+            answer = Answer(text, hits, report, degraded=True)
 
     if persist:
         store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
