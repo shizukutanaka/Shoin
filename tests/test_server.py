@@ -570,6 +570,33 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
 
+    def test_upload_claimed_larger_than_drain_cap_closes_connection(self) -> None:
+        """Upload Content-Length >> drain cap must return 400 and close the connection.
+
+        When the claimed body is larger than MAX_UPLOAD_BYTES + 65536 the server
+        cannot drain it all, so it sets close_connection=True.  The client gets
+        the error response and the connection is not reused for a subsequent request.
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "draincap"})
+        # Content-Length claims 20 MB but we send a tiny body.
+        huge = 20 * 1024 * 1024
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("POST", f"/api/notebooks/{nb['id']}/upload")
+        # Send only MAX_UPLOAD_BYTES + 65536 bytes of actual body but claim 20 MB.
+        from shoin.config import MAX_UPLOAD_BYTES
+        actual_body = b"x" * (MAX_UPLOAD_BYTES + 65536)
+        conn.putheader("Content-Length", str(huge))
+        conn.putheader("X-Filename", "big.txt")
+        conn.endheaders(actual_body)
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"]["code"], "INGEST_FILE_TOO_LARGE")
+        conn.close()
+        # Server must still be accepting new connections after the drain.
+        status, _ = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
+
     def test_json_body_malformed_content_length(self) -> None:
         """Non-numeric Content-Length on a JSON endpoint falls back to empty body."""
         conn = http.client.HTTPConnection("127.0.0.1", self.port)

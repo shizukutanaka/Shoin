@@ -308,7 +308,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.22
+## Version History: v0.1.37 → v0.2.23
+
+### v0.2.23 (2026-06-21)
+**Fixed**: `_drain()` did not set `self.close_connection = True` when `Content-Length` exceeded the drain cap (`MAX_UPLOAD_BYTES + 65536`). In HTTP/1.1 keep-alive mode, undrained bytes would corrupt subsequent request parsing on the same connection. Fix: mark connection for close when the declared body size exceeds what we can drain.
+
+**Fixed**: `config.port()` raised unhandled `ValueError` when `SHOIN_PORT` was set to a non-numeric value (e.g. `SHOIN_PORT=abc`), propagating through `_build_parser()` in `main()` as an uncaught exception. Fix: wrap in `try/except (ValueError, TypeError)` and fall back to `DEFAULT_PORT`.
 
 ### v0.2.22 (2026-06-21)
 **Fixed**: `_dispatch()` returned HTTP 404 `ROUTE_NOT_FOUND` when a known path was accessed with an unsupported HTTP method (e.g. `DELETE /api/notebooks`). Per RFC 9110 §15.5.6, the correct status is 405 `METHOD_NOT_ALLOWED`. Fix: after the main route-matching loop, do a second pass checking whether any route's path pattern matches — if yes, return 405; if no path matches at all, return 404.

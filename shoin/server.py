@@ -160,13 +160,20 @@ class _Handler(BaseHTTPRequestHandler):
         return data
 
     def _drain(self, n: int) -> None:
-        """Discard an oversize request body (bounded) so the error reaches the client."""
+        """Discard an oversize request body (bounded) so the error reaches the client.
+
+        If Content-Length exceeds our drain cap, leftover bytes in the socket
+        would corrupt the next HTTP/1.1 keep-alive request, so we force a
+        connection close in that case.
+        """
         remaining = min(n, MAX_UPLOAD_BYTES + 65536)
         while remaining > 0:
             chunk = self.rfile.read(min(65536, remaining))
             if not chunk:
                 break
             remaining -= len(chunk)
+        if n > MAX_UPLOAD_BYTES + 65536:
+            self.close_connection = True
 
     def _require(self, data: Json, key: str) -> str:
         value = str(data.get(key) or "").strip()

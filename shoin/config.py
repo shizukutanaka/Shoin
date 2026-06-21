@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "0.2.22"
+VERSION = "0.2.23"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -51,4 +51,7 @@ def ui_lang() -> str:
 
 
 def port() -> int:
-    return int(os.environ.get("SHOIN_PORT", str(DEFAULT_PORT)))
+    try:
+        return int(os.environ.get("SHOIN_PORT") or DEFAULT_PORT)
+    except (ValueError, TypeError):
+        return DEFAULT_PORT

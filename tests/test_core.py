@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.22")
+        self.assertEqual(VERSION, "0.2.23")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2184,6 +2184,33 @@ class TestConfigXDG(unittest.TestCase):
             os.environ.pop("SHOIN_DATA_DIR", None)
             result = data_dir()
         self.assertEqual(str(result), "/tmp/xdgtest/shoin")
+
+    def test_port_invalid_env_falls_back_to_default(self) -> None:
+        """Non-numeric SHOIN_PORT must fall back to DEFAULT_PORT, not raise ValueError."""
+        import os
+        from shoin.config import DEFAULT_PORT, port
+
+        with patch.dict(os.environ, {"SHOIN_PORT": "notanumber"}):
+            result = port()
+        self.assertEqual(result, DEFAULT_PORT)
+
+    def test_port_empty_env_falls_back_to_default(self) -> None:
+        """Empty SHOIN_PORT must fall back to DEFAULT_PORT."""
+        import os
+        from shoin.config import DEFAULT_PORT, port
+
+        with patch.dict(os.environ, {"SHOIN_PORT": ""}):
+            result = port()
+        self.assertEqual(result, DEFAULT_PORT)
+
+    def test_port_valid_env_is_used(self) -> None:
+        """Valid SHOIN_PORT must be returned as-is."""
+        import os
+        from shoin.config import port
+
+        with patch.dict(os.environ, {"SHOIN_PORT": "9999"}):
+            result = port()
+        self.assertEqual(result, 9999)
 
 
 if __name__ == "__main__":
