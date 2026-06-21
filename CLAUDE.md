@@ -216,10 +216,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `Notebook`, `Source`, `Chunk`: dataclasses, frozen for safety
 - `Store` class: transaction management, batch operations
 - Key methods:
-  - `add_source(notebook_id, kind, title, origin, text)` → Source, opens transaction
-  - `set_embedding(chunk_id, embedding)` → updates chunks.embedding BLOB
-  - `sources_for_notebook(nb_id)` → list of sources (lazy)
-  - `list_notebook_with_counts()` → single LEFT JOIN query (no N+1)
+  - `add_source(notebook_id, kind, title, origin, sha256)` → Source, opens transaction
+  - `set_embedding(chunk_id, vec, *, commit)` → updates chunks.embedding BLOB; commit=False for batch use
+  - `sources_for_notebook(nb_id)` → list of sources ordered by id
+  - `list_notebooks_with_counts()` → single LEFT JOIN query (no N+1)
 
 **`search.py`** (Retrieval Engine)
 - `Hit`: scored chunk + source metadata, carries detail dict for fusion info
