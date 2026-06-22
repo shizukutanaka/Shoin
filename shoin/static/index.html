@@ -499,9 +499,10 @@ async function showSource(id, title, excerpt){
       const body = el("div","full-body", "…");
       det.append(body);
       try{
-        const j = await (await api(`/api/sources/${id}/text`)).json();
+        const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
+        if (sig.aborted) return;
         body.textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
-      }catch(e){ body.textContent = e.message; }
+      }catch(e){ if (!sig.aborted) body.textContent = e.message; }
     });
     vt.append(det);
     $("#viewer").classList.add("open");

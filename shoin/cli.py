@@ -177,7 +177,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         )
     answer = ask(store, llm, int(args.notebook_id), question, k=int(args.k))
     print(answer.text)
-    if answer.hits:
+    if answer.hits and not answer.degraded:
         print("---")
         _print_report(answer.report)
     return 0

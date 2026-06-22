@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.26
+## Version History: v0.1.37 → v0.2.27
+
+### v0.2.27 (2026-06-22)
+**Fixed**: `showSource()` lazy-load `<details>` toggle listener (added in v0.2.26) fetched full source text without an abort signal, leaving orphaned HTTP requests in-flight when the viewer was switched before the `<details>` was expanded. The outer `sig` (`AbortController.signal`) was in scope but not passed to the inner `api()` call. Fix: pass `{signal: sig}` to the fetch, add `if (sig.aborted) return;` guard after the await, and change the catch handler to `if (!sig.aborted) body.textContent = e.message` to suppress abort errors.
+
+**Fixed**: `_cmd_ask()` (`cli.py`) printed a spurious `---` separator followed by an empty citation report when the answer was degraded (LLM unreachable, search-only). `answer.hits` is truthy for degraded answers (retrieval still runs), but the degraded text contains no `[S#]` markers, so `_print_report()` produced empty output. Fix: change `if answer.hits:` to `if answer.hits and not answer.degraded:`.
 
 ### v0.2.26 (2026-06-22)
 **Feature**: Source passage highlighting — clicking an [S1] seal chip now shows the retrieved excerpt immediately (no network round-trip), with lazy-load of the full source text via `<details>`. The specific context fed to the LLM is preserved in `source_excerpts` inside `CitationReport` so the excerpt is available from history on reload without an extra API call.
