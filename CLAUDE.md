@@ -306,7 +306,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.31
+## Version History: v0.1.37 → v0.2.32
+
+### v0.2.32 (2026-06-22)
+**Fixed**: `_decode()` (`ingest.py`) ignored the `charset=` parameter in the HTTP `Content-Type` header. Pages encoded as ISO-8859-1, Windows-1252, EUC-JP, or any non-UTF-8/non-CP932 encoding fell through to `data.decode("utf-8", errors="replace")`, producing replacement characters (`?`) for all non-ASCII content. Fix: add a `charset: str | None` parameter to `_decode()`; try the provided charset first (guarded with `LookupError` for unknown names), then fall through to the existing `utf-8-sig` / `cp932` defaults. Add `_charset_from_ctype()` helper to parse the `charset=` value from the Content-Type string; called in `extract_url()` and passed through to `_decode()`.
 
 ### v0.2.31 (2026-06-22)
 **Fixed**: `_h_ask_sse()` (`server.py`) did not guard `build_context()` after SSE headers were committed. If `build_context()` raised a non-`StoreError` exception (e.g. `sqlite3.OperationalError` on DB-lock timeout), it propagated to `_dispatch`'s `except Exception` handler, which called `_error(500, ...)` → wrote a new HTTP status line into the already-flushed SSE stream body, corrupting the response. Fix: wrap `build_context()` in its own `try/except Exception` block that sends an SSE `error` event and returns cleanly.

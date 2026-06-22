@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.31")
+        self.assertEqual(VERSION, "0.2.32")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1076,6 +1076,37 @@ class TestIngest(unittest.TestCase):
         result = _decode(b"\x80\x81")
         # Should not raise; replacement characters indicate the fallback was used.
         self.assertIsInstance(result, str)
+
+    def test_decode_charset_hint_used_before_defaults(self) -> None:
+        """_decode must try the supplied charset first, before utf-8-sig/cp932.
+
+        Before the fix: the charset parameter did not exist, so HTTP Content-Type
+        charsets (e.g. iso-8859-1) were ignored — non-UTF-8/CP932 pages produced
+        mojibake or replacement characters.
+        After the fix: the charset hint is tried first; only falls through to the
+        defaults on LookupError or UnicodeDecodeError.
+        """
+        from shoin.ingest import _decode
+
+        # Encode a French sentence in ISO-8859-1 (not valid UTF-8 or CP932)
+        french = "Caf\xe9 au lait"  # é = 0xE9 in latin-1
+        data = french.encode("iso-8859-1")
+        # Without charset hint: would fail utf-8-sig and cp932, fall back to errors=replace
+        result_no_hint = _decode(data)
+        self.assertIn("�", result_no_hint, "without hint, replacement char expected")
+        # With charset hint: must decode correctly
+        result_with_hint = _decode(data, "iso-8859-1")
+        self.assertEqual(result_with_hint, french)
+
+    def test_charset_from_ctype_parses_charset_parameter(self) -> None:
+        """_charset_from_ctype must extract charset= from common Content-Type strings."""
+        from shoin.ingest import _charset_from_ctype
+
+        self.assertEqual(_charset_from_ctype("text/html; charset=iso-8859-1"), "iso-8859-1")
+        self.assertEqual(_charset_from_ctype("text/html; charset=UTF-8"), "UTF-8")
+        self.assertEqual(_charset_from_ctype('text/html; charset="windows-1252"'), "windows-1252")
+        self.assertIsNone(_charset_from_ctype("text/html"))
+        self.assertIsNone(_charset_from_ctype("application/json"))
 
     def test_pdf_to_text_parse_error_raises_ingest_error(self) -> None:
         """Corrupt PDF bytes must raise INGEST_PARSE_FAILED, not a bare exception."""

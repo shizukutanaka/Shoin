@@ -65,13 +65,17 @@ def _check_size(data: bytes) -> None:
         )
 
 
-def _decode(data: bytes) -> str:
-    for enc in ("utf-8-sig", "cp932"):
-        # utf-8-sig handles plain UTF-8 and strips BOM (U+FEFF) when present;
-        # Windows Notepad and some editors emit BOM-prefixed UTF-8 files.
+def _decode(data: bytes, charset: str | None = None) -> str:
+    candidates = []
+    if charset:
+        candidates.append(charset)
+    # utf-8-sig handles plain UTF-8 and BOM-prefixed UTF-8 (Windows Notepad);
+    # cp932 covers Shift-JIS, the dominant legacy encoding for Japanese content.
+    candidates.extend(["utf-8-sig", "cp932"])
+    for enc in candidates:
         try:
             return data.decode(enc)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, LookupError):
             continue
     return data.decode("utf-8", errors="replace")
 
@@ -309,17 +313,27 @@ def extract_file(path: Path | str) -> Extracted:
     return Extracted(kind, title, text, str(p), _digest(data))
 
 
+def _charset_from_ctype(ctype: str) -> str | None:
+    """Extract the charset parameter from a Content-Type header value."""
+    for part in ctype.split(";"):
+        kv = part.strip().split("=", 1)
+        if len(kv) == 2 and kv[0].strip().lower() == "charset":
+            return kv[1].strip().strip('"').strip("'")
+    return None
+
+
 def extract_url(url: str) -> Extracted:
     """Fetch and extract text from a public URL (html / pdf / plain text)."""
     body, ctype, final_url = fetch_url(url)
     low = ctype.lower()
+    charset = _charset_from_ctype(ctype)
     if "pdf" in low or body.lstrip()[:4] == b"%PDF":
         text, title = pdf_to_text(body), final_url
     elif "html" in low or body.lstrip()[:1] == b"<":
-        title, text = html_to_text(_decode(body))
+        title, text = html_to_text(_decode(body, charset))
         title = title or final_url
     else:
-        text, title = _decode(body), final_url
+        text, title = _decode(body, charset), final_url
     text = text.strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
