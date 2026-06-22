@@ -200,9 +200,13 @@ class Store:
             # tables in place but no version record, breaking every subsequent startup.
             # Embedding the INSERT inside BEGIN/COMMIT makes the whole migration one
             # atomic SQLite write (SQLite DDL is transactional).
+            # INSERT OR IGNORE makes the migration idempotent: if two threads
+            # both read current=N and race to apply the same migration, the
+            # second thread's DDL (all IF NOT EXISTS) is a no-op and the
+            # duplicate INSERT is silently ignored rather than crashing.
             self.conn.executescript(
                 f"BEGIN;\n{sql.strip()}\n"
-                f"INSERT INTO schema_migrations(version) VALUES ({int(version)});\n"
+                f"INSERT OR IGNORE INTO schema_migrations(version) VALUES ({int(version)});\n"
                 "COMMIT;"
             )
             current = version
@@ -249,9 +253,10 @@ class Store:
             raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
     def delete_notebook(self, notebook_id: int) -> None:
-        self.get_notebook(notebook_id)
-        self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+        cur = self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
         self.conn.commit()
+        if cur.rowcount == 0:
+            raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
     def touch_notebook(self, notebook_id: int) -> None:
         """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""
@@ -357,6 +362,8 @@ class Store:
         return ids
 
     def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
+        if not vec:
+            raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
         cur = self.conn.execute(
             "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id)
         )

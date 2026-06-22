@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.32")
+        self.assertEqual(VERSION, "0.2.33")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -409,6 +409,57 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.set_embedding(99999, [1.0, 0.0])
             self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
+
+    def test_set_embedding_empty_vector_raises(self) -> None:
+        """set_embedding must reject an empty vector before touching the database.
+
+        Empty embeddings stored and later used in cosine similarity silently
+        degrade retrieval (norm=0.0 guard returns 0.0 for all queries).
+        """
+        with make_store() as s:
+            nb = s.create_notebook("ev")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-ev")
+            chunk_ids = s.add_chunks(src.id, ["text"])
+            with self.assertRaises(StoreError) as cm:
+                s.set_embedding(chunk_ids[0], [])
+            self.assertEqual(cm.exception.code, "EMBEDDING_INVALID")
+
+    def test_delete_notebook_nonexistent_raises(self) -> None:
+        """delete_notebook on a missing id must raise NOTEBOOK_NOT_FOUND.
+
+        Before the fix: pre-check get_notebook() raised NOTEBOOK_NOT_FOUND,
+        but a concurrent delete between get_notebook() and DELETE would silently
+        succeed (rowcount=0 not checked). Fix uses rowcount after DELETE.
+        """
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.delete_notebook(99999)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_migrate_concurrent_idempotent(self) -> None:
+        """migrate() must not crash when called concurrently from two threads
+        on the same fresh database (ThreadingHTTPServer spawns one Store per request).
+
+        Before the fix: INSERT INTO schema_migrations raised UNIQUE constraint failed
+        when both threads read version=0 and both tried to apply migration v1.
+        After the fix: INSERT OR IGNORE silently skips duplicate version records.
+        """
+        import threading
+        errors: list[Exception] = []
+
+        def run_migrate() -> None:
+            try:
+                with make_store() as s:
+                    s.migrate()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run_migrate) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [], f"concurrent migrate() raised: {errors}")
 
     def test_add_chunks_with_deleted_source_raises_source_not_found(self) -> None:
         """add_chunks() must raise StoreError(SOURCE_NOT_FOUND) — not a bare

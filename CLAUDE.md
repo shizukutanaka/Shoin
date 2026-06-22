@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.32
+## Version History: v0.1.37 → v0.2.33
+
+### v0.2.33 (2026-06-22)
+**Fixed**: `store.delete_notebook()` called `get_notebook()` then `DELETE` in separate steps, the same TOCTOU gap already fixed in `rename_notebook()` (v0.2.29). A notebook deleted between those two steps caused the DELETE to silently match 0 rows — the method returned success while no deletion occurred. Fix: remove the pre-check read and check `cur.rowcount == 0` after the DELETE, raising `NOTEBOOK_NOT_FOUND` atomically.
+
+**Fixed**: `store.set_embedding()` accepted zero-length vectors without error. An embedding endpoint returning an empty list `[]` would store `b""` (empty BLOB), which later produces a zero-norm in cosine similarity (guarded to 0.0, but silently degrades retrieval). Fix: raise `StoreError("EMBEDDING_INVALID", ...)` when `vec` is empty.
+
+**Fixed**: `store.migrate()` used `INSERT INTO schema_migrations(version)` which raises a UNIQUE constraint violation when two concurrent threads (from `ThreadingHTTPServer`) both read `version=0` and both try to apply the same migration. The second thread would crash with an unhandled `sqlite3.OperationalError`. Fix: change to `INSERT OR IGNORE INTO schema_migrations(version)` so duplicate version records are silently skipped — all migration DDL is already idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`).
 
 ### v0.2.32 (2026-06-22)
 **Fixed**: `_decode()` (`ingest.py`) ignored the `charset=` parameter in the HTTP `Content-Type` header. Pages encoded as ISO-8859-1, Windows-1252, EUC-JP, or any non-UTF-8/non-CP932 encoding fell through to `data.decode("utf-8", errors="replace")`, producing replacement characters (`?`) for all non-ASCII content. Fix: add a `charset: str | None` parameter to `_decode()`; try the provided charset first (guarded with `LookupError` for unknown names), then fall through to the existing `utf-8-sig` / `cp932` defaults. Add `_charset_from_ctype()` helper to parse the `charset=` value from the Content-Type string; called in `extract_url()` and passed through to `_decode()`.
