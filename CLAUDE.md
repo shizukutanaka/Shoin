@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.30
+## Version History: v0.1.37 → v0.2.31
+
+### v0.2.31 (2026-06-22)
+**Fixed**: `_h_ask_sse()` (`server.py`) did not guard `build_context()` after SSE headers were committed. If `build_context()` raised a non-`StoreError` exception (e.g. `sqlite3.OperationalError` on DB-lock timeout), it propagated to `_dispatch`'s `except Exception` handler, which called `_error(500, ...)` → wrote a new HTTP status line into the already-flushed SSE stream body, corrupting the response. Fix: wrap `build_context()` in its own `try/except Exception` block that sends an SSE `error` event and returns cleanly.
+
+**Fixed**: `index.html` ask handler — if the SSE stream was established (HTTP 200, `meta` event received) but then closed without any `delta` or `done` events (the primary trigger being the above `build_context` corruption), the spinner appended to the message bubble was never cleared. The `catch` block only fires on fetch rejection or `reader.read()` throw, not a clean stream close. Fix: add `if (!acc) bd.replaceChildren()` to the `finally` block to clear the spinner whenever no content arrived.
 
 ### v0.2.30 (2026-06-22)
 **Fixed**: `verify_grounding()` (`citation.py`) processed all cited S-numbers in a sentence as a group rather than independently. When a sentence co-cited `[S1][S2]` and S1 was confirmed (overlap >= CONFIRM_MIN), `continue` skipped misattribution detection for S2 entirely — even if S2's overlap was 0% and S1 matched the claim far better than S2. Fix: restructure the inner loop to evaluate each cited S-number independently; each number is confirmed if its own overlap >= CONFIRM_MIN, or flagged misattributed if any *other* source (including co-cited ones) matches far better. Regression test added.

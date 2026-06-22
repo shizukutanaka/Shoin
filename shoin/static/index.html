@@ -641,7 +641,12 @@ $("#askForm").onsubmit = async e=>{
       }
     }
   }catch(err){ bd.textContent=""; toast(err.message); }
-  finally{ $("#askBtn").disabled = false; }
+  finally{
+    $("#askBtn").disabled = false;
+    // If the stream closed before any delta/done event (e.g. server error after meta),
+    // bd still holds the spinner — clear it so it doesn't linger permanently.
+    if (!acc) bd.replaceChildren();
+  }
 };
 
 /* ---------- studio & notes ---------- */

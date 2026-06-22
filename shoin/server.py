@@ -522,7 +522,17 @@ class _Handler(BaseHTTPRequestHandler):
                     pass  # post-SSE persist: notebook deleted or DB error; stream already clean
                 return
 
-            context = build_context(store, hits)
+            try:
+                context = build_context(store, hits)
+            except Exception as exc:
+                # Headers already committed; must not let this propagate to _dispatch
+                # (it would write a new HTTP status line into the SSE body stream).
+                try:
+                    self._sse("error", {"code": "SYSTEM_INTERNAL_ERROR", "message": str(exc)})
+                except ConnectionError:
+                    pass
+                return
+
             try:
                 self._sse(
                     "meta",
