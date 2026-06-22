@@ -899,6 +899,10 @@ class MidStreamLLMErrorTest(unittest.TestCase):
         self.assertEqual(len(assistant_msgs), 1)
         persisted_body = assistant_msgs[0]["body"]
         self.assertIn("部分的な回答", persisted_body)
+        # Persisted citation_report must carry degraded:true so the UI can render
+        # the "search only" badge when loading chat history after a page reload.
+        persisted_report = assistant_msgs[0].get("report", {})
+        self.assertTrue(persisted_report.get("degraded"), "report.degraded must be True in DB")
 
 
 class PostStreamStoreErrorTest(unittest.TestCase):
