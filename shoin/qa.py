@@ -122,7 +122,7 @@ def _truncate_tokens(text: str, limit: int) -> str:
         if is_cjk(ch):
             acc += 1
             prev_alnum = False
-        elif ch.isalnum():
+        elif ch.isalnum() or ch == '_':
             if not prev_alnum:
                 acc += 1
             prev_alnum = True

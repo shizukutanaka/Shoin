@@ -306,7 +306,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.27
+## Version History: v0.1.37 → v0.2.28
+
+### v0.2.28 (2026-06-22)
+**Fixed**: `_truncate_tokens()` (`qa.py`) and `_tail()` (`chunk.py`) treated `_` as a word separator (via `ch.isalnum()`) while `estimate_tokens()` counted it as a word character (via `_WORD_RE = r"[A-Za-z0-9_]+"`) — causing `parse_user_input` to cost 1 token by `estimate_tokens` but 3 tokens in the truncation/tail logic. Consequence: source context was cut to roughly half the intended token budget for any document with underscore-delimited identifiers (code, config keys). Fix: replace `ch.isalnum()` with `ch.isalnum() or ch == '_'` in both functions so all three are consistent. Regression tests added.
 
 ### v0.2.27 (2026-06-22)
 **Fixed**: `showSource()` lazy-load `<details>` toggle listener (added in v0.2.26) fetched full source text without an abort signal, leaving orphaned HTTP requests in-flight when the viewer was switched before the `<details>` was expanded. The outer `sig` (`AbortController.signal`) was in scope but not passed to the inner `api()` call. Fix: pass `{signal: sig}` to the fetch, add `if (sig.aborted) return;` guard after the await, and change the catch handler to `if (!sig.aborted) body.textContent = e.message` to suppress abort errors.

@@ -96,7 +96,7 @@ def _tail(text: str, tokens: int) -> str:
         ch = text[i]
         if is_cjk(ch):
             acc += 1
-        elif not ch.isalnum() and i + 1 < len(text) and text[i + 1].isalnum():
+        elif not (ch.isalnum() or ch == '_') and i + 1 < len(text) and (text[i + 1].isalnum() or text[i + 1] == '_'):
             acc += 1  # word boundary crossed
         if acc >= tokens:
             # For CJK, position i IS the token — include it.

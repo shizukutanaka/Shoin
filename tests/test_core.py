@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.27")
+        self.assertEqual(VERSION, "0.2.28")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -585,6 +585,34 @@ class TestChunk(unittest.TestCase):
         short = "猫"  # 1 CJK token
         result = _tail(short, 10)  # budget larger than available tokens
         self.assertEqual(result, short)
+
+    def test_underscore_word_boundary_consistent_between_estimate_and_tail(self) -> None:
+        """estimate_tokens and _tail must agree on underscore-delimited identifiers.
+
+        Before the fix: _WORD_RE counted parse_user_input as 1 token; _tail's
+        isalnum() boundary treated each _ as a separator, so _tail(text, 1)
+        returned just "input" (3rd word) instead of "parse_user_input".
+        After the fix: both count underscore-delimited identifiers as 1 token.
+        """
+        from shoin.chunk import _tail
+        text = "alpha parse_user_input beta"
+        # estimate_tokens: 3 word-runs ("alpha", "parse_user_input", "beta") → 3
+        self.assertEqual(estimate_tokens(text), 3)
+        # _tail with budget=2 should return the last 2 word-runs
+        result = _tail(text, 2)
+        self.assertEqual(result, "parse_user_input beta")
+        self.assertEqual(estimate_tokens(result), 2)
+
+    def test_truncate_tokens_underscore_consistent_with_estimate(self) -> None:
+        """_truncate_tokens must treat underscore-delimited identifiers as 1 token,
+        matching estimate_tokens so the token budget is not violated."""
+        from shoin.qa import _truncate_tokens
+        # "parse_user_input" is 1 token by estimate_tokens; budget of 1 should keep it whole
+        text = "parse_user_input extra_word"
+        truncated = _truncate_tokens(text, 1)
+        self.assertEqual(truncated.strip(), "parse_user_input")
+        # Verify the truncated text costs exactly 1 token
+        self.assertEqual(estimate_tokens(truncated.strip()), 1)
 
     def test_heading_after_content_creates_block_boundary(self) -> None:
         """A heading that immediately follows content (no blank line) must flush the buffer."""
