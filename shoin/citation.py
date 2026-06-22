@@ -135,15 +135,20 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         claim = _bigrams(_BRACKET_RE.sub(" ", sentence))  # drop the [S#] markers
         if not claim:
             continue
-        cited_best = max(_overlap(claim, src_bg[n]) for n in nums)
-        if cited_best >= CONFIRM_MIN:
-            confirmed.update(n for n in nums if _overlap(claim, src_bg[n]) >= CONFIRM_MIN)
-            continue
-        others = [_overlap(claim, bg) for n, bg in src_bg.items() if n not in nums]
-        best_other = max(others) if others else 0.0
-        if best_other >= CONFIRM_MIN and best_other - cited_best >= MISMATCH_GAP:
-            misattributed.update(nums)  # wording belongs to a source it did not cite
-        # otherwise inconclusive (possibly a valid paraphrase) — stay silent
+        for n in nums:
+            overlap_n = _overlap(claim, src_bg[n])
+            if overlap_n >= CONFIRM_MIN:
+                confirmed.add(n)
+            else:
+                # A different source — including co-cited ones — may match far better,
+                # indicating this specific S-number is wrong even if others in the same
+                # sentence are correctly cited.
+                best_other = max(
+                    (_overlap(claim, src_bg[k]) for k in src_bg if k != n), default=0.0
+                )
+                if best_other >= CONFIRM_MIN and best_other - overlap_n >= MISMATCH_GAP:
+                    misattributed.add(n)
+            # otherwise inconclusive (possibly a valid paraphrase) — stay silent
     return sorted(confirmed), sorted(misattributed)
 
 

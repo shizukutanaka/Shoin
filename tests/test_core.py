@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.29")
+        self.assertEqual(VERSION, "0.2.30")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1944,6 +1944,27 @@ class TestCitation(unittest.TestCase):
         self.assertIn(1, confirmed, "S1 must be confirmed when claim text matches its source")
         self.assertIn(2, confirmed, "S2 must be confirmed when claim text matches its source")
         self.assertEqual(misattributed, [])
+
+    def test_verify_grounding_multi_citation_independent_check(self) -> None:
+        """In a sentence co-citing [S1][S2], a confirmed S1 must NOT prevent S2
+        from being flagged misattributed when S2's overlap is low and S1 matches better.
+
+        Before the fix: the `continue` after confirming S1 skipped the misattribution
+        check for S2 entirely, silently ignoring the wrong citation number.
+        After the fix: each cited number is evaluated independently.
+        """
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "Shoin retrieves documents with source-grounded citations.",
+            2: "Washi paper is made from kozo fiber by traditional craftspeople.",
+        }
+        # The claim strongly matches S1 but cites both S1 and S2 in the same sentence.
+        # S2 has zero overlap → should be flagged misattributed.
+        text = "Shoin retrieves documents with citations [S1][S2]."
+        confirmed, misattributed = verify_grounding(text, sources)
+        self.assertIn(1, confirmed, "S1 must be confirmed (high overlap)")
+        self.assertIn(2, misattributed, "S2 must be misattributed (co-cited but low overlap)")
 
 
 class TestStoreChunksForSource(unittest.TestCase):
