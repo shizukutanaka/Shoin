@@ -266,7 +266,7 @@ def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
 
 
 def _degraded_text(hits: list[Hit]) -> str:
-    lines = [f"[S?] …{h.text[:120]}" for h in hits[:3]]
+    lines = [f"[S{i + 1}] …{h.text[:120]}" for i, h in enumerate(hits[:3])]
     return _t("degraded_prefix") + "\n".join(lines)
 
 

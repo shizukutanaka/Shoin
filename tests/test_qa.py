@@ -233,6 +233,27 @@ class TestAsk(unittest.TestCase):
             self.assertIn("confirmed", ans.report)
             self.assertIn("misattributed", ans.report)
 
+    def test_degraded_response_citations_extract_correctly(self) -> None:
+        """Degraded response text must use valid [S#] numbers so citations extract properly.
+
+        Before the fix: _degraded_text() used [S?] which doesn't match the citation regex,
+        resulting in empty cited list and 0.0 coverage even though sources are shown.
+        After the fix: uses [S1], [S2], [S3] so citations extract and coverage reflects
+        the sources actually cited.
+        """
+        from shoin.citation import extract_citations, make_report
+
+        s, nb = seeded_store()
+        with s:
+            ans = ask(s, FakeLLM(chat_error=True), nb, "書斎とは？")
+            self.assertTrue(ans.degraded)
+            # Degraded answer should cite the top 3 sources (or fewer if fewer are returned)
+            cited = ans.report.get("cited", [])
+            self.assertGreater(len(cited), 0, "degraded response must cite sources")
+            # Check that cited numbers match [S1], [S2], [S3] pattern — i.e., sequential from 1
+            self.assertEqual(cited, list(range(1, len(cited) + 1)), "cited sources must be sequential from 1")
+            self.assertGreater(ans.report.get("coverage", 0.0), 0.0, "coverage must reflect cited sources")
+
     def test_embed_failure_falls_back_to_bm25(self) -> None:
         s, nb = seeded_store()
         with s:
