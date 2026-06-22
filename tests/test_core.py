@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.28")
+        self.assertEqual(VERSION, "0.2.29")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -155,6 +155,36 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.rename_notebook(nb.id, "a" * (MAX_NAME_LEN + 1))
             self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_rename_notebook_nonexistent_raises(self) -> None:
+        """rename_notebook on a missing id must raise NOTEBOOK_NOT_FOUND, not silently no-op."""
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.rename_notebook(99999, "should fail")
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_update_source_title_concurrent_delete_raises(self) -> None:
+        """update_source_title must raise SOURCE_NOT_FOUND when the source is deleted
+        between the existence check and the UPDATE (TOCTOU race simulation)."""
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("race")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-race")
+            # Simulate concurrent delete: after get_source succeeds, DELETE the row
+            # so the UPDATE finds 0 rows.
+            original_get = s.get_source
+
+            def get_and_delete(sid):
+                result = original_get(sid)
+                s.conn.execute("DELETE FROM sources WHERE id=?", (sid,))
+                s.conn.commit()
+                return result
+
+            with patch.object(s, "get_source", side_effect=get_and_delete):
+                with self.assertRaises(StoreError) as cm:
+                    s.update_source_title(src.id, "new title", "new origin")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
     def test_add_note_title_too_long_rejected(self) -> None:
         from shoin.config import MAX_NAME_LEN
@@ -2145,6 +2175,32 @@ class TestPipeline(unittest.TestCase):
 
         self.assertEqual(n, 2, "both chunks must be embedded via embed_one fallback")
         self.assertEqual(embedded, ["alpha", "beta"])
+
+    def test_embed_chunks_done_counts_actual_pairs_not_batch_size(self) -> None:
+        """n_embedded must reflect vectors actually stored, not the full batch size.
+
+        Before the fix: done += len(batch_ids) overcounted when a backend's embed()
+        returned fewer vectors than requested (zip silently truncates).
+        After the fix: done += count (incremented per pair in the zip loop).
+        """
+        from shoin.pipeline import _embed_chunks
+
+        class ShortVectorLLM:
+            """Returns one fewer vector than requested to exercise zip truncation."""
+            embedding_model = "short-vec-model"
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                # Return one fewer vector than requested
+                return [[0.1, 0.2] for _ in texts[:-1]]
+
+        with make_store() as s:
+            nb_id = s.create_notebook("zip-trunc-test").id
+            src = s.add_source(nb_id, "txt", "doc", "o", "sha-zt")
+            texts = ["chunk one", "chunk two", "chunk three"]
+            chunk_ids = s.add_chunks(src.id, texts)
+            n = _embed_chunks(s, ShortVectorLLM(), chunk_ids, texts)
+        # embed() returns len(texts)-1 vectors → zip processes len(texts)-1 pairs
+        self.assertEqual(n, len(texts) - 1, "done must equal actual pairs stored, not batch size")
 
     def test_index_source_url_path_calls_extract_url(self) -> None:
         """index_source with an http:// target must call extract_url, not extract_file."""

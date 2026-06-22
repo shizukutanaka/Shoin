@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.28
+## Version History: v0.1.37 → v0.2.29
+
+### v0.2.29 (2026-06-22)
+**Fixed**: `_embed_chunks()` (`pipeline.py`) counted `done += len(batch_ids)` instead of actual stored pairs. When a `ChatBackend.embed()` returns fewer vectors than requested, Python's `zip` silently truncates, storing fewer embeddings while `n_embedded` overcounted by the full batch size. Fix: increment `done` once per pair inside the `zip` loop.
+
+**Fixed**: `_embed_chunks()` `except StoreError` did not catch `sqlite3.OperationalError` from `conn.commit()` (raised on DB-lock timeout). The uncommitted batch's `set_embedding(commit=False)` calls would remain pending and could be flushed by a later `conn.commit()` elsewhere. Fix: broaden to `except Exception` so the rollback guard covers both `StoreError` and DB lock failures.
+
+**Fixed**: `store.rename_notebook()` called `get_notebook()` then `UPDATE` in separate steps. A notebook deleted between those two steps would cause the `UPDATE` to silently match 0 rows — the method returned success while no rename occurred. Fix: remove the pre-check read and check `cur.rowcount == 0` after the `UPDATE` instead, raising `NOTEBOOK_NOT_FOUND` atomically.
+
+**Fixed**: `store.update_source_title()` had the same TOCTOU gap as `rename_notebook` — no `rowcount` check after the `UPDATE`. Fix: check `cur.rowcount == 0` and raise `SOURCE_NOT_FOUND` if the source was concurrently deleted.
 
 ### v0.2.28 (2026-06-22)
 **Fixed**: `_truncate_tokens()` (`qa.py`) and `_tail()` (`chunk.py`) treated `_` as a word separator (via `ch.isalnum()`) while `estimate_tokens()` counted it as a word character (via `_WORD_RE = r"[A-Za-z0-9_]+"`) — causing `parse_user_input` to cost 1 token by `estimate_tokens` but 3 tokens in the truncation/tail logic. Consequence: source context was cut to roughly half the intended token budget for any document with underscore-delimited identifiers (code, config keys). Fix: replace `ch.isalnum()` with `ch.isalnum() or ch == '_'` in both functions so all three are consistent. Regression tests added.

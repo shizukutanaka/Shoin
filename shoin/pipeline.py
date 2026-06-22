@@ -77,15 +77,18 @@ def _embed_chunks(
         for i in range(0, len(texts), EMBED_BATCH):
             batch_ids = chunk_ids[i : i + EMBED_BATCH]
             vectors = embed(texts[i : i + EMBED_BATCH])
+            count = 0
             for cid, vec in zip(batch_ids, vectors):
                 store.set_embedding(cid, vec, commit=False)
+                count += 1
             store.conn.commit()  # one commit per batch, not per chunk
-            done += len(batch_ids)
+            done += count
     except LLMError:
         pass  # partial embedding is fine: BM25 covers the rest
-    except StoreError:
-        # A chunk was concurrently deleted mid-batch. Roll back the partial
-        # uncommitted batch so its embeddings aren't silently committed later
+    except Exception:
+        # StoreError (concurrent chunk delete) or sqlite3.OperationalError
+        # (busy_timeout on conn.commit()). Roll back the partial uncommitted
+        # batch so its embeddings aren't silently committed later
         # (set_setting() below issues conn.commit(), which would flush them).
         try:
             store.conn.rollback()

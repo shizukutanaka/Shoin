@@ -240,12 +240,13 @@ class Store:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
         if len(name) > MAX_NAME_LEN:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"name too long (max {MAX_NAME_LEN} chars)")
-        self.get_notebook(notebook_id)
-        self.conn.execute(
+        cur = self.conn.execute(
             "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
             (name, _now(), notebook_id),
         )
         self.conn.commit()
+        if cur.rowcount == 0:
+            raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
     def delete_notebook(self, notebook_id: int) -> None:
         self.get_notebook(notebook_id)
@@ -295,10 +296,12 @@ class Store:
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
         title = title[:MAX_TITLE_LEN]
-        src = self.get_source(source_id)
-        self.conn.execute(
+        src = self.get_source(source_id)  # also validates existence; notebook_id needed below
+        cur = self.conn.execute(
             "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
         )
+        if cur.rowcount == 0:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
         self.touch_notebook(src.notebook_id)
         self.conn.commit()
 
