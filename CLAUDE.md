@@ -128,11 +128,9 @@ When a user adds a URL source, Shoin fetches the content over HTTP. An SSRF vuln
 
 Code: `ingest.py` `fetch_url()` and `_check_ip_pinning()`.
 
-### Atomic Database Operations
+### Atomic Chunk Insertion + Best-Effort Embedding
 
-Multi-step operations (ingest source → chunk → embed → FTS index) are wrapped in SQLite transactions. If any step fails (LLM down, disk full, malformed PDF), the entire source is rolled back; no orphaned chunks or half-indexed data left behind.
-
-Example: `pipeline.py` `index_source()` opens a transaction, adds the source row, chunks it, embeds them, and updates the settings table. If embedding fails partway, `except LLMError` rolls back the entire transaction.
+`add_chunks()` wraps all INSERT statements for a source in a single `with self.conn:` transaction; if any chunk INSERT fails (e.g., disk full) all are rolled back. The source row itself is committed separately by `add_source()` before `add_chunks()` is called, so a disk-full failure between those two steps could leave a source with zero chunks in the DB. In practice this is very unlikely (the source row was just written, so the same disk that accepted it will almost always accept the much larger chunk batch too). Embedding failures are always non-fatal: `_embed_chunks()` catches `LLMError` and leaves the source indexed for BM25-only retrieval.
 
 ### Token-Aware Truncation
 
@@ -308,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.24
+## Version History: v0.1.37 → v0.2.25
+
+### v0.2.25 (2026-06-22)
+**Fixed**: `bm25_search()` LIKE fallback had no SQL `LIMIT` clause. For large notebooks, a short query (single CJK character, 2-char ASCII term) could pull tens of thousands of rows into memory before Python-side scoring and truncation to k. Fix: cap the LIKE scan at `max(k * 10, 2000)` rows via `LIMIT ?` in the SQL, matching the "limited to 2000 rows" statement in CLAUDE.md that was previously documentation-only.
+
+**Fixed (docs)**: CLAUDE.md "Atomic Database Operations" section incorrectly stated that source + chunks + embed operations are wrapped in a single transaction. `add_source()` commits independently before `add_chunks()` is called, so a failure between the two (very unlikely in practice) could leave a zero-chunk source. Corrected to accurately describe `add_chunks()` atomicity and best-effort embedding.
 
 ### v0.2.24 (2026-06-21)
 **Fixed**: `degraded: true` was not persisted to the `citation_report` JSON stored in the `messages` table. When a user reloaded the page or switched notebooks, historical degraded (search-only) answers lost their "search only" badge. Fix: add `degraded: NotRequired[bool]` to `CitationReport` TypedDict (`citation.py`), set it in the degraded path of `ask()` (`qa.py`) and in `_h_ask_sse()` (`server.py`), and render it in `addMsg()` by checking `report.degraded` (`index.html`). The dead `#degBadge` header element (initialized hidden and never shown) is left in place but is no longer the primary indicator — per-message badges in the chat history are now the correct mechanism.

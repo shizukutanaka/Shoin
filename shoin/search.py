@@ -149,11 +149,16 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         return []
     conditions = " OR ".join(f"c.text LIKE ? ESCAPE '|'" for _ in needles)
     like_params = [f"%{_esc_like(n)}%" for n in needles]
+    # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
+    # score in Python, and take the top k.  Without the cap a common CJK bigram
+    # on a large notebook can pull tens of thousands of rows into memory.
+    like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
         f"SELECT c.id, c.source_id, c.text FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
-        f" WHERE s.notebook_id = ? AND ({conditions})",
-        [notebook_id, *like_params],
+        f" WHERE s.notebook_id = ? AND ({conditions})"
+        f" LIMIT ?",
+        [notebook_id, *like_params, like_cap],
     ).fetchall()
     for r in rows:
         text = str(r["text"])
