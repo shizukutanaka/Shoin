@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.25")
+        self.assertEqual(VERSION, "0.2.26")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1819,6 +1819,27 @@ class TestCitation(unittest.TestCase):
 
         report = make_report("answer [S1].", ["t1"], source_bodies=["body text here"])
         self.assertIn("confirmed", report)
+
+    def test_make_report_source_excerpts_populated_when_bodies_given(self) -> None:
+        """make_report() must populate source_excerpts keyed by S-number when bodies given."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "Answer [S1] and [S2].",
+            ["Title A", "Title B"],
+            source_ids=[10, 20],
+            source_bodies=["Body of source one here.", "Body of source two here."],
+        )
+        self.assertIn("source_excerpts", report)
+        self.assertEqual(report["source_excerpts"]["S1"], "Body of source one here.")
+        self.assertEqual(report["source_excerpts"]["S2"], "Body of source two here.")
+
+    def test_make_report_no_source_excerpts_without_bodies(self) -> None:
+        """source_excerpts must be absent when source_bodies are not supplied."""
+        from shoin.citation import make_report
+
+        report = make_report("Answer [S1].", ["Title A"])
+        self.assertNotIn("source_excerpts", report)
 
     def test_make_report_source_ids_and_bodies_both_checked(self) -> None:
         """Both source_ids and source_bodies must match source_titles length."""

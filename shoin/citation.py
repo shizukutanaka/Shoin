@@ -66,6 +66,10 @@ class CitationReport(TypedDict):
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
+    # Maps "S1" -> excerpt of the text actually retrieved as context for the answer.
+    # Allows the UI to show the supporting passage immediately on seal-click without
+    # an extra HTTP fetch. Absent on old persisted reports — consumers must guard.
+    source_excerpts: NotRequired[dict[str, str]]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -175,4 +179,7 @@ def make_report(
         )
         report["confirmed"] = confirmed
         report["misattributed"] = misattributed
+        # Each body is already bounded by the context token budget (~300–400 tokens
+        # ≈ 1 200 chars max), so storing the full body is compact and safe.
+        report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
     return report

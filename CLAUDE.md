@@ -306,7 +306,13 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.25
+## Version History: v0.1.37 → v0.2.26
+
+### v0.2.26 (2026-06-22)
+**Feature**: Source passage highlighting — clicking an [S1] seal chip now shows the retrieved excerpt immediately (no network round-trip), with lazy-load of the full source text via `<details>`. The specific context fed to the LLM is preserved in `source_excerpts` inside `CitationReport` so the excerpt is available from history on reload without an extra API call.
+
+- `citation.py`: Added `source_excerpts: NotRequired[dict[str, str]]` to `CitationReport`. Populated in `make_report()` when `source_bodies` are supplied (each entry is the retrieved context text for that S-number, already bounded by the context token budget).
+- `index.html`: `renderWithSeals()` extracts `source_excerpts` from the report and passes it through `openSeal()` to `showSource()`. `showSource()` now renders the excerpt as a highlighted passage block, then lazily fetches the full source only when the user expands the "View full source" `<details>` element. Falls back to immediate fetch when no excerpt is available (old persisted messages, Studio outputs).
 
 ### v0.2.25 (2026-06-22)
 **Fixed**: `bm25_search()` LIKE fallback had no SQL `LIMIT` clause. For large notebooks, a short query (single CJK character, 2-char ASCII term) could pull tens of thousands of rows into memory before Python-side scoring and truncation to k. Fix: cap the LIKE scan at `max(k * 10, 2000)` rows via `LIMIT ?` in the SQL, matching the "limited to 2000 rows" statement in CLAUDE.md that was previously documentation-only.

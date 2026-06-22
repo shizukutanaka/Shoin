@@ -145,8 +145,18 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 #viewer .sheet{background:var(--paper);max-width:680px;width:100%;max-height:80vh;display:flex;
   flex-direction:column;border-radius:4px;border-top:3px solid var(--seiji)}
 #viewer .sheet h3{font-family:var(--serif);padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px}
-#viewer .sheet .tx{overflow-y:auto;padding:14px 16px;white-space:pre-wrap;font-size:13.5px}
+#viewer .sheet .tx{overflow-y:auto;padding:14px 16px;font-size:13.5px}
 #viewer .sheet .ft{padding:10px 16px;border-top:1px solid var(--border);text-align:right}
+.excerpt-label{font-size:11px;letter-spacing:.06em;color:var(--sumi-soft);margin-bottom:5px}
+.excerpt{background:var(--washi);border-left:3px solid var(--seiji);padding:8px 12px;
+  white-space:pre-wrap;word-break:break-word;font-size:13px;margin-bottom:8px}
+details.full-src{margin-top:4px}
+details.full-src summary{cursor:pointer;font-size:12px;color:var(--seiji);padding:4px 0;
+  list-style:none;user-select:none}
+details.full-src summary::before{content:"▸ "}
+details.full-src[open] summary::before{content:"▾ "}
+details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
+  border-top:1px solid var(--border);padding-top:10px;margin-top:6px;font-size:13px}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:40;display:none;
   background:var(--sumi);color:var(--washi);border-left:3px solid var(--shu);
   border-radius:3px;padding:9px 16px;font-size:13px;max-width:88vw}
@@ -271,6 +281,7 @@ const I18N = {
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "export.head":"エクスポート","viewer.close":"閉じる",
+    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…"
   },
@@ -293,6 +304,7 @@ const I18N = {
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "export.head":"Export","viewer.close":"Close",
+    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…"
   }
@@ -425,6 +437,7 @@ function renderWithSeals(container, text, report){
   const confirmed = new Set((report && report.confirmed) || []);
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
+  const excerpts = (report && report.source_excerpts) || {};
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -443,19 +456,20 @@ function renderWithSeals(container, text, report){
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + name : "")
         : name;
       chip.setAttribute("aria-label", `Citation S${n}` + (name ? ": " + name : ""));
-      chip.onclick = () => openSeal(n, srcMap, idMap);
+      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap){
+function openSeal(n, srcMap, idMap, excerpts){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
-  if (sid){ showSource(sid, title || `S${n}`); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title); return; } }
+  const excerpt = (excerpts && excerpts[`S${n}`]) || null;
+  if (sid){ showSource(sid, title || `S${n}`, excerpt); return; }
+  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt); return; } }
   if (title) toast(title);
 }
 let _srcAbort = null, _viewerOpener = null;
@@ -463,19 +477,45 @@ function closeViewer(){
   $("#viewer").classList.remove("open");
   if (_viewerOpener) { _viewerOpener.focus(); _viewerOpener = null; }
 }
-async function showSource(id, title){
+async function showSource(id, title, excerpt){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
   const sig = _srcAbort.signal;
-  try{
-    const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
-    if (sig.aborted) return;
-    _viewerOpener = document.activeElement;
-    $("#viewerTitle").textContent = title;
-    $("#viewerText").textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+  _viewerOpener = document.activeElement;
+  $("#viewerTitle").textContent = title;
+  const vt = $("#viewerText");
+  vt.replaceChildren();
+  if (excerpt){
+    // Show the retrieved passage immediately — no network round-trip needed.
+    vt.append(el("div","excerpt-label", t("viewer.excerpt")));
+    vt.append(el("div","excerpt", excerpt));
+    // Lazy-load the full source text only when the user expands the details.
+    const det = document.createElement("details"); det.className="full-src";
+    const sum = document.createElement("summary"); sum.textContent = t("viewer.full_src");
+    det.append(sum);
+    det.addEventListener("toggle", async () => {
+      if (!det.open || det.dataset.loaded) return;
+      det.dataset.loaded = "1";
+      const body = el("div","full-body", "…");
+      det.append(body);
+      try{
+        const j = await (await api(`/api/sources/${id}/text`)).json();
+        body.textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+      }catch(e){ body.textContent = e.message; }
+    });
+    vt.append(det);
     $("#viewer").classList.add("open");
     $("#viewerClose").focus();
-  }catch(e){ if (!sig.aborted) toast(e.message); }
+  } else {
+    // No excerpt (old persisted message or Studio output): fetch immediately.
+    try{
+      const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
+      if (sig.aborted) return;
+      vt.textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+      $("#viewer").classList.add("open");
+      $("#viewerClose").focus();
+    }catch(e){ if (!sig.aborted) toast(e.message); }
+  }
 }
 $("#viewerClose").onclick = () => closeViewer();
 $("#viewer").onclick = e => { if (e.target.id==="viewer") closeViewer(); };
