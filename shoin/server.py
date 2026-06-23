@@ -426,14 +426,19 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_refresh(self, src_id: int) -> None:
         with Store(self.db) as store:
             result = refresh_source(store, src_id, self.llm)
-            self._json(
-                {
-                    "source": {"id": result.source.id, "title": result.source.title},
-                    "n_chunks": result.n_chunks,
-                    "n_embedded": result.n_embedded,
-                },
-                200,
-            )
+        # Source content changed: evict stale question suggestions (fingerprint = source
+        # ID tuple, which is unchanged on refresh, so the cache would never self-expire).
+        nb_id = result.source.notebook_id
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
+        self._json(
+            {
+                "source": {"id": result.source.id, "title": result.source.title},
+                "n_chunks": result.n_chunks,
+                "n_embedded": result.n_embedded,
+            },
+            200,
+        )
 
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:

@@ -306,7 +306,22 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.35
+## Version History: v0.1.37 → v0.2.36
+
+### v0.2.36 (2026-06-23)
+**Fixed**: `_h_src_refresh()` (`server.py`) did not evict the `questions_cache` entry for the affected notebook. The cache fingerprint is `tuple(s.id for s in store.sources_for_notebook(nb_id))`; since source IDs are preserved on refresh (by design), the fingerprint never changes, so stale question suggestions from before the content update were served indefinitely. Fix: add `questions_cache.pop(nb_id, None)` under `questions_cache_lock` after `refresh_source()` returns.
+
+**Fixed**: `store.replace_chunks_for_source()` did not call `touch_notebook()`. If `update_source_sha256()` was never called (e.g., it raised mid-pipeline), the notebook's `updated_at` timestamp would never reflect the chunk replacement. Fix: call `self.touch_notebook(src.notebook_id)` inside the `with self.conn:` block so the timestamp update is atomic with the DELETE+INSERT.
+
+**Fixed**: `store.update_source_sha256()` did not catch `sqlite3.IntegrityError` from the UPDATE. When a refreshed URL returns content whose SHA-256 already exists in the same notebook (i.e., a duplicate source by content), SQLite raised a UNIQUE constraint violation on `(notebook_id, sha256)`, which propagated as an unhandled exception and returned HTTP 500. Fix: wrap the UPDATE in `try/except sqlite3.IntegrityError` and raise `StoreError("SOURCE_ALREADY_EXISTS", ...)` so the dispatcher maps it to HTTP 409.
+
+**Fixed**: `pipeline.py` `refresh_source()` used a local `from .ingest import IngestError` import with a misleading comment "to avoid circular at module level". There is no circular import: `ingest.py` does not import `pipeline.py`. Fix: remove the local import and add `IngestError` to the existing module-level import on line 13.
+
+**Fixed** (UI): Clicking inside the inline source-rename input caused `row.onclick` to fire (`showSource`), opening the source viewer while trying to type. Fix: add `input.onclick = e => e.stopPropagation()` to block click propagation from the input to the row.
+
+**Fixed** (UI): Clicking the delete `×` button while the source-rename input had focus caused the `onblur` handler to fire first, calling `openNotebook()` and rebuilding the DOM — the delete button's `onclick` was then lost on the destroyed element. Fix: use `e.relatedTarget` in `onblur` to detect focus moving to another element within the same row and skip the commit in that case; the action button's own handler runs normally and rebuilds the DOM.
+
+**Fixed** (UI): Inline title-edit `commit` closure captured `cur` by reference. If the user switched notebooks between the double-click and Enter/blur, `openNotebook(cur.id)` would reload the newly selected notebook. Fix: capture `const nb = cur` at the top of the `ondblclick` handler so `commit` uses the notebook at the time of the rename initiation.
 
 ### v0.2.35 (2026-06-23)
 **Feature**: Source Refresh (`POST /api/sources/{id}/refresh`) — re-fetch a URL source in-place, replacing all chunks atomically while keeping the source ID. This preserves citation references in stored messages (existing `[S1]` links remain valid after a content update). Only URL sources support refresh; file sources return `INGEST_REFRESH_NOT_URL`. UI: URL sources now show a `↻` refresh button in the source list.

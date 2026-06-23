@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 
 from .chunk import split_text
-from .ingest import extract_file, extract_url
+from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
 from .store import Source, Store, StoreError
@@ -132,8 +132,6 @@ def refresh_source(
     remain resolvable after the content update. Only URL sources can be refreshed;
     file sources raise IngestError(INGEST_REFRESH_NOT_URL).
     """
-    from .ingest import IngestError  # local import to avoid circular at module level
-
     src = store.get_source(source_id)
     if not src.origin.startswith(("http://", "https://")):
         raise IngestError("INGEST_REFRESH_NOT_URL", "refresh is only supported for URL sources")

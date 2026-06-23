@@ -406,20 +406,28 @@ function renderNotebook(){
       // Inline title editing: double-click turns the span into an input
       tt.ondblclick = async ev => {
         ev.stopPropagation();
+        const nb = cur;  // capture notebook reference; cur may drift if user switches
         const input = document.createElement("input");
         input.type = "text"; input.className = "src-rename"; input.value = s.title;
+        // Prevent clicks inside the input from propagating to row.onclick (showSource)
+        input.onclick = e => e.stopPropagation();
         tt.replaceChildren(input, el("div","k", s.kind));
         input.focus(); input.select();
+        let committed = false;
         const commit = async () => {
+          if (committed) return; committed = true;
           const newTitle = input.value.trim();
-          if (!newTitle || newTitle === s.title) { openNotebook(cur.id); return; }
+          if (!newTitle || newTitle === s.title) { openNotebook(nb.id); return; }
           try {
             await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
-            toast(t("src.rename.ok")); openNotebook(cur.id);
-          } catch(e) { toast(e.message); openNotebook(cur.id); }
+            toast(t("src.rename.ok")); openNotebook(nb.id);
+          } catch(e) { toast(e.message); openNotebook(nb.id); }
         };
-        input.onblur = commit;
-        input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(cur.id);} };
+        // relatedTarget check: if focus moves to another element within this row
+        // (e.g. the delete or refresh button), skip blur-commit so the button click
+        // fires normally on its own; the button's onclick rebuilds the DOM anyway.
+        input.onblur = e => { if (row.contains(e.relatedTarget)) return; commit(); };
+        input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(nb.id);} };
       };
       tt.setAttribute("title", t("src.rename"));
       row.append(tt);
@@ -437,7 +445,7 @@ function renderNotebook(){
       del.onclick = async ev=>{ ev.stopPropagation();
         try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
       row.append(del);
-      row.onclick = () => showSource(s.id, s.title);
+      row.onclick = () => { if (tt.querySelector("input.src-rename")) return; showSource(s.id, s.title); };
       row.tabIndex = 0;
       row.setAttribute("role", "button");
       row.setAttribute("aria-label", `View source: ${s.title}`);

@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.35")
+        self.assertEqual(VERSION, "0.2.36")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -386,6 +386,27 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_sha256(99999, "sha", "title")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_replace_chunks_touches_notebook_updated_at(self) -> None:
+        """replace_chunks_for_source must update the notebook's updated_at timestamp."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "url", "page", "https://x.com", "sha-x")
+            s.add_chunks(src.id, ["old"])
+            t0 = s.get_notebook(nb.id).updated_at
+            s.replace_chunks_for_source(src.id, ["new"])
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
+        """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
+        collides with another source in the same notebook (UNIQUE constraint on sha256)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_source(nb.id, "url", "first", "https://a.com", "sha-collision")
+            src2 = s.add_source(nb.id, "url", "second", "https://b.com", "sha-other")
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src2.id, "sha-collision", "second renamed")
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
 
     def test_add_note_missing_notebook_raises(self) -> None:
         """add_note() on a non-existent notebook must raise NOTEBOOK_NOT_FOUND."""

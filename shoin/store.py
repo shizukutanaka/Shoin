@@ -354,7 +354,7 @@ class Store:
         source ID intact (preserving citation history in stored messages).
         Raises SOURCE_NOT_FOUND if the source was concurrently deleted.
         """
-        self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -365,6 +365,7 @@ class Store:
                         (source_id, seq, text),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError:
             raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement")
         return ids
@@ -373,9 +374,12 @@ class Store:
         """Update the content hash and title of a source after a refresh."""
         title = title[:MAX_TITLE_LEN]
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
-        cur = self.conn.execute(
-            "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
-        )
+        try:
+            cur = self.conn.execute(
+                "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
+            )
+        except sqlite3.IntegrityError:
+            raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source")
         if cur.rowcount == 0:
             raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
         self.touch_notebook(src.notebook_id)
