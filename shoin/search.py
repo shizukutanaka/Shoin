@@ -264,9 +264,9 @@ def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
 
 def _char_bigrams(text: str) -> set[str]:
     t = text.lower()
-    if len(t) > 1:
-        return {t[i : i + 2] for i in range(len(t) - 1)}
-    return {t} if t else set()
+    if len(t) < 2:
+        return set()
+    return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
 def lexical_overlap(query: str, text: str) -> float:

@@ -161,11 +161,13 @@ def build_context(
         texts: list[str] = []
         for h in grouped[source_id]:
             cost = estimate_tokens(h.text)
-            if used and used + cost > per_source:
-                break
-            if cost > per_source:  # single oversize chunk: token-aware truncate
-                texts.append(_truncate_tokens(h.text, per_source))
-                used = per_source
+            remaining = per_source - used
+            if cost > remaining:
+                # Chunk won't fit in full: truncate to remaining budget if any.
+                # Previously, the truncation guard fired only for the first chunk
+                # (when used==0); later oversize chunks were silently dropped.
+                if remaining > 0:
+                    texts.append(_truncate_tokens(h.text, remaining))
                 break
             texts.append(h.text)
             used += cost

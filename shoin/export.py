@@ -55,7 +55,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
             role = str(m["role"])
             body = str(m["body"])
             if role == "user":
-                parts.append(f"**User**: {body}")
+                parts.append(f"**User**: {_md_line(body)}")
                 parts.append("")
             else:
                 try:

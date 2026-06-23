@@ -186,7 +186,7 @@ class LLMClient:
         try:
             items = sorted(data["data"], key=lambda d: int(d.get("index", 0)))
             vecs = [[float(x) for x in item["embedding"]] for item in items]
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing embeddings in response") from exc
         if len(vecs) != len(texts):
             raise LLMError(

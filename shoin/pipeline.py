@@ -136,6 +136,16 @@ def refresh_source(
     if not src.origin.startswith(("http://", "https://")):
         raise IngestError("INGEST_REFRESH_NOT_URL", "refresh is only supported for URL sources")
     extracted = extract_url(src.origin)
+    # Guard against SHA-256 collision BEFORE replacing chunks.  Without this check,
+    # replace_chunks_for_source commits new chunks and then update_source_sha256 raises
+    # SOURCE_ALREADY_EXISTS, leaving the source with new chunks but the old sha256/title —
+    # a permanently inconsistent state.
+    dup = store.conn.execute(
+        "SELECT id FROM sources WHERE notebook_id=? AND sha256=? AND id!=?",
+        (src.notebook_id, extracted.sha256, source_id),
+    ).fetchone()
+    if dup:
+        raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
     texts = split_text(extracted.text)
     chunk_ids = store.replace_chunks_for_source(source_id, texts)
     store.update_source_sha256(source_id, extracted.sha256, extracted.title)

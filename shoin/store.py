@@ -343,7 +343,9 @@ class Store:
 
     def delete_source(self, source_id: int) -> None:
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
-        self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        cur = self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        if cur.rowcount == 0:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
         self.touch_notebook(src.notebook_id)
         self.conn.commit()
 
@@ -486,7 +488,9 @@ class Store:
         row = self.conn.execute("SELECT notebook_id FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
             raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
-        self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        cur = self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        if cur.rowcount == 0:
+            raise StoreError("NOTE_NOT_FOUND", f"note {note_id} was concurrently deleted")
         self.touch_notebook(int(row["notebook_id"]))
         self.conn.commit()
 

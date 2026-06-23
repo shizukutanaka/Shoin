@@ -1604,6 +1604,34 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_patch_source_with_integer_title_returns_400(self) -> None:
+        """PATCH /api/sources/{id} with {"title": 42} must return 400.
+
+        Before v0.2.39, _h_src_patch used `str(data.get("title") or "")` which silently
+        coerced integer titles to strings.
+        """
+        import json as _json
+
+        # Use a large nonexistent source_id — _require() runs before the source lookup
+        patch_body = _json.dumps({"title": 42}).encode()
+        status, raw = self._raw_post(
+            "/api/sources/99999",
+            patch_body,
+            {"Content-Type": "application/json", "X-HTTP-Method-Override": "PATCH"},
+        )
+        # Can't use _raw_post for PATCH directly — do it manually
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "PATCH", "/api/sources/99999",
+            body=patch_body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        raw = resp.read()
+        data = _json.loads(raw)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

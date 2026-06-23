@@ -413,10 +413,7 @@ class _Handler(BaseHTTPRequestHandler):
                 tmp_path.unlink(missing_ok=True)
 
     def _h_src_patch(self, src_id: int) -> None:
-        data = self._read_json()
-        title = str(data.get("title") or "").strip()
-        if not title:
-            raise StoreError("VALIDATION_FIELD_REQUIRED", "title must not be empty")
+        title = self._require(self._read_json(), "title")
         with Store(self.db) as store:
             src = store.get_source(src_id)
             store.update_source_title(src_id, title, src.origin)
@@ -565,6 +562,12 @@ class _Handler(BaseHTTPRequestHandler):
                 try:
                     self._sse("error", {"code": "SYSTEM_INTERNAL_ERROR", "message": str(exc)})
                 except ConnectionError:
+                    pass
+                # Prevent dangling user turn: save an empty assistant message so
+                # history_messages() sees a complete pair instead of an orphaned user turn.
+                try:
+                    store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))
+                except Exception:
                     pass
                 return
 

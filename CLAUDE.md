@@ -306,7 +306,26 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.38
+## Version History: v0.1.37 → v0.2.39
+
+### v0.2.39 (2026-06-23)
+**Fixed**: `build_context()` (`qa.py`) silently dropped an oversize chunk when it was not the first chunk for a source. The budget guard (`if used and used + cost > per_source: break`) came before the truncation guard (`if cost > per_source`), so only the first chunk ever got token-aware truncation. A later chunk that exceeded the remaining budget was thrown away entirely instead of being truncated to fill the space. Fix: replace both guards with a unified `remaining = per_source - used` check; any chunk that doesn't fit is truncated to `remaining` tokens and then the loop breaks.
+
+**Fixed**: `refresh_source()` (`pipeline.py`) checked for SHA-256 collision *after* replacing chunks, leaving the DB inconsistent on failure. If `replace_chunks_for_source()` committed new chunks and then `update_source_sha256()` raised `SOURCE_ALREADY_EXISTS` (refreshed content matched another source in the same notebook), the source row retained the old hash and title while its chunks already contained new content — a permanently inconsistent state. Fix: query for an existing source with the same `(notebook_id, sha256)` pair *before* replacing chunks, raising `SOURCE_ALREADY_EXISTS` if found, so the operation fails cleanly with no DB mutation.
+
+**Fixed**: `delete_source()` (`store.py`) had a TOCTOU gap: `get_source()` confirmed existence, but no `rowcount` check followed the `DELETE`. If a concurrent thread deleted the source between those two steps, `DELETE` matched 0 rows and the method silently returned success (HTTP 200) instead of raising `SOURCE_NOT_FOUND`. Fix: check `cur.rowcount == 0` after the `DELETE` and raise `SOURCE_NOT_FOUND` if nothing was deleted — the same pattern applied to `rename_notebook()` and `delete_notebook()` in v0.2.29 and v0.2.33.
+
+**Fixed**: `delete_note()` (`store.py`) had the same TOCTOU gap as `delete_source()`: the `DELETE` was not followed by a `rowcount` check. Fix: add the `cur.rowcount == 0` guard and raise `NOTE_NOT_FOUND`.
+
+**Fixed**: `_char_bigrams()` (`search.py`) returned `{t}` for a single-character input (e.g., `_char_bigrams("a")` returned `{"a"}`). The same class of bug was fixed in `citation._bigrams()` in v0.2.38. In MMR's `_sim()`, Jaccard of two monogram sets containing the same character equals 1.0, causing single-character chunk texts to be treated as fully duplicate and suppressed by MMR. Fix: mirror the v0.2.38 guard — `if len(t) < 2: return set()`.
+
+**Fixed**: `_h_src_patch()` (`server.py`) used `str(data.get("title") or "")` instead of `self._require()`. A non-string `"title"` value like `42` was silently coerced to `"42"` — the same type-confusion class fixed in `_require()` in v0.2.38, but `_h_src_patch` was not using `_require()`. Fix: replace the manual check with `self._require(self._read_json(), "title")`.
+
+**Fixed**: `_h_ask_sse()` (`server.py`) left an orphaned user message in the DB when `build_context()` raised an exception. The SSE error event was sent and the handler returned, but no assistant message was saved — leaving a dangling user turn that `history_messages()` would silently drop on the next request. Fix: save an empty assistant message (matching the no-hits path pattern) before returning from the `build_context` error handler.
+
+**Fixed**: `export_markdown()` (`export.py`) used `f"**User**: {body}"` without applying `_md_line()`. A user question with an embedded `\n` produced two output lines: `**User**: first line` (bold, labeled) and `second line` (plain, unlabeled) — visually broken in rendered Markdown. All other structural text (source titles, note titles, notebook name) already went through `_md_line()`; chat message bodies were missed. Fix: apply `_md_line(body)` to collapse embedded newlines on the user label line.
+
+**Fixed**: `pyproject.toml` version was `0.1.16`, diverged from `config.py`'s `VERSION = "0.2.38"`. Both are now aligned at `0.2.39`.
 
 ### v0.2.38 (2026-06-23)
 **Fixed**: `_bigrams()` (`citation.py`) returned `{t}` for single-character input (e.g., `_bigrams("a")` returned `{"a"}`). A character-1 set is not a bigram; passing it to `_overlap()` made a sentence whose sole overlap with a source was one shared character score 1.0, falsely confirming unrelated citations in `verify_grounding()`. Fix: guard `if len(t) < 2: return set()` so the function returns an empty set for inputs of fewer than two characters.
