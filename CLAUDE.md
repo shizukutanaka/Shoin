@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.37
+## Version History: v0.1.37 → v0.2.38
+
+### v0.2.38 (2026-06-23)
+**Fixed**: `_bigrams()` (`citation.py`) returned `{t}` for single-character input (e.g., `_bigrams("a")` returned `{"a"}`). A character-1 set is not a bigram; passing it to `_overlap()` made a sentence whose sole overlap with a source was one shared character score 1.0, falsely confirming unrelated citations in `verify_grounding()`. Fix: guard `if len(t) < 2: return set()` so the function returns an empty set for inputs of fewer than two characters.
+
+**Fixed**: `_CJK_RANGES` (`chunk.py`) omitted the CJK Unified Ideographs Extension B/C/D/E/F/G/H blocks (U+20000–U+2EBEF). Historical, variant, and rare CJK characters in the supplementary plane were classified as non-CJK, causing `estimate_tokens()` to undercount their token cost by roughly 4× (counted as ~¼-word ASCII runs instead of 1 token per character). This led to context budget overflows for texts containing supplementary-plane characters. Fix: add three ranges — `(0x20000, 0x2A6DF)`, `(0x2A700, 0x2CEAF)`, `(0x2CEB0, 0x2EBEF)` — to `_CJK_RANGES`.
+
+**Fixed**: `_require()` (`server.py`) silently coerced non-string JSON values to strings via `str(raw)`. A request body like `{"name": 42}` would create a notebook named `"42"`, bypassing type expectations. Fix: add an `isinstance` guard before the coercion; non-string non-null values now raise `VALIDATION_FIELD_FORMAT_INVALID` (HTTP 400).
 
 ### v0.2.37 (2026-06-23)
 **Fixed**: `suggest_questions()` (`studio.py`) filtered English questions too aggressively: the `"?" in q` guard silently dropped valid English questions when the LLM omitted trailing punctuation (e.g., "What is the main thesis" in list form). Japanese questions survived via the `か`/`でしょう` endswith fallback; English ones did not. Fix: accept any line of sufficient length (>= 8 chars) since the prompt already constrains output to questions only.

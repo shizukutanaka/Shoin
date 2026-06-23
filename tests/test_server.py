@@ -1583,6 +1583,27 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_create_notebook_with_integer_name_returns_400(self) -> None:
+        """POST /api/notebooks with {"name": 42} must return 400, not silently coerce.
+
+        Before v0.2.38, _require() called str(raw) on non-string values, so an integer
+        name like 42 would be silently accepted as "42" — a type confusion bug that let
+        callers bypass name-length validation and potentially inject unexpected values.
+        """
+        import json as _json
+
+        body = _json.dumps({"name": 42}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "POST", "/api/notebooks", body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        raw = resp.read()
+        data = _json.loads(raw)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

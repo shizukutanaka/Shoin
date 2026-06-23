@@ -97,7 +97,7 @@ def _bigrams(text: str) -> set[str]:
     """Character bigrams of NFKC-normalised, whitespace-stripped text."""
     t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).lower())
     if len(t) < 2:
-        return {t} if t else set()
+        return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 

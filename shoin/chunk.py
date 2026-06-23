@@ -11,17 +11,20 @@ import re
 from .config import CHUNK_OVERLAP, CHUNK_TOKENS
 
 _CJK_RANGES = (
-    (0x0E00, 0x0E7F),  # Thai
-    (0x0E80, 0x0EFF),  # Lao
-    (0x1000, 0x109F),  # Myanmar
-    (0x1780, 0x17FF),  # Khmer
-    (0x3000, 0x303F),  # CJK symbols and punctuation (。、　〆々 etc.)
-    (0x3040, 0x30FF),  # hiragana + katakana
-    (0x3400, 0x4DBF),  # CJK ext A
-    (0x4E00, 0x9FFF),  # CJK unified
-    (0xF900, 0xFAFF),  # CJK compat
-    (0xFF66, 0xFF9D),  # halfwidth katakana
-    (0xAC00, 0xD7A3),  # Hangul syllables
+    (0x0E00, 0x0E7F),    # Thai
+    (0x0E80, 0x0EFF),    # Lao
+    (0x1000, 0x109F),    # Myanmar
+    (0x1780, 0x17FF),    # Khmer
+    (0x3000, 0x303F),    # CJK symbols and punctuation (。、　〆々 etc.)
+    (0x3040, 0x30FF),    # hiragana + katakana
+    (0x3400, 0x4DBF),    # CJK ext A
+    (0x4E00, 0x9FFF),    # CJK unified ideographs
+    (0xF900, 0xFAFF),    # CJK compat
+    (0xFF66, 0xFF9D),    # halfwidth katakana
+    (0xAC00, 0xD7A3),    # Hangul syllables
+    (0x20000, 0x2A6DF),  # CJK ext B (supplementary plane — rare/historical chars)
+    (0x2A700, 0x2CEAF),  # CJK ext C/D/E/F
+    (0x2CEB0, 0x2EBEF),  # CJK ext G/H
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")

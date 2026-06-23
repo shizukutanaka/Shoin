@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.37")
+        self.assertEqual(VERSION, "0.2.38")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -694,6 +694,24 @@ class TestChunk(unittest.TestCase):
         """D7A3 is the last Hangul syllable; D7A4–D7AF must not count as CJK."""
         self.assertTrue(is_cjk("힣"))   # last syllable — should be CJK
         self.assertFalse(is_cjk("힤"))  # one past the syllable block — not CJK
+
+    def test_is_cjk_supplementary_plane_ext_b(self) -> None:
+        """CJK Unified Ideographs Extension B–H (U+20000+) must be recognised as CJK.
+
+        These rare/historical characters live in the supplementary plane.
+        Before v0.2.38, _CJK_RANGES only covered the BMP so is_cjk() returned
+        False for them, causing estimate_tokens() to undercount historical CJK docs.
+        """
+        # U+20000 — first CJK Ext B character (𠀀)
+        self.assertTrue(is_cjk("\U00020000"), "first CJK Ext B char must be CJK")
+        # U+2A6D6 — last CJK Ext B character
+        self.assertTrue(is_cjk("\U0002A6D6"), "last CJK Ext B char must be CJK")
+        # U+2A700 — first CJK Ext C
+        self.assertTrue(is_cjk("\U0002A700"), "first CJK Ext C char must be CJK")
+        # U+2CEB0 — first CJK Ext G
+        self.assertTrue(is_cjk("\U0002CEB0"), "first CJK Ext G char must be CJK")
+        # U+1F600 (emoji, outside all CJK ranges) must NOT be CJK
+        self.assertFalse(is_cjk("\U0001F600"), "emoji outside CJK ranges must not be CJK")
 
     def test_sentence_split_on_fullwidth_semicolon(self) -> None:
         """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""
@@ -2107,6 +2125,23 @@ class TestCitation(unittest.TestCase):
         confirmed, misattributed = verify_grounding(text, sources)
         self.assertIn(1, confirmed, "S1 must be confirmed (high overlap)")
         self.assertIn(2, misattributed, "S2 must be misattributed (co-cited but low overlap)")
+
+    def test_bigrams_single_char_returns_empty_set(self) -> None:
+        """_bigrams of a single character must return set(), not {'x'}.
+
+        Before v0.2.38, the guard was `if len(t) < 2: return {t} if t else set()`.
+        A single-char string would produce {'x'} — a length-1 "bigram" that is not
+        actually a bigram. This caused _overlap() to return 1.0 for a single shared
+        character, falsely confirming unrelated citations in verify_grounding().
+        """
+        from shoin.citation import _bigrams
+
+        self.assertEqual(_bigrams("a"), set(), "single ASCII char must yield empty set")
+        self.assertEqual(_bigrams("あ"), set(), "single CJK char must yield empty set")
+        self.assertEqual(_bigrams(""), set(), "empty string must yield empty set")
+        # Two chars must still produce exactly one bigram
+        self.assertEqual(_bigrams("ab"), {"ab"})
+        self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
 
 
 class TestStoreChunksForSource(unittest.TestCase):

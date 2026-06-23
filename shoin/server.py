@@ -176,7 +176,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _require(self, data: Json, key: str) -> str:
-        value = str(data.get(key) or "").strip()
+        raw = data.get(key)
+        if raw is not None and not isinstance(raw, str):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
+            )
+        value = (raw or "").strip()
         if not value:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}")
         return value
