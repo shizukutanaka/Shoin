@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.39
+## Version History: v0.1.37 → v0.2.40
+
+### v0.2.40 (2026-06-23)
+**Fixed**: `_HTMLText.handle_endtag()` (`ingest.py`) reset `_in_title` on `</head>` but did not reset `_skip_depth`. An unclosed `<noscript>`, `<script>`, or `<style>` tag in `<head>` left `_skip_depth=1` for the entire `<body>`, causing `handle_data` to discard every text node. Pages with malformed markup (e.g., `<noscript>` without `</noscript>` in `<head>`) raised `INGEST_EMPTY` instead of extracting body content. Fix: reset `_skip_depth = 0` alongside `_in_title` in the `tag == "head"` branch of `handle_endtag`.
+
+**Fixed**: `replace_chunks_for_source()` (`store.py`) accepted an empty `texts` list without error. Passing `texts=[]` would DELETE all existing chunks and commit zero new chunks — leaving the source permanently with zero content, invisible to all retrieval queries, with no indication of the error. Fix: raise `StoreError("VALIDATION_REQUIRED_FIELD_MISSING")` at entry when `texts` is empty.
+
+**Fixed**: `CREATE VIRTUAL TABLE chunks_fts` (migration 1, `store.py`) lacked `IF NOT EXISTS`. Two concurrent `Store.__init__()` calls on a fresh DB file could both read `current=0` and both execute the DDL; the second thread's `CREATE VIRTUAL TABLE` raised `OperationalError: table chunks_fts already exists`. The comment in `migrate()` incorrectly stated "all IF NOT EXISTS"; the FTS5 virtual table was the exception. Fix: add `IF NOT EXISTS` to the `CREATE VIRTUAL TABLE` statement — supported since SQLite 3.9.0 (2015), well within the 3.34+ requirement.
 
 ### v0.2.39 (2026-06-23)
 **Fixed**: `build_context()` (`qa.py`) silently dropped an oversize chunk when it was not the first chunk for a source. The budget guard (`if used and used + cost > per_source: break`) came before the truncation guard (`if cost > per_source`), so only the first chunk ever got token-aware truncation. A later chunk that exceeded the remaining budget was thrown away entirely instead of being truncated to fill the space. Fix: replace both guards with a unified `remaining = per_source - used` check; any chunk that doesn't fit is truncated to `remaining` tokens and then the loop breaks.

@@ -68,7 +68,7 @@ MIGRATIONS: list[tuple[int, str]] = [
           citation_report TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL
         );
-        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
           text, content='chunks', content_rowid='id', tokenize='trigram'
         );
         CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
@@ -202,8 +202,9 @@ class Store:
             # atomic SQLite write (SQLite DDL is transactional).
             # INSERT OR IGNORE makes the migration idempotent: if two threads
             # both read current=N and race to apply the same migration, the
-            # second thread's DDL (all IF NOT EXISTS) is a no-op and the
-            # duplicate INSERT is silently ignored rather than crashing.
+            # second thread's DDL (all IF NOT EXISTS, including the FTS5 virtual
+            # table in migration 1) is a no-op and the duplicate INSERT is
+            # silently ignored rather than crashing.
             self.conn.executescript(
                 f"BEGIN;\n{sql.strip()}\n"
                 f"INSERT OR IGNORE INTO schema_migrations(version) VALUES ({int(version)});\n"
@@ -356,6 +357,8 @@ class Store:
         source ID intact (preserving citation history in stored messages).
         Raises SOURCE_NOT_FOUND if the source was concurrently deleted.
         """
+        if not texts:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "replacement chunk list must not be empty")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:

@@ -113,8 +113,14 @@ class _HTMLText(HTMLParser):
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag == "title":
             self._in_title = False
-        elif tag == "head" and self._in_title:
-            self._in_title = False  # </head> without </title> implicitly closes the title
+        elif tag == "head":
+            # An unclosed <noscript>/<script>/<style> in <head> must not leak into
+            # <body> and swallow all body text.  Reset both guards at </head> so
+            # malformed markup like <noscript>fallback</head><body>Content</body>
+            # still extracts "Content" rather than raising INGEST_EMPTY.
+            self._skip_depth = 0
+            if self._in_title:
+                self._in_title = False  # </head> without </title> implicitly closes the title
         elif tag in _BLOCK_TAGS:
             self.parts.append("\n")
 

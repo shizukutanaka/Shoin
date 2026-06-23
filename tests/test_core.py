@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.39")
+        self.assertEqual(VERSION, "0.2.40")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -419,6 +419,24 @@ class TestStore(unittest.TestCase):
                 s.replace_chunks_for_source(99999, ["x"])
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
+    def test_replace_chunks_empty_texts_raises(self) -> None:
+        """replace_chunks_for_source([]) must raise, not silently delete all chunks.
+
+        Before v0.2.40, passing an empty texts list would DELETE all existing chunks
+        and insert none — leaving the source permanently with zero chunks (invisible
+        to all retrieval queries) with no indication of the error.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-empty-replace")
+            src = s.add_source(nb.id, "url", "title", "https://example.com", "sha-x")
+            s.add_chunks(src.id, ["existing chunk"])
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, [])
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+            # Existing chunks must be untouched — the guard fires before any DELETE
+            texts = [t for _, t in s.text_chunks_for_source(src.id)]
+            self.assertEqual(texts, ["existing chunk"])
+
     def test_update_source_sha256_and_title(self) -> None:
         """update_source_sha256 must update both sha256 and title, and touch the notebook."""
         with make_store() as s:
@@ -570,6 +588,36 @@ class TestStore(unittest.TestCase):
         for t in threads:
             t.join()
         self.assertEqual(errors, [], f"concurrent migrate() raised: {errors}")
+
+    def test_migrate_concurrent_shared_db_file_no_crash(self) -> None:
+        """Two Store instances opening the SAME fresh file DB simultaneously must not crash.
+
+        Before v0.2.40, CREATE VIRTUAL TABLE chunks_fts lacked IF NOT EXISTS.
+        Two concurrent migrate() calls on the same file would both read current=0
+        and both execute the migration DDL; the second thread's
+        'CREATE VIRTUAL TABLE chunks_fts' raised OperationalError: table already exists
+        because virtual tables did not support IF NOT EXISTS in the migration string.
+        """
+        import tempfile, threading, os
+        errors: list[Exception] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "shared.db")
+
+            def open_store(tid: int) -> None:
+                try:
+                    with Store(db_path) as s:
+                        s.migrate()  # the target: must not raise OperationalError
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=open_store, args=(i,)) for i in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(errors, [], f"concurrent migrate() on shared file raised: {errors}")
 
     def test_add_chunks_with_deleted_source_raises_source_not_found(self) -> None:
         """add_chunks() must raise StoreError(SOURCE_NOT_FOUND) — not a bare
@@ -943,6 +991,19 @@ class TestIngest(unittest.TestCase):
         title, text = html_to_text(html)
         self.assertEqual(title, "Title")
         self.assertIn("Body text", text)
+
+    def test_html_unclosed_noscript_in_head_does_not_swallow_body(self) -> None:
+        """An unclosed <noscript> in <head> must not silently discard all body text.
+
+        Before v0.2.40, handle_endtag("head") reset _in_title but NOT _skip_depth.
+        A <noscript> (or <script>/<style>) without a closing tag in <head> left
+        _skip_depth=1 after </head>, causing handle_data to discard every text node
+        in <body> and raising INGEST_EMPTY for a non-empty page.
+        """
+        html = "<html><head><noscript>fallback</head><body><p>Content here.</p></body></html>"
+        title, text = html_to_text(html)
+        self.assertIn("Content here", text,
+                      "body text must be extracted even when <noscript> is unclosed in <head>")
 
     def test_html_table_cells_separated_by_newlines(self) -> None:
         """<td> and <th> must produce newline boundaries so cell values don't merge."""
