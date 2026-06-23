@@ -23,7 +23,7 @@ from .config import MAX_QUESTION_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source
+from .pipeline import index_source, refresh_source
 from .qa import (
     ChatBackend,
     _check_embed_model_ok,
@@ -193,8 +193,10 @@ class _Handler(BaseHTTPRequestHandler):
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
+        ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
         ("DELETE", r"^/api/sources/(\d+)$", "src_delete"),
         ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
+        ("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
@@ -405,10 +407,33 @@ class _Handler(BaseHTTPRequestHandler):
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
 
+    def _h_src_patch(self, src_id: int) -> None:
+        data = self._read_json()
+        title = str(data.get("title") or "").strip()
+        if not title:
+            raise StoreError("VALIDATION_FIELD_REQUIRED", "title must not be empty")
+        with Store(self.db) as store:
+            src = store.get_source(src_id)
+            store.update_source_title(src_id, title, src.origin)
+            updated = store.get_source(src_id)
+            self._json({"id": updated.id, "title": updated.title})
+
     def _h_src_delete(self, src_id: int) -> None:
         with Store(self.db) as store:
             store.delete_source(src_id)
         self._json({"deleted": src_id})
+
+    def _h_src_refresh(self, src_id: int) -> None:
+        with Store(self.db) as store:
+            result = refresh_source(store, src_id, self.llm)
+            self._json(
+                {
+                    "source": {"id": result.source.id, "title": result.source.title},
+                    "n_chunks": result.n_chunks,
+                    "n_embedded": result.n_embedded,
+                },
+                200,
+            )
 
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:

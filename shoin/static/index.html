@@ -93,8 +93,9 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .src .no{font-family:var(--mono);font-size:11px;color:var(--seiji-ink);border:1px solid var(--border-strong);border-radius:2px;padding:0 4px;margin-top:3px}
 .src .t{flex:1;font-size:13.5px;word-break:break-all}
 .src .k{font-size:11px;color:var(--sumi-soft)}
-.src button{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:14px;padding:0 2px}
-.src button:hover{color:var(--shu)}
+.src .src-act{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0}
+.src .src-act:hover{color:var(--shu)}
+.src .src-rename{font-size:13px;width:100%;border:1px solid var(--border-strong);border-radius:2px;padding:1px 4px;background:var(--paper);color:var(--ink);outline:none}
 .adders{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .adders .row{display:flex;gap:6px}
 #nbList{list-style:none;padding:0}
@@ -282,6 +283,8 @@ const I18N = {
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示",
+    "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
+    "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…"
   },
@@ -305,6 +308,8 @@ const I18N = {
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "export.head":"Export","viewer.close":"Close",
     "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source",
+    "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
+    "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…"
   }
@@ -398,8 +403,37 @@ function renderNotebook(){
       const row = el("div","src");
       row.append(el("span","no",`S${i+1}`));
       const tt = el("span","t", s.title); tt.append(el("div","k", s.kind));
+      // Inline title editing: double-click turns the span into an input
+      tt.ondblclick = async ev => {
+        ev.stopPropagation();
+        const input = document.createElement("input");
+        input.type = "text"; input.className = "src-rename"; input.value = s.title;
+        tt.replaceChildren(input, el("div","k", s.kind));
+        input.focus(); input.select();
+        const commit = async () => {
+          const newTitle = input.value.trim();
+          if (!newTitle || newTitle === s.title) { openNotebook(cur.id); return; }
+          try {
+            await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
+            toast(t("src.rename.ok")); openNotebook(cur.id);
+          } catch(e) { toast(e.message); openNotebook(cur.id); }
+        };
+        input.onblur = commit;
+        input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(cur.id);} };
+      };
+      tt.setAttribute("title", t("src.rename"));
       row.append(tt);
-      const del = el("button",null,"×"); del.setAttribute("aria-label","delete source");
+      // Refresh button for URL sources
+      if (s.origin && s.origin.startsWith("http")) {
+        const ref = el("button","src-act","↻"); ref.setAttribute("aria-label", t("src.refresh"));
+        ref.setAttribute("title", t("src.refresh"));
+        ref.onclick = async ev => { ev.stopPropagation();
+          ref.disabled = true; ref.textContent = "…";
+          try { await api(`/api/sources/${s.id}/refresh`,{method:"POST"}); toast(t("src.refresh.ok")); openNotebook(cur.id); }
+          catch(e){ toast(e.message); ref.disabled=false; ref.textContent="↻"; } };
+        row.append(ref);
+      }
+      const del = el("button","src-act",null); del.textContent = "×"; del.setAttribute("aria-label","delete source");
       del.onclick = async ev=>{ ev.stopPropagation();
         try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
       row.append(del);

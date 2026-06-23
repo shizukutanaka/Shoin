@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.34")
+        self.assertEqual(VERSION, "0.2.35")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -346,6 +346,45 @@ class TestStore(unittest.TestCase):
         with make_store() as s:
             with self.assertRaises(StoreError) as cm:
                 s.update_source_title(99999, "x", "x")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_replace_chunks_for_source_swaps_content(self) -> None:
+        """replace_chunks_for_source must atomically delete old chunks and insert new ones."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "url", "old title", "https://example.com", "sha-old")
+            ids_old = s.add_chunks(src.id, ["chunk A", "chunk B", "chunk C"])
+            self.assertEqual(len(ids_old), 3)
+            ids_new = s.replace_chunks_for_source(src.id, ["new chunk 1", "new chunk 2"])
+            self.assertEqual(len(ids_new), 2)
+            texts = [t for _, t in s.text_chunks_for_source(src.id)]
+            # New content must replace old content exactly
+            self.assertEqual(texts, ["new chunk 1", "new chunk 2"])
+            # Total chunk count for source must be 2 (not 3+2=5: old chunks fully replaced)
+            self.assertEqual(len(ids_new), len(texts))
+
+    def test_replace_chunks_missing_source_raises(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(99999, ["x"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_update_source_sha256_and_title(self) -> None:
+        """update_source_sha256 must update both sha256 and title, and touch the notebook."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "url", "old title", "https://example.com", "sha-old")
+            t0 = s.get_notebook(nb.id).updated_at
+            s.update_source_sha256(src.id, "sha-new", "new title")
+            updated = s.get_source(src.id)
+            self.assertEqual(updated.sha256, "sha-new")
+            self.assertEqual(updated.title, "new title")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_sha256_missing_raises(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(99999, "sha", "title")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
     def test_add_note_missing_notebook_raises(self) -> None:
@@ -2319,6 +2358,52 @@ class TestPipeline(unittest.TestCase):
                 result = index_source(s, nb_id, "http://x.test")
         mock_eu.assert_called_once_with("http://x.test")
         self.assertEqual(result.source.title, "Mock Page")
+
+    def test_refresh_source_replaces_chunks_keeps_id(self) -> None:
+        """refresh_source must keep the source ID and replace chunks with fresh content."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import refresh_source
+
+        original = Extracted(kind="url", title="Page v1", origin="http://refresh.test", sha256="sha-v1", text="old content")
+        updated = Extracted(kind="url", title="Page v2", origin="http://refresh.test", sha256="sha-v2", text="new content refreshed")
+        with make_store() as s:
+            nb_id = s.create_notebook("refresh-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                from shoin.pipeline import index_source
+                res0 = index_source(s, nb_id, "http://refresh.test")
+            source_id = res0.source.id
+            with patch("shoin.pipeline.extract_url", return_value=updated):
+                res1 = refresh_source(s, source_id)
+        self.assertEqual(res1.source.id, source_id, "source ID must be preserved")
+        self.assertEqual(res1.source.title, "Page v2")
+        self.assertEqual(res1.source.sha256, "sha-v2")
+        with make_store() as s2:
+            pass  # store closed; already verified above
+
+    def test_refresh_source_nonurl_raises(self) -> None:
+        """refresh_source on a file source must raise INGEST_REFRESH_NOT_URL."""
+        from shoin.ingest import IngestError
+        from shoin.pipeline import refresh_source
+
+        with make_store() as s:
+            nb_id = s.create_notebook("nb").id
+            src = s.add_source(nb_id, "txt", "doc.txt", "/local/doc.txt", "sha-f")
+            s.add_chunks(src.id, ["text"])
+            with self.assertRaises(IngestError) as cm:
+                refresh_source(s, src.id)
+        self.assertEqual(cm.exception.code, "INGEST_REFRESH_NOT_URL")
+
+    def test_refresh_source_missing_raises(self) -> None:
+        """refresh_source on a non-existent source must raise SOURCE_NOT_FOUND."""
+        from shoin.store import StoreError
+        from shoin.pipeline import refresh_source
+
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                refresh_source(s, 99999)
+        self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
 
 
 class TestExport(unittest.TestCase):

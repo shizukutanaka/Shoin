@@ -121,6 +121,31 @@ def index_source(
     return IndexResult(source, len(chunk_ids), n_embedded)
 
 
+def refresh_source(
+    store: Store,
+    source_id: int,
+    llm: ChatBackend | None = None,
+) -> IndexResult:
+    """Re-fetch a URL source in-place, replacing chunks while keeping the source ID.
+
+    The source ID is preserved so that citation references in stored messages
+    remain resolvable after the content update. Only URL sources can be refreshed;
+    file sources raise IngestError(INGEST_REFRESH_NOT_URL).
+    """
+    from .ingest import IngestError  # local import to avoid circular at module level
+
+    src = store.get_source(source_id)
+    if not src.origin.startswith(("http://", "https://")):
+        raise IngestError("INGEST_REFRESH_NOT_URL", "refresh is only supported for URL sources")
+    extracted = extract_url(src.origin)
+    texts = split_text(extracted.text)
+    chunk_ids = store.replace_chunks_for_source(source_id, texts)
+    store.update_source_sha256(source_id, extracted.sha256, extracted.title)
+    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
+    updated_src = store.get_source(source_id)
+    return IndexResult(updated_src, len(chunk_ids), n_embedded)
+
+
 def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[int, int]:
     """Re-embed all chunks for a notebook with the current embedding model.
 

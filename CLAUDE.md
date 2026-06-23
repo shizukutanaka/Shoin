@@ -306,7 +306,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.34
+## Version History: v0.1.37 → v0.2.35
+
+### v0.2.35 (2026-06-23)
+**Feature**: Source Refresh (`POST /api/sources/{id}/refresh`) — re-fetch a URL source in-place, replacing all chunks atomically while keeping the source ID. This preserves citation references in stored messages (existing `[S1]` links remain valid after a content update). Only URL sources support refresh; file sources return `INGEST_REFRESH_NOT_URL`. UI: URL sources now show a `↻` refresh button in the source list.
+
+- `store.replace_chunks_for_source(source_id, texts)`: Atomic DELETE-old + INSERT-new within a single `with self.conn:` transaction. Raises `SOURCE_NOT_FOUND` if the source was concurrently deleted.
+- `store.update_source_sha256(source_id, sha256, title)`: Updates the content hash and title of a source after a refresh; touches the notebook `updated_at` timestamp.
+- `pipeline.refresh_source(store, source_id, llm)`: Validates the source is a URL, calls `extract_url()`, calls `replace_chunks_for_source()`, calls `update_source_sha256()`, then re-embeds with `_embed_chunks()`. Returns `IndexResult`.
+- New route `("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh")` + handler `_h_src_refresh()` in `server.py`.
+
+**Feature**: Source Title Edit (`PATCH /api/sources/{id}`) — rename a source's display title inline. The existing `store.update_source_title()` method was not exposed through any API. Now:
+
+- New route `("PATCH", r"^/api/sources/(\d+)$", "src_patch")` + handler `_h_src_patch()` in `server.py`. Accepts `{"title": "new name"}` JSON body.
+- UI: double-clicking a source title in the source list opens an inline input. `Enter` commits, `Escape` cancels. `blur` also commits to handle click-away.
 
 ### v0.2.34 (2026-06-22)
 **Fixed**: `_degraded_text()` (`qa.py`) used `[S?]` citation markers instead of valid `[S1]`, `[S2]`, etc. When degraded (LLM unreachable), the response would display source excerpts but the citation extraction regex couldn't parse `[S?]` (requires digits), resulting in an empty `citation_report["cited"]` list and `coverage: 0.0` even though sources were actually shown. Fix: use `[S{i + 1}]` to generate sequential source numbers matching the actual sources, so citations extract correctly and coverage reflects the sources cited.

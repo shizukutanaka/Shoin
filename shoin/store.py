@@ -347,6 +347,40 @@ class Store:
         self.touch_notebook(src.notebook_id)
         self.conn.commit()
 
+    def replace_chunks_for_source(self, source_id: int, texts: list[str]) -> list[int]:
+        """Atomically replace all chunks for a source (DELETE old + INSERT new).
+
+        Used by refresh_source to update stale URL content while keeping the
+        source ID intact (preserving citation history in stored messages).
+        Raises SOURCE_NOT_FOUND if the source was concurrently deleted.
+        """
+        self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+        ids: list[int] = []
+        try:
+            with self.conn:
+                self.conn.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
+                for seq, text in enumerate(texts):
+                    cur = self.conn.execute(
+                        "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
+                        (source_id, seq, text),
+                    )
+                    ids.append(int(cur.lastrowid or 0))
+        except sqlite3.IntegrityError:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement")
+        return ids
+
+    def update_source_sha256(self, source_id: int, sha256: str, title: str) -> None:
+        """Update the content hash and title of a source after a refresh."""
+        title = title[:MAX_TITLE_LEN]
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+        cur = self.conn.execute(
+            "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
+        )
+        if cur.rowcount == 0:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+        self.touch_notebook(src.notebook_id)
+        self.conn.commit()
+
     def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
         ids: list[int] = []
         try:
