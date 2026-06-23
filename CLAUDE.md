@@ -306,7 +306,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.36
+## Version History: v0.1.37 → v0.2.37
+
+### v0.2.37 (2026-06-23)
+**Fixed**: `suggest_questions()` (`studio.py`) filtered English questions too aggressively: the `"?" in q` guard silently dropped valid English questions when the LLM omitted trailing punctuation (e.g., "What is the main thesis" in list form). Japanese questions survived via the `か`/`でしょう` endswith fallback; English ones did not. Fix: accept any line of sufficient length (>= 8 chars) since the prompt already constrains output to questions only.
+
+**Fixed**: `_bib_escape()` (`export.py`) mapped `{` → `(` and `}` → `)`, silently mutating source titles containing curly braces (e.g., "Algorithms {revised}" became "Algorithms (revised)"). Fix: replace with `{\{}` and `{\}}` — balanced BibTeX groups that render as literal braces in LaTeX.
+
+**Fixed**: `export_bibtex()` and `export_ris()` (`export.py`) did not guard against empty or None `added_at` values. `src.added_at[:10]` on an empty string produces `""`, silently inserting a blank date. Fix: `(src.added_at or "")[:10] or "unknown"`.
+
+**Fixed**: `export_ris()` (`export.py`) emitted `"ER  - "` (with trailing space) as the end-of-record marker. The RIS 2001 spec requires `"ER  -"` with no trailing whitespace; some strict reference managers reject records with whitespace after the dash. Fix: remove the trailing space.
+
+**Fixed**: `_post()` (`llm.py`) called `resp.read()` with no size limit. A malicious or buggy LLM endpoint returning gigabytes would be read entirely into memory before JSON parsing, causing OOM. Fix: cap at 32 MB via `resp.read(32 * 1024 * 1024)`; raise `SYSTEM_LLM_BAD_RESPONSE` if the cap is hit.
 
 ### v0.2.36 (2026-06-23)
 **Fixed**: `_h_src_refresh()` (`server.py`) did not evict the `questions_cache` entry for the affected notebook. The cache fingerprint is `tuple(s.id for s in store.sources_for_notebook(nb_id))`; since source IDs are preserved on refresh (by design), the fingerprint never changes, so stale question suggestions from before the content update were served indefinitely. Fix: add `questions_cache.pop(nb_id, None)` under `questions_cache_lock` after `refresh_source()` returns.

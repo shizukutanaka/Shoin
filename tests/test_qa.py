@@ -931,6 +931,54 @@ class TestI18n(unittest.TestCase):
             self.assertTrue(ans.degraded)
             self.assertIn("LLM endpoint unreachable", ans.text)
 
+    def test_suggest_questions_accepts_english_without_question_mark(self) -> None:
+        """English questions without a trailing '?' must not be silently dropped.
+
+        The old filter required '?' in the line; many LLMs omit punctuation in
+        list outputs ('What is the main thesis' instead of 'What is the main thesis?').
+        """
+        import os
+        from unittest.mock import patch as mpatch
+
+        from shoin.store import Store
+        from shoin.studio import suggest_questions
+
+        class _FakeLLM:
+            embedding_model = ""
+            def chat(self, messages, temperature=0.2):
+                # Return English questions without trailing '?'
+                return "What is the main thesis\nHow does the author support the claim\nWhy does this matter"
+            def embed_one(self, text):
+                raise Exception("no embed")
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("test-nb")
+            src = s.add_source(nb.id, "txt", "doc", "doc.txt", "sha-e")
+            s.add_chunks(src.id, ["The thesis is clear. The author argues X."])
+            with mpatch.dict(os.environ, {"SHOIN_LANG": "en"}):
+                questions = suggest_questions(s, _FakeLLM(), nb.id)
+        self.assertGreater(len(questions), 0, "English questions without '?' must not all be dropped")
+
+    def test_llm_response_too_large_raises_bad_response(self) -> None:
+        """_post() must raise SYSTEM_LLM_BAD_RESPONSE when response exceeds 32 MB."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient()
+        # Exactly 32 MB of bytes to trigger the cap
+        _MAX = 32 * 1024 * 1024
+        oversized = io.BytesIO(b"x" * _MAX)
+        oversized.__enter__ = lambda s: s
+        oversized.__exit__ = lambda s, *a: None
+
+        with patch("urllib.request.urlopen", return_value=oversized):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("32 MB", str(cm.exception))
+
     def test_unknown_lang_falls_back_to_english(self) -> None:
         with patch.dict(os.environ, {"SHOIN_LANG": "fr"}):
             text = _t("no_hit")

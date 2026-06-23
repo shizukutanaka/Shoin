@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.36")
+        self.assertEqual(VERSION, "0.2.37")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2475,6 +2475,39 @@ class TestExport(unittest.TestCase):
         h1_lines = [l for l in md.splitlines() if l.startswith("# ")]
         self.assertEqual(len(h1_lines), 1)
         self.assertIn("My Notebook", h1_lines[0])
+
+    def test_bibtex_brace_in_title_does_not_mutate_to_paren(self) -> None:
+        """Curly braces in source titles must not be silently replaced with parentheses."""
+        from shoin.export import export_bibtex
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_source(nb.id, "url", "Algorithms {revised}", "https://x.com", "sha1")
+            bib = export_bibtex(s, nb.id)
+        self.assertNotIn("(revised)", bib, "{ must not be silently converted to (")
+        self.assertIn("{", bib)
+
+    def test_bibtex_added_at_empty_does_not_crash(self) -> None:
+        """export_bibtex must not crash when added_at is an empty string."""
+        from shoin.export import export_bibtex
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "doc", "doc.txt", "sha2")
+            # Manually corrupt added_at to empty string
+            s.conn.execute("UPDATE sources SET added_at='' WHERE id=?", (src.id,))
+            s.conn.commit()
+            bib = export_bibtex(s, nb.id)
+        self.assertIn("added unknown", bib)
+
+    def test_ris_er_no_trailing_space(self) -> None:
+        """RIS ER  - terminator must not have a trailing space (spec compliance)."""
+        from shoin.export import export_ris
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_source(nb.id, "url", "Page", "https://x.com", "sha3")
+            ris = export_ris(s, nb.id)
+        for line in ris.splitlines():
+            if line.startswith("ER"):
+                self.assertEqual(line, "ER  -", f"ER line must not have trailing space: {line!r}")
 
 
 class TestConfigXDG(unittest.TestCase):

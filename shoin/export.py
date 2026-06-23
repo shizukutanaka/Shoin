@@ -102,8 +102,8 @@ _BIB_ESC: dict[str, str] = {
     # the subsequent {}→() substitution from corrupting these two-char sequences.
     "^": "\\^{}",
     "~": "\\~{}",
-    "{": "(",       # Literal braces → parens to avoid unbalanced BibTeX delimiters
-    "}": ")",
+    "{": "{\\{}",  # {\{} — balanced for BibTeX, renders as literal { in LaTeX
+    "}": "{\\}}",  # {\}} — balanced for BibTeX, renders as literal } in LaTeX
 }
 
 
@@ -123,11 +123,12 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
         key = f"shoin{src.id}"
+        date = (src.added_at or "")[:10] or "unknown"
         entries.append(
             "@misc{" + key + ",\n"
             f"  title = {{{_bib_escape(src.title)}}},\n"
             f"  howpublished = {{{_bib_escape(src.origin)}}},\n"
-            f"  note = {{Shoin source, added {src.added_at[:10]}}}\n"
+            f"  note = {{Shoin source, added {date}}}\n"
             "}"
         )
     return "\n\n".join(entries) + ("\n" if entries else "")
@@ -137,12 +138,13 @@ def export_ris(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
+        date = (src.added_at or "")[:10].replace("-", "/")
         lines = [
             "TY  - GEN",
             f"TI  - {_ris_escape(src.title)}",
             f"UR  - {_ris_escape(src.origin)}",
-            f"DA  - {src.added_at[:10].replace('-', '/')}",
-            "ER  - ",
+            f"DA  - {date}",
+            "ER  -",
         ]
         entries.append("\n".join(lines))
     return "\n\n".join(entries) + ("\n" if entries else "")

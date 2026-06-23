@@ -313,7 +313,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn(".ris\"", cd, "RIS download must use .ris extension")
         body = raw.decode()
         self.assertIn("TY  - GEN", body)
-        self.assertIn("ER  - ", body)
+        self.assertIn("ER  -", body)
         self.assertIn("ris_test.txt", body)
 
     def test_delete_nonexistent_note_returns_404(self) -> None:

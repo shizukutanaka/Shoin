@@ -327,8 +327,9 @@ class ExportTest(unittest.TestCase):
         from shoin.export import _bib_escape
 
         self.assertEqual(_bib_escape("C:\\Users\\file.txt"), "C:\\\\Users\\\\file.txt")
-        # Braces are still escaped, and backslash is escaped first to avoid double-escaping
-        self.assertEqual(_bib_escape("a\\{b}"), "a\\\\(b)")
+        # Braces escape to {\{} / {\}} (balanced BibTeX groups rendering literal braces
+        # in LaTeX); backslash is escaped first to avoid double-escaping the result.
+        self.assertEqual(_bib_escape("a\\{b}"), "a\\\\{\\{}b{\\}}")
 
     def test_bibtex_escapes_tex_special_chars(self) -> None:
         """TeX special characters must be escaped so LaTeX can compile the .bib file.
@@ -394,13 +395,13 @@ class ExportTest(unittest.TestCase):
     def test_ris_structure(self) -> None:
         ris = export(self.store, self.nb, "ris")
         self.assertEqual(ris.count("TY  - GEN"), 2)
-        self.assertEqual(ris.count("ER  - "), 2)
+        self.assertEqual(ris.count("ER  -"), 2)
 
     def test_ris_entries_separated_by_blank_line(self) -> None:
         """RIS 2001 spec requires a blank line between entries (two or more sources)."""
         ris = export(self.store, self.nb, "ris")
         # With 2 sources the output must contain a blank line between the two entries.
-        self.assertIn("ER  - \n\nTY  - GEN", ris, "RIS entries must be separated by a blank line")
+        self.assertIn("ER  -\n\nTY  - GEN", ris, "RIS entries must be separated by a blank line")
 
     def test_ris_escape_handles_crlf(self) -> None:
         """CRLF (Windows) line endings in field values must collapse to a single space."""

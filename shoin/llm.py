@@ -53,9 +53,13 @@ class LLMClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        _MAX_RESPONSE = 32 * 1024 * 1024  # 32 MB — guard against runaway endpoints
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                raw = resp.read(_MAX_RESPONSE)
+                if len(raw) == _MAX_RESPONSE:
+                    raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "response exceeded 32 MB size limit")
+                return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             raise LLMError(

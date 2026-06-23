@@ -202,10 +202,20 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         )
     except LLMError:
         return []
+    # Common English question-starter words. LLMs asked for "no decoration" often
+    # omit trailing "?" in list form; these words reliably identify questions.
+    _EN_QUESTION_STARTERS = frozenset(
+        "what how why when where who which does is are was were will would could should can".split()
+    )
     questions: list[str] = []
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
         q_base = q.rstrip("。.!?")  # strip trailing punctuation for endswith check
-        if len(q) >= 2 and ("?" in q or q_base.endswith(("か", "ください", "でしょう"))):
+        first_word = q.split()[0].lower() if q.split() else ""
+        if len(q) >= 2 and (
+            "?" in q
+            or q_base.endswith(("か", "ください", "でしょう"))
+            or first_word in _EN_QUESTION_STARTERS
+        ):
             questions.append(q)
     return questions[:n]
