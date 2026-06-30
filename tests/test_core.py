@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.48")
+        self.assertEqual(VERSION, "0.2.49")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2686,6 +2686,65 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(tokens, ["hello"])          # partial output before truncation
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
+    def test_post_http_error_body_read_is_capped(self) -> None:
+        """_post() must read at most 300 bytes of an HTTP error body before decoding.
+
+        Before v0.2.49, `exc.read().decode(...)[:300]` read the full body into memory
+        then sliced — a malicious endpoint returning a gigabyte 500 response caused OOM.
+        Fix: `exc.read(300).decode(...)` passes the limit to read().
+        """
+        import http.client
+        import io
+        from unittest.mock import patch, MagicMock
+        from shoin.llm import LLMClient, LLMError
+
+        # Build a fake HTTPError whose read() raises if called without a limit
+        body_bytes = b"X" * 600  # 600 bytes; we assert only 300 are read
+
+        class _LimitedBytesIO(io.RawIOBase):
+            def __init__(self, data: bytes) -> None:
+                self._data = data
+                self.max_read: int | None = None
+
+            def read(self, n: int = -1) -> bytes:
+                if n == -1:
+                    raise AssertionError("read() called without size limit")
+                self.max_read = n
+                return self._data[:n]
+
+        fake_body = _LimitedBytesIO(body_bytes)
+        import urllib.error
+        err = urllib.error.HTTPError("http://x", 500, "Internal Server Error", {}, fake_body)  # type: ignore
+
+        with patch("urllib.request.urlopen", side_effect=err):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        # The read limit must have been set (not None, meaning uncapped read was not called)
+        self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
+        self.assertLessEqual(fake_body.max_read, 300)
+
+    def test_embed_non_dict_data_items_raise_llmerror(self) -> None:
+        """embed() must convert AttributeError from non-dict items in response['data']
+        to LLMError('SYSTEM_LLM_BAD_RESPONSE'), not propagate AttributeError.
+
+        Before v0.2.49, when a malformed endpoint returned data as a list of strings
+        (instead of dicts), `d.get('index', 0)` raised AttributeError, which was NOT
+        in the except clause — it escaped embed() and _query_vector() in qa.py,
+        bypassing the BM25-only degradation path and raising HTTP 500 instead.
+        """
+        from unittest.mock import patch
+        from shoin.llm import LLMClient, LLMError
+
+        bad_response = {"data": ["not", "a", "dict"], "model": "test", "object": "list"}
+        with patch.object(LLMClient, "_post", return_value=bad_response):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            client._embedding_model = "nomic-embed-text"
+            with self.assertRaises(LLMError) as cm:
+                client.embed(["hello world"])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
     def test_available_bad_status_line_returns_false(self) -> None:
         """http.client.BadStatusLine (HTTPException subclass) in available() must
         return False, not raise.
@@ -2705,6 +2764,80 @@ class TestLLMClient(unittest.TestCase):
         ):
             client = LLMClient(base_url="http://localhost:11434/v1")
             self.assertFalse(client.available())
+
+
+class TestServerSSE(unittest.TestCase):
+    """Server-level SSE streaming regression tests (v0.2.49)."""
+
+    def test_meta_conn_error_saves_empty_assistant_message(self) -> None:
+        """When ConnectionError fires during the meta SSE event, an empty assistant
+        message must be saved so the orphaned user turn is not visible in
+        list_messages() on page reload.
+
+        Before v0.2.49, the handler returned without saving any assistant message,
+        leaving a dangling user turn that list_messages() (used by GET /api/notebooks/{id})
+        returned to the UI, rendering an unanswered question in the history panel.
+        The build_context exception path (v0.2.39) already saved an empty message;
+        this fix makes the meta-send ConnectionError path consistent with that pattern.
+        """
+        import json
+        import os
+        import tempfile
+        import threading
+
+        from shoin.server import _Handler
+
+        class _FakeLLM:
+            embedding_model = ""
+            model = "test"
+
+            def embed_one(self, text: str) -> list[float]:
+                return [1.0, 0.0]
+
+            def chat(self, messages: list, temperature: float = 0.2) -> str:
+                return "answer"
+
+        # Create a real DB so retrieve() has actual chunks to find
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_path = f.name
+        try:
+            with Store(db_path) as s:
+                nb = s.create_notebook("sse-test")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-sse")
+                s.add_chunks(src.id, ["books are great for learning and studying"])
+                nb_id = nb.id
+
+            # Build a minimal handler instance with HTTP plumbing mocked out
+            handler = _Handler.__new__(_Handler)
+            handler.db = db_path
+            handler.llm = _FakeLLM()  # type: ignore[assignment]
+            handler.questions_cache = {}
+            handler.questions_cache_lock = threading.Lock()
+
+            sse_calls: list[str] = []
+
+            def _mock_sse(event: str, data: object) -> None:
+                sse_calls.append(event)
+                if event == "meta":
+                    raise ConnectionError("client disconnected")
+
+            handler._sse = _mock_sse  # type: ignore[assignment]
+            handler._headers = lambda *a, **kw: None  # type: ignore[assignment]
+            handler._read_json = lambda: {"question": "books"}  # type: ignore[assignment]
+            handler._require = lambda data, field: str(data[field])  # type: ignore[assignment]
+
+            handler._h_ask_sse(nb_id)
+
+            with Store(db_path) as s:
+                msgs = s.list_messages(nb_id)
+
+            # Must have two messages: user + empty assistant (not just the orphaned user)
+            self.assertEqual(len(msgs), 2, "user message + empty assistant message must both be saved")
+            self.assertEqual(msgs[0]["role"], "user")
+            self.assertEqual(msgs[1]["role"], "assistant")
+            self.assertEqual(msgs[1]["body"], "")
+        finally:
+            os.unlink(db_path)
 
 
 class TestPipeline(unittest.TestCase):

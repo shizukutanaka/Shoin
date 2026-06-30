@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.48
+## Version History: v0.1.37 → v0.2.49
+
+### v0.2.49 (2026-06-30)
+**Fixed**: `_post()` (`llm.py`) called `exc.read().decode(...)[:300]` on HTTPError response bodies — reading the entire body into memory before slicing to 300 chars. A malicious or misconfigured endpoint returning a gigabyte 500 response caused OOM before the truncation ran. Fix: `exc.read(300).decode(...)` passes the size limit to `read()` directly.
+
+**Fixed**: `embed()` (`llm.py`) raised `AttributeError` when a malformed endpoint returned `response["data"]` as a list of non-dict items (e.g., strings). The `lambda d: int(d.get("index", 0))` sort key called `.get()` on a `str`, raising `AttributeError`. This was NOT in the `except (KeyError, TypeError, ValueError, OverflowError)` clause, so it escaped `embed()` and `_query_vector()` in `qa.py`, bypassing the BM25-only degradation path and producing HTTP 500. Fix: add `AttributeError` to the exception tuple.
+
+**Fixed**: `_h_ask_sse()` (`server.py`) returned without saving an empty assistant message when `ConnectionError` fired during the `meta` SSE event send (line ~593). This left a dangling user turn visible in `list_messages()` (used by `GET /api/notebooks/{id}` to populate the chat history panel on page reload), rendering an unanswered question in the UI. The analogous `build_context` exception path (v0.2.39) already saved an empty assistant message for this exact reason; the `meta`-send `ConnectionError` path was inconsistent. Fix: add `store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))` before `return` in the `except ConnectionError` block, matching the `build_context` error path pattern.
+
+**Fixed**: `pyproject.toml` version was `0.2.48`, aligned with `config.py` `VERSION = "0.2.49"`.
 
 ### v0.2.48 (2026-06-30)
 **Fixed**: `_embed_chunks()` (`pipeline.py`) stored vectors of any dimension without validation. A temporarily misconfigured or restarting embedding endpoint can return vectors of the wrong dimension (e.g., 384 floats when 768 are expected); these were packed via `array.array("f", vec).tobytes()` and stored without a dimension check. On subsequent `vector_search()`, cosine similarity compared BLOBs of different byte lengths, producing garbage scores. The `embed_model` mismatch guard only fires on model *name* change; it does not fire if the same model name returns different-dimension vectors. The `force=True` path in `reindex_notebook` additionally bypasses even the name guard. Fix: establish `expected_dim` from the first vector in the first batch and validate all subsequent vectors against it; raise `LLMError("SYSTEM_LLM_BAD_RESPONSE", ...)` on mismatch so the `except LLMError: pass` handler leaves BM25-only retrieval intact. Regression test added.

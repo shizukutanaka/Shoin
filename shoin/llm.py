@@ -62,7 +62,7 @@ class LLMClient:
                     raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "response exceeded 32 MB size limit")
                 return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            detail = exc.read(300).decode("utf-8", errors="replace")
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
@@ -191,7 +191,7 @@ class LLMClient:
         try:
             items = sorted(data["data"], key=lambda d: int(d.get("index", 0)))
             vecs = [[float(x) for x in item["embedding"]] for item in items]
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing embeddings in response") from exc
         if len(vecs) != len(texts):
             raise LLMError(

@@ -590,7 +590,14 @@ class _Handler(BaseHTTPRequestHandler):
                     },
                 )
             except ConnectionError:
-                return  # Nothing sent yet; orphaned user message handled by history_messages()
+                # Client disconnected before any SSE was sent.  Save an empty assistant
+                # message so the orphaned user turn is not visible in list_messages() on
+                # page reload — matching the build_context exception path (v0.2.39).
+                try:
+                    store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))
+                except Exception:
+                    pass
+                return
 
             parts: list[str] = []
             degraded = False
