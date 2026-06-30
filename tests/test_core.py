@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.59")
+        self.assertEqual(VERSION, "0.2.60")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2401,6 +2401,37 @@ class TestSearch(unittest.TestCase):
             self.assertTrue(
                 any("コンピュータ" in h.text for h in hits),
                 "Hiragana query must find katakana-indexed chunk via alternate trigrams",
+            )
+
+
+    def test_retrieve_rrf_scores_normalized_before_rerank(self) -> None:
+        """retrieve() must normalize RRF scores to [0,1] before lexical rerank.
+
+        Before v0.2.60, rrf_fuse() returned unnormalized RRF scores in the range
+        ~[0.012, 0.033].  With rerank(weight=0.3), lexical_overlap values in [0,1]
+        contributed ~10× more than the RRF signal, making the hybrid retrieval ranking
+        irrelevant — the reranker effectively became a pure lexical ranker.
+
+        Concrete failure: for a single highly-relevant hit (lex ≈ 1.0, rrf = 1/61 ≈ 0.016),
+        the unnormalized path scored 0.7*0.016 + 0.3*1.0 ≈ 0.31. After RRF normalization
+        (single hit → score = 1.0), the score is 0.7*1.0 + 0.3*1.0 = 1.0.
+        A score > 0.9 is only reachable after normalization.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("rrf-norm-test").id
+            src = s.add_source(nb_id, "txt", "single-doc", "mem://rrf", "sha-rrf")
+            # A single chunk containing the exact query terms — lex ≈ 1.0
+            s.add_chunks(src.id, ["書院は知の書斎である。引用付きで文書と対話する。"])
+            hits = retrieve(s, nb_id, "書院 書斎", k=3)
+            self.assertTrue(hits, "should find at least one hit for the query")
+            top = hits[0]
+            # Without normalization: max score ≈ 0.7*0.016 + 0.3*1.0 ≈ 0.31
+            # With normalization: single hit normalized to 1.0 → score = 0.7*1.0 + 0.3*lex ≥ 0.7
+            self.assertGreater(
+                top.score,
+                0.5,
+                f"top hit score ({top.score:.4f}) must be > 0.5 after RRF normalization; "
+                f"unnormalized ceiling is ~0.33 (lex overwhelms raw RRF ≈ 0.016).",
             )
 
 

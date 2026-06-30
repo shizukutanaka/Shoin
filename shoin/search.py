@@ -488,6 +488,16 @@ def retrieve(
     bm25_hits = bm25_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
     fused = rrf_fuse(bm25_hits, vec_hits)
+    # Normalize RRF scores to [0,1] before lexical rerank so the weight=0.3
+    # blend ratio is calibrated correctly. Without this, RRF scores (~0.01-0.03)
+    # are overwhelmed by lexical_overlap values in [0,1]: lex contributes ~10×
+    # more than the RRF signal, making the reranker effectively ignore hybrid
+    # retrieval. The old fuse() emitted [0,1] scores implicitly via _minmax;
+    # rrf_fuse() emits raw rank-reciprocal values and needs explicit normalization.
+    if fused:
+        normed = _minmax([h.score for h in fused])
+        for h, n in zip(fused, normed):
+            h.score = n
     results = mmr(rerank(clean, fused), k)
     # Apply negative-term filter after fusion so vector hits are also excluded.
     if negs:
