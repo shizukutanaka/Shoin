@@ -295,10 +295,14 @@ class Store:
                     "SOURCE_ALREADY_EXISTS",
                     "identical source already in notebook (concurrent upload)",
                 )
-            raise StoreError(
-                "NOTEBOOK_NOT_FOUND",
-                f"notebook {notebook_id} was deleted during source addition",
-            )
+            if "FOREIGN KEY" in str(e):
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND",
+                    f"notebook {notebook_id} was deleted during source addition",
+                )
+            # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate
+            # as a generic internal error rather than a misleading NOTEBOOK_NOT_FOUND.
+            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
         self.touch_notebook(notebook_id)
         self.conn.commit()
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
@@ -353,12 +357,24 @@ class Store:
         self.touch_notebook(src.notebook_id)
         self.conn.commit()
 
-    def replace_chunks_for_source(self, source_id: int, texts: list[str]) -> list[int]:
+    def replace_chunks_for_source(
+        self,
+        source_id: int,
+        texts: list[str],
+        *,
+        sha256: str | None = None,
+        title: str | None = None,
+    ) -> list[int]:
         """Atomically replace all chunks for a source (DELETE old + INSERT new).
 
         Used by refresh_source to update stale URL content while keeping the
         source ID intact (preserving citation history in stored messages).
         Raises SOURCE_NOT_FOUND if the source was concurrently deleted.
+
+        When sha256 and title are provided, the source metadata is updated in the
+        SAME transaction as the chunk replacement, eliminating the two-phase commit
+        gap that previously existed between replace_chunks_for_source and the
+        separate update_source_sha256 call in pipeline.refresh_source.
         """
         if not texts:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "replacement chunk list must not be empty")
@@ -373,13 +389,27 @@ class Store:
                         (source_id, seq, text),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                if sha256 is not None:
+                    meta_cur = self.conn.execute(
+                        "UPDATE sources SET sha256=?, title=? WHERE id=?",
+                        (sha256, (title or src.title)[:MAX_TITLE_LEN], source_id),
+                    )
+                    if meta_cur.rowcount == 0:
+                        raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
                 self.touch_notebook(src.notebook_id)
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source")
             raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement")
         return ids
 
     def update_source_sha256(self, source_id: int, sha256: str, title: str) -> None:
-        """Update the content hash and title of a source after a refresh."""
+        """Update the content hash and title of a source after a refresh.
+
+        Callers that need atomic chunk-replacement + metadata update should pass
+        sha256/title to replace_chunks_for_source instead of calling this separately.
+        This method is retained for callers that update metadata without replacing chunks.
+        """
         title = title[:MAX_TITLE_LEN]
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:

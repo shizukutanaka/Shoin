@@ -134,7 +134,12 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         if not sentence:
             continue
         nums = [n for n in extract_citations(sentence) if n in source_texts]
-        bare = _BRACKET_RE.sub(" ", sentence).strip()  # drop the [S#] markers
+        # NFKC-normalize before stripping brackets so that full-width citation brackets
+        # ［Ｓ１］ (U+FF3B/U+FF3D) are also removed.  extract_citations already applies
+        # NFKC internally; without this normalization, full-width brackets survive into
+        # `bare`, producing spurious bigrams that inflate the claim denominator and
+        # prevent prev_claim propagation for citation-only full-width fragments.
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
         if not nums:
             cand = _bigrams(bare)
             if cand:

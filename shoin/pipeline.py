@@ -166,8 +166,13 @@ def refresh_source(
     texts = split_text(extracted.text)
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
-    chunk_ids = store.replace_chunks_for_source(source_id, texts)
-    store.update_source_sha256(source_id, extracted.sha256, extracted.title)
+    # Pass sha256/title to replace_chunks_for_source so the metadata update happens
+    # in the SAME transaction as the chunk replacement — eliminating the two-phase
+    # commit gap that previously left new chunks committed with stale sha256/title
+    # if the process was killed between the two separate commits.
+    chunk_ids = store.replace_chunks_for_source(
+        source_id, texts, sha256=extracted.sha256, title=extracted.title
+    )
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
     updated_src = store.get_source(source_id)
     return IndexResult(updated_src, len(chunk_ids), n_embedded)

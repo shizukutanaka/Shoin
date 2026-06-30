@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.52
+## Version History: v0.1.37 → v0.2.53
+
+### v0.2.53 (2026-06-30)
+**Fixed**: `replace_chunks_for_source()` (`store.py`) and `update_source_sha256()` were called as two separate transactions in `pipeline.refresh_source()`. A process crash between the two commits left the source in an inconsistent state: new chunk content committed with stale `sha256` and `title` in the source row. Fix: add optional `sha256` and `title` keyword parameters to `replace_chunks_for_source()` so the source metadata update runs inside the SAME `with self.conn:` block as the chunk DELETE+INSERT, making the entire refresh atomic. `pipeline.refresh_source()` now passes `sha256/title` directly and omits the separate `update_source_sha256()` call. Regression tests added.
+
+**Fixed**: `add_source()` (`store.py`) classified any non-UNIQUE `IntegrityError` as `NOTEBOOK_NOT_FOUND` via an implicit else branch. A future CHECK or NOT NULL constraint violation on the `sources` table would produce a misleading HTTP 404 "notebook not found" error instead of HTTP 500. Fix: explicitly check for `"FOREIGN KEY"` in the error message for the `NOTEBOOK_NOT_FOUND` path; all other `IntegrityError` variants now raise `SYSTEM_INTERNAL_ERROR` instead. Regression test added.
+
+**Fixed**: `verify_grounding()` (`citation.py`) applied `_BRACKET_RE.sub(" ", sentence)` to strip `[S#]` markers before computing claim bigrams — but `_BRACKET_RE` only matches ASCII `[`/`]` (U+005B/U+005D). Full-width citation brackets `［Ｓ１］` (U+FF3B/U+FF3D), which some Japanese LLMs output, were not stripped. They survived into `bare`, adding ~4 spurious bigrams from the NFKC-normalized bracket form. For citation-only fragments like `"Result. ［Ｓ１］"`, the non-empty spurious bigrams prevented `prev_claim` propagation (the `if not claim` guard was bypassed), so the citation was never confirmed. For short sentences with embedded brackets, the inflated denominator pushed overlap below `CONFIRM_MIN`. Fix: apply `unicodedata.normalize("NFKC", sentence)` before `_BRACKET_RE.sub()` so full-width brackets are normalized to ASCII and stripped. Two regression tests added.
+
+**Fixed**: `pyproject.toml` version was `0.2.52`, aligned with `config.py` `VERSION = "0.2.53"`.
 
 ### v0.2.52 (2026-06-30)
 **Fixed**: `_degraded_text()` (`qa.py`) assigned S-numbers per-hit instead of per-unique-source, causing a mismatch with `build_context`'s per-source S-numbering. When the top two retrieval hits came from the same source, `_degraded_text` emitted `[S2]` for a second chunk of source 0 — but `make_report` (and the user-visible citation report) attributed `[S2]` to a completely different source (the second unique source in `context.source_titles`). The user saw content from source 0 labelled as source 1, and `[S3]` was reported as out-of-range even when a third source existed. Fix: skip duplicate `source_id`s in the enumeration loop so S-numbers increment only when a new source is encountered, matching `build_context`'s first-seen-unique-source ordering. Regression test added.

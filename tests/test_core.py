@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.52")
+        self.assertEqual(VERSION, "0.2.53")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -477,6 +477,68 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_sha256(src2.id, "sha-collision", "second renamed")
             self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+
+    def test_replace_chunks_with_sha256_updates_metadata_atomically(self) -> None:
+        """replace_chunks_for_source with sha256/title must update both chunks and
+        source metadata in a single transaction.
+
+        Before v0.2.53, refresh_source called replace_chunks_for_source and
+        update_source_sha256 as two SEPARATE transactions. A crash between them
+        left new chunks committed with stale sha256/title. Fix: pass sha256/title
+        to replace_chunks_for_source so both operations are in the same transaction.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-atomic")
+            src = s.add_source(nb.id, "url", "old title", "https://x.com", "sha-old")
+            s.add_chunks(src.id, ["old chunk"])
+            ids_new = s.replace_chunks_for_source(
+                src.id, ["new chunk"], sha256="sha-new", title="new title"
+            )
+            self.assertEqual(len(ids_new), 1)
+            # Chunks replaced
+            texts = [t for _, t in s.text_chunks_for_source(src.id)]
+            self.assertEqual(texts, ["new chunk"])
+            # Metadata updated atomically in the same transaction
+            updated = s.get_source(src.id)
+            self.assertEqual(updated.sha256, "sha-new")
+            self.assertEqual(updated.title, "new title")
+
+    def test_replace_chunks_with_sha256_collision_raises_source_already_exists(self) -> None:
+        """replace_chunks_for_source with a sha256 that matches another source must raise
+        SOURCE_ALREADY_EXISTS and leave the original chunks intact (atomic rollback).
+
+        This verifies that the UNIQUE constraint on (notebook_id, sha256) is respected
+        inside the merged transaction and triggers rollback of the chunk replacement.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-collision")
+            s.add_source(nb.id, "url", "existing", "https://a.com", "sha-taken")
+            src2 = s.add_source(nb.id, "url", "second", "https://b.com", "sha-other")
+            s.add_chunks(src2.id, ["original chunk"])
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src2.id, ["new chunk"], sha256="sha-taken", title="t")
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+            # Rollback: original chunks must be untouched
+            texts = [t for _, t in s.text_chunks_for_source(src2.id)]
+            self.assertEqual(texts, ["original chunk"])
+
+    def test_add_source_fk_violation_raises_notebook_not_found(self) -> None:
+        """add_source with a deleted notebook raises NOTEBOOK_NOT_FOUND (FK violation).
+
+        Before v0.2.53, any non-UNIQUE IntegrityError used the else branch and returned
+        NOTEBOOK_NOT_FOUND; other unexpected constraint types also hit this path.
+        With the fix, 'FOREIGN KEY' in the error message explicitly maps to
+        NOTEBOOK_NOT_FOUND, making the classification more robust.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-fk-test")
+            # Concurrent-delete simulation: delete the notebook so the next INSERT
+            # triggers a FOREIGN KEY constraint violation on sources.notebook_id
+            s.conn.execute("PRAGMA foreign_keys = ON")
+            s.delete_notebook(nb.id)
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "txt", "t", "orig", "sha-fk")
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_add_note_missing_notebook_raises(self) -> None:
         """add_note() on a non-existent notebook must raise NOTEBOOK_NOT_FOUND."""
@@ -2538,6 +2600,47 @@ class TestQA(unittest.TestCase):
 
 
 class TestCitation(unittest.TestCase):
+    def test_verify_grounding_fullwidth_brackets_do_not_poison_claim_bigrams(self) -> None:
+        """verify_grounding must handle full-width citation brackets ［Ｓ１］ correctly.
+
+        Before v0.2.53, _BRACKET_RE only stripped ASCII [ / ] brackets.  Full-width
+        brackets ［Ｓ１］ (U+FF3B / U+FF3D) survived into `bare`, producing spurious
+        bigrams from the bracket characters and NFKC-normalized form '[s1]'.  For a
+        citation-only fragment like "Result. ［Ｓ１］", the non-empty spurious bigrams
+        prevented prev_claim propagation, so the citation was never confirmed.
+
+        Fix: apply unicodedata.normalize('NFKC', sentence) before _BRACKET_RE.sub()
+        so full-width brackets are also stripped.
+        """
+        from shoin.citation import verify_grounding
+
+        text = "研究結果は重要だ。 ［Ｓ１］"  # full-width brackets after period
+        source_texts = {1: "研究結果は重要だ。実験で確認された。"}
+        confirmed, misattributed = verify_grounding(text, source_texts)
+        self.assertIn(1, confirmed, "S1 with full-width brackets must be confirmed via prev_claim")
+        self.assertNotIn(1, misattributed)
+
+    def test_verify_grounding_fullwidth_brackets_embedded_in_sentence(self) -> None:
+        """Full-width brackets embedded mid-sentence must not inflate the claim bigram count.
+
+        Before the fix, '研究結果 ［Ｓ１］。' left bracket chars in `bare`, inflating the
+        claim denominator by ~4 spurious bigrams, which could push overlap below
+        CONFIRM_MIN (0.30) for short sentences.
+        """
+        from shoin.citation import verify_grounding
+
+        # Short sentence where bracket inflation would push 2-bigram claim below threshold
+        # "AIが重要。" — bare bigrams without brackets: {"ai", "i重", "重要"} (3 bigrams)
+        # With FW brackets in bare: would add ~4 bracket bigrams → 7 total → 3/7 = 0.43 (still ok)
+        # But for even shorter text: "AI ［Ｓ１］。" → 1 real bigram + 4 bracket = 5 → 1/5 = 0.20 < CONFIRM_MIN
+        text = "AI ［Ｓ１］。"
+        # Source contains the claim content — should confirm despite the short sentence
+        source_texts = {1: "AIは次世代の基盤技術。AIの応用が広がる。"}
+        confirmed, _ = verify_grounding(text, source_texts)
+        # With the fix, bracket bigrams are stripped → bare = "ai" (1 bigram) → normalized correctly
+        # Overlap: {"ai"} ∩ source bigrams containing "ai" / 1 = ≥1/1 = 1.0 → confirmed
+        self.assertIn(1, confirmed, "short sentence with FW brackets must be confirmed after bracket stripping")
+
     def test_make_report_source_bodies_length_mismatch_raises(self) -> None:
         """source_bodies length != source_titles length must raise ValueError (defensive check)."""
         from shoin.citation import make_report
