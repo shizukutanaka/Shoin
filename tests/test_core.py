@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.57")
+        self.assertEqual(VERSION, "0.2.58")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1764,6 +1764,29 @@ class TestIngest(unittest.TestCase):
             self.assertRaises(IngestError) as cm,
         ):
             ing.extract_url("http://example.com/empty")
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+
+    def test_extract_url_null_byte_body_raises_ingest_empty(self) -> None:
+        """extract_url must raise INGEST_EMPTY when the response body decodes to only
+        null bytes (U+0000).
+
+        str.strip() does not remove null bytes (category Cc, not Unicode whitespace),
+        so a body of b'\\x00\\x00\\x00' produced the non-empty string '\\x00\\x00\\x00'
+        which passed the `not text` guard and was indexed as garbage content.
+        Before v0.2.58, extract_file() had the null-byte guard (v0.2.50) but
+        extract_url() did not.  Fix: apply text.replace('\\x00', '') before strip().
+        """
+        import shoin.ingest as ing
+
+        null_body = b"\x00\x00\x00"
+        with (
+            patch.object(
+                ing, "fetch_url",
+                return_value=(null_body, "text/plain; charset=utf-8", "http://example.com/nulls")
+            ),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.extract_url("http://example.com/nulls")
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_pinned_https_connection_connect(self) -> None:

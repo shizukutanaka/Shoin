@@ -357,7 +357,10 @@ def extract_url(url: str) -> Extracted:
         title = title or final_url
     else:
         text, title = _decode(body, charset), final_url
-    text = text.strip()
+    # Strip null bytes (U+0000): str.strip() skips them (category Cc, not
+    # whitespace), so content containing only \x00 bytes would pass `not text`
+    # unchanged.  The same guard was applied to extract_file() in v0.2.50.
+    text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
     return Extracted("url", title, text, final_url, _digest(body))

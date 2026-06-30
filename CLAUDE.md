@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.57
+## Version History: v0.1.37 → v0.2.58
+
+### v0.2.58 (2026-06-30)
+**Fixed**: `extract_url()` (`ingest.py`) did not strip null bytes (U+0000) from extracted text before the empty-content guard. `str.strip()` skips null bytes (Unicode category Cc, not whitespace), so a URL returning a body of all-null bytes produced the non-empty string `"\x00\x00\x00"` — truthy, passing `if not text:` — and the garbage content was indexed into BM25 and vector search. The identical fix was applied to `extract_file()` in v0.2.50 (`text = text.replace("\x00", "").strip()`) but `extract_url()` was missed. Fix: apply the same `replace("\x00", "")` guard before `strip()` in `extract_url()`. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.57`, aligned with `config.py` `VERSION = "0.2.58"`.
 
 ### v0.2.57 (2026-06-30)
 **Fixed**: `available()` (`llm.py`) raised `AttributeError` when `urlopen` returned a response object without a `getheader()` method — e.g. an unusual WSGI shim or a test double with a bare interface. `resp.getheader("Content-Type", "")` (added in v0.2.54) is not part of the `io.IOBase` contract; only `http.client.HTTPResponse` guarantees it. `AttributeError` was not in the `except (OSError, ValueError, http.client.HTTPException)` clause, so it propagated as a bare exception instead of the expected `False` return. Fix: add `AttributeError` to the except tuple. Regression test added.
