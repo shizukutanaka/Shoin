@@ -57,8 +57,11 @@ class LLMClient:
         _MAX_RESPONSE = 32 * 1024 * 1024  # 32 MB — guard against runaway endpoints
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read(_MAX_RESPONSE)
-                if len(raw) == _MAX_RESPONSE:
+                # Read one byte beyond the limit so len > _MAX_RESPONSE is the correct
+                # truncation signal — len == _MAX_RESPONSE means the response fit exactly
+                # (no truncation), which was wrongly rejected by the previous == check.
+                raw = resp.read(_MAX_RESPONSE + 1)
+                if len(raw) > _MAX_RESPONSE:
                     raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "response exceeded 32 MB size limit")
                 return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
@@ -93,8 +96,14 @@ class LLMClient:
         """Cheap health check against /models."""
         req = urllib.request.Request(f"{self.base_url}/models")
         try:
-            with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC):
-                return True
+            with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC) as resp:
+                # Check Content-Type to distinguish LLM API servers (application/json)
+                # from plain HTTP servers (text/html) that also return HTTP 200 on any
+                # path.  Without this check, available() returned True for nginx/http.server,
+                # causing every subsequent chat() to fail with SYSTEM_LLM_BAD_RESPONSE
+                # instead of the graceful SYSTEM_SERVICE_UNAVAILABLE degradation path.
+                ct = resp.getheader("Content-Type", "")
+                return "json" in ct
         except (OSError, ValueError, http.client.HTTPException):
             # ValueError: unknown URL scheme.  HTTPException: BadStatusLine from a
             # non-HTTP server occupying the configured port.

@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.53
+## Version History: v0.1.37 → v0.2.54
+
+### v0.2.54 (2026-06-30)
+**Fixed**: `available()` (`llm.py`) returned `True` for any HTTP 200 response, including a plain HTTP server (nginx, `http.server`) on the configured port returning `text/html` on `GET /models`. The function opened the connection and immediately returned `True` without reading or validating the response body. Callers in `qa.ask()` use `available()` to decide whether to degrade to BM25-only retrieval; with a false-positive `True`, they skipped the `SYSTEM_SERVICE_UNAVAILABLE` degradation path and called `llm.chat()`, which raised `SYSTEM_LLM_BAD_RESPONSE` (invalid JSON) on every request — a worse error code that bypassed callers' graceful degradation checks. Fix: after `urlopen()`, read the `Content-Type` header; return `True` only when it contains `"json"` (all OpenAI-compatible endpoints send `application/json`). 2 regression tests added.
+
+**Fixed**: `_post()` (`llm.py`) raised `LLMError` for valid JSON responses of exactly 32 MB. `resp.read(_MAX_RESPONSE)` reads up to 32 MB; if the response is exactly 32,768,000 bytes, `len(raw) == _MAX_RESPONSE` is `True` and `LLMError("SYSTEM_LLM_BAD_RESPONSE", "response exceeded 32 MB size limit")` is raised even though the full response was received without truncation. Fix: read `_MAX_RESPONSE + 1` bytes and check `len(raw) > _MAX_RESPONSE` — when the response is exactly 32 MB, `read(_MAX_RESPONSE + 1)` returns only 32 MB bytes (nothing more is available), so the guard correctly does not fire. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.53`, aligned with `config.py` `VERSION = "0.2.54"`.
 
 ### v0.2.53 (2026-06-30)
 **Fixed**: `replace_chunks_for_source()` (`store.py`) and `update_source_sha256()` were called as two separate transactions in `pipeline.refresh_source()`. A process crash between the two commits left the source in an inconsistent state: new chunk content committed with stale `sha256` and `title` in the source row. Fix: add optional `sha256` and `title` keyword parameters to `replace_chunks_for_source()` so the source metadata update runs inside the SAME `with self.conn:` block as the chunk DELETE+INSERT, making the entire refresh atomic. `pipeline.refresh_source()` now passes `sha256/title` directly and omits the separate `update_source_sha256()` call. Regression tests added.

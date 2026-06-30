@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.53")
+        self.assertEqual(VERSION, "0.2.54")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3012,6 +3012,74 @@ class TestLLMClient(unittest.TestCase):
         ):
             client = LLMClient(base_url="http://localhost:11434/v1")
             self.assertFalse(client.available())
+
+    def test_available_returns_false_for_non_json_content_type(self) -> None:
+        """available() must return False when the server responds with text/html.
+
+        Before v0.2.54, available() returned True for any HTTP 200 response,
+        including a plain nginx/http.server returning text/html on /models.
+        This misled callers (qa.ask()) into skipping graceful BM25-only
+        degradation — every chat() then failed with SYSTEM_LLM_BAD_RESPONSE
+        instead of the expected SYSTEM_SERVICE_UNAVAILABLE.
+        Fix: check the Content-Type header; return True only when it contains "json".
+        """
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.getheader.return_value = "text/html; charset=utf-8"
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            self.assertFalse(client.available())
+
+    def test_available_returns_true_for_json_content_type(self) -> None:
+        """available() returns True when the server responds with application/json."""
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.getheader.return_value = "application/json"
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            self.assertTrue(client.available())
+
+    def test_post_size_check_reads_max_plus_one_byte(self) -> None:
+        """_post() must read _MAX_RESPONSE + 1 bytes to correctly detect oversized responses.
+
+        Before v0.2.54, resp.read(_MAX_RESPONSE) was used; if a valid response was
+        exactly 32 MB, len(raw) == _MAX_RESPONSE fired and raised LLMError even
+        though no truncation had occurred (off-by-one).
+        Fix: read _MAX_RESPONSE + 1 bytes; len(raw) > _MAX_RESPONSE is the correct
+        truncation signal — len == _MAX_RESPONSE means the full response fit within
+        the limit.
+        """
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        _MAX_RESPONSE = 32 * 1024 * 1024
+        valid_payload = b'{"choices":[{"message":{"content":"hi"}}]}'
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = valid_payload
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            client._post("/chat/completions", {}, 10)
+
+        read_arg = mock_resp.read.call_args[0][0]
+        self.assertEqual(
+            read_arg,
+            _MAX_RESPONSE + 1,
+            "_post() must read _MAX_RESPONSE + 1 bytes to avoid off-by-one on exact-limit responses",
+        )
 
 
 class TestServerSSE(unittest.TestCase):
