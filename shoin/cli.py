@@ -7,6 +7,7 @@ product is fully usable headless (REQ-103).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from collections.abc import Sequence
 
@@ -165,6 +166,9 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         except (IngestError, StoreError) as exc:
             print(f"✗ {target}: [{exc.code}] {exc}", file=sys.stderr)
             rc = 1
+        except sqlite3.OperationalError as exc:
+            print(f"✗ {target}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
+            rc = 1
     return rc
 
 
@@ -186,8 +190,9 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
     print(result.body)
-    print("---")
-    _print_report(result.report)
+    if result.report["cited"]:
+        print("---")
+        _print_report(result.report)
     return 0
 
 
@@ -240,6 +245,9 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return 0
     except (StoreError, IngestError, LLMError) as exc:
         print(_t("err.prefix", code=exc.code, msg=str(exc)), file=sys.stderr)
+        return 1
+    except sqlite3.OperationalError as exc:
+        print(_t("err.prefix", code="SYSTEM_DB_LOCKED", msg=str(exc)), file=sys.stderr)
         return 1
     except OverflowError:
         print(

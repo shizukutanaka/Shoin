@@ -306,7 +306,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.54
+## Version History: v0.1.37 → v0.2.55
+
+### v0.2.55 (2026-06-30)
+**Fixed**: `_h_ask_sse()` (`server.py`) left an orphaned user turn in the DB when the LLM's `chat_stream()` yielded zero tokens (e.g., a reasoning model that emits only `<think>` tokens with no `content` deltas). `parts=[]`, `full=""`, and the guard `if full:` prevented `store.add_message()` from saving any assistant message. On page reload, `list_messages()` returned the unanswered user question with no reply. All other disconnect/error paths (meta-send, `build_context` exception) already saved empty assistant messages; this path was inconsistent. Fix: remove the `if full:` guard so an empty assistant message is always persisted after SSE streaming, regardless of content length. Regression test added.
+
+**Fixed**: `_h_src_upload()` (`server.py`) committed the source row via `index_source()` (which used the tmp file path as the title) and then called `store.update_source_title()` as a second separate transaction. A concurrent `DELETE /api/sources/{id}` in the window between the two commits caused `update_source_title` to raise `SOURCE_NOT_FOUND` → HTTP 404, while the source remained in the DB with the tmp-path as its title — invisible to the client who received an error. Fix: add an optional `title: str | None = None` keyword argument to `pipeline.index_source()`; when supplied, it overrides `extracted.title` in the `store.add_source()` call so the source is committed with the correct user filename in a single transaction, eliminating the two-phase commit window. `server._h_src_upload` now passes `title=raw_name`. Regression test added.
+
+**Fixed**: `cli.py` (`main()` outer handler) did not catch `sqlite3.OperationalError`. Any `store.*` call that timed out waiting for the SQLite WAL write lock (after the 5000ms `busy_timeout`) raised `sqlite3.OperationalError: database is locked`. This propagated through `main()`'s `except (StoreError, IngestError, LLMError, OverflowError, KeyboardInterrupt)` — which does not include `OperationalError` — and produced a raw Python traceback instead of a clean error message. Fix: add `except sqlite3.OperationalError` clause to `main()` that prints `err.prefix` with `SYSTEM_DB_LOCKED` and returns exit code 1. Regression test added.
+
+**Fixed**: `_cmd_studio()` (`cli.py`) unconditionally printed `---` and called `_print_report()` after generating Studio output, even when the output contained no `[S#]` citations. The result was a lone `---` line with nothing below it — the same issue fixed for `_cmd_ask` in v0.2.27. Fix: guard the separator and report with `if result.report["cited"]:`, matching the `_cmd_ask` pattern. Regression test added.
+
+**Fixed**: `_cmd_add()` (`cli.py`) per-target inner `except (IngestError, StoreError)` did not catch `sqlite3.OperationalError`. A DB lock timeout during `store.add_chunks()` inside `index_source()` was not caught by the inner handler, propagating to `main()` (which also didn't catch it, as fixed above) and printing a raw traceback while skipping the remaining targets in the batch. Fix: add `except sqlite3.OperationalError` to the inner handler so the per-file loop continues with remaining targets, printing a clean error for the locked file. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.54`, aligned with `config.py` `VERSION = "0.2.55"`.
 
 ### v0.2.54 (2026-06-30)
 **Fixed**: `available()` (`llm.py`) returned `True` for any HTTP 200 response, including a plain HTTP server (nginx, `http.server`) on the configured port returning `text/html` on `GET /models`. The function opened the connection and immediately returned `True` without reading or validating the response body. Callers in `qa.ask()` use `available()` to decide whether to degrade to BM25-only retrieval; with a false-positive `True`, they skipped the `SYSTEM_SERVICE_UNAVAILABLE` degradation path and called `llm.chat()`, which raised `SYSTEM_LLM_BAD_RESPONSE` (invalid JSON) on every request — a worse error code that bypassed callers' graceful degradation checks. Fix: after `urlopen()`, read the `Content-Type` header; return `True` only when it contains `"json"` (all OpenAI-compatible endpoints send `application/json`). 2 regression tests added.

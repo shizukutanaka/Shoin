@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.54")
+        self.assertEqual(VERSION, "0.2.55")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3156,6 +3156,109 @@ class TestServerSSE(unittest.TestCase):
             os.unlink(db_path)
 
 
+    def test_zero_token_llm_response_saves_empty_assistant_message(self) -> None:
+        """When chat_stream yields zero tokens (e.g. reasoning model with no content),
+        an empty assistant message must still be saved to prevent an orphaned user turn.
+
+        Before v0.2.55, the guard `if full:` prevented saving when `full=""`, leaving
+        the user question visible in list_messages() on page reload with no reply.
+        The fix removes the guard so an empty assistant message is always persisted,
+        matching the meta-send disconnect and build_context error paths.
+        """
+        import os
+        import tempfile
+        import threading
+
+        from shoin.server import _Handler
+        from shoin.llm import LLMError
+
+        class _ZeroTokenLLM:
+            embedding_model = ""
+            model = "test"
+
+            def embed_one(self, text: str) -> list[float]:
+                return [1.0, 0.0]
+
+            def chat(self, messages: list, temperature: float = 0.2) -> str:
+                return ""
+
+            def chat_stream(self, messages: list, temperature: float = 0.2):
+                return iter([])  # yields nothing — simulates reasoning model
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_path = f.name
+        try:
+            with Store(db_path) as s:
+                nb = s.create_notebook("zero-token-test")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-zt")
+                s.add_chunks(src.id, ["books are great for learning"])
+                nb_id = nb.id
+
+            handler = _Handler.__new__(_Handler)
+            handler.db = db_path
+            handler.llm = _ZeroTokenLLM()  # type: ignore[assignment]
+            handler.questions_cache = {}
+            handler.questions_cache_lock = threading.Lock()
+
+            sse_events: list[str] = []
+
+            def _mock_sse(event: str, data: object) -> None:
+                sse_events.append(event)
+
+            handler._sse = _mock_sse  # type: ignore[assignment]
+            handler._headers = lambda *a, **kw: None  # type: ignore[assignment]
+            handler._read_json = lambda: {"question": "books"}  # type: ignore[assignment]
+            handler._require = lambda data, field: str(data[field])  # type: ignore[assignment]
+            handler._stream_chat = lambda msgs: _ZeroTokenLLM().chat_stream(msgs)  # type: ignore[assignment]
+
+            handler._h_ask_sse(nb_id)
+
+            with Store(db_path) as s:
+                msgs = s.list_messages(nb_id)
+
+            self.assertEqual(len(msgs), 2, "user + empty assistant must both be saved")
+            self.assertEqual(msgs[0]["role"], "user")
+            self.assertEqual(msgs[1]["role"], "assistant")
+            self.assertEqual(msgs[1]["body"], "")
+        finally:
+            os.unlink(db_path)
+
+
+class TestPipelineTitle(unittest.TestCase):
+    """Regression tests for pipeline.index_source title override (v0.2.55)."""
+
+    def test_index_source_title_override_used_in_source_row(self) -> None:
+        """index_source(title=) must commit the source with the supplied title.
+
+        Before v0.2.55, server._h_src_upload called index_source (which derived the
+        title from the tmp file path) then update_source_title in a second transaction.
+        A concurrent DELETE between the two commits left the source with the tmp-path
+        as its title and caused HTTP 404.
+        Fix: add title kwarg to index_source so add_source uses the override directly
+        in a single transaction, eliminating the two-phase commit window.
+        """
+        import os
+        import tempfile
+        from shoin.pipeline import index_source
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".txt", delete=False, mode="w", encoding="utf-8"
+        ) as f:
+            f.write("some document content for testing")
+            tmp_path = f.name
+        try:
+            with make_store() as s:
+                nb_id = s.create_notebook("title-test").id
+                result = index_source(s, nb_id, tmp_path, title="My Document.pdf")
+            self.assertEqual(
+                result.source.title,
+                "My Document.pdf",
+                "index_source must use the title kwarg, not the tmp file path",
+            )
+        finally:
+            os.unlink(tmp_path)
+
+
 class TestPipeline(unittest.TestCase):
     def test_noembed_chat_raises_service_unavailable(self) -> None:
         """_NoEmbed.chat() must raise LLMError so the 'no LLM' path is explicit."""
@@ -3856,6 +3959,115 @@ class TestBM25MergePathCap(unittest.TestCase):
                 len(hits), k,
                 f"bm25_search must return at most {k} hits on FTS5+LIKE merge path, got {len(hits)}",
             )
+
+
+class TestCLI(unittest.TestCase):
+    """CLI main() error-handling tests."""
+
+    def test_studio_no_citations_does_not_print_separator(self) -> None:
+        """_cmd_studio must suppress the '---' separator when no citations are present.
+
+        Before v0.2.55, _cmd_studio unconditionally printed '---' then called
+        _print_report(), which printed nothing for an empty cited list.  The user
+        saw a lone '---' with no content below it.  The symmetric fix was applied to
+        _cmd_ask in v0.2.27.
+        Fix: guard print('---') and _print_report() with if result.report['cited'].
+        """
+        import io
+        from unittest.mock import patch, MagicMock
+        from shoin.cli import main
+        from shoin.studio import StudioResult
+        from shoin.citation import CitationReport
+
+        report: CitationReport = CitationReport(
+            cited=[], invalid=[], coverage=0.0, n_sources=1,
+            source_map={"S1": "doc"}, confirmed=[], misattributed=[],
+        )
+        fake_result = StudioResult(kind="mindmap", body="## Mindmap\n- A\n- B", report=report)
+
+        with make_store() as s:
+            nb = s.create_notebook("test")
+            s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+
+        # Run via temp DB file so main() can open it
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with make_store() as s2:
+                pass  # just need a clean DB
+            # Build a store at db_file path and add a notebook + source
+            from shoin.store import Store
+            with Store(db_file) as s:
+                nb = s.create_notebook("test")
+                s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                nb_id = nb.id
+
+            captured = io.StringIO()
+            with patch("shoin.cli.generate", return_value=fake_result):
+                with patch("sys.stdout", captured):
+                    rc = main(["--db", db_file, "studio", str(nb_id), "mindmap"])
+            self.assertEqual(rc, 0)
+            output = captured.getvalue()
+            self.assertIn("## Mindmap", output)
+            self.assertNotIn("---", output, "separator must be suppressed when no citations exist")
+        finally:
+            os.unlink(db_file)
+
+    def test_main_db_locked_returns_exit_code_1(self) -> None:
+        """main() must catch sqlite3.OperationalError and return exit code 1.
+
+        Before v0.2.55, sqlite3.OperationalError (DB lock timeout) propagated
+        through main()'s except clause (which only caught StoreError/IngestError/
+        LLMError/OverflowError/KeyboardInterrupt) as a raw traceback.
+        Fix: add sqlite3.OperationalError to the outer handler in main().
+        """
+        import sqlite3 as _sqlite3
+        import io
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        with patch("shoin.cli.Store.__enter__", side_effect=_sqlite3.OperationalError("database is locked")):
+            err_out = io.StringIO()
+            with patch("sys.stderr", err_out):
+                rc = main(["notebook", "list"])
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_DB_LOCKED", err_out.getvalue())
+
+    def test_cmd_add_db_locked_continues_and_returns_nonzero(self) -> None:
+        """_cmd_add must catch sqlite3.OperationalError per-target and continue.
+
+        Before v0.2.55, a DB lock error from store.add_chunks() inside index_source()
+        was not caught by the inner except (IngestError, StoreError) clause, so it
+        propagated to main(), printing a raw traceback and skipping remaining targets.
+        Fix: add sqlite3.OperationalError to the inner except in _cmd_add.
+        """
+        import sqlite3 as _sqlite3
+        import io
+        import tempfile, os
+        from unittest.mock import patch
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("test").id
+
+            err_out = io.StringIO()
+            out = io.StringIO()
+            with patch(
+                "shoin.cli.index_source",
+                side_effect=_sqlite3.OperationalError("database is locked"),
+            ):
+                with patch("sys.stderr", err_out):
+                    with patch("sys.stdout", out):
+                        rc = main(["--db", db_file, "add", str(nb_id), "file.pdf"])
+            self.assertEqual(rc, 1)
+            self.assertIn("SYSTEM_DB_LOCKED", err_out.getvalue())
+        finally:
+            os.unlink(db_file)
 
 
 if __name__ == "__main__":

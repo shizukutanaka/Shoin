@@ -397,9 +397,11 @@ class _Handler(BaseHTTPRequestHandler):
                 tmp.write(data)
             with Store(self.db) as store:
                 store.get_notebook(nb_id)  # raises NOTEBOOK_NOT_FOUND → 404 before ingesting
-                result = index_source(store, nb_id, str(tmp_path), self.llm)
-                # keep the user's filename, not the temp path
-                store.update_source_title(result.source.id, raw_name, raw_name)
+                # Pass the user's original filename as title so add_source commits it
+                # in a single transaction — no separate update_source_title needed,
+                # which eliminates a TOCTOU window where a concurrent DELETE could
+                # leave the source in the DB with the tmp-path as its title.
+                result = index_source(store, nb_id, str(tmp_path), self.llm, title=raw_name)
                 self._json(
                     {
                         "source": {"id": result.source.id, "title": raw_name},
@@ -627,11 +629,17 @@ class _Handler(BaseHTTPRequestHandler):
                     self._sse("done", {"report": dict(report), "degraded": degraded})
                 except ConnectionError:
                     pass
-            if full:  # Don't persist empty assistant turns (client disconnected before tokens)
-                try:
-                    store.add_message(nb_id, "assistant", full, json.dumps(report))
-                except Exception:
-                    pass  # post-SSE persist: notebook deleted or DB error; stream already clean
+            # Always persist the assistant message — even when full="" (zero-token LLM
+            # response, e.g. reasoning models that emit no content, or client disconnect
+            # before any tokens).  An empty assistant message is preferable to leaving
+            # the user turn orphaned: history_messages() would silently drop lone user
+            # turns, but list_messages() (page-reload) shows them as unanswered questions.
+            # This matches the meta-send disconnect path (lines above) and the
+            # build_context error path that both persist empty assistant messages.
+            try:
+                store.add_message(nb_id, "assistant", full, json.dumps(report))
+            except Exception:
+                pass  # post-SSE persist: notebook deleted or DB error; stream already clean
 
 
 def make_server(

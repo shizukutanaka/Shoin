@@ -119,8 +119,16 @@ def index_source(
     notebook_id: int,
     target: str,
     llm: ChatBackend | None = None,
+    *,
+    title: str | None = None,
 ) -> IndexResult:
-    """Ingest a local file path or public URL into a notebook."""
+    """Ingest a local file path or public URL into a notebook.
+
+    title overrides the title inferred from the file/URL (useful when the caller
+    knows the user-supplied name, e.g. an upload's original filename vs. a tmpfile
+    path), so the source row is committed with the correct title in a single
+    transaction — no second update_source_title commit needed.
+    """
     if target.startswith(("http://", "https://")):
         extracted = extract_url(target)
     else:
@@ -131,7 +139,7 @@ def index_source(
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
     source = store.add_source(
-        notebook_id, extracted.kind, extracted.title, extracted.origin, extracted.sha256
+        notebook_id, extracted.kind, title or extracted.title, extracted.origin, extracted.sha256
     )
     chunk_ids = store.add_chunks(source.id, texts)
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
