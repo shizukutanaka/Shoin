@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.41")
+        self.assertEqual(VERSION, "0.2.42")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1672,21 +1672,29 @@ class TestSearch(unittest.TestCase):
         self.assertIn(" OR ", expr)
 
     def test_fts_query_cjk_3char_used_as_single_term(self) -> None:
-        """A 3-char CJK term is exactly one trigram — used as-is, not decomposed.
+        """A 3-char CJK term is exactly one trigram (v0.2.41) plus kana alt (v0.2.42).
 
         With `len(term) >= 3` (v0.2.41 fix from > 3), exactly-3-char CJK terms
         enter the trigram branch and produce range(1) = one trigram = the term
-        itself.  Behaviorally identical to the old `else [term]` path, but
-        consistent with the design intent.  A 4-char CJK term produces two
-        overlapping trigrams.
+        itself.  When the term contains kana characters, the katakana↔hiragana
+        alternate-script trigram is also added (v0.2.42).  A 4-char CJK term
+        produces two overlapping trigrams (plus alternates for any kana chars).
         """
-        three_char = fts_query("書院は")  # single 3-char CJK run
-        self.assertEqual(three_char, '"書院は"', "3-char CJK term must be used as-is")
+        # "書院は": 2 kanji + hiragana は → alternate は→ハ so 2 trigrams total
+        three_char = fts_query("書院は")
+        self.assertIn('"書院は"', three_char)   # original hiragana trigram
+        self.assertIn('"書院ハ"', three_char)   # katakana alternate (は→ハ)
 
-        four_char = fts_query("書院はな")  # 4-char → decomposes into 2 trigrams
+        # Pure-kanji 3-char term: no kana → single trigram, no alternate
+        pure_kanji = fts_query("書院学")  # all kanji
+        self.assertIn('"書院学"', pure_kanji)
+        self.assertNotIn("OR", pure_kanji)     # no alternate for pure kanji
+
+        four_char = fts_query("書院はな")  # 4-char → 2 original + 2 alternate trigrams
         self.assertIn('"書院は"', four_char)
         self.assertIn('"院はな"', four_char)
-        self.assertEqual(four_char, '"書院は" OR "院はな"')
+        self.assertIn('"書院ハ"', four_char)   # alternate for は→ハ
+        self.assertIn('"院ハナ"', four_char)   # alternate for はな→ハナ
 
     def test_query_terms_cjk_punctuation_acts_as_boundary(self) -> None:
         """CJK punctuation (U+3000-U+303F) must split CJK runs, not extend them."""
@@ -2064,6 +2072,94 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb_id, "local 猫", k=10)
             chunk_ids = [h.chunk_id for h in hits]
             self.assertEqual(len(chunk_ids), len(set(chunk_ids)), "duplicate chunk IDs in bm25_search result")
+
+    def test_fts_query_katakana_query_includes_hiragana_trigrams(self) -> None:
+        """fts_query() for a katakana term must also include hiragana-script trigrams.
+
+        Before v0.2.42, a katakana query like コンピュータ (computer) would only
+        generate katakana trigrams, missing documents indexed with hiragana
+        (こんぴゅーた).  The new _kana_alt() conversion adds alternate-script
+        trigrams to the OR expression.
+        """
+        from shoin.search import fts_query
+        expr = fts_query("コンピュータ")  # 5-char katakana → 3 trigrams
+        # katakana trigrams must be present
+        self.assertIn('"コンピ"', expr)
+        self.assertIn('"ンピュ"', expr)
+        self.assertIn('"ピュー"', expr)
+        # hiragana alternate trigrams must also be present
+        self.assertIn('"こんぴ"', expr)
+        self.assertIn('"んぴゅ"', expr)
+        self.assertIn('"ぴゅー"', expr)
+
+    def test_fts_query_hiragana_query_includes_katakana_trigrams(self) -> None:
+        """fts_query() for a hiragana term must also include katakana-script trigrams."""
+        from shoin.search import fts_query
+        expr = fts_query("こんぴゅーた")  # hiragana → multiple trigrams
+        self.assertIn('"こんぴ"', expr)   # hiragana trigram present
+        self.assertIn('"コンピ"', expr)   # katakana alternate present
+
+    def test_fts_query_pure_kanji_no_alt(self) -> None:
+        """Pure kanji terms (no kana) must not generate spurious alternate trigrams.
+
+        _kana_alt() returns the original string unchanged for pure kanji, so no
+        duplicate OR branches should appear.
+        """
+        from shoin.search import fts_query, _kana_alt
+        # Pure kanji term — no kana characters → unchanged
+        self.assertEqual(_kana_alt("書院"), "書院")
+        # fts_query for 3-char pure kanji: one trigram (itself), no alternate
+        expr = fts_query("書院学")
+        self.assertNotIn("OR", expr, "Pure kanji must not produce alternate OR branch")
+        # Each trigram must appear exactly once (no duplication)
+        expr2 = fts_query("書院はな")
+        self.assertEqual(expr2.count('"書院は"'), 1, "Original trigram must not appear twice")
+
+    def test_kana_alt_katakana_to_hiragana(self) -> None:
+        """_kana_alt() converts katakana → hiragana char by char."""
+        from shoin.search import _kana_alt
+        self.assertEqual(_kana_alt("コンピュータ"), "こんぴゅーた")
+
+    def test_kana_alt_hiragana_to_katakana(self) -> None:
+        """_kana_alt() converts hiragana → katakana char by char."""
+        from shoin.search import _kana_alt
+        self.assertEqual(_kana_alt("こんぴゅーた"), "コンピュータ")
+
+    def test_kana_alt_pure_kanji_unchanged(self) -> None:
+        """_kana_alt() returns original for pure-kanji (no kana)."""
+        from shoin.search import _kana_alt
+        self.assertEqual(_kana_alt("書院"), "書院")
+
+    def test_bm25_katakana_query_finds_hiragana_indexed_chunk(self) -> None:
+        """A katakana query must retrieve a chunk indexed with hiragana content.
+
+        Requires _kana_alt() alternate-script trigrams in fts_query() (v0.2.42).
+        Without the fix, FTS5 trigrams for コンピュータ never match こんぴゅーた
+        because they are stored as different Unicode codepoints.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("kana-xscript").id
+            src = s.add_source(nb_id, "txt", "hiragana-doc", "mem://h", "sha-h")
+            # Index a chunk written in hiragana
+            s.add_chunks(src.id, ["こんぴゅーたは便利な道具です。"])
+            # Query in katakana — should still find the hiragana chunk
+            hits = bm25_search(s, nb_id, "コンピュータ", k=5)
+            self.assertTrue(
+                any("こんぴゅーた" in h.text for h in hits),
+                "Katakana query must find hiragana-indexed chunk via alternate trigrams",
+            )
+
+    def test_bm25_hiragana_query_finds_katakana_indexed_chunk(self) -> None:
+        """A hiragana query must retrieve a chunk indexed with katakana content."""
+        with make_store() as s:
+            nb_id = s.create_notebook("kana-xscript2").id
+            src = s.add_source(nb_id, "txt", "katakana-doc", "mem://k", "sha-k")
+            s.add_chunks(src.id, ["コンピュータは便利なツールです。"])
+            hits = bm25_search(s, nb_id, "こんぴゅーた", k=5)
+            self.assertTrue(
+                any("コンピュータ" in h.text for h in hits),
+                "Hiragana query must find katakana-indexed chunk via alternate trigrams",
+            )
 
 
 class TestCLI(unittest.TestCase):

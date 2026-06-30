@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.41
+## Version History: v0.1.37 → v0.2.42
+
+### v0.2.42 (2026-06-30)
+**Feature**: Katakana↔Hiragana cross-script search (`search.py`). SQLite FTS5's trigram tokeniser is not kana-aware: a katakana query like コンピュータ would never match a document indexed with hiragana (こんぴゅーた) because the two scripts use different Unicode codepoints. Fix: add `_kana_alt(term)` helper that converts a CJK run character-by-character (katakana U+30A1–U+30F6 ↔ hiragana U+3041–U+3096, offset ±0x60). In `fts_query()`, when a CJK term contains kana, the trigrams of both the original and the alternate-script form are included in the OR expression. Pure-kanji terms (no kana) are unaffected: `_kana_alt()` returns the original string unchanged so no duplicate OR branch is emitted. The LIKE-scan fallback path for short terms is unchanged. The feature is zero-dependency and requires no language detection.
+
+**Fixed**: `pyproject.toml` version was `0.2.41`, aligned with `config.py` `VERSION = "0.2.42"`.
 
 ### v0.2.41 (2026-06-23)
 **Fixed**: `bm25_search()` (`search.py`) returned early when FTS5 found any hits, even when some query terms had `len < 3` (silently skipped by `fts_query`). For a mixed query like `"local 猫"`: FTS5 found "local" chunks and returned immediately; "猫" (1 char, below the 3-char FTS5 trigram minimum) never got LIKE-scanned — chunks containing only 猫 were silently dropped. Fix: replace the unconditional `if hits: return hits` with a guard that checks whether all query terms were covered by FTS5 (`all(len(t) >= 3 for t in query_terms(query))`). When short terms exist, the LIKE scan runs and its results (for chunks not already found by FTS5) are merged without duplicates.

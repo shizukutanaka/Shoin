@@ -74,12 +74,43 @@ def query_terms(query: str) -> list[str]:
     return [t for t in terms if t]
 
 
+def _kana_alt(term: str) -> str:
+    """Return the hiragana↔katakana alternate of a kana run, or the original term.
+
+    Converts katakana (U+30A1–U+30F6) ↔ hiragana (U+3041–U+3096) character by
+    character.  Pure kanji or mixed kanji/kana strings are converted on the kana
+    characters only.  Returns the original string unchanged when no conversion
+    occurred (e.g. pure kanji terms like 書院).
+
+    Rationale: documents indexed with katakana (コード) are missed by hiragana
+    queries (こーど) and vice-versa, because SQLite FTS5 trigram tokeniser is
+    not kana-aware.  Adding alternate-script trigrams to the OR expression
+    bridges the gap without a language detection dependency.
+    """
+    result = []
+    changed = False
+    for c in term:
+        cp = ord(c)
+        if 0x30A1 <= cp <= 0x30F6:  # full-width katakana → hiragana
+            result.append(chr(cp - 0x60))
+            changed = True
+        elif 0x3041 <= cp <= 0x3096:  # hiragana → katakana
+            result.append(chr(cp + 0x60))
+            changed = True
+        else:
+            result.append(c)
+    return "".join(result) if changed else term
+
+
 def fts_query(query: str) -> str:
     """Build a recall-oriented FTS5 MATCH expression.
 
     ASCII words become quoted terms; CJK runs are decomposed into their
-    trigrams. Everything is OR-joined: BM25 ranks denser matches higher and
-    precision is restored downstream by the lexical reranker + MMR.
+    trigrams.  For kana-containing terms, trigrams for the katakana↔hiragana
+    alternate script are also added so that a katakana query finds hiragana-
+    indexed documents and vice-versa.  Everything is OR-joined: BM25 ranks
+    denser matches higher and precision is restored downstream by the lexical
+    reranker + MMR.
     """
     groups: list[str] = []
     seen: set[str] = set()
@@ -87,11 +118,14 @@ def fts_query(query: str) -> str:
         term = term.replace("\x00", "").replace('"', '""')
         if len(term) < 3:
             continue
-        grams = (
-            [term[i : i + 3] for i in range(len(term) - 2)]
-            if is_cjk(term[0]) and len(term) >= 3
-            else [term]
-        )
+        if is_cjk(term[0]):
+            grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
+            alt = _kana_alt(term)
+            if alt != term:
+                alt_grams = [alt[i : i + 3] for i in range(len(alt) - 2)]
+                grams = grams + alt_grams
+        else:
+            grams = [term]
         for g in grams:
             if g not in seen:
                 seen.add(g)
