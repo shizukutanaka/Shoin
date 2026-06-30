@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.42
+## Version History: v0.1.37 → v0.2.43
+
+### v0.2.43 (2026-06-30)
+**Fixed**: `_post()` (`llm.py`) did not catch `http.client.HTTPException` (specifically `http.client.IncompleteRead`). When a local LLM endpoint (Ollama, llama.cpp) drops the TCP connection before sending the full `Content-Length` body — e.g. OOM kill, server crash mid-response — `resp.read()` raises `IncompleteRead`, a subclass of `HTTPException` and NOT of `OSError`. None of the three `except` handlers caught it, so it propagated as a bare exception to callers. In `_embed_chunks`, `IncompleteRead` hit `except Exception` (the rollback path) instead of `except LLMError` (the silent-skip/degradation path). In `ask()` and other chat callers, the bare exception bypassed the `LLMError` guard entirely. Fix: add `http.client.HTTPException` to the `(OSError, ValueError)` clause in `_post()`.
+
+**Fixed**: `chat_stream()` (`llm.py`) had the same uncaught `http.client.HTTPException` gap as `_post()`. During SSE stream iteration (`for raw in resp:`), a TCP truncation before `data: [DONE]` raises `IncompleteRead`. Neither `except urllib.error.HTTPError` nor `except (OSError, ValueError)` caught it, so it bypassed the `LLMError` guard in `server.py`'s `_h_ask_sse()` and corrupted the SSE response with an HTTP 500 status line written into the already-flushed stream body — the same class of corruption `v0.2.31` fixed for `build_context()`, but not for the LLM stream path itself. Fix: add `http.client.HTTPException` to the `(OSError, ValueError)` clause in `chat_stream()`.
+
+**Fixed**: `available()` (`llm.py`) did not catch `http.client.HTTPException`. When `SHOIN_LLM_URL` points to a port occupied by a non-HTTP server (e.g. a raw TCP service sending a malformed status line), `urlopen()` raises `http.client.BadStatusLine` — an `HTTPException` subclass, not `OSError`. `available()` is declared to return `bool`; propagating `BadStatusLine` instead was a latent type contract violation. Fix: add `http.client.HTTPException` to the `(OSError, ValueError)` clause in `available()`.
+
+**Fixed**: `pyproject.toml` version was `0.2.42`, aligned with `config.py` `VERSION = "0.2.43"`.
 
 ### v0.2.42 (2026-06-30)
 **Feature**: Katakana↔Hiragana cross-script search (`search.py`). SQLite FTS5's trigram tokeniser is not kana-aware: a katakana query like コンピュータ would never match a document indexed with hiragana (こんぴゅーた) because the two scripts use different Unicode codepoints. Fix: add `_kana_alt(term)` helper that converts a CJK run character-by-character (katakana U+30A1–U+30F6 ↔ hiragana U+3041–U+3096, offset ±0x60). In `fts_query()`, when a CJK term contains kana, the trigrams of both the original and the alternate-script form are included in the OR expression. Pure-kanji terms (no kana) are unaffected: `_kana_alt()` returns the original string unchanged so no duplicate OR branch is emitted. The LIKE-scan fallback path for short terms is unchanged. The feature is zero-dependency and requires no language detection.

@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.42")
+        self.assertEqual(VERSION, "0.2.43")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2530,6 +2530,84 @@ class TestLLMClient(unittest.TestCase):
 
         client = LLMClient(base_url="ftp://invalid-scheme")
         self.assertFalse(client.available())
+
+    def test_post_incomplete_read_raises_llmerror(self) -> None:
+        """http.client.IncompleteRead (HTTPException subclass) in _post() must be
+        converted to LLMError, not propagate as a bare exception.
+
+        Before v0.2.43, only (OSError, ValueError) were caught; IncompleteRead
+        (raised when the server drops the TCP connection before sending the full
+        Content-Length body) escaped as an uncaught http.client.HTTPException.
+        """
+        import http.client
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, LLMError
+
+        exc = http.client.IncompleteRead(b"partial", 100)
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.side_effect = exc
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_chat_stream_incomplete_read_raises_llmerror(self) -> None:
+        """http.client.IncompleteRead during SSE stream iteration must be LLMError.
+
+        Before v0.2.43, IncompleteRead during 'for raw in resp' bypassed the
+        LLMError guard in server.py's _h_ask_sse(), corrupting the SSE response
+        with an HTTP 500 status written into the already-flushed stream body.
+        """
+        import http.client
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, LLMError
+
+        exc = http.client.IncompleteRead(b"data: {", 50)
+
+        class _TruncatedResp:
+            def __enter__(self) -> "_TruncatedResp":
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+            def __iter__(self):  # type: ignore[override]
+                yield b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n"
+                raise exc
+
+        with patch("urllib.request.urlopen", return_value=_TruncatedResp()):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            gen = client.chat_stream([{"role": "user", "content": "hi"}])
+            tokens = []
+            with self.assertRaises(LLMError) as cm:
+                for tok in gen:
+                    tokens.append(tok)
+        self.assertEqual(tokens, ["hello"])          # partial output before truncation
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_available_bad_status_line_returns_false(self) -> None:
+        """http.client.BadStatusLine (HTTPException subclass) in available() must
+        return False, not raise.
+
+        Before v0.2.43, available() only caught (OSError, ValueError).  When the
+        configured port is occupied by a non-HTTP server that sends a malformed HTTP
+        status line, urlopen() raises BadStatusLine, which is an HTTPException and
+        NOT a subclass of OSError — so it propagated instead of returning False.
+        """
+        import http.client
+        from unittest.mock import patch
+        from shoin.llm import LLMClient
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=http.client.BadStatusLine("HTTP/1.1"),
+        ):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            self.assertFalse(client.available())
 
 
 class TestPipeline(unittest.TestCase):

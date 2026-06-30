@@ -7,6 +7,7 @@ failures raise LLMError with stable codes so callers can degrade gracefully
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -69,10 +70,12 @@ class LLMClient:
             # Must precede (OSError, ValueError): json.JSONDecodeError is a ValueError
             # subclass and would otherwise be misrouted to SYSTEM_SERVICE_UNAVAILABLE.
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", f"invalid JSON from {path}") from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             # urllib wraps socket.timeout in URLError(reason=TimeoutError(...));
             # bare TimeoutError also has no .reason, so fall back to exc itself.
             # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
+            # http.client.HTTPException covers IncompleteRead (truncated response body)
+            # and BadStatusLine (malformed HTTP status line from a non-HTTP server).
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, TimeoutError):
                 raise LLMError(
@@ -92,8 +95,9 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC):
                 return True
-        except (OSError, ValueError):
-            # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
+        except (OSError, ValueError, http.client.HTTPException):
+            # ValueError: unknown URL scheme.  HTTPException: BadStatusLine from a
+            # non-HTTP server occupying the configured port.
             return False
 
     # --- chat ---
@@ -159,8 +163,9 @@ class LLMClient:
                         yield str(delta)
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
-        except (OSError, ValueError) as exc:
-            # ValueError is raised for unknown URL schemes (e.g. SHOIN_LLM_URL=file://...).
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            # http.client.HTTPException covers IncompleteRead raised when the TCP
+            # connection is dropped before the SSE stream sends data: [DONE].
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, TimeoutError):
                 raise LLMError(
