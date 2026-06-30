@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.40")
+        self.assertEqual(VERSION, "0.2.41")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1674,9 +1674,11 @@ class TestSearch(unittest.TestCase):
     def test_fts_query_cjk_3char_used_as_single_term(self) -> None:
         """A 3-char CJK term is exactly one trigram — used as-is, not decomposed.
 
-        The condition `len(term) > 3` means exactly-3-char CJK terms skip
-        decomposition and are passed whole to FTS5 (which is correct: they ARE
-        a single trigram).  A 4-char CJK term produces two overlapping trigrams.
+        With `len(term) >= 3` (v0.2.41 fix from > 3), exactly-3-char CJK terms
+        enter the trigram branch and produce range(1) = one trigram = the term
+        itself.  Behaviorally identical to the old `else [term]` path, but
+        consistent with the design intent.  A 4-char CJK term produces two
+        overlapping trigrams.
         """
         three_char = fts_query("書院は")  # single 3-char CJK run
         self.assertEqual(three_char, '"書院は"', "3-char CJK term must be used as-is")
@@ -2029,6 +2031,56 @@ class TestSearch(unittest.TestCase):
         self.assertNotIn("A", needles)
         self.assertIn("love", needles)
         self.assertIn("story", needles)
+
+    def test_bm25_mixed_query_short_cjk_not_suppressed_by_fts5(self) -> None:
+        """Mixed query (long ASCII term + short CJK term) must find chunks for BOTH.
+
+        Before v0.2.41, bm25_search returned early when FTS5 found any hits.
+        For a query like "local 猫": FTS5 finds "local" chunks and returns
+        immediately; "猫" (1 char, skipped by fts_query because len < 3) never
+        gets LIKE scanned.  Chunks containing only 猫 were silently dropped.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("mixed-query-test").id
+            src = s.add_source(nb_id, "txt", "mixed", "t", "sha-mixed")
+            s.add_chunks(src.id, [
+                "local knowledge base",   # contains "local" — FTS5 finds this
+                "猫が好きです",            # contains 猫 (1 char) — only LIKE finds this
+                "全く別のテキスト",         # unrelated
+            ])
+            hits = bm25_search(s, nb_id, "local 猫", k=10)
+            texts = [h.text for h in hits]
+            self.assertTrue(any("local" in t for t in texts),
+                            "FTS5 result for 'local' must be present")
+            self.assertTrue(any("猫" in t for t in texts),
+                            "LIKE result for short CJK '猫' must not be suppressed by FTS5 early return")
+
+    def test_bm25_mixed_query_no_duplicate_chunks(self) -> None:
+        """When FTS5 and LIKE both match the same chunk, it must appear only once."""
+        with make_store() as s:
+            nb_id = s.create_notebook("dedup-test").id
+            src = s.add_source(nb_id, "txt", "dedup", "t", "sha-dedup")
+            s.add_chunks(src.id, ["local 猫 knowledge"])  # matches both FTS5 and LIKE
+            hits = bm25_search(s, nb_id, "local 猫", k=10)
+            chunk_ids = [h.chunk_id for h in hits]
+            self.assertEqual(len(chunk_ids), len(set(chunk_ids)), "duplicate chunk IDs in bm25_search result")
+
+
+class TestCLI(unittest.TestCase):
+    def test_serve_oserror_returns_exit_code_1(self) -> None:
+        """When `shoin serve` fails to bind the port (OSError), main() must return 1.
+
+        Before v0.2.41, the `serve()` call was outside the try/except block in
+        main(), so OSError (e.g., 'Address already in use') propagated as an
+        unhandled Python traceback instead of a clean error message + exit code 1.
+        """
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        # serve is imported locally inside main() so patch it at the source module.
+        with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
+            rc = main(["serve"])
+        self.assertEqual(rc, 1)
 
 
 class TestQA(unittest.TestCase):

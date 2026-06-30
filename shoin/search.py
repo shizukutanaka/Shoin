@@ -89,7 +89,7 @@ def fts_query(query: str) -> str:
             continue
         grams = (
             [term[i : i + 3] for i in range(len(term) - 2)]
-            if is_cjk(term[0]) and len(term) > 3
+            if is_cjk(term[0]) and len(term) >= 3
             else [term]
         )
         for g in grams:
@@ -124,7 +124,7 @@ def _fallback_needles(query: str) -> list[str]:
 
 def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
     expr = fts_query(query)
-    hits: list[Hit] = []
+    fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
             "SELECT c.id, c.source_id, c.text, bm25(chunks_fts) AS rank"
@@ -135,18 +135,20 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             (expr, notebook_id, k),
         ).fetchall()
         for r in rows:
-            hits.append(Hit(r["id"], r["source_id"], r["text"], 0.0, bm25=-float(r["rank"])))
-        if hits:
-            return hits
-    # fallback: SQL LIKE scan for short queries the trigram index can't serve.
-    # Pushing the filter into SQL means every chunk in the notebook is searched
-    # regardless of insertion order — no silent truncation for recently-added
-    # sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
+            fts_hits.append(Hit(r["id"], r["source_id"], r["text"], 0.0, bm25=-float(r["rank"])))
+        # Return early only when fts_query covered every query term (no terms with
+        # len < 3 were silently skipped).  Short terms still need the LIKE path.
+        if fts_hits and all(len(t) >= 3 for t in query_terms(query)):
+            return fts_hits
+    # LIKE-scan fallback: covers short queries and any terms with len < 3 that
+    # fts_query skips.  Pushing the filter into SQL means every chunk in the notebook
+    # is searched regardless of insertion order — no silent truncation for recently-
+    # added sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
     # (correct in both cases since CJK has no case).  Special LIKE characters in
     # the needle ('|', '%', '_') are escaped with '|' as the sentinel.
     needles = _fallback_needles(query)
     if not needles:
-        return []
+        return fts_hits  # return whatever FTS5 found (possibly empty)
     conditions = " OR ".join(f"c.text LIKE ? ESCAPE '|'" for _ in needles)
     like_params = [f"%{_esc_like(n)}%" for n in needles]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
@@ -160,14 +162,21 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         f" LIMIT ?",
         [notebook_id, *like_params, like_cap],
     ).fetchall()
+    like_hits: list[Hit] = []
     for r in rows:
         text = str(r["text"])
         low = text.lower()
         score = float(sum(low.count(n.lower()) for n in needles))
         if score > 0:
-            hits.append(Hit(r["id"], r["source_id"], text, 0.0, bm25=score))
-    hits.sort(key=lambda h: h.bm25, reverse=True)
-    return hits[:k]
+            like_hits.append(Hit(r["id"], r["source_id"], text, 0.0, bm25=score))
+    like_hits.sort(key=lambda h: h.bm25, reverse=True)
+    if fts_hits:
+        # FTS5 found results for long terms; add LIKE-only results for short terms
+        # that were not already covered by FTS5.
+        fts_ids = {h.chunk_id for h in fts_hits}
+        fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
+        return fts_hits
+    return like_hits[:k]
 
 
 def cosine(a: list[float], b: list[float]) -> float:

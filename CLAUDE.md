@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.40
+## Version History: v0.1.37 → v0.2.41
+
+### v0.2.41 (2026-06-23)
+**Fixed**: `bm25_search()` (`search.py`) returned early when FTS5 found any hits, even when some query terms had `len < 3` (silently skipped by `fts_query`). For a mixed query like `"local 猫"`: FTS5 found "local" chunks and returned immediately; "猫" (1 char, below the 3-char FTS5 trigram minimum) never got LIKE-scanned — chunks containing only 猫 were silently dropped. Fix: replace the unconditional `if hits: return hits` with a guard that checks whether all query terms were covered by FTS5 (`all(len(t) >= 3 for t in query_terms(query))`). When short terms exist, the LIKE scan runs and its results (for chunks not already found by FTS5) are merged without duplicates.
+
+**Fixed**: `fts_query()` (`search.py`) used `len(term) > 3` to decide whether to decompose a CJK term into trigrams, skipping the trigram branch for exactly-3-char terms. While the behavior was identical in practice (a 3-char term's single trigram equals the term itself), the condition was inconsistent with the design intent of the trigram tokenizer. Fix: `len(term) > 3` → `len(term) >= 3` for correctness.
+
+**Fixed**: `main()` (`cli.py`) placed the `serve()` call outside the `try/except` block, so `OSError` from `ThreadingHTTPServer.__init__` (e.g., `[Errno 98] Address already in use` when the port is already occupied) propagated as an unhandled Python traceback instead of a clean error message. Fix: wrap the `serve()` call in its own `try/except OSError` that prints the error with the standard `err.prefix` format and returns exit code 1.
+
+**Fixed**: `pyproject.toml` version was `0.2.40`, aligned with `config.py` `VERSION = "0.2.41"`.
 
 ### v0.2.40 (2026-06-23)
 **Fixed**: `_HTMLText.handle_endtag()` (`ingest.py`) reset `_in_title` on `</head>` but did not reset `_skip_depth`. An unclosed `<noscript>`, `<script>`, or `<style>` tag in `<head>` left `_skip_depth=1` for the entire `<body>`, causing `handle_data` to discard every text node. Pages with malformed markup (e.g., `<noscript>` without `</noscript>` in `<head>`) raised `INGEST_EMPTY` instead of extracting body content. Fix: reset `_skip_depth = 0` alongside `_in_title` in the `tag == "head"` branch of `handle_endtag`.

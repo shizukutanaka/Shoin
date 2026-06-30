@@ -20,14 +20,17 @@ from .config import MAX_NAME_LEN, MAX_TITLE_LEN
 MIGRATIONS: list[tuple[int, str]] = [
     (
         1,
+        # All DDL uses IF NOT EXISTS so that two concurrent migrations on the same
+        # fresh file are idempotent: the second thread's DDL is a no-op after the
+        # first thread commits.  CREATE TRIGGER IF NOT EXISTS requires SQLite ≥ 3.35.
         """
-        CREATE TABLE notebooks(
+        CREATE TABLE IF NOT EXISTS notebooks(
           id INTEGER PRIMARY KEY,
           name TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-        CREATE TABLE sources(
+        CREATE TABLE IF NOT EXISTS sources(
           id INTEGER PRIMARY KEY,
           notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
           kind TEXT NOT NULL,
@@ -37,22 +40,22 @@ MIGRATIONS: list[tuple[int, str]] = [
           added_at TEXT NOT NULL,
           UNIQUE(notebook_id, sha256)
         );
-        CREATE TABLE chunks(
+        CREATE TABLE IF NOT EXISTS chunks(
           id INTEGER PRIMARY KEY,
           source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
           seq INTEGER NOT NULL,
           text TEXT NOT NULL,
           embedding BLOB
         );
-        CREATE INDEX idx_chunks_source ON chunks(source_id);
-        CREATE TABLE notes(
+        CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+        CREATE TABLE IF NOT EXISTS notes(
           id INTEGER PRIMARY KEY,
           notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
           title TEXT NOT NULL,
           body TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-        CREATE TABLE studio_outputs(
+        CREATE TABLE IF NOT EXISTS studio_outputs(
           id INTEGER PRIMARY KEY,
           notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
           kind TEXT NOT NULL,
@@ -60,7 +63,7 @@ MIGRATIONS: list[tuple[int, str]] = [
           citation_report TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL
         );
-        CREATE TABLE messages(
+        CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY,
           notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
           role TEXT NOT NULL,
@@ -71,10 +74,10 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
           text, content='chunks', content_rowid='id', tokenize='trigram'
         );
-        CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
           INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
         END;
-        CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
           INSERT INTO chunks_fts(chunks_fts, rowid, text)
           VALUES('delete', old.id, old.text);
         END;
@@ -83,16 +86,16 @@ MIGRATIONS: list[tuple[int, str]] = [
     (
         2,
         """
-        CREATE INDEX idx_sources_notebook ON sources(notebook_id);
-        CREATE INDEX idx_notes_notebook ON notes(notebook_id);
-        CREATE INDEX idx_studio_notebook ON studio_outputs(notebook_id);
-        CREATE INDEX idx_messages_notebook ON messages(notebook_id);
+        CREATE INDEX IF NOT EXISTS idx_sources_notebook ON sources(notebook_id);
+        CREATE INDEX IF NOT EXISTS idx_notes_notebook ON notes(notebook_id);
+        CREATE INDEX IF NOT EXISTS idx_studio_notebook ON studio_outputs(notebook_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_notebook ON messages(notebook_id);
         """,
     ),
     (
         3,
         """
-        CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """,
     ),
     (
@@ -101,7 +104,7 @@ MIGRATIONS: list[tuple[int, str]] = [
         # O(total messages for notebook) by matching notebook_id then scanning
         # id DESC directly without a full-table sort.
         """
-        CREATE INDEX idx_messages_notebook_id_desc ON messages(notebook_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_notebook_id_desc ON messages(notebook_id, id DESC);
         """,
     ),
 ]

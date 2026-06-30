@@ -211,7 +211,11 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     if str(args.command) == "serve":
         from .server import serve
 
-        serve(int(args.port), str(args.db) if args.db else None)
+        try:
+            serve(int(args.port), str(args.db) if args.db else None)
+        except OSError as exc:
+            print(_t("err.prefix", code="SYSTEM_PORT_IN_USE", msg=str(exc)), file=sys.stderr)
+            return 1
         return 0
     backend: ChatBackend = llm if llm is not None else LLMClient()
     try:
