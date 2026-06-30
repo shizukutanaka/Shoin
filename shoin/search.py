@@ -243,7 +243,9 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
         if negs:
             fts_hits = _apply_neg_filter(fts_hits, negs)
-        return fts_hits
+        # The LIKE-only path caps at k; cap the merge path for consistency so
+        # callers can rely on the k parameter being respected on all code paths.
+        return fts_hits[:k]
     result = like_hits[:k]
     if negs:
         result = _apply_neg_filter(result, negs)
@@ -313,9 +315,12 @@ def adaptive_alpha(query: str) -> float:
         alpha -= 0.15  # short keyword lookup: exact match matters
     if len(terms) >= 6 or is_question:
         alpha += 0.15  # natural-language question: semantics matter
-    if _DIGIT_RE.search(query) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
+    # Use neg-stripped query for digit/quote checks so a neg-term like -v2 or
+    # -"phrase" doesn't falsely bias alpha toward exact-match retrieval.
+    clean_q = strip_neg_terms(query)
+    if _DIGIT_RE.search(clean_q) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
         alpha -= 0.15  # identifiers / numbers: exact match matters
-    if '"' in query or "「" in query:
+    if '"' in clean_q or "「" in clean_q:
         alpha -= 0.10  # quoted phrase: exact match matters
     return min(0.8, max(0.2, alpha))
 

@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.50
+## Version History: v0.1.37 → v0.2.51
+
+### v0.2.51 (2026-06-30)
+**Fixed**: `adaptive_alpha()` (`search.py`) called `_DIGIT_RE.search(query)` on the raw query including neg-terms. A query like `"neural network -v2"` triggered the digit-presence penalty (`alpha -= 0.15`) because the digit `2` exists in the negated token `-v2`, biasing retrieval toward exact-match even though the positive content had no digits. Fix: use `clean_q = strip_neg_terms(query)` as the target for both the digit regex and the quoted-phrase `'"' in query` check, so neg-terms never influence the alpha heuristic. Regression test added.
+
+**Fixed**: `bm25_search()` (`search.py`) merge path (FTS5 + LIKE) returned the combined result list without slicing to `k`. When a query contained at least one long term (≥3 chars) handled by FTS5 and at least one short term (<3 chars) handled by LIKE, `bm25_search(store, nb_id, query, k=10)` could return up to `k + 2000` hits instead of `k`. The LIKE-only path (line 247) and FTS5-only early-return already sliced to `k`; only the merge path was uncapped. Fix: add `[:k]` cap before returning from the merge path, making all three exit paths consistent. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.50`, aligned with `config.py` `VERSION = "0.2.51"`.
 
 ### v0.2.50 (2026-06-30)
 **Fixed**: `_hard_split()` (`chunk.py`) used `window = max(limit, 1)` as a character index when falling back to the character-window path for unbreakable text. For ASCII text (≈5 chars/token), this produced chunks approximately 5× too small (a 512-token budget produced 512-char chunks ≈ 102 tokens instead of ≈512 tokens). Fix: compute `chars_per_token = len(p) / tok` and use `window = max(int(limit * chars_per_token), 1)` so the window is proportional to the actual character density of the text. Regression test added.

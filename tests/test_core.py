@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.50")
+        self.assertEqual(VERSION, "0.2.51")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3561,6 +3561,64 @@ class TestAdaptiveAlphaKeyword(unittest.TestCase):
             a = adaptive_alpha(q)
             self.assertGreaterEqual(a, 0.2)
             self.assertLessEqual(a, 0.8)
+
+    def test_digit_in_neg_term_does_not_trigger_exact_match_bias(self) -> None:
+        """A digit inside a negated term must not reduce alpha via the digit heuristic.
+
+        Before the fix, _DIGIT_RE.search(query) matched digits in neg-terms like -v2,
+        triggering the exact-match penalty even though the positive query had no digits.
+        Fix: search the neg-stripped query (clean_q) instead of the raw query.
+        """
+        # "neural network" → 2 terms → short-keyword penalty applied (-0.15 → 0.35)
+        # "-v2" is a neg-term and must NOT trigger the digit penalty
+        alpha_with_neg_digit = adaptive_alpha("neural network -v2")
+        alpha_no_neg = adaptive_alpha("neural network")
+        self.assertEqual(
+            alpha_with_neg_digit, alpha_no_neg,
+            "neg-term digit -v2 must not change alpha vs. the same query without it",
+        )
+
+    def test_digit_in_neg_term_does_not_affect_long_identifier_check(self) -> None:
+        """A long identifier inside a neg-term must not trigger the long-token penalty.
+
+        The `any(len(t) >= 12 ...)` check iterates over `terms` which already comes from
+        strip_neg_terms, so long identifiers in neg-terms can't trigger it that way.
+        This test confirms the check is consistently applied to positive terms only.
+        """
+        # The neg-term "-averylongnegidentifier" (22 chars) must NOT trigger the
+        # long-identifier penalty (len >= 12). Only positive terms matter.
+        alpha_neg_long = adaptive_alpha("cats -averylongnegidentifier")
+        alpha_baseline = adaptive_alpha("cats")
+        self.assertEqual(
+            alpha_neg_long, alpha_baseline,
+            "long neg-term identifier must not trigger the long-identifier alpha penalty",
+        )
+
+
+class TestBM25MergePathCap(unittest.TestCase):
+    """bm25_search() merge path must cap results to k (v0.2.51)."""
+
+    def test_fts5_like_merge_capped_to_k(self) -> None:
+        """bm25_search must return at most k hits on the FTS5+LIKE merge path.
+
+        The merge path is triggered when a query has at least one long term (≥3 chars)
+        that FTS5 can index AND at least one short term (<3 chars) that needs LIKE.
+        Before the fix, the merge path returned fts_hits + like_hits (up to k + 2000),
+        violating the k parameter.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("cap-test").id
+            src = s.add_source(nb_id, "txt", "x", "mem://x", "sha-x")
+            # Add many chunks that match both the long and short query terms
+            texts = [f"quantum mechanics entry {i} 猫" for i in range(50)]
+            s.add_chunks(src.id, texts)
+            # "quantum" (7 chars → FTS5) + "猫" (1 CJK char → LIKE) triggers merge path
+            k = 5
+            hits = bm25_search(s, nb_id, "quantum 猫", k=k)
+            self.assertLessEqual(
+                len(hits), k,
+                f"bm25_search must return at most {k} hits on FTS5+LIKE merge path, got {len(hits)}",
+            )
 
 
 if __name__ == "__main__":
