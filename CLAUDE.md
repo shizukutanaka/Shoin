@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.51
+## Version History: v0.1.37 → v0.2.52
+
+### v0.2.52 (2026-06-30)
+**Fixed**: `_degraded_text()` (`qa.py`) assigned S-numbers per-hit instead of per-unique-source, causing a mismatch with `build_context`'s per-source S-numbering. When the top two retrieval hits came from the same source, `_degraded_text` emitted `[S2]` for a second chunk of source 0 — but `make_report` (and the user-visible citation report) attributed `[S2]` to a completely different source (the second unique source in `context.source_titles`). The user saw content from source 0 labelled as source 1, and `[S3]` was reported as out-of-range even when a third source existed. Fix: skip duplicate `source_id`s in the enumeration loop so S-numbers increment only when a new source is encountered, matching `build_context`'s first-seen-unique-source ordering. Regression test added.
+
+**Fixed**: `build_context()` (`qa.py`) did not enforce the per-source token budget for scripts where `estimate_tokens()` returns 0 (Arabic, Cyrillic, Hebrew, Devanagari, pure punctuation — outside `_CJK_RANGES` and `_WORD_RE`). `cost = 0` made `cost > remaining` always `False`, so all chunks were appended without any budget cap — a source with 20 Arabic paragraphs could consume the entire LLM context window. Fix: compute `effective_cost = cost if cost > 0 else len(h.text) // 5` (≈ ASCII word density as a conservative upper bound) and use `effective_cost` for the budget guard and accumulator. When truncating zero-token text that overflows, use `h.text[:remaining * 5]` as a character-window fallback since `_truncate_tokens` also returns the full text for zero-token input. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.51`, aligned with `config.py` `VERSION = "0.2.52"`.
 
 ### v0.2.51 (2026-06-30)
 **Fixed**: `adaptive_alpha()` (`search.py`) called `_DIGIT_RE.search(query)` on the raw query including neg-terms. A query like `"neural network -v2"` triggered the digit-presence penalty (`alpha -= 0.15`) because the digit `2` exists in the negated token `-v2`, biasing retrieval toward exact-match even though the positive content had no digits. Fix: use `clean_q = strip_neg_terms(query)` as the target for both the digit regex and the quoted-phrase `'"' in query` check, so neg-terms never influence the alpha heuristic. Regression test added.

@@ -162,16 +162,27 @@ def build_context(
         texts: list[str] = []
         for h in grouped[source_id]:
             cost = estimate_tokens(h.text)
+            # Zero-token text (Arabic, Cyrillic, Hebrew, pure punctuation — scripts
+            # outside _CJK_RANGES and _WORD_RE) escapes the token budget: cost=0 means
+            # cost > remaining is always False and ALL chunks are appended uncapped.
+            # Use 5 chars/token (≈ASCII word density) as a conservative char-based cost
+            # so the budget guard fires for scripts that estimate_tokens() can't count.
+            effective_cost = cost if cost > 0 else len(h.text) // 5
             remaining = per_source - used
-            if cost > remaining:
+            if effective_cost > remaining:
                 # Chunk won't fit in full: truncate to remaining budget if any.
                 # Previously, the truncation guard fired only for the first chunk
                 # (when used==0); later oversize chunks were silently dropped.
                 if remaining > 0:
-                    texts.append(_truncate_tokens(h.text, remaining))
+                    if cost > 0:
+                        texts.append(_truncate_tokens(h.text, remaining))
+                    else:
+                        # Zero-token text: _truncate_tokens may also return the full
+                        # text (same 0-count problem). Use char window as fallback.
+                        texts.append(h.text[: remaining * 5])
                 break
             texts.append(h.text)
-            used += cost
+            used += effective_cost
         body = "\n…\n".join(texts)
         bodies.append(body)
         parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
@@ -269,7 +280,19 @@ def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
 
 
 def _degraded_text(hits: list[Hit]) -> str:
-    lines = [f"[S{i + 1}] …{h.text[:120]}" for i, h in enumerate(hits[:3])]
+    # Enumerate unique sources (first-seen order), not individual hits, so S-numbers
+    # match build_context's per-source assignment.  If hits[0] and hits[1] are both
+    # from the same source, enumerating hits would emit [S2] for a second chunk of
+    # source 0 — but context.source_titles[1] (S2 in make_report) is a different source.
+    seen: set[int] = set()
+    lines: list[str] = []
+    for h in hits:
+        if h.source_id in seen:
+            continue
+        seen.add(h.source_id)
+        lines.append(f"[S{len(seen)}] …{h.text[:120]}")
+        if len(seen) >= 3:
+            break
     return _t("degraded_prefix") + "\n".join(lines)
 
 

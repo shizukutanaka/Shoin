@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.51")
+        self.assertEqual(VERSION, "0.2.52")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2430,6 +2430,72 @@ class TestQA(unittest.TestCase):
         self.assertGreater(estimate_tokens(body), estimate_tokens(short_text),
                            "truncated hit1 must have been appended, not dropped")
 
+
+    def test_degraded_text_s_numbers_match_unique_sources_not_hits(self) -> None:
+        """_degraded_text must assign S-numbers per unique source, not per hit.
+
+        When hits[0] and hits[1] come from the same source, the old code emitted
+        [S1] for hit0 and [S2] for hit1 — but build_context assigns [S2] to the
+        SECOND unique source.  make_report then attributed [S2] to the wrong source
+        in the citation report.
+
+        Fix: skip duplicate source_ids in _degraded_text so S-numbers align with
+        build_context's first-seen-unique-source ordering.
+        """
+        from shoin.qa import _degraded_text
+        from shoin.search import Hit
+
+        # Two hits from source 5, then one hit from source 7
+        hits = [
+            Hit(chunk_id=1, source_id=5, text="chunk A from src5", score=1.0),
+            Hit(chunk_id=2, source_id=5, text="chunk B from src5", score=0.9),
+            Hit(chunk_id=3, source_id=7, text="chunk from src7", score=0.8),
+        ]
+        text = _degraded_text(hits)
+        # [S1] must reference source 5, [S2] must reference source 7
+        # The old code would put [S2] on "chunk B from src5" — the fix shows
+        # only ONE entry for source 5 (as [S1]) and one for source 7 (as [S2])
+        self.assertIn("[S1]", text)
+        self.assertIn("[S2]", text)
+        self.assertNotIn("[S3]", text, "[S3] should not appear when only 2 unique sources")
+        # [S2] must show the source-7 content, not the duplicate source-5 content
+        lines = [ln for ln in text.splitlines() if "[S2]" in ln]
+        self.assertTrue(lines, "[S2] line must exist")
+        self.assertIn("src7", lines[0], "[S2] must show content from source 7, not source 5")
+
+    def test_build_context_zero_token_text_respects_budget(self) -> None:
+        """build_context must cap zero-token text (Arabic/Cyrillic/punctuation).
+
+        estimate_tokens() returns 0 for scripts outside _CJK_RANGES and _WORD_RE.
+        Before the fix, cost=0 always satisfied `cost > remaining` (False), so all
+        chunks were appended without budget enforcement — a 100K-char Arabic paragraph
+        would blow the LLM context budget entirely.
+
+        Fix: use effective_cost = len(text) // 5 (≈ 5 chars/token) when cost==0.
+        """
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        # Pure ellipsis/punctuation — estimate_tokens() returns 0 for these
+        zero_tok_char = "…"  # U+2026, not CJK, not ASCII word → 0 tokens
+        self.assertEqual(estimate_tokens(zero_tok_char), 0, "pre-condition: char must be zero-token")
+        # 2000-char block of zero-token text → effective cost ≈ 400 tokens (2000 // 5)
+        big_zero_tok = zero_tok_char * 2000
+
+        with make_store() as s:
+            nb = s.create_notebook("zero-tok-test")
+            src = s.add_source(nb.id, "txt", "Doc", "orig", "sha-zt")
+            h = Hit(chunk_id=1, source_id=src.id, text=big_zero_tok, score=1.0)
+            # budget_tokens=200: per_source=200, effective_cost=400 > 200 → must truncate
+            ctx = build_context(s, [h], budget_tokens=200)
+        body = ctx.source_bodies[0]
+        # Body must be shorter than the full 2000-char input (truncation happened)
+        self.assertLess(
+            len(body), len(big_zero_tok),
+            "zero-token text exceeding budget must be truncated, not appended in full",
+        )
+        # Body must not be empty (some content was included up to the budget)
+        self.assertGreater(len(body), 0, "truncated zero-token body must not be empty")
 
     def test_ask_build_context_db_lock_raises_store_error(self) -> None:
         """sqlite3.OperationalError from build_context must be re-raised as StoreError.
