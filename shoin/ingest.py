@@ -69,6 +69,11 @@ def _decode(data: bytes, charset: str | None = None) -> str:
     candidates = []
     if charset:
         candidates.append(charset)
+    # UTF-16 BOM detection: cp932 accepts any byte sequence so it would silently
+    # produce mojibake for UTF-16 content. Detect BOM-prefixed UTF-16 explicitly
+    # before the cp932 fallback so the correct codec is used.
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        candidates.append("utf-16")
     # utf-8-sig handles plain UTF-8 and BOM-prefixed UTF-8 (Windows Notepad);
     # cp932 covers Shift-JIS, the dominant legacy encoding for Japanese content.
     candidates.extend(["utf-8-sig", "cp932"])
@@ -323,7 +328,9 @@ def extract_file(path: Path | str) -> Extracted:
         title = html_title or title
     else:
         text = _decode(data)
-    text = text.strip()
+    # Strip null bytes (U+0000): str.strip() skips them (category Cc, not whitespace),
+    # so a file containing only \x00 bytes would pass the `not text` guard without this.
+    text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text in {p.name}")
     return Extracted(kind, title, text, str(p), _digest(data))

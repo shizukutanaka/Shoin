@@ -306,7 +306,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.49
+## Version History: v0.1.37 → v0.2.50
+
+### v0.2.50 (2026-06-30)
+**Fixed**: `_hard_split()` (`chunk.py`) used `window = max(limit, 1)` as a character index when falling back to the character-window path for unbreakable text. For ASCII text (≈5 chars/token), this produced chunks approximately 5× too small (a 512-token budget produced 512-char chunks ≈ 102 tokens instead of ≈512 tokens). Fix: compute `chars_per_token = len(p) / tok` and use `window = max(int(limit * chars_per_token), 1)` so the window is proportional to the actual character density of the text. Regression test added.
+
+**Fixed**: `_hard_split()` (`chunk.py`) did not split very long zero-token text (Arabic, Hebrew, Cyrillic, pure punctuation). `estimate_tokens()` returns 0 for scripts outside its CJK and ASCII-word coverage; a zero result always satisfies `tok <= limit`, so a pathologically long zero-token paragraph (e.g., 100K chars of Arabic) was emitted as a single oversized chunk with no further splitting. Fix: add an explicit guard — when `tok == 0` and `len(p) > limit * 5`, apply the character-window fallback with `window = max(limit * 5, 1)` (matching ≈5 chars/token ASCII density as a conservative upper bound). Regression test added.
+
+**Fixed**: `_decode()` (`ingest.py`) did not detect UTF-16 BOM-prefixed files. A `.txt` or `.md` file encoded as UTF-16 with a byte-order mark (`\xff\xfe` or `\xfe\xff`) was mishandled: `utf-8-sig` rejected it (0xFF is invalid UTF-8), then `cp932` accepted every byte sequence silently — producing mojibake (PUA characters, embedded null bytes) rather than the correct text. The cp932 fallback was designed for Shift-JIS Japanese content, not as a universal binary-safe decoder. Fix: when `data[:2]` matches a UTF-16 BOM, prepend `"utf-16"` to the candidate list before `utf-8-sig` and `cp932`. Regression test added.
+
+**Fixed**: `extract_file()` (`ingest.py`) did not strip null bytes (U+0000) before the empty-text guard. `str.strip()` removes Unicode whitespace (category Zs/Zl/Zp and ASCII controls), but U+0000 is category Cc (control) and is NOT stripped. A `.txt` file containing only null bytes produced `'\x00\x00\x00'` — truthy, non-empty — so `if not text:` did not fire and the file was indexed as valid content, inserting garbage into BM25 and vector search. Fix: add `text = text.replace("\x00", "").strip()` before the guard so null-only files raise `INGEST_EMPTY`. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.49`, aligned with `config.py` `VERSION = "0.2.50"`.
 
 ### v0.2.49 (2026-06-30)
 **Fixed**: `_post()` (`llm.py`) called `exc.read().decode(...)[:300]` on HTTPError response bodies — reading the entire body into memory before slicing to 300 chars. A malicious or misconfigured endpoint returning a gigabyte 500 response caused OOM before the truncation ran. Fix: `exc.read(300).decode(...)` passes the size limit to `read()` directly.

@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.49")
+        self.assertEqual(VERSION, "0.2.50")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -923,6 +923,55 @@ class TestChunk(unittest.TestCase):
         # No split should occur inside '3.14' because '4' is not whitespace
         self.assertEqual(len(parts), 1)
 
+    def test_hard_split_ascii_window_uses_char_density_not_token_count(self) -> None:
+        """_hard_split character-window must account for ASCII density (~5 chars/token).
+
+        Before the fix, window = max(limit, 1) used the token budget (e.g. 50) as
+        a character index, producing ASCII chunks ~5× too small (50 chars ≈ 10 tokens
+        instead of ~50 tokens). Fix: window = limit * chars_per_token.
+        """
+        from shoin.chunk import _hard_split
+
+        # Space-separated words with NO sentence punctuation so the sentence splitter
+        # produces one giant fragment, forcing the character-window fallback.
+        # 200 words × ~5 chars/word ≈ 1000 chars ≈ 200 tokens.
+        block = "alpha " * 200  # 200 words → estimate_tokens ≈ 200, well above limit=50
+        block = block.strip()
+        self.assertGreater(estimate_tokens(block), 50, "pre-condition: block must exceed limit")
+        parts = _hard_split(block, 50)
+        # Old code (50-char window) → ~20 parts; new code (~300-char window) → ~4 parts.
+        # Allow up to 8 to give slack for off-by-one at chunk boundaries.
+        self.assertLessEqual(len(parts), 8, msg="too many chunks indicates window was in chars not tokens")
+        # All non-tail chunks must be substantially sized (>20 tokens), proving the window
+        # is token-proportional. The last chunk may be a small word fragment so skip it.
+        for p in parts[:-1]:
+            self.assertGreater(
+                estimate_tokens(p), 20,
+                msg=f"non-tail chunk too small (5× penalty): {p!r:.40}",
+            )
+
+    def test_hard_split_zero_token_text_is_bounded(self) -> None:
+        """_hard_split must split very long zero-token text (Arabic/Cyrillic/punctuation).
+
+        Before the fix, estimate_tokens(p) == 0 always satisfied tok <= limit, so
+        an unbounded zero-token paragraph was emitted as a single oversized chunk.
+        Fix: when tok == 0 and len(p) > limit * 5, apply character-window fallback.
+        """
+        from shoin.chunk import _hard_split
+
+        # Pure Latin-extended chars that estimate_tokens() cannot count (no CJK, no _WORD_RE match).
+        # Use repeated diacritics which have ord() outside CJK ranges and are not \w.
+        # Cyrillic letters DO match _WORD_RE since they are alpha; use punctuation instead.
+        # A long string of punctuation/symbols that aren't ASCII word chars and aren't CJK:
+        block = "…·" * 2000  # 4000 chars, estimate_tokens() returns 0 (no CJK, no ASCII words)
+        self.assertEqual(estimate_tokens(block), 0, "pre-condition: block must be zero-token")
+        parts = _hard_split(block, 50)
+        # Should have been split — not emitted as one 4000-char chunk
+        self.assertGreater(len(parts), 1, "zero-token oversized block must be split into multiple chunks")
+        # Each part must fit within limit * 5 chars (≈ 5 chars/token ASCII upper bound)
+        for p in parts:
+            self.assertLessEqual(len(p), 50 * 5 + 10, msg=f"part too large: len={len(p)}")
+
 
 class TestIngest(unittest.TestCase):
     def test_txt_md_extract(self) -> None:
@@ -948,6 +997,36 @@ class TestIngest(unittest.TestCase):
             text = extract_file(p).text
             self.assertNotIn("﻿", text, "BOM character must not appear in extracted text")
             self.assertIn("BOM付きテキスト", text)
+
+    def test_null_byte_file_raises_ingest_empty(self) -> None:
+        """A .txt file containing only null bytes must raise INGEST_EMPTY.
+
+        Before the fix, str.strip() skipped U+0000 (category Cc, not whitespace),
+        so '\x00\x00\x00'.strip() returned '\x00\x00\x00' (truthy) and the file was
+        indexed as valid text, inserting garbage into BM25 and vector search.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "nulls.txt"
+            p.write_bytes(b"\x00\x00\x00")
+            with self.assertRaises(IngestError) as ctx:
+                extract_file(p)
+            self.assertEqual(ctx.exception.code, "INGEST_EMPTY")
+
+    def test_utf16_le_file_decoded_correctly(self) -> None:
+        """A UTF-16 LE .txt file must be decoded as UTF-16, not mangled by cp932.
+
+        Before the fix, _decode() tried utf-8-sig (fails on 0xFF/0xFE BOM), then
+        cp932, which accepted all byte sequences and produced mojibake — cp932 decoded
+        the UTF-16 BOM as two PUA characters and null bytes as literal U+0000.
+        Fix: detect UTF-16 BOM before the cp932 fallback.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "utf16.txt"
+            p.write_bytes("Hello world".encode("utf-16-le") + b"\x00")
+            # utf-16-le without BOM requires explicit codec; use utf-16 LE with BOM
+            p.write_bytes("Hello world".encode("utf-16"))  # includes BOM (\xff\xfe)
+            ex = extract_file(p)
+            self.assertIn("Hello", ex.text, f"got mojibake instead: {ex.text!r:.60}")
 
     def test_html_extract(self) -> None:
         html = (
