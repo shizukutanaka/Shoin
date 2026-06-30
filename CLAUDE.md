@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.60
+## Version History: v0.1.37 → v0.2.61
+
+### v0.2.61 (2026-06-30)
+**Fixed**: `bm25_search()` (`search.py`) FTS5+LIKE merge path sorted the FTS5-hit sublist *before* extending with LIKE-only hits, leaving the combined list globally unsorted. A LIKE-only chunk with `bm25=50` was appended after an FTS5 chunk with `bm25≈5`, so `rrf_fuse()` received the hits out of rank order and assigned a worse rank-reciprocal score to the higher-scoring LIKE-only chunk. This affected queries mixing a long ASCII/CJK term (handled by FTS5 trigrams) with a short term (<3 chars, handled by LIKE scan), e.g. `"local 猫"`. Fix: move the `fts_hits.sort()` call to after the `extend()` so the combined list is globally sorted before being passed to `rrf_fuse()`. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.60`, aligned with `config.py` `VERSION = "0.2.61"`.
 
 ### v0.2.60 (2026-06-30)
 **Fixed**: `retrieve()` (`search.py`) did not normalize RRF scores to [0,1] before passing them to `rerank()`. `rrf_fuse()` returns rank-reciprocal scores in the range ~[0.012, 0.033] (i.e., `1/(k+rank+1)` with k=60, pool≤24), while `lexical_overlap()` returns values in [0,1]. With `rerank(weight=0.3)`, the lexical term (`0.3 * lex`) contributed up to 13× more than the RRF term (`0.7 * rrf_score`), making the reranker effectively ignore the hybrid retrieval signal entirely — the final ordering was determined almost entirely by lexical repetition, not by BM25/vector rank. The previous `fuse()` function emitted [0,1] scores via `_minmax` implicitly, but `rrf_fuse()` emits raw rank-reciprocal values. Fix: in `retrieve()`, apply `_minmax` to the fused hit scores before passing to `rerank()`, restoring the intended 70/30 RRF-vs-lexical blend ratio. Regression test added.

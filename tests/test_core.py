@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.60")
+        self.assertEqual(VERSION, "0.2.61")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4089,6 +4089,47 @@ class TestBM25MergePathCap(unittest.TestCase):
             self.assertLessEqual(
                 len(hits), k,
                 f"bm25_search must return at most {k} hits on FTS5+LIKE merge path, got {len(hits)}",
+            )
+
+    def test_bm25_merge_path_globally_sorted(self) -> None:
+        """FTS5+LIKE merge result must be globally sorted by bm25 score.
+
+        Before v0.2.61, bm25_search() sorted the FTS5-hit sublist *before*
+        extending with LIKE-only hits.  A LIKE-only chunk with bm25=50 was
+        appended at the end of the list behind an FTS5 chunk with bm25≈5.
+        rrf_fuse() assigns rank-reciprocal scores by position, so the
+        mis-ranked LIKE-only chunk received a worse RRF score than it deserved.
+
+        Concrete failing scenario:
+          query "abc 猫": "abc" (3 chars) goes to FTS5; "猫" (1 char CJK) is
+          too short for FTS5 trigrams and falls through to LIKE.
+          chunk_a matches FTS5 ("abc") + 1× LIKE ("猫") → bm25 ≈ raw_fts5 + 2 ≈ 5
+          chunk_b matches 50× LIKE ("猫") only         → bm25 = 50
+          Without fix: returned as [chunk_a(5), chunk_b(50)] → rank 0 and 1
+          With fix:    re-sort after extend → [chunk_b(50), chunk_a(5)] → rank 0 and 1
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("merge-sort-test").id
+            src = s.add_source(nb_id, "txt", "doc", "mem://ms", "sha-ms")
+            # chunk_a: FTS5-matched for "abc" + 1 LIKE hit for "猫" → bm25 ≈ small
+            # chunk_b: LIKE-only (no "abc"), 50 occurrences of "猫" → bm25 = 50
+            s.add_chunks(src.id, [
+                "abc is a standard example term 猫",
+                "猫" * 50 + " unrelated content no abc here",
+            ])
+            hits = bm25_search(s, nb_id, "abc 猫", k=5)
+            self.assertEqual(len(hits), 2)
+            # Combined list must be sorted: highest bm25 first.
+            # Without the fix, hits[0].bm25 ≈ 5 and hits[1].bm25 = 50 — inverted.
+            self.assertGreaterEqual(
+                hits[0].bm25, hits[1].bm25,
+                f"bm25_search FTS5+LIKE merge not globally sorted: "
+                f"hits[0].bm25={hits[0].bm25:.2f} < hits[1].bm25={hits[1].bm25:.2f}",
+            )
+            # The LIKE-dominant chunk (50 occurrences) must rank first.
+            self.assertIn(
+                "猫猫猫", hits[0].text,
+                f"LIKE-dominant chunk must rank first; got hits[0].text={hits[0].text!r}",
             )
 
 

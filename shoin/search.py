@@ -241,8 +241,13 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         for h in fts_hits:
             low = h.text.lower()
             h.bm25 += float(sum(low.count(n.lower()) for n in needles))
-        fts_hits.sort(key=lambda h: h.bm25, reverse=True)
         fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
+        # Re-sort the combined list after extending with LIKE-only hits.  The
+        # previous sort ran before the extend, leaving LIKE-only hits appended
+        # after FTS5 hits regardless of score — a LIKE-only chunk with bm25=50
+        # would rank behind an FTS5 chunk with bm25=5.  rrf_fuse() uses rank
+        # position (1/(k+rank+1)), so a wrong order here gives wrong RRF scores.
+        fts_hits.sort(key=lambda h: h.bm25, reverse=True)
         if negs:
             fts_hits = _apply_neg_filter(fts_hits, negs)
         # The LIKE-only path caps at k; cap the merge path for consistency so
