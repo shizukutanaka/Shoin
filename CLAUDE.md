@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.47
+## Version History: v0.1.37 → v0.2.48
+
+### v0.2.48 (2026-06-30)
+**Fixed**: `_embed_chunks()` (`pipeline.py`) stored vectors of any dimension without validation. A temporarily misconfigured or restarting embedding endpoint can return vectors of the wrong dimension (e.g., 384 floats when 768 are expected); these were packed via `array.array("f", vec).tobytes()` and stored without a dimension check. On subsequent `vector_search()`, cosine similarity compared BLOBs of different byte lengths, producing garbage scores. The `embed_model` mismatch guard only fires on model *name* change; it does not fire if the same model name returns different-dimension vectors. The `force=True` path in `reindex_notebook` additionally bypasses even the name guard. Fix: establish `expected_dim` from the first vector in the first batch and validate all subsequent vectors against it; raise `LLMError("SYSTEM_LLM_BAD_RESPONSE", ...)` on mismatch so the `except LLMError: pass` handler leaves BM25-only retrieval intact. Regression test added.
+
+**Fixed**: `refresh_source()` (`pipeline.py`) passed an empty `texts` list directly to `replace_chunks_for_source()` when the re-fetched URL returned no extractable text. This raised `StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "replacement chunk list must not be empty")` — a store-layer error that leaks implementation detail to the HTTP caller. The symmetric fix was applied to `index_source()` in v0.2.46 (`IngestError("INGEST_EMPTY")`), but `refresh_source()` was missed. Fix: add the same `if not texts: raise IngestError("INGEST_EMPTY", ...)` guard before calling `replace_chunks_for_source()`.
+
+**Fixed**: `pyproject.toml` version was `0.2.47`, aligned with `config.py` `VERSION = "0.2.48"`.
 
 ### v0.2.47 (2026-06-30)
 **Feature**: Negative-term filtering in queries — prefix a word with `-` to exclude chunks containing it (e.g. `Python -legacy`). `neg_terms(query)` parses the negated tokens; `strip_neg_terms(query)` removes them before FTS5/LIKE processing; `_apply_neg_filter(hits, negs)` does the post-retrieval exclusion. The filter is applied at both the `bm25_search()` stage and the final `retrieve()` output (so vector hits are also excluded). A `-` preceded by a word character (e.g. `state-of-the-art`) is treated as a hyphen, not negation.

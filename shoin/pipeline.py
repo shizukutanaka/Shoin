@@ -73,12 +73,25 @@ def _embed_chunks(
         )
         return 0
     done = 0
+    expected_dim: int | None = None
     try:
         for i in range(0, len(texts), EMBED_BATCH):
             batch_ids = chunk_ids[i : i + EMBED_BATCH]
             vectors = embed(texts[i : i + EMBED_BATCH])
             count = 0
             for cid, vec in zip(batch_ids, vectors):
+                # Establish expected dimension from the first vector and validate all
+                # subsequent vectors against it.  A mismatched dimension (e.g. from a
+                # restarting endpoint momentarily returning truncated vectors) would
+                # silently corrupt the embedding index; treat it as a non-fatal LLMError
+                # so BM25-only retrieval remains intact.
+                if expected_dim is None:
+                    expected_dim = len(vec)
+                elif len(vec) != expected_dim:
+                    raise LLMError(
+                        "SYSTEM_LLM_BAD_RESPONSE",
+                        f"embedding dimension mismatch: expected {expected_dim}, got {len(vec)}",
+                    )
                 store.set_embedding(cid, vec, commit=False)
                 count += 1
             store.conn.commit()  # one commit per batch, not per chunk
@@ -151,6 +164,8 @@ def refresh_source(
     if dup:
         raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
     texts = split_text(extracted.text)
+    if not texts:
+        raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
     chunk_ids = store.replace_chunks_for_source(source_id, texts)
     store.update_source_sha256(source_id, extracted.sha256, extracted.title)
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)

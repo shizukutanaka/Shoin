@@ -54,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.47")
+        self.assertEqual(VERSION, "0.2.48")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2978,6 +2978,61 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_chunks(src.id, [])
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_embed_chunks_dimension_mismatch_stops_embedding(self) -> None:
+        """_embed_chunks() must stop and NOT store vectors when dimension changes mid-run.
+
+        A restarting embedding endpoint can momentarily return wrong-dimension vectors.
+        Before v0.2.48, these were stored silently, corrupting the embedding index
+        with vectors of mismatched byte length that produce garbage cosine scores.
+        Fix: compare each vector's dimension against the first vector's dimension;
+        raise LLMError on mismatch so the except-LLMError handler leaves BM25 intact.
+        """
+        from shoin.pipeline import _embed_chunks
+
+        class MismatchEmbedLLM:
+            embedding_model = "test-model"
+            call_count = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                MismatchEmbedLLM.call_count += 1
+                if MismatchEmbedLLM.call_count == 1:
+                    return [[0.1, 0.2] for _ in texts]  # dim=2
+                return [[0.1, 0.2, 0.3] for _ in texts]  # dim=3 — mismatch!
+
+        MismatchEmbedLLM.call_count = 0
+        with make_store() as s:
+            nb_id = s.create_notebook("dim-mismatch").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-dm")
+            # 32 chunks = 2 batches of 16 (EMBED_BATCH=16); second batch returns dim=3
+            texts = [f"chunk {i}" for i in range(32)]
+            chunk_ids = s.add_chunks(src.id, texts)
+            n = _embed_chunks(s, MismatchEmbedLLM(), chunk_ids, texts)
+        # First batch (dim=2) succeeds (16 chunks), second batch raises LLMError
+        self.assertEqual(n, 16, "only first batch must be stored; second batch aborted on mismatch")
+
+    def test_refresh_source_empty_text_raises_ingest_empty(self) -> None:
+        """refresh_source() must raise IngestError('INGEST_EMPTY') when the re-fetched
+        URL returns no extractable text — matching the behavior of index_source() (v0.2.46).
+
+        Before v0.2.48, the empty-text case fell through to replace_chunks_for_source(),
+        which raised StoreError('VALIDATION_REQUIRED_FIELD_MISSING') — leaking internal
+        implementation detail and breaking the HTTP 400 / IngestError mapping contract.
+        """
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted, IngestError
+        from shoin.pipeline import refresh_source
+
+        blank = Extracted(text="", kind="html", title="empty page", origin="http://x.com/", sha256="abc123")
+        with make_store() as s:
+            nb_id = s.create_notebook("refresh-empty").id
+            src = s.add_source(nb_id, "html", "original", "http://x.com/", "sha-orig")
+            s.add_chunks(src.id, ["original content"])
+            with patch("shoin.pipeline.extract_url", return_value=blank):
+                with self.assertRaises(IngestError) as cm:
+                    refresh_source(s, src.id)
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_fuse_vec_only_scores_in_unit_range(self) -> None:
         """fuse() with empty bm25_hits must normalize vec scores to [0..1].
