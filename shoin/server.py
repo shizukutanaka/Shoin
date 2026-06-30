@@ -417,8 +417,10 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             src = store.get_source(src_id)
             store.update_source_title(src_id, title, src.origin)
-            updated = store.get_source(src_id)
-            self._json({"id": updated.id, "title": updated.title})
+        # Use src_id and title from the request — no second get_source() to avoid
+        # a TOCTOU window where a concurrent delete would return HTTP 404 despite
+        # the update having already committed successfully.
+        self._json({"id": src_id, "title": title})
 
     def _h_src_delete(self, src_id: int) -> None:
         with Store(self.db) as store:

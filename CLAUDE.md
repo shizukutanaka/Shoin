@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.44
+## Version History: v0.1.37 → v0.2.45
+
+### v0.2.45 (2026-06-30)
+**Fixed**: `export_ris()` (`export.py`) produced a blank `DA` field (`"DA  - "`) when `added_at` is an empty string. The v0.2.37 fix that added `or "unknown"` fallback was applied to `export_bibtex()` but not to `export_ris()`. Fix: add `or "unknown"` to the `date` assignment in `export_ris()`, matching the bibtex path.
+
+**Fixed**: `_validate_resolved()` (`ingest.py`) raised bare `ValueError` for zone-scoped IPv6 addresses (e.g. `"fe80::1%eth0"` returned by `socket.getaddrinfo()` on Linux for link-local interfaces). `ipaddress.ip_address()` does not accept RFC 6874 zone IDs. The `ValueError` was not caught by the `except socket.gaierror` handler and propagated through `fetch_url()` and `_dispatch()` as HTTP 500 `SYSTEM_INTERNAL_ERROR` instead of the correct HTTP 400 `INGEST_URL_BLOCKED`. Zone-scoped addresses are inherently link-local (non-public), so the correct behavior is to reject them with `INGEST_URL_BLOCKED`. Fix: wrap `ipaddress.ip_address(raw_addr)` in `try/except ValueError` and raise `IngestError("INGEST_URL_BLOCKED", ...)`.
+
+**Fixed**: `_h_src_patch()` (`server.py`) called `store.get_source(src_id)` a second time after `update_source_title()` returned, purely to build the JSON response `{"id": ..., "title": ...}`. With `ThreadingHTTPServer`, a concurrent `DELETE /api/sources/{id}` between the committed UPDATE and the second `get_source` raised `SOURCE_NOT_FOUND`, causing the client to receive HTTP 404 even though the rename had already succeeded. Fix: remove the second `get_source()` and build the response directly from `src_id` and `title` (already known from the request), eliminating the TOCTOU window.
+
+**Fixed**: `pyproject.toml` version was `0.2.44`, aligned with `config.py` `VERSION = "0.2.45"`.
 
 ### v0.2.44 (2026-06-30)
 **Fixed**: `verify_grounding()` (`citation.py`) silently dropped citations placed after a period-space boundary (`"Sentence. [S1]"`). `_SENTENCE_SPLIT_RE` splits on `(?<=\.)(?=\s)`, isolating `" [S1]"` as a fragment. After bracket removal, the claim bigrams are empty (`_bigrams("")` → `set()`), and the `if not claim: continue` guard drops the citation entirely — it receives neither a `confirmed` entry nor a `misattributed` entry, even when the cited source perfectly matches the preceding sentence. This is the most common LLM citation placement pattern (end-of-sentence). Fix: track `prev_claim` — the bigrams of the most recent non-citation fragment — and use them when a citation-only fragment's own claim is empty, so the citation is verified against the sentence it annotates. 2 regression tests added.

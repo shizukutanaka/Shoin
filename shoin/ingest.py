@@ -174,7 +174,17 @@ def _validate_resolved(host: str) -> str:
         raise IngestError("INGEST_FETCH_FAILED", f"DNS resolution failed: {host}") from exc
     chosen = ""
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
+        raw_addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(raw_addr)
+        except ValueError:
+            # Zone-scoped link-local addresses (e.g. "fe80::1%eth0") are not
+            # accepted by ip_address(). They are inherently non-public, so
+            # reject them with the same error as other blocked addresses.
+            raise IngestError(
+                "INGEST_URL_BLOCKED",
+                f"host resolves to non-public address: {raw_addr!r}",
+            )
         if (
             ip.is_private
             or ip.is_loopback

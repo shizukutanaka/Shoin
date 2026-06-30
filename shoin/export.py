@@ -138,7 +138,7 @@ def export_ris(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
-        date = (src.added_at or "")[:10].replace("-", "/")
+        date = ((src.added_at or "")[:10].replace("-", "/")) or "unknown"
         lines = [
             "TY  - GEN",
             f"TI  - {_ris_escape(src.title)}",

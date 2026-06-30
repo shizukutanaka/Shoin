@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.44")
+        self.assertEqual(VERSION, "0.2.45")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1209,6 +1209,28 @@ class TestIngest(unittest.TestCase):
             self.assertRaises(IngestError) as cm,
         ):
             ing.fetch_url("http://attacker.example/")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_ssrf_zone_scoped_ipv6_blocked(self) -> None:
+        """Zone-scoped IPv6 addresses (e.g. 'fe80::1%eth0') must raise INGEST_URL_BLOCKED.
+
+        Before v0.2.45, `ipaddress.ip_address(info[4][0])` raised ValueError for
+        zone-ID-qualified addresses (RFC 6874 syntax not supported by the stdlib).
+        The ValueError escaped the `except socket.gaierror` handler and propagated
+        to _dispatch's catch-all as HTTP 500 SYSTEM_INTERNAL_ERROR instead of the
+        correct HTTP 400 INGEST_URL_BLOCKED.
+        """
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            # Linux can return zone-ID-qualified strings like "fe80::1%eth0"
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1%eth0", 0, 0, 3))]
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.validate_public_url("http://linklocal.example/")
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
 
     def test_redirect_cycle_detected(self) -> None:
@@ -2999,6 +3021,26 @@ class TestExport(unittest.TestCase):
         for line in ris.splitlines():
             if line.startswith("ER"):
                 self.assertEqual(line, "ER  -", f"ER line must not have trailing space: {line!r}")
+
+    def test_ris_empty_added_at_produces_unknown_date(self) -> None:
+        """export_ris DA field must be 'unknown' when added_at is empty, not blank.
+
+        Before v0.2.45, export_bibtex had `or 'unknown'` (added in v0.2.37) but
+        export_ris was missed — (src.added_at or '')[:10].replace('-', '/') returns
+        '' for an empty added_at, producing 'DA  - ' (blank value) in the RIS entry.
+        Strict RIS consumers may reject or produce a null date for a blank DA field.
+        """
+        from shoin.export import export_ris
+        with make_store() as s:
+            nb = s.create_notebook("nb-ris-date")
+            src = s.add_source(nb.id, "url", "Page", "https://x.com", "sha-rd")
+            # Directly zero out added_at to simulate an empty-string value
+            s.conn.execute("UPDATE sources SET added_at='' WHERE id=?", (src.id,))
+            s.conn.commit()
+            ris = export_ris(s, nb.id)
+        da_lines = [l for l in ris.splitlines() if l.startswith("DA  -")]
+        self.assertEqual(len(da_lines), 1)
+        self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
 
     def test_export_markdown_multiline_user_question_stays_on_one_label_line(self) -> None:
         """A user question with an embedded newline must not break the **User**: label.
