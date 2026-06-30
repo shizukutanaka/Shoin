@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.45")
+        self.assertEqual(VERSION, "0.2.46")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2938,6 +2938,67 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 refresh_source(s, 99999)
         self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_index_source_empty_text_raises_ingest_empty(self) -> None:
+        """index_source must raise INGEST_EMPTY before committing the source row
+        when split_text() returns an empty list.
+
+        Before v0.2.46, add_source() committed first, then add_chunks([]) was
+        called with an empty list, silently creating a zero-chunk source that
+        was permanently invisible to all retrieval queries.  The caller (CLI or
+        server) received a success response despite the source contributing nothing.
+        """
+        from shoin.ingest import Extracted, IngestError
+        from shoin.pipeline import index_source
+
+        # Extracted text that collapses to no chunks (whitespace-only after processing)
+        fake = Extracted(kind="txt", title="Empty Doc", origin="/dev/null", sha256="sha-empty", text="")
+        with make_store() as s:
+            nb_id = s.create_notebook("empty-src-test").id
+            with patch("shoin.pipeline.extract_file", return_value=fake):
+                with self.assertRaises(IngestError) as cm:
+                    index_source(s, nb_id, "/dev/null")
+            self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+            # No source row must have been committed
+            sources = s.sources_for_notebook(nb_id)
+            self.assertEqual(len(sources), 0, "source row must not be committed when chunks are empty")
+
+    def test_add_chunks_empty_list_raises_store_error(self) -> None:
+        """add_chunks([]) must raise StoreError, not silently create a zero-chunk source.
+
+        Matches the existing guard in replace_chunks_for_source() (added in v0.2.40).
+        """
+        from shoin.store import StoreError
+
+        with make_store() as s:
+            nb_id = s.create_notebook("empty-chunks-test").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-ec")
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, [])
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_fuse_vec_only_scores_in_unit_range(self) -> None:
+        """fuse() with empty bm25_hits must normalize vec scores to [0..1].
+
+        Before v0.2.46, when bm25_hits=[] but vec_hits was non-empty, fuse()
+        entered the merged-dict path and set h.score = alpha * vec_norm, capping
+        scores at alpha (≈0.5).  BM25-only hits scored in [0..1].  The asymmetry
+        caused MMR's relevance/diversity balance to skew toward diversity for
+        vec-only queries, because all candidate scores were compressed by alpha.
+        """
+        from shoin.search import Hit, fuse
+
+        vec_hits = [
+            Hit(chunk_id=1, source_id=1, text="a", score=0.0, vec=0.9),
+            Hit(chunk_id=2, source_id=1, text="b", score=0.0, vec=0.4),
+        ]
+        result = fuse([], vec_hits, alpha=0.5)
+        scores = [h.score for h in result]
+        # With proper normalization, top score = 1.0, bottom = 0.0
+        self.assertAlmostEqual(max(scores), 1.0, places=6, msg="vec-only top score must be 1.0")
+        self.assertAlmostEqual(min(scores), 0.0, places=6, msg="vec-only bottom score must be 0.0")
+        # Ordering must be preserved (vec=0.9 ranked above vec=0.4)
+        self.assertEqual(result[0].chunk_id, 1, "highest vec score must rank first")
 
 
 class TestExport(unittest.TestCase):

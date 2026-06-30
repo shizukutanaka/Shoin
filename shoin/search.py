@@ -281,12 +281,27 @@ def _minmax(values: list[float]) -> list[float]:
 
 
 def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
-    """Convex combination over min-max normalised score lists."""
+    """Convex combination over min-max normalised score lists.
+
+    When only one signal is available, the degenerate case normalises that
+    signal to [0..1] directly (same as the convex combination with the other
+    weight at 0 and normalization applied before combining).  This keeps MMR
+    scores symmetric: BM25-only and vec-only paths both produce scores in
+    [0..1] so MMR's relevance/diversity trade-off is not biased by which signal
+    happened to return results.
+    """
     if not vec_hits:
         for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
             h.score = n
             h.detail["bm25_norm"] = n
         return sorted(bm25_hits, key=lambda h: h.score, reverse=True)
+    if not bm25_hits:
+        # Symmetric case: only vector hits; normalize to [0..1] directly so
+        # MMR gets the same score range as the BM25-only path above.
+        for h, n in zip(vec_hits, _minmax([h.vec for h in vec_hits])):
+            h.score = n
+            h.detail["vec_norm"] = n
+        return sorted(vec_hits, key=lambda h: h.score, reverse=True)
     merged: dict[int, Hit] = {}
     for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
         merged[h.chunk_id] = h

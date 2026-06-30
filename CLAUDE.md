@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.45
+## Version History: v0.1.37 → v0.2.46
+
+### v0.2.46 (2026-06-30)
+**Fixed**: `index_source()` (`pipeline.py`) committed the source row via `add_source()` before checking whether `split_text()` produced any chunks. When `split_text()` returned `[]` (e.g. whitespace-only text, scanned PDF with no extractable content), `add_chunks(source_id, [])` was called with an empty list, silently creating a zero-chunk source that was permanently invisible to BM25 search, vector search, and `build_context`. The caller (CLI or server) received a success response with `0 chunks`. Fix: call `split_text()` before `add_source()` and raise `IngestError("INGEST_EMPTY", ...)` immediately if the result is empty, so no source row is committed. As belt-and-suspenders defense, `add_chunks()` (`store.py`) now also raises `StoreError("VALIDATION_REQUIRED_FIELD_MISSING", ...)` on an empty list, matching the existing guard in `replace_chunks_for_source()` (added in v0.2.40).
+
+**Fixed**: `_h_questions()` (`server.py`) skipped writing to `questions_cache` when `suggest_questions()` returned an empty list due to LLM failure on a notebook with active sources (`if questions or not fingerprint:` evaluated to False). Every subsequent request to `GET /api/notebooks/{id}/questions` then re-fired the LLM call with its full timeout (up to `CHAT_TIMEOUT_SEC=180s`), creating an unbounded retry storm in degraded mode. The fear of "permanent suppression" was unfounded — the cache is invalidated whenever sources are added, deleted, or refreshed via `questions_cache.pop(nb_id, None)`. Fix: remove the `questions or` condition and always write to cache when a fingerprint is available.
+
+**Fixed**: `fuse()` (`search.py`) was asymmetric in its score normalization: BM25-only hits scored in [0..1] (via `_minmax` on the `not vec_hits` early-return path), but when `bm25_hits=[]` and only vector hits were present, the code fell through to the merged-dict convex-combination path and set `h.score = alpha * vec_norm`, capping scores at `alpha` (≈0.5). The compressed score range caused MMR's relevance/diversity trade-off to skew toward diversity for vec-only queries, since the `lam * cand.score` relevance term was halved relative to the BM25-only case. Fix: add a symmetric `if not bm25_hits:` early-return path that normalizes vec scores directly to [0..1], matching the behavior of the existing `not vec_hits` path.
+
+**Fixed**: `pyproject.toml` version was `0.2.45`, aligned with `config.py` `VERSION = "0.2.46"`.
 
 ### v0.2.45 (2026-06-30)
 **Fixed**: `export_ris()` (`export.py`) produced a blank `DA` field (`"DA  - "`) when `added_at` is an empty string. The v0.2.37 fix that added `or "unknown"` fallback was applied to `export_bibtex()` but not to `export_ris()`. Fix: add `or "unknown"` to the `date` assignment in `export_ris()`, matching the bibtex path.

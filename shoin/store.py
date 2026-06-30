@@ -394,6 +394,8 @@ class Store:
         self.conn.commit()
 
     def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
+        if not texts:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "chunk list must not be empty")
         ids: list[int] = []
         try:
             with self.conn:

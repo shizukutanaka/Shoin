@@ -112,10 +112,14 @@ def index_source(
         extracted = extract_url(target)
     else:
         extracted = extract_file(target)
+    # Guard before add_source so that zero-text documents don't leave an orphaned
+    # source row (no chunks → permanently invisible to all retrieval queries).
+    texts = split_text(extracted.text)
+    if not texts:
+        raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
     source = store.add_source(
         notebook_id, extracted.kind, extracted.title, extracted.origin, extracted.sha256
     )
-    texts = split_text(extracted.text)
     chunk_ids = store.add_chunks(source.id, texts)
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
     return IndexResult(source, len(chunk_ids), n_embedded)

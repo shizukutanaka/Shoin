@@ -470,15 +470,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"questions": cached[1]})
                 return
             questions = suggest_questions(store, self.llm, nb_id)
-            # Only cache non-empty results when sources exist; an empty list
-            # from LLM failure would otherwise suppress questions permanently.
+            # Cache the result regardless of whether questions is empty.  An LLM
+            # failure on an active notebook (non-empty fingerprint) returns [] but
+            # NOT caching it causes every subsequent poll to fire a full LLM
+            # timeout (up to CHAT_TIMEOUT_SEC=180s), creating a retry storm.
+            # "Permanent suppression" is not an issue because the cache is
+            # invalidated whenever sources are added, deleted, or refreshed
+            # (via questions_cache.pop(nb_id, None)).
             # Guard: only write if no newer fingerprint was stored while the LLM
             # was running (concurrent source-add could otherwise be overwritten).
-            if questions or not fingerprint:
-                with self.questions_cache_lock:
-                    existing = self.questions_cache.get(nb_id)
-                    if existing is None or existing[0] == fingerprint:
-                        self.questions_cache[nb_id] = (fingerprint, questions)
+            with self.questions_cache_lock:
+                existing = self.questions_cache.get(nb_id)
+                if existing is None or existing[0] == fingerprint:
+                    self.questions_cache[nb_id] = (fingerprint, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:
