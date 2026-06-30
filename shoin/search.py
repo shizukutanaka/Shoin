@@ -20,11 +20,28 @@ from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _DIGIT_RE = re.compile(r"\d")
+_NEG_RE = re.compile(r"(?<![A-Za-z0-9_])-([A-Za-z0-9_]+|[\u3041-\u30FF\u4E00-\u9FFF]+)")
 
 
 def _esc_like(s: str) -> str:
     """Escape SQL LIKE special characters using '|' as the escape sentinel."""
     return s.replace("|", "||").replace("%", "|%").replace("_", "|_")
+
+
+def neg_terms(query: str) -> list[str]:
+    """Extract negated terms from a query (`-word`, `-日本語`).
+
+    A leading minus not preceded by a word character introduces a negative
+    filter.  The matched tokens are lower-cased for case-insensitive matching.
+    Example: "Python -2.7 -legacy" → ["2.7", "legacy"] (note: "2.7" contains
+    a dot that _NEG_RE does not capture across; the caller strips the raw hit).
+    """
+    return [m.group(1).lower() for m in _NEG_RE.finditer(query)]
+
+
+def strip_neg_terms(query: str) -> str:
+    """Return query with all `-term` tokens removed (for FTS5/LIKE processing)."""
+    return _NEG_RE.sub("", query).strip()
 
 
 @dataclass
@@ -157,7 +174,11 @@ def _fallback_needles(query: str) -> list[str]:
 
 
 def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
-    expr = fts_query(query)
+    # Strip negated tokens before building FTS5/LIKE queries.
+    negs = neg_terms(query)
+    clean_query = strip_neg_terms(query) if negs else query
+
+    expr = fts_query(clean_query)
     fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
@@ -172,7 +193,9 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             fts_hits.append(Hit(r["id"], r["source_id"], r["text"], 0.0, bm25=-float(r["rank"])))
         # Return early only when fts_query covered every query term (no terms with
         # len < 3 were silently skipped).  Short terms still need the LIKE path.
-        if fts_hits and all(len(t) >= 3 for t in query_terms(query)):
+        if fts_hits and all(len(t) >= 3 for t in query_terms(clean_query)):
+            if negs:
+                fts_hits = _apply_neg_filter(fts_hits, negs)
             return fts_hits
     # LIKE-scan fallback: covers short queries and any terms with len < 3 that
     # fts_query skips.  Pushing the filter into SQL means every chunk in the notebook
@@ -180,8 +203,10 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # added sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
     # (correct in both cases since CJK has no case).  Special LIKE characters in
     # the needle ('|', '%', '_') are escaped with '|' as the sentinel.
-    needles = _fallback_needles(query)
+    needles = _fallback_needles(clean_query)
     if not needles:
+        if negs:
+            fts_hits = _apply_neg_filter(fts_hits, negs)
         return fts_hits  # return whatever FTS5 found (possibly empty)
     conditions = " OR ".join(f"c.text LIKE ? ESCAPE '|'" for _ in needles)
     like_params = [f"%{_esc_like(n)}%" for n in needles]
@@ -205,12 +230,29 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             like_hits.append(Hit(r["id"], r["source_id"], text, 0.0, bm25=score))
     like_hits.sort(key=lambda h: h.bm25, reverse=True)
     if fts_hits:
-        # FTS5 found results for long terms; add LIKE-only results for short terms
-        # that were not already covered by FTS5.
+        # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
+        # compare fairly against LIKE-only hits.  Raw FTS5 BM25 is near-zero for
+        # small corpora (~2e-6), while LIKE scores are integers (1, 2, …).
+        # Without this, min-max normalization in fuse() makes LIKE-only hits
+        # dominate even when the FTS5 hit matches more query terms.
         fts_ids = {h.chunk_id for h in fts_hits}
+        for h in fts_hits:
+            low = h.text.lower()
+            h.bm25 += float(sum(low.count(n.lower()) for n in needles))
+        fts_hits.sort(key=lambda h: h.bm25, reverse=True)
         fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
+        if negs:
+            fts_hits = _apply_neg_filter(fts_hits, negs)
         return fts_hits
-    return like_hits[:k]
+    result = like_hits[:k]
+    if negs:
+        result = _apply_neg_filter(result, negs)
+    return result
+
+
+def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
+    """Remove hits whose text contains any negated term (case-insensitive)."""
+    return [h for h in hits if not any(n in h.text.lower() for n in negs)]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -252,15 +294,24 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
 
 
 def adaptive_alpha(query: str) -> float:
-    """Vector weight in [0.2, 0.8]. Lexical-looking queries push toward BM25."""
+    """Vector weight in [0.2, 0.8]. Lexical-looking queries push toward BM25.
+
+    Heuristics (applied in order, each adjusts alpha from 0.5 baseline):
+    - Short keyword query (≤ 3 terms, no question markers) → -0.15 (BM25 favoured)
+    - Natural-language question (≥ 6 terms, ends with か/？/?) → +0.15 (semantic)
+    - Digits or long identifiers → -0.15 (exact match)
+    - Quoted phrase → -0.10 (exact match)
+    """
     alpha = 0.5
-    terms = query_terms(query)
-    # Strip sentence-final punctuation so that か (the JP question particle) can be
-    # detected even when followed by ？.  Check ? / ？ against the whitespace-only
-    # stripped form because rstrip above already removes them.
+    terms = query_terms(strip_neg_terms(query))
     q_tail = query.rstrip("。．!！?？ 　\t\n")
     q_ws = query.rstrip(" 　\t\n")
-    if len(terms) >= 6 or q_tail.endswith("か") or q_ws.endswith(("?", "？")):
+    is_question = (
+        q_tail.endswith("か") or q_ws.endswith(("?", "？"))
+    )
+    if len(terms) <= 3 and not is_question:
+        alpha -= 0.15  # short keyword lookup: exact match matters
+    if len(terms) >= 6 or is_question:
         alpha += 0.15  # natural-language question: semantics matter
     if _DIGIT_RE.search(query) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
         alpha -= 0.15  # identifiers / numbers: exact match matters
@@ -383,7 +434,13 @@ def retrieve(
 ) -> list[Hit]:
     """Full pipeline: candidates -> CC fusion -> lexical rerank -> MMR."""
     pool = max(k * 3, 12)
+    negs = neg_terms(query)
+    clean = strip_neg_terms(query) if negs else query
     bm25_hits = bm25_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
     fused = fuse(bm25_hits, vec_hits, adaptive_alpha(query))
-    return mmr(rerank(query, fused), k)
+    results = mmr(rerank(clean, fused), k)
+    # Apply negative-term filter after fusion so vector hits are also excluded.
+    if negs:
+        results = _apply_neg_filter(results, negs)
+    return results

@@ -27,8 +27,10 @@ from shoin.search import (
     fuse,
     lexical_overlap,
     mmr,
+    neg_terms,
     query_terms,
     retrieve,
+    strip_neg_terms,
 )
 from shoin.search import Hit, _char_bigrams
 from shoin.store import Store, StoreError, pack_vector, unpack_vector
@@ -52,7 +54,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.46")
+        self.assertEqual(VERSION, "0.2.47")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3171,6 +3173,127 @@ class TestConfigXDG(unittest.TestCase):
         with patch.dict(os.environ, {"SHOIN_PORT": "9999"}):
             result = port()
         self.assertEqual(result, 9999)
+
+
+class TestNegTerms(unittest.TestCase):
+    """Tests for negative-term parsing and filtering (v0.2.47)."""
+
+    def test_neg_terms_ascii(self) -> None:
+        self.assertEqual(neg_terms("Python -2"), ["2"])
+
+    def test_neg_terms_multiple(self) -> None:
+        self.assertEqual(neg_terms("機械学習 -Python -legacy"), ["python", "legacy"])
+
+    def test_neg_terms_cjk(self) -> None:
+        self.assertEqual(neg_terms("書院 -Python"), ["python"])
+
+    def test_neg_terms_none(self) -> None:
+        self.assertEqual(neg_terms("書院 引用"), [])
+
+    def test_neg_terms_hyphen_in_word_not_matched(self) -> None:
+        """Hyphen inside a word like 'state-of-the-art' must not be treated as negation."""
+        self.assertEqual(neg_terms("state-of-the-art"), [])
+
+    def test_strip_neg_terms(self) -> None:
+        # Regex matches word-char runs; the dot in "2.7" breaks the match so only "-2" is stripped.
+        self.assertEqual(strip_neg_terms("Python -2 django"), "Python  django")
+        self.assertEqual(strip_neg_terms("Python -legacy django"), "Python  django")
+
+    def test_strip_neg_terms_noop(self) -> None:
+        self.assertEqual(strip_neg_terms("書院 引用"), "書院 引用")
+
+    def test_bm25_neg_term_filters_results(self) -> None:
+        """Chunks containing a negated term must be excluded from results."""
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-test").id
+            src = s.add_source(nb_id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, [
+                "Python is a programming language.",
+                "Python 2.7 is legacy.",
+                "Django is a web framework.",
+            ])
+            hits = bm25_search(s, nb_id, "Python -legacy", k=10)
+            texts = [h.text for h in hits]
+            self.assertTrue(any("programming" in t for t in texts), "non-neg hit missing")
+            self.assertFalse(any("legacy" in t for t in texts), "negated hit should be excluded")
+
+    def test_retrieve_neg_term_excludes_vec_hits(self) -> None:
+        """Negative-term filter applies after fusion so vector hits are also excluded."""
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-vec").id
+            src = s.add_source(nb_id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, [
+                "書院は知の書斎である。",
+                "書斎と書院には大きな違いがある。legacy",
+            ])
+            hits = retrieve(s, nb_id, "書院 -legacy")
+            self.assertFalse(
+                any("legacy" in h.text for h in hits),
+                "vector hits containing negated term must be excluded",
+            )
+
+
+class TestBM25FTSLikeMerge(unittest.TestCase):
+    """Ranking correctness when FTS5 and LIKE results are merged (v0.2.47)."""
+
+    def test_fts5_hit_with_more_terms_outranks_like_only_hit(self) -> None:
+        """A chunk found by FTS5 (long term) + LIKE (short term) must rank above
+        a chunk found only by LIKE (short term), even in a tiny 2-doc corpus where
+        raw FTS5 BM25 scores are near-zero (~2e-6).
+
+        Regression for v0.2.41 which correctly fixed early-return but left FTS5 hits
+        unable to compare against LIKE-only hits due to scale mismatch.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("merge-rank").id
+            a = s.add_source(nb_id, "txt", "A", "mem://a", "sha-a")
+            # Source A matches BOTH the long FTS5 term (引用検証) AND the short LIKE term (書斎)
+            s.add_chunks(a.id, ["書院は知の書斎である。引用検証が差別化の核。"])
+            b = s.add_source(nb_id, "txt", "B", "mem://b", "sha-b")
+            # Source B matches ONLY the short LIKE term (書斎)
+            s.add_chunks(b.id, ["軽量LLMでも書斎の検索品質は維持できる。"])
+            hits = bm25_search(s, nb_id, "引用検証 書斎", k=4)
+            self.assertTrue(len(hits) >= 2, "both sources should be returned")
+            self.assertEqual(
+                hits[0].source_id, a.id,
+                "source A (matches both FTS5 and LIKE terms) must rank first",
+            )
+
+
+class TestAdaptiveAlphaKeyword(unittest.TestCase):
+    """Tests for keyword-detection in adaptive_alpha (v0.2.47)."""
+
+    def test_short_keyword_query_favours_bm25(self) -> None:
+        """A short keyword-style query (≤3 terms, no question) should get alpha < 0.5."""
+        alpha = adaptive_alpha("Python Django")
+        self.assertLess(alpha, 0.5, "short keyword query must favour BM25 (alpha < 0.5)")
+
+    def test_short_cjk_keyword_favours_bm25(self) -> None:
+        alpha = adaptive_alpha("書院")
+        self.assertLess(alpha, 0.5)
+
+    def test_question_overrides_short_keyword(self) -> None:
+        """A short query ending in '?' must NOT get the keyword penalty."""
+        alpha_q = adaptive_alpha("何ですか？")
+        alpha_kw = adaptive_alpha("Python")
+        self.assertGreater(alpha_q, alpha_kw, "question must get higher alpha than bare keyword")
+
+    def test_long_narrative_query_favours_vector(self) -> None:
+        """A natural-language question must get alpha > 0.5."""
+        # Japanese question detected via ？ ending (gets +0.15 boost)
+        alpha_ja = adaptive_alpha("機械学習と深層学習の違いは何ですか？")
+        self.assertGreater(alpha_ja, 0.5)
+        # English question with ≥6 terms (keyword penalty does not apply when >= 6 terms)
+        alpha_en = adaptive_alpha("what is the difference between machine learning and deep learning")
+        self.assertGreater(alpha_en, 0.5)
+
+    def test_alpha_within_bounds(self) -> None:
+        """Alpha must stay in [0.2, 0.8] for all test cases."""
+        queries = ["a", "a b c d e f g h i j", "何か？", '"quoted"', "123 -abc"]
+        for q in queries:
+            a = adaptive_alpha(q)
+            self.assertGreaterEqual(a, 0.2)
+            self.assertLessEqual(a, 0.8)
 
 
 if __name__ == "__main__":

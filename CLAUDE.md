@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.46
+## Version History: v0.1.37 → v0.2.47
+
+### v0.2.47 (2026-06-30)
+**Feature**: Negative-term filtering in queries — prefix a word with `-` to exclude chunks containing it (e.g. `Python -legacy`). `neg_terms(query)` parses the negated tokens; `strip_neg_terms(query)` removes them before FTS5/LIKE processing; `_apply_neg_filter(hits, negs)` does the post-retrieval exclusion. The filter is applied at both the `bm25_search()` stage and the final `retrieve()` output (so vector hits are also excluded). A `-` preceded by a word character (e.g. `state-of-the-art`) is treated as a hyphen, not negation.
+
+**Fixed**: `bm25_search()` FTS5+LIKE merge path produced wrong ranking when FTS5's raw BM25 score was near-zero (~2e-6 for small corpora) while LIKE-only hits had integer scores (1, 2, …). After min-max normalization in `fuse()`, LIKE-only hits dominated even when the FTS5 hit matched more query terms. Fix: when merging the two result sets, compute the LIKE needle score for each FTS5 hit and add it to `h.bm25`. A chunk found by both FTS5 (long term) and LIKE (short term) now correctly ranks above a chunk found only by LIKE (short term). Regression test added.
+
+**Feature**: Query type detection in `adaptive_alpha()` — short keyword queries (≤ 3 terms, no question markers) now get `alpha -= 0.15`, biasing toward BM25/exact-match retrieval. This complements the existing +0.15 boost for natural-language questions (ending in か/？/?) and the -0.15 penalty for identifiers/numbers. The adjustments are additive and clamped to [0.2, 0.8]. Research source: Qiita/Zenn/GitHub RAG improvement survey (2024).
+
+**Fixed**: `pyproject.toml` version was `0.2.46`, aligned with `config.py` `VERSION = "0.2.47"`.
 
 ### v0.2.46 (2026-06-30)
 **Fixed**: `index_source()` (`pipeline.py`) committed the source row via `add_source()` before checking whether `split_text()` produced any chunks. When `split_text()` returned `[]` (e.g. whitespace-only text, scanned PDF with no extractable content), `add_chunks(source_id, [])` was called with an empty list, silently creating a zero-chunk source that was permanently invisible to BM25 search, vector search, and `build_context`. The caller (CLI or server) received a success response with `0 chunks`. Fix: call `split_text()` before `add_source()` and raise `IngestError("INGEST_EMPTY", ...)` immediately if the result is empty, so no source row is committed. As belt-and-suspenders defense, `add_chunks()` (`store.py`) now also raises `StoreError("VALIDATION_REQUIRED_FIELD_MISSING", ...)` on an empty list, matching the existing guard in `replace_chunks_for_source()` (added in v0.2.40).
