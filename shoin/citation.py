@@ -125,14 +125,29 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
     src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
     confirmed: set[int] = set()
     misattributed: set[int] = set()
+    # Carry the most recent non-empty claim bigrams so that citation-only fragments
+    # (produced by the (?<=\.)(?=\s) split, e.g. "Sentence. [S1]" → " [S1]") can
+    # still be verified against the sentence they annotate.
+    prev_claim: set[str] = set()
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
             continue
         nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", sentence).strip()  # drop the [S#] markers
         if not nums:
+            cand = _bigrams(bare)
+            if cand:
+                prev_claim = cand
             continue
-        claim = _bigrams(_BRACKET_RE.sub(" ", sentence))  # drop the [S#] markers
+        claim = _bigrams(bare)
+        if not claim:
+            # Citation-only fragment after sentence boundary split (e.g. " [S1]").
+            # Re-use the preceding sentence's bigrams so the citation is still
+            # verified rather than silently dropped.
+            claim = prev_claim
+        else:
+            prev_claim = claim
         if not claim:
             continue
         for n in nums:

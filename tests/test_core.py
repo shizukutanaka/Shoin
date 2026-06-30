@@ -52,7 +52,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.43")
+        self.assertEqual(VERSION, "0.2.44")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2328,6 +2328,46 @@ class TestQA(unittest.TestCase):
                            "truncated hit1 must have been appended, not dropped")
 
 
+    def test_ask_build_context_db_lock_raises_store_error(self) -> None:
+        """sqlite3.OperationalError from build_context must be re-raised as StoreError.
+
+        Before v0.2.44, build_context(store, hits) was unguarded in ask(). If
+        store.get_source() raised sqlite3.OperationalError (DB lock timeout after
+        5000ms busy_timeout), the exception bypassed the CLI's except clause
+        (which only catches StoreError/IngestError/LLMError) and produced a raw
+        Python traceback instead of a clean error message.
+        """
+        import sqlite3 as _sqlite3
+        from unittest.mock import patch
+
+        from shoin.qa import ask
+        from shoin.search import Hit
+        from shoin.store import StoreError as _StoreError
+
+        class _NoLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                return "answer"
+
+            def embed_one(self, text):  # type: ignore[override]
+                return []
+
+        fake_hit = Hit(chunk_id=1, source_id=1, text="some text", score=0.9)
+
+        with make_store() as s:
+            nb_id = seed(s)
+            # Ensure retrieve() returns a non-empty hit list so build_context is called.
+            with patch("shoin.qa.retrieve", return_value=[fake_hit]):
+                with patch(
+                    "shoin.qa.build_context",
+                    side_effect=_sqlite3.OperationalError("database is locked"),
+                ):
+                    with self.assertRaises(_StoreError) as cm:
+                        ask(s, _NoLLM(), nb_id, "notebook", persist=False)
+            self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+
+
 class TestCitation(unittest.TestCase):
     def test_make_report_source_bodies_length_mismatch_raises(self) -> None:
         """source_bodies length != source_titles length must raise ValueError (defensive check)."""
@@ -2430,6 +2470,39 @@ class TestCitation(unittest.TestCase):
         confirmed, misattributed = verify_grounding(text, sources)
         self.assertIn(1, confirmed, "S1 must be confirmed (high overlap)")
         self.assertIn(2, misattributed, "S2 must be misattributed (co-cited but low overlap)")
+
+    def test_verify_grounding_citation_after_period_space_confirmed(self) -> None:
+        """Citation placed after '. ' must be verified, not silently dropped.
+
+        _SENTENCE_SPLIT_RE splits "Sentence. [S1]" at the period-space, producing
+        fragment " [S1]" whose claim (after bracket removal) is empty.  Before
+        v0.2.44, the empty-claim guard silently dropped the citation — a correctly
+        grounded [S1] received no 'confirmed' entry.  After v0.2.44, prev_claim
+        carries the preceding sentence's bigrams, allowing confirmation.
+        """
+        from shoin.citation import verify_grounding
+
+        src = "The study found significant results in the experiment."
+        # Common LLM citation style: claim sentence, then period, then [S#]
+        text = "The study found significant results. [S1]"
+        confirmed, _ = verify_grounding(text, {1: src})
+        self.assertIn(1, confirmed, "Citation after '. ' must be confirmed when source matches")
+
+    def test_verify_grounding_citation_after_period_space_misattributed(self) -> None:
+        """A misattributed citation placed after '. ' must still be detectable."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "Washi paper is made from kozo fiber by traditional craftspeople.",
+            2: "The study found significant results in the experiment.",
+        }
+        # Claim text matches S2; citation wrongly says [S1] — placed after ". "
+        text = "The study found significant results. [S1]"
+        _, misattributed = verify_grounding(text, sources)
+        self.assertIn(
+            1, misattributed,
+            "[S1] after '. ' must be flagged misattributed when claim matches S2 far better",
+        )
 
     def test_bigrams_single_char_returns_empty_set(self) -> None:
         """_bigrams of a single character must return set(), not {'x'}.

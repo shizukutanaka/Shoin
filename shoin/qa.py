@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -292,7 +293,10 @@ def ask(
         no_hit = _t("no_hit")
         answer = Answer(no_hit, [], make_report(no_hit, []))
     else:
-        context = build_context(store, hits)
+        try:
+            context = build_context(store, hits)
+        except sqlite3.OperationalError as exc:
+            raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
         try:
             text = llm.chat(build_messages(question, context, history))
             answer = Answer(

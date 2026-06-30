@@ -306,7 +306,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.43
+## Version History: v0.1.37 → v0.2.44
+
+### v0.2.44 (2026-06-30)
+**Fixed**: `verify_grounding()` (`citation.py`) silently dropped citations placed after a period-space boundary (`"Sentence. [S1]"`). `_SENTENCE_SPLIT_RE` splits on `(?<=\.)(?=\s)`, isolating `" [S1]"` as a fragment. After bracket removal, the claim bigrams are empty (`_bigrams("")` → `set()`), and the `if not claim: continue` guard drops the citation entirely — it receives neither a `confirmed` entry nor a `misattributed` entry, even when the cited source perfectly matches the preceding sentence. This is the most common LLM citation placement pattern (end-of-sentence). Fix: track `prev_claim` — the bigrams of the most recent non-citation fragment — and use them when a citation-only fragment's own claim is empty, so the citation is verified against the sentence it annotates. 2 regression tests added.
+
+**Fixed**: `ask()` (`qa.py`) did not guard `build_context(store, hits)` against `sqlite3.OperationalError`. If `store.get_source()` inside `build_context` raised `OperationalError` (DB lock timeout after 5000ms `busy_timeout`), it propagated through `ask()` and bypassed the CLI's `except (StoreError, IngestError, LLMError)` handler, producing a raw Python traceback. The server path was already protected by `_h_ask_sse()`'s `except Exception` guard (`v0.2.31`); the CLI path was not. Fix: wrap the `build_context(store, hits)` call in a `try/except sqlite3.OperationalError` that re-raises as `StoreError("SYSTEM_DB_LOCKED", ...)`.
+
+**Fixed**: `pyproject.toml` version was `0.2.43`, aligned with `config.py` `VERSION = "0.2.44"`.
 
 ### v0.2.43 (2026-06-30)
 **Fixed**: `_post()` (`llm.py`) did not catch `http.client.HTTPException` (specifically `http.client.IncompleteRead`). When a local LLM endpoint (Ollama, llama.cpp) drops the TCP connection before sending the full `Content-Length` body — e.g. OOM kill, server crash mid-response — `resp.read()` raises `IncompleteRead`, a subclass of `HTTPException` and NOT of `OSError`. None of the three `except` handlers caught it, so it propagated as a bare exception to callers. In `_embed_chunks`, `IncompleteRead` hit `except Exception` (the rollback path) instead of `except LLMError` (the silent-skip/degradation path). In `ask()` and other chat callers, the bare exception bypassed the `LLMError` guard entirely. Fix: add `http.client.HTTPException` to the `(OSError, ValueError)` clause in `_post()`.
