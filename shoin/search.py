@@ -1,9 +1,11 @@
-"""Retrieval pipeline: BM25 + vector, Convex Combination fusion, rerank, MMR.
+"""Retrieval pipeline: BM25 + vector, RRF fusion, rerank, MMR.
 
 Design (Plan.md / Hako v0.10.2 lineage):
 - BM25 via SQLite FTS5 trigram (CJK-capable). LIKE fallback for short queries.
 - Vector scores computed in-process over notebook chunks (local scale).
-- Fusion: convex combination with adaptive alpha (arXiv:2604.01733, 2604.16394).
+- Fusion: Reciprocal Rank Fusion (Cormack et al. SIGIR 2009, k=60) replaces
+  the previous min-max-normalized convex combination. RRF is robust to
+  scale incompatibility between BM25 (TF-IDF-like) and cosine ([0,1]) scores.
 - Zero-dependency lexical reranker + MMR diversity (arXiv:2305.14499 lineage).
 - Without embeddings the pipeline degrades to pure BM25 (first-class mode).
 """
@@ -373,6 +375,48 @@ def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
     return sorted(merged.values(), key=lambda h: h.score, reverse=True)
 
 
+def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit]:
+    """Reciprocal Rank Fusion over BM25 and vector rank lists.
+
+    RRF score for a chunk: sum of 1/(k + rank + 1) across all rank lists it
+    appears in.  rank is 0-based within each sorted list (rank 0 = highest
+    relevance).  k=60 is the empirically optimal constant from Cormack et al.
+    SIGIR 2009, confirmed across TREC, WANDS, and hybrid-search benchmarks.
+
+    Advantages over the previous min-max convex combination (fuse()):
+    1. No score-scale normalization required — BM25 raw values and cosine
+       similarity [0,1] are on completely incompatible scales; min-max is
+       per-query, misbehaves on single-hit result sets (v0.1.45 bug), and
+       compresses the BM25 dynamic range so any single vector hit dominates.
+    2. No alpha tuning required — adaptive_alpha() heuristics disappear.
+    3. A chunk that ranks well in BOTH lists scores higher than one that only
+       ranks well in one, which is the correct semantic for hybrid retrieval.
+
+    The legacy fuse() is kept for backward compatibility with direct callers.
+    retrieve() uses rrf_fuse() as of v0.2.56.
+    """
+    scores: dict[int, float] = {}
+    all_hits: dict[int, Hit] = {}
+
+    for rank, h in enumerate(bm25_hits):
+        scores[h.chunk_id] = scores.get(h.chunk_id, 0.0) + 1.0 / (k + rank + 1)
+        all_hits[h.chunk_id] = h
+        h.detail["rrf_bm25_rank"] = float(rank + 1)
+
+    for rank, h in enumerate(vec_hits):
+        scores[h.chunk_id] = scores.get(h.chunk_id, 0.0) + 1.0 / (k + rank + 1)
+        if h.chunk_id not in all_hits:
+            all_hits[h.chunk_id] = h
+        else:
+            all_hits[h.chunk_id].vec = h.vec
+        all_hits[h.chunk_id].detail["rrf_vec_rank"] = float(rank + 1)
+
+    for cid, rrf in scores.items():
+        all_hits[cid].score = rrf
+
+    return sorted(all_hits.values(), key=lambda h: h.score, reverse=True)
+
+
 # --- rerank + diversity ---------------------------------------------------
 
 
@@ -437,13 +481,13 @@ def retrieve(
     query_vec: list[float] | None = None,
     k: int = TOP_K,
 ) -> list[Hit]:
-    """Full pipeline: candidates -> CC fusion -> lexical rerank -> MMR."""
+    """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR."""
     pool = max(k * 3, 12)
     negs = neg_terms(query)
     clean = strip_neg_terms(query) if negs else query
     bm25_hits = bm25_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
-    fused = fuse(bm25_hits, vec_hits, adaptive_alpha(query))
+    fused = rrf_fuse(bm25_hits, vec_hits)
     results = mmr(rerank(clean, fused), k)
     # Apply negative-term filter after fusion so vector hits are also excluded.
     if negs:

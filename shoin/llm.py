@@ -104,9 +104,10 @@ class LLMClient:
                 # instead of the graceful SYSTEM_SERVICE_UNAVAILABLE degradation path.
                 ct = resp.getheader("Content-Type", "")
                 return "json" in ct
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException, AttributeError):
             # ValueError: unknown URL scheme.  HTTPException: BadStatusLine from a
-            # non-HTTP server occupying the configured port.
+            # non-HTTP server occupying the configured port.  AttributeError: urlopen
+            # mock/stub without getheader() (also guards against unusual WSGI shims).
             return False
 
     # --- chat ---

@@ -30,6 +30,7 @@ from shoin.search import (
     neg_terms,
     query_terms,
     retrieve,
+    rrf_fuse,
     strip_neg_terms,
 )
 from shoin.search import Hit, _char_bigrams
@@ -54,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.55")
+        self.assertEqual(VERSION, "0.2.57")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2035,6 +2036,59 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(len(set(ids)), len(ids), "duplicate chunk IDs in fuse result")
         self.assertIn(1, ids)
 
+    def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
+        """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
+        hits = [Hit(1, 1, "text", 0.0, bm25=5.0), Hit(2, 1, "other", 0.0, bm25=3.0)]
+        result = rrf_fuse(hits, [])
+        self.assertEqual(len(result), 2)
+        self.assertGreater(result[0].score, 0.0)
+        self.assertGreater(result[0].score, result[1].score)
+
+    def test_rrf_fuse_vec_only_scores_nonzero(self) -> None:
+        """rrf_fuse() with empty bm25_hits must return vec hits with RRF scores > 0."""
+        hits = [Hit(1, 1, "text", 0.0, vec=0.9), Hit(2, 1, "other", 0.0, vec=0.5)]
+        result = rrf_fuse([], hits)
+        self.assertEqual(len(result), 2)
+        self.assertGreater(result[0].score, 0.0)
+        self.assertGreater(result[0].score, result[1].score)
+
+    def test_rrf_fuse_shared_chunk_scores_higher(self) -> None:
+        """A chunk ranking well in BOTH BM25 and vector must outscore single-list chunks.
+
+        This is the key RRF invariant: a chunk appearing at rank 1 in both lists
+        gets 2×(1/61) ≈ 0.0328, while a chunk only at rank 1 in one list gets
+        1/61 ≈ 0.0164. The shared chunk must win regardless of which list it
+        appeared in.
+        """
+        # chunk 1: rank 1 in BM25 only
+        bm25_hits = [Hit(1, 1, "bm25-only", 0.0, bm25=10.0),
+                     Hit(2, 1, "shared", 0.0, bm25=5.0)]
+        # chunk 2: rank 1 in vec only; chunk (2) shared = rank 2 in bm25
+        vec_hits = [Hit(3, 1, "vec-only", 0.0, vec=0.95),
+                    Hit(2, 1, "shared", 0.0, vec=0.80)]
+        result = rrf_fuse(bm25_hits, vec_hits)
+        # chunk 2 (shared rank 2 in bm25 + rank 2 in vec) should beat chunk 1 (rank 1 in bm25 only)
+        # chunk 2 score = 1/(60+2) + 1/(60+2) = 2/62 ≈ 0.0323
+        # chunk 1 score = 1/(60+1) = 1/61 ≈ 0.0164
+        result_ids = [h.chunk_id for h in result]
+        shared_pos = result_ids.index(2)
+        bm25_only_pos = result_ids.index(1)
+        self.assertLess(shared_pos, bm25_only_pos,
+                        "shared chunk must rank higher than single-list chunk")
+
+    def test_rrf_fuse_no_duplicates(self) -> None:
+        """rrf_fuse() must not produce duplicate chunk IDs when a chunk appears in both lists."""
+        bm25 = [Hit(1, 1, "shared", 0.0, bm25=2.0), Hit(2, 1, "bm25-only", 0.0, bm25=1.0)]
+        vec = [Hit(1, 1, "shared", 0.0, vec=0.9), Hit(3, 1, "vec-only", 0.0, vec=0.7)]
+        result = rrf_fuse(bm25, vec)
+        ids = [h.chunk_id for h in result]
+        self.assertEqual(len(set(ids)), len(ids), "rrf_fuse must not produce duplicate chunk IDs")
+        self.assertEqual(len(result), 3)  # 3 distinct chunks
+
+    def test_rrf_fuse_empty_both_returns_empty(self) -> None:
+        """rrf_fuse() with both empty lists must return empty list."""
+        self.assertEqual(rrf_fuse([], []), [])
+
     def test_rerank_improves_lexical_match(self) -> None:
         """rerank() should boost a chunk whose text closely matches the query."""
         from shoin.search import rerank
@@ -3048,6 +3102,29 @@ class TestLLMClient(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=mock_resp):
             client = LLMClient(base_url="http://localhost:11434/v1")
             self.assertTrue(client.available())
+
+    def test_available_returns_false_when_response_lacks_getheader(self) -> None:
+        """available() must return False (not raise AttributeError) when the response
+        object raises AttributeError on getheader() — e.g. an unusual WSGI shim or
+        test double without a full HTTP response interface.
+
+        Before v0.2.57, AttributeError was NOT in the except tuple; it propagated
+        as a bare exception to callers rather than the expected False return.
+        Fix: add AttributeError to the except clause.
+        """
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        # Simulate an object whose getheader() raises AttributeError
+        mock_resp.getheader.side_effect = AttributeError("no getheader")
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            # Must return False, not raise AttributeError
+            self.assertFalse(client.available())
 
     def test_post_size_check_reads_max_plus_one_byte(self) -> None:
         """_post() must read _MAX_RESPONSE + 1 bytes to correctly detect oversized responses.

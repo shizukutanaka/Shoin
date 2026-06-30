@@ -306,7 +306,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.55
+## Version History: v0.1.37 → v0.2.57
+
+### v0.2.57 (2026-06-30)
+**Fixed**: `available()` (`llm.py`) raised `AttributeError` when `urlopen` returned a response object without a `getheader()` method — e.g. an unusual WSGI shim or a test double with a bare interface. `resp.getheader("Content-Type", "")` (added in v0.2.54) is not part of the `io.IOBase` contract; only `http.client.HTTPResponse` guarantees it. `AttributeError` was not in the `except (OSError, ValueError, http.client.HTTPException)` clause, so it propagated as a bare exception instead of the expected `False` return. Fix: add `AttributeError` to the except tuple. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.56`, aligned with `config.py` `VERSION = "0.2.57"`.
+
+### v0.2.56 (2026-06-30)
+**Feature**: Reciprocal Rank Fusion (RRF) replacing convex-combination score fusion in `retrieve()` (`search.py`). The previous `fuse(adaptive_alpha(query))` combined min-max-normalized BM25 and vector scores via a linear combination. Min-max normalization is per-query and pathological on single-hit result sets (v0.1.45 class bug); adaptive alpha adds heuristics that can fire incorrectly on neg-term queries (v0.2.51 class bug). RRF (`score = Σ 1/(k + rank + 1)`, k=60, Cormack SIGIR 2009) uses only rank positions, completely bypassing scale incompatibility between raw FTS5 BM25 values and cosine similarity scores in [0,1]. A chunk found by both BM25 (rank 1) and vector (rank 1) scores ≈ 0.0328; found by only one at rank 1 scores ≈ 0.0164 — naturally combining both signals without normalization or alpha tuning. `rrf_fuse()` added after `fuse()`; `retrieve()` now calls `rrf_fuse(bm25_hits, vec_hits)` instead of `fuse(adaptive_alpha(query), ...)`. `fuse()` and `adaptive_alpha()` retained for backward compatibility with existing tests. 5 regression tests added.
+
+**Fixed**: `pyproject.toml` version was `0.2.55`, aligned with `config.py` `VERSION = "0.2.56"`.
 
 ### v0.2.55 (2026-06-30)
 **Fixed**: `_h_ask_sse()` (`server.py`) left an orphaned user turn in the DB when the LLM's `chat_stream()` yielded zero tokens (e.g., a reasoning model that emits only `<think>` tokens with no `content` deltas). `parts=[]`, `full=""`, and the guard `if full:` prevented `store.add_message()` from saving any assistant message. On page reload, `list_messages()` returned the unanswered user question with no reply. All other disconnect/error paths (meta-send, `build_context` exception) already saved empty assistant messages; this path was inconsistent. Fix: remove the `if full:` guard so an empty assistant message is always persisted after SSE streaming, regardless of content length. Regression test added.
