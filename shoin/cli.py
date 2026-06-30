@@ -249,6 +249,12 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     except sqlite3.OperationalError as exc:
         print(_t("err.prefix", code="SYSTEM_DB_LOCKED", msg=str(exc)), file=sys.stderr)
         return 1
+    except OSError as exc:
+        # Store.__init__ calls mkdir() for the data directory: a PermissionError or
+        # other OSError (e.g. SHOIN_DATA_DIR points to a read-only filesystem) would
+        # otherwise escape as a bare Python traceback.
+        print(_t("err.prefix", code="SYSTEM_IO_ERROR", msg=str(exc)), file=sys.stderr)
+        return 1
     except OverflowError:
         print(
             _t("err.prefix", code="VALIDATION_INTEGER_OVERFLOW", msg="ID value too large for SQLite"),

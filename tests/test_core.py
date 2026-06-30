@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.58")
+        self.assertEqual(VERSION, "0.2.59")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4133,6 +4133,27 @@ class TestCLI(unittest.TestCase):
                 rc = main(["notebook", "list"])
         self.assertEqual(rc, 1)
         self.assertIn("SYSTEM_DB_LOCKED", err_out.getvalue())
+
+    def test_main_os_error_returns_exit_code_1(self) -> None:
+        """main() must catch OSError and return exit code 1 with SYSTEM_IO_ERROR.
+
+        Store.__init__ calls Path.mkdir() to create the data directory.  If the
+        path is on a read-only filesystem or the user lacks write permission,
+        mkdir() raises PermissionError (an OSError subclass).  Before v0.2.59,
+        this propagated through main() as a bare Python traceback because the outer
+        handler only caught StoreError/IngestError/LLMError/OperationalError.
+        Fix: add `except OSError` to the outer handler in main().
+        """
+        import io
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        with patch("shoin.cli.Store", side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'")):
+            err_out = io.StringIO()
+            with patch("sys.stderr", err_out):
+                rc = main(["notebook", "list"])
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_IO_ERROR", err_out.getvalue())
 
     def test_cmd_add_db_locked_continues_and_returns_nonzero(self) -> None:
         """_cmd_add must catch sqlite3.OperationalError per-target and continue.

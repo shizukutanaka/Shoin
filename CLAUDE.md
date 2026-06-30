@@ -306,7 +306,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.58
+## Version History: v0.1.37 → v0.2.59
+
+### v0.2.59 (2026-06-30)
+**Fixed**: `main()` (`cli.py`) did not catch `OSError`. `Store.__init__` calls `Path.mkdir(parents=True, exist_ok=True)` to create the data directory; when `SHOIN_DATA_DIR` or the default `~/.local/share/shoin` is on a read-only filesystem or the user lacks write permission, `mkdir()` raises `PermissionError` (an `OSError` subclass). Before this fix, the exception propagated through `main()`'s `except (StoreError, IngestError, LLMError, OverflowError, KeyboardInterrupt)` handler as a raw Python traceback. Fix: add `except OSError` clause to the outer handler in `main()` that prints `SYSTEM_IO_ERROR` and returns exit code 1. Regression test added.
+
+**Fixed**: `pyproject.toml` version was `0.2.58`, aligned with `config.py` `VERSION = "0.2.59"`.
 
 ### v0.2.58 (2026-06-30)
 **Fixed**: `extract_url()` (`ingest.py`) did not strip null bytes (U+0000) from extracted text before the empty-content guard. `str.strip()` skips null bytes (Unicode category Cc, not whitespace), so a URL returning a body of all-null bytes produced the non-empty string `"\x00\x00\x00"` — truthy, passing `if not text:` — and the garbage content was indexed into BM25 and vector search. The identical fix was applied to `extract_file()` in v0.2.50 (`text = text.replace("\x00", "").strip()`) but `extract_url()` was missed. Fix: apply the same `replace("\x00", "")` guard before `strip()` in `extract_url()`. Regression test added.
