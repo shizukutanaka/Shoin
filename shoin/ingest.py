@@ -92,7 +92,10 @@ class _HTMLText(HTMLParser):
     # not enter raw-text mode on <title> — otherwise </noscript> (or any other tag)
     # inside an unclosed <title> is consumed as text rather than fired as a closing
     # tag, leaving _skip_depth permanently > 0 and silently swallowing the body.
-    RCDATA_CONTENT_ELEMENTS = ("textarea",)
+    # typeshed marks this attribute Final for internal-implementation-detail reasons;
+    # HTMLParser itself does not enforce that at runtime, and this override is the
+    # documented, tested mechanism for the <title> raw-text fix above.
+    RCDATA_CONTENT_ELEMENTS = ("textarea",)  # type: ignore[misc]
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)

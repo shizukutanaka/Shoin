@@ -11,9 +11,20 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from .config import MAX_NAME_LEN, MAX_TITLE_LEN
+
+
+class _Counts(TypedDict):
+    sources: int
+    chunks: int
+
+
+class NotebookWithCounts(TypedDict):
+    id: int
+    name: str
+    counts: _Counts
 
 # --- schema migrations (append-only; never edit a shipped entry) ---
 
@@ -613,7 +624,7 @@ class Store:
         ).fetchone()
         return {"sources": int(row["sources"]), "chunks": int(row["chunks"])}
 
-    def list_notebooks_with_counts(self) -> list[dict[str, object]]:
+    def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
         """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
         rows = self.conn.execute(
             "SELECT n.id, n.name,"

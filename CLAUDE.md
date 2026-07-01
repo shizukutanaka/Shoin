@@ -306,7 +306,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.62
+## Version History: v0.1.37 → v0.2.63
+
+### v0.2.63 (2026-07-01)
+**Fixed**: `mypy --strict` (configured in `pyproject.toml`) reported 2 real type errors, never caught because mypy had not been run as part of the audit loop's verification command.
+
+- `store.py` `list_notebooks_with_counts()` was typed `-> list[dict[str, object]]`. The nested `"counts"` value is itself a `dict[str, int]`, but the outer `dict[str, object]` annotation erased that structure, so `cli.py`'s `_cmd_notebook()` (`c = row["counts"]; ... c['sources']`) failed to type-check: indexing an `object` is not allowed. Fix: added `NotebookWithCounts`/`_Counts` `TypedDict`s (matching the existing `CitationReport` TypedDict pattern in `citation.py`) and changed the return type to `list[NotebookWithCounts]`. No runtime behavior change — the dict literal returned by the method already matched this shape.
+- `ingest.py`: `_HTMLText.RCDATA_CONTENT_ELEMENTS = ("textarea",)` overrides a `html.parser.HTMLParser` class attribute that typeshed marks `Final`. This override is deliberate and tested (see v0.2.40 changelog: it's the mechanism that keeps `<title>` out of raw-text/CDATA mode so an unclosed `<title>` doesn't swallow the rest of the document). `HTMLParser` itself does not enforce `Final` at runtime, so the override works correctly; it is a type-checker-only violation. Fix: added `# type: ignore[misc]` with a comment explaining why the override is safe, rather than changing the (correct, tested) runtime behavior.
+
+`python -m mypy shoin/` now reports "Success: no issues found in 14 source files". Added `mypy shoin/` to the working verification command for future audit passes — `pytest tests/test_core.py` alone (v0.2.56–v0.2.61) and even `pytest tests/` alone (v0.2.62) were both insufficient to catch static-typing regressions.
+
+**Fixed**: `pyproject.toml` version was `0.2.62`, aligned with `config.py` `VERSION = "0.2.63"`.
 
 ### v0.2.62 (2026-07-01)
 **Fixed**: Two tests in `tests/test_qa.py` were failing when the full `tests/` directory was run together (they had only been passing because prior audit sessions verified fixes by running `tests/test_core.py` in isolation, never the full suite).
