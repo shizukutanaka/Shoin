@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.65")
+        self.assertEqual(VERSION, "0.2.66")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3938,6 +3938,115 @@ class TestExport(unittest.TestCase):
         self.assertEqual(len(user_lines), 1, "user question must appear on exactly one line")
         self.assertIn("line one", user_lines[0])
         self.assertIn("line two", user_lines[0])
+
+    def test_status_line_includes_confirmed_misattributed_uncited_degraded(self) -> None:
+        """_status_line() must surface every verification signal from the report.
+
+        Before v0.2.66, export_markdown() reconstructed the [S#] legend from
+        citation_report but never rendered confirmed/misattributed/uncited/degraded —
+        the exact verification signal that is Shoin's core differentiator. Exported
+        text was indistinguishable from unverified prose once shared or archived.
+        """
+        from shoin.export import _status_line
+
+        report: dict[str, object] = {
+            "degraded": True,
+            "invalid": [3],
+            "misattributed": [2],
+            "confirmed": [1],
+            "uncited": ["猫は液体である。"],
+        }
+        line = _status_line(report)
+        self.assertIn("S3", line)
+        self.assertIn("S2", line)
+        self.assertIn("S1", line)
+        self.assertIn("1", line)  # uncited count
+
+    def test_status_line_empty_when_report_has_nothing_to_report(self) -> None:
+        from shoin.export import _status_line
+
+        self.assertEqual(_status_line({}), "")
+
+    def test_export_markdown_chat_message_shows_confirmed_citation(self) -> None:
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-status-test")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, ["書院はローカルツールである。"])
+            report = make_report(
+                "書院はローカルツールである[S1]。",
+                ["doc"],
+                [src.id],
+                ["書院はローカルツールである。"],
+            )
+            s.add_message(nb.id, "user", "書院とは何か", "{}")
+            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertIn("S1", md)
+        self.assertTrue(
+            any("根拠確認済み" in ln for ln in md.splitlines()),
+            f"exported markdown must surface confirmed status: {md!r}",
+        )
+
+    def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-uncited-test")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, ["書院はローカルツールである。"])
+            text = "書院はローカルツールである[S1]。猫は液体であるという説がある。"
+            report = make_report(text, ["doc"], [src.id], ["書院はローカルツールである。"])
+            s.add_message(nb.id, "user", "書院とは何か", "{}")
+            s.add_message(nb.id, "assistant", text, json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertTrue(
+            any("無出典" in ln for ln in md.splitlines()),
+            f"exported markdown must surface uncited-assertion status: {md!r}",
+        )
+
+    def test_export_markdown_studio_output_shows_status_line(self) -> None:
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-studio-status-test")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, ["書院はローカルツールである。"])
+            report = make_report(
+                "書院はローカルツールである[S1]。", ["doc"], [src.id], ["書院はローカルツールである。"]
+            )
+            s.add_studio_output(nb.id, "briefing", "書院はローカルツールである[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertTrue(
+            any("根拠確認済み" in ln for ln in md.splitlines()),
+            f"exported studio output must surface confirmed status: {md!r}",
+        )
+
+    def test_export_markdown_degraded_message_shows_search_only(self) -> None:
+        import json
+
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-degraded-test")
+            report: dict[str, object] = {"degraded": True, "cited": [], "invalid": [], "coverage": 0.0}
+            s.add_message(nb.id, "user", "書院とは何か", "{}")
+            s.add_message(nb.id, "assistant", "検索のみの結果", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertTrue(
+            any("検索のみ" in ln for ln in md.splitlines()),
+            f"exported markdown must surface degraded status: {md!r}",
+        )
 
 
 class TestConfigXDG(unittest.TestCase):

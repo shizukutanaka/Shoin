@@ -219,7 +219,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
     <div id="composer">
       <div id="qs" aria-label="Suggested questions"></div>
       <form id="askForm">
-        <input id="askInput" class="field" data-i18n-ph="chat.placeholder" placeholder="資料への質問…" autocomplete="off">
+        <input id="askInput" class="field" data-i18n-ph="chat.placeholder" data-i18n-title="chat.hint" placeholder="資料への質問…" title="ヒント: -語 で除外検索(例: Python -legacy)" autocomplete="off">
         <button class="btn primary" id="askBtn" type="submit" data-i18n="chat.ask">尋ねる</button>
       </form>
     </div>
@@ -287,7 +287,8 @@ const I18N = {
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
-    "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…"
+    "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…",
+    "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)"
   },
   en: {
     "app.title":"Shoin","app.lamp.on":"LLM connected","app.lamp.off":"LLM offline",
@@ -313,7 +314,8 @@ const I18N = {
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
-    "err.generic":"Request failed. Is the server running?","busy":"Working…"
+    "err.generic":"Request failed. Is the server running?","busy":"Working…",
+    "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy)"
   }
 };
 let lang = localStorage.getItem("shoin.lang") || (navigator.language||"ja").slice(0,2);
@@ -323,6 +325,7 @@ function applyI18n(){
   document.documentElement.lang = lang;
   document.querySelectorAll("[data-i18n]").forEach(el=>{el.textContent=t(el.dataset.i18n);});
   document.querySelectorAll("[data-i18n-ph]").forEach(el=>{el.placeholder=t(el.dataset.i18nPh);});
+  document.querySelectorAll("[data-i18n-title]").forEach(el=>{el.title=t(el.dataset.i18nTitle);});
   $("#langBtn").textContent = lang==="ja" ? "EN" : "日本語";
 }
 

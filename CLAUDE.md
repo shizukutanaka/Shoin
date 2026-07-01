@@ -306,10 +306,23 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - Formats: Markdown (full notebook dump), BibTeX, RIS
 - Handles malformed JSON in citation_report gracefully
 - Escapes special characters (backslash, newlines) per format spec
+- `_status_line()`: renders confirmed/misattributed/uncited/degraded status inline for chat messages and Studio outputs in the Markdown export, so citation verification survives outside the app (v0.2.66)
 
 ---
 
-## Version History: v0.1.37 → v0.2.65
+## Version History: v0.1.37 → v0.2.66
+
+### v0.2.66 (2026-07-01)
+**Feature**: Citation verification status surfaced in Markdown export — a Socratic "過不足" (excess/deficient feature) audit of the product asked: does every exported artifact still carry the product's flagship differentiator (machine-checked citation verification)? Tracing `export_markdown()` found it reconstructed the `[S#]` source legend from `citation_report` but never rendered `confirmed`/`misattributed`/`uncited`/`degraded` — the exact verification signal. Once a Q&A exchange or Studio output was exported to Markdown (to share, archive, or paste into a report), it became visually indistinguishable from unverified prose; the newly-added `uncited` field (v0.2.65) had zero representation in exports either.
+
+- `export._status_line(report) -> str`: builds a single Markdown status line from a `citation_report` dict (`検索のみ` / `⚠検証失敗: S3` / `⚠番号取り違えの可能性: S2` / `✓根拠確認済み: S1` / `⚠無出典の断定文 (N)`, joined with ` / `). Empty string when there's nothing to report.
+- `export._parse_report()`: extracted the existing malformed-JSON-safe parsing (previously inlined only in the chat-message loop) so both the chat-message and Studio-output loops in `export_markdown()` share one safe parser.
+- Wired into both loops: assistant chat messages now print the status line under the body; Studio output cards do too (Studio outputs previously rendered *zero* citation metadata in export, not even the `[S#]` legend).
+- 6 regression tests added (`_status_line` unit tests + integration tests asserting `confirmed`/`uncited`/`degraded` text actually appears in `export_markdown()` output for messages and Studio outputs).
+
+**Minor**: The same audit also asked whether the `-word` negative-term search filter (v0.2.47, fully wired through `search.py`) is discoverable by an actual user. It is not — `#askInput`'s placeholder never mentioned it, so a user would need to read the source or CHANGELOG to learn the syntax exists. Added a `title` tooltip (`data-i18n-title`, a new i18n attribute pattern alongside the existing `data-i18n-ph`) explaining `-word` exclusion syntax with an example.
+
+**Fixed**: `pyproject.toml` version was `0.2.65`, aligned with `config.py` `VERSION = "0.2.66"`.
 
 ### v0.2.65 (2026-07-01)
 **Feature**: Uncited-assertion detection — the top-priority open item from `docs/product-review.md`'s "未実装" (not yet implemented) list. `verify_grounding()`'s two existing checks (grounding confirmation, mis-numbering detection) only ever examine sentences that *already* carry a `[S#]` citation; a hallucinated or simply unsupported factual claim with zero citations anywhere in it was completely invisible to Shoin's citation verification, despite "the machine-checkable citation verification" being the product's flagship differentiator.

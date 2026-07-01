@@ -13,6 +13,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "studio_section": {"ja": "Studio出力", "en": "Studio Output"},
     "chat_section": {"ja": "チャット履歴", "en": "Chat History"},
     "source_label": {"ja": "引用元", "en": "sources"},
+    "status_degraded": {"ja": "検索のみ", "en": "search only"},
+    "status_invalid": {"ja": "⚠検証失敗", "en": "⚠ invalid citations"},
+    "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
+    "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
+    "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
 }
 
 
@@ -21,6 +26,41 @@ def _t(key: str) -> str:
     return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
 FORMATS = ("md", "bibtex", "ris")
+
+
+def _status_line(report: dict[str, object]) -> str:
+    """Build a Markdown status line reflecting citation verification results.
+
+    Exported Markdown previously showed the [S#] source legend but silently
+    dropped confirmed/misattributed/uncited/degraded status — the exact
+    verification signal that is Shoin's core differentiator. Without this,
+    exported text is indistinguishable from unverified prose once shared or
+    archived outside the app.
+    """
+    bits: list[str] = []
+    if report.get("degraded"):
+        bits.append(_t("status_degraded"))
+    invalid = report.get("invalid")
+    if isinstance(invalid, list) and invalid:
+        bits.append(f"{_t('status_invalid')}: " + ", ".join(f"S{i}" for i in invalid))
+    misattr = report.get("misattributed")
+    if isinstance(misattr, list) and misattr:
+        bits.append(f"{_t('status_misattr')}: " + ", ".join(f"S{i}" for i in misattr))
+    confirmed = report.get("confirmed")
+    if isinstance(confirmed, list) and confirmed:
+        bits.append(f"{_t('status_confirmed')}: " + ", ".join(f"S{i}" for i in confirmed))
+    uncited = report.get("uncited")
+    if isinstance(uncited, list) and uncited:
+        bits.append(f"{_t('status_uncited')} ({len(uncited)})")
+    return " / ".join(bits)
+
+
+def _parse_report(raw: object) -> dict[str, object]:
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def export_markdown(store: Store, notebook_id: int) -> str:
@@ -46,6 +86,9 @@ def export_markdown(store: Store, notebook_id: int) -> str:
         for o in outputs:
             parts.append(f"### {o['kind']}")
             parts.append(str(o["body"] or ""))
+            status = _status_line(_parse_report(o["citation_report"]))
+            if status:
+                parts.append(f"*{status}*")
             parts.append("")
 
     messages = store.list_messages(notebook_id)
@@ -58,10 +101,7 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 parts.append(f"**User**: {_md_line(body)}")
                 parts.append("")
             else:
-                try:
-                    report: dict[str, object] = json.loads(str(m["citation_report"] or "{}"))
-                except (json.JSONDecodeError, ValueError):
-                    report = {}
+                report = _parse_report(m["citation_report"])
                 raw_map = report.get("source_map")
                 source_map: dict[str, str] = (
                     {k: str(v) for k, v in raw_map.items()}
@@ -80,6 +120,9 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 else:
                     parts.append("**Assistant**:")
                 parts.append(body)
+                status = _status_line(report)
+                if status:
+                    parts.append(f"*{status}*")
                 parts.append("")
 
     return "\n".join(parts).rstrip() + "\n"
