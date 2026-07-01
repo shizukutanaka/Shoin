@@ -306,7 +306,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.61
+## Version History: v0.1.37 → v0.2.62
+
+### v0.2.62 (2026-07-01)
+**Fixed**: Two tests in `tests/test_qa.py` were failing when the full `tests/` directory was run together (they had only been passing because prior audit sessions verified fixes by running `tests/test_core.py` in isolation, never the full suite).
+
+- `test_available_returns_true_when_endpoint_reachable`: the mock `urlopen` return value was a bare `io.BytesIO` with no `getheader()` method and no `Content-Type` header. Since v0.2.54, `available()` requires the response's `Content-Type` header to contain `"json"` to return `True` (distinguishing a real LLM API server from an unrelated HTTP server on the same port); the AttributeError from the missing `getheader()` is caught (v0.2.57) and `available()` correctly returns `False` for this unrealistic mock — but the test still asserted `True`. The mock never accounted for the Content-Type check added four versions after the test was originally written. Fix: give the mock a `getheader()` method returning `"application/json"` for the `Content-Type` header, matching what `urllib.request.urlopen()` actually returns in production (an `http.client.HTTPResponse`).
+- `test_llm_response_too_large_raises_bad_response`: used exactly `32 * 1024 * 1024` bytes as the response body. Since v0.2.54's boundary fix, `_post()` only raises the size-exceeded error when `len(raw) > _MAX_RESPONSE` — exactly 32 MB is valid and falls through to `json.loads()`, which fails with "invalid JSON" (the body was `b"x" * _MAX`, not valid JSON) instead of the expected "32 MB" message. The test was asserting the pre-v0.2.54 boundary (`>=`) after the fix intentionally moved it to `>`. Fix: use `_MAX + 1` bytes so the response genuinely exceeds the cap and the size-exceeded path fires as intended.
+
+Neither `llm.py` production code needed a change — both failures were stale test fixtures from before the Content-Type check (v0.2.54) and the boundary fix (v0.2.54) were introduced, never updated to match. Running `pytest tests/` (all four test files together, not just `test_core.py`) is required to catch this class of regression; `tests/test_qa.py`, `tests/test_server.py`, and `tests/test_studio.py` were not part of the working test command used during the v0.2.56–v0.2.61 audit passes.
+
+**Fixed**: `pyproject.toml` version was `0.2.61`, aligned with `config.py` `VERSION = "0.2.62"`.
 
 ### v0.2.61 (2026-06-30)
 **Fixed**: `bm25_search()` (`search.py`) FTS5+LIKE merge path sorted the FTS5-hit sublist *before* extending with LIKE-only hits, leaving the combined list globally unsorted. A LIKE-only chunk with `bm25=50` was appended after an FTS5 chunk with `bm25≈5`, so `rrf_fuse()` received the hits out of rank order and assigned a worse rank-reciprocal score to the higher-scoring LIKE-only chunk. This affected queries mixing a long ASCII/CJK term (handled by FTS5 trigrams) with a short term (<3 chars, handled by LIKE scan), e.g. `"local 猫"`. Fix: move the `fts_hits.sort()` call to after the `extend()` so the combined list is globally sorted before being passed to `rrf_fuse()`. Regression test added.

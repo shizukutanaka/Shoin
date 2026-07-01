@@ -713,7 +713,12 @@ class TestLLMClient(unittest.TestCase):
         self.assertIn("429", str(cm.exception))
 
     def test_available_returns_true_when_endpoint_reachable(self) -> None:
-        """available() must return True when the /models endpoint responds."""
+        """available() must return True when the /models endpoint responds with JSON.
+
+        Since v0.2.54, available() checks the Content-Type header (not just HTTP 200)
+        to distinguish a real LLM API server from an unrelated HTTP server on the same
+        port. The mock must expose getheader() like a real http.client.HTTPResponse.
+        """
         import io
         from unittest.mock import patch
 
@@ -723,6 +728,9 @@ class TestLLMClient(unittest.TestCase):
         mock_resp = io.BytesIO(b'{"models": []}')
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = lambda s, *a: None
+        mock_resp.getheader = lambda name, default="": (
+            "application/json" if name == "Content-Type" else default
+        )
         with patch("urllib.request.urlopen", return_value=mock_resp):
             self.assertTrue(client.available())
 
@@ -960,16 +968,23 @@ class TestI18n(unittest.TestCase):
         self.assertGreater(len(questions), 0, "English questions without '?' must not all be dropped")
 
     def test_llm_response_too_large_raises_bad_response(self) -> None:
-        """_post() must raise SYSTEM_LLM_BAD_RESPONSE when response exceeds 32 MB."""
+        """_post() must raise SYSTEM_LLM_BAD_RESPONSE when response exceeds 32 MB.
+
+        Since v0.2.54, _post() reads _MAX_RESPONSE + 1 bytes and only rejects when
+        len(raw) > _MAX_RESPONSE (a response of exactly 32 MB is valid and must NOT
+        be rejected). This test must use 32 MB + 1 byte to actually cross that
+        boundary; exactly 32 MB falls through to json.loads() instead, which fails
+        with an unrelated "invalid JSON" error since "x" repeated isn't valid JSON.
+        """
         import io
         from unittest.mock import patch
 
         from shoin.llm import LLMClient, LLMError
 
         client = LLMClient()
-        # Exactly 32 MB of bytes to trigger the cap
+        # One byte over the 32 MB cap to trigger the size-exceeded path.
         _MAX = 32 * 1024 * 1024
-        oversized = io.BytesIO(b"x" * _MAX)
+        oversized = io.BytesIO(b"x" * (_MAX + 1))
         oversized.__enter__ = lambda s: s
         oversized.__exit__ = lambda s, *a: None
 
