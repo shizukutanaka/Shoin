@@ -299,7 +299,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex
+- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -311,7 +311,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.67
+## Version History: v0.1.37 → v0.2.68
+
+### v0.2.68 (2026-07-01)
+**Feature**: CLI note/source management — a third Socratic "過不足" audit pass, this time asking whether Web UI capabilities are reachable from the CLI (the reverse of v0.2.67, which closed the Web-missing-CLI-feature gap). `cli.py`'s own module docstring claims *"the CLI exposes every core capability so the product is fully usable headless (REQ-103)"* — but notes (add/list/delete) and source management (delete/rename/refresh) existed only as Web API routes with zero CLI subcommands. A fully headless user (SSH-only server, no browser) had no way to manage notes or clean up/rename/refresh sources without importing `shoin.store`/`shoin.pipeline` directly in a Python REPL.
+
+- New `shoin note {add,list,delete}` subcommands, thin wrappers around the existing `store.add_note()`/`list_notes()`/`delete_note()` (already used by the Web API).
+- New `shoin source {delete,rename,refresh}` subcommands, thin wrappers around `store.delete_source()`/`update_source_title()` and `pipeline.refresh_source()`. `rename` fetches the source first to preserve `origin` (matching `server._h_src_patch`'s get-then-update pattern — `update_source_title()` requires both fields since it updates them in one UPDATE).
+- 5 regression tests (`TestCLINoteSourceParity`): add/list/delete roundtrip, empty-notebook hint text, source delete removes the row, rename preserves origin (regression-proofing the exact bug class server.py already avoided), refresh calls the pipeline function correctly.
+
+**Fixed**: `pyproject.toml` version was `0.2.67`, aligned with `config.py` `VERSION = "0.2.68"`.
 
 ### v0.2.67 (2026-07-01)
 **Feature**: Web UI reindex — a second Socratic "過不足" audit pass asked whether every CLI capability has Web UI parity, per Plan.md's explicit "CLI Parity (REQ-103)" design principle. `shoin reindex <id>` (rebuild embeddings after an `SHOIN_EMBED_MODEL` change) existed only as a CLI subcommand; a user running only the Web UI had no way to recover from a stale/mismatched embedding model without dropping to a terminal. `_check_embed_model_ok()` (`qa.py`) already silently falls back to BM25-only search on a mismatch — the fix was previously reachable only outside the app the mismatch was detected in.

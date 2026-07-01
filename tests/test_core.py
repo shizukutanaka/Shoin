@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.67")
+        self.assertEqual(VERSION, "0.2.68")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4465,6 +4465,158 @@ class TestCLI(unittest.TestCase):
                         rc = main(["--db", db_file, "add", str(nb_id), "file.pdf"])
             self.assertEqual(rc, 1)
             self.assertIn("SYSTEM_DB_LOCKED", err_out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+
+class TestCLINoteSourceParity(unittest.TestCase):
+    """CLI note/source subcommands (v0.2.68): before this, notes and source
+    management (delete/rename/refresh) existed only as Web API routes, despite
+    cli.py's own module docstring claiming 'the CLI exposes every core
+    capability so the product is fully usable headless (REQ-103)'.
+    """
+
+    def _db(self) -> str:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            return f.name
+
+    def test_note_add_list_delete_roundtrip(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("note-cli-test").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "note", "add", str(nb_id), "題", "本文"])
+            self.assertEqual(rc, 0)
+            self.assertIn("題", out.getvalue())
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "note", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("題", out.getvalue())
+
+            with Store(db_file) as s:
+                note_id = s.list_notes(nb_id)[0]["id"]
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "note", "delete", str(note_id)])
+            self.assertEqual(rc, 0)
+
+            with Store(db_file) as s:
+                self.assertEqual(s.list_notes(nb_id), [])
+        finally:
+            os.unlink(db_file)
+
+    def test_note_list_empty_notebook_prints_hint(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("empty-notes-test").id
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "note", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("shoin note add", out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_source_delete_removes_source(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store, StoreError
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("src-delete-test").id
+                src_id = s.add_source(nb_id, "txt", "doc", "mem://d", "sha1").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "source", "delete", str(src_id)])
+            self.assertEqual(rc, 0)
+
+            with Store(db_file) as s:
+                with self.assertRaises(StoreError):
+                    s.get_source(src_id)
+        finally:
+            os.unlink(db_file)
+
+    def test_source_rename_preserves_origin(self) -> None:
+        """CLI rename must update only the title, matching server._h_src_patch's
+        get-then-update-with-original-origin pattern (not blank the origin)."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("src-rename-test").id
+                src_id = s.add_source(nb_id, "txt", "old title", "mem://original", "sha1").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "source", "rename", str(src_id), "new title"])
+            self.assertEqual(rc, 0)
+
+            with Store(db_file) as s:
+                src = s.get_source(src_id)
+            self.assertEqual(src.title, "new title")
+            self.assertEqual(src.origin, "mem://original", "origin must survive a rename")
+        finally:
+            os.unlink(db_file)
+
+    def test_source_refresh_calls_pipeline(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source, Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("src-refresh-test").id
+                src_id = s.add_source(nb_id, "url", "old", "http://example.test", "sha1").id
+
+            fake_source = Source(src_id, nb_id, "url", "refreshed", "http://example.test", "sha2", "2026-01-01")
+            fake_result = IndexResult(source=fake_source, n_chunks=3, n_embedded=0)
+            out = io.StringIO()
+            with patch("shoin.cli.refresh_source", return_value=fake_result):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "source", "refresh", str(src_id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("refreshed", out.getvalue())
+            self.assertIn("3 chunks", out.getvalue())
         finally:
             os.unlink(db_file)
 

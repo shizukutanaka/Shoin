@@ -16,7 +16,7 @@ from .config import MAX_QUESTION_LEN, TOP_K, VERSION, db_path, port, ui_lang
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, reindex_notebook
+from .pipeline import index_source, reindex_notebook, refresh_source
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
@@ -35,6 +35,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
+        "note.added": "追加: [{id}] {title}",
+        "note.deleted": "ノート削除完了",
+        "note.empty": "ノートがありません。`shoin note add <書院ID> <題> <本文>` で追加。",
+        "src.deleted": "ソース削除完了",
+        "src.renamed": "改名完了: [{id}] {title}",
+        "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -49,6 +55,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
+        "note.added": "Added: [{id}] {title}",
+        "note.deleted": "Note deleted",
+        "note.empty": "No notes. Add one with `shoin note add <notebook_id> <title> <body>`.",
+        "src.deleted": "Source deleted",
+        "src.renamed": "Renamed: [{id}] {title}",
+        "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
     },
 }
 
@@ -89,6 +101,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ri = sub.add_parser("reindex", help="ノートブックの埋め込みを再構築")
     ri.add_argument("notebook_id", type=int)
+
+    note = sub.add_parser("note", help="ノート管理")
+    notesub = note.add_subparsers(dest="action", required=True)
+    note_add = notesub.add_parser("add", help="追加")
+    note_add.add_argument("notebook_id", type=int)
+    note_add.add_argument("title")
+    note_add.add_argument("body")
+    note_list = notesub.add_parser("list", help="一覧")
+    note_list.add_argument("notebook_id", type=int)
+    note_del = notesub.add_parser("delete", help="削除")
+    note_del.add_argument("note_id", type=int)
+
+    src = sub.add_parser("source", help="ソース管理")
+    srcsub = src.add_subparsers(dest="action", required=True)
+    src_del = srcsub.add_parser("delete", help="削除")
+    src_del.add_argument("source_id", type=int)
+    src_ren = srcsub.add_parser("rename", help="改名")
+    src_ren.add_argument("source_id", type=int)
+    src_ren.add_argument("title")
+    src_ref = srcsub.add_parser("refresh", help="URLソースの再取込")
+    src_ref.add_argument("source_id", type=int)
 
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
@@ -218,6 +251,45 @@ def _cmd_reindex(store: Store, llm: ChatBackend, args: argparse.Namespace) -> in
     return 0
 
 
+def _cmd_note(store: Store, args: argparse.Namespace) -> int:
+    action = str(args.action)
+    if action == "add":
+        note_id = store.add_note(int(args.notebook_id), str(args.title), str(args.body))
+        print(_t("note.added", id=str(note_id), title=str(args.title)))
+    elif action == "list":
+        notes = store.list_notes(int(args.notebook_id))
+        if not notes:
+            print(_t("note.empty"))
+        for n in notes:
+            print(f"[{n['id']}] {n['title']}")
+    elif action == "delete":
+        store.delete_note(int(args.note_id))
+        print(_t("note.deleted"))
+    return 0
+
+
+def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
+    action = str(args.action)
+    if action == "delete":
+        store.delete_source(int(args.source_id))
+        print(_t("src.deleted"))
+    elif action == "rename":
+        src = store.get_source(int(args.source_id))
+        store.update_source_title(src.id, str(args.title), src.origin)
+        print(_t("src.renamed", id=str(src.id), title=str(args.title)))
+    elif action == "refresh":
+        result = refresh_source(store, int(args.source_id), llm)
+        print(
+            _t(
+                "src.refreshed",
+                title=result.source.title,
+                chunks=str(result.n_chunks),
+                embedded=str(result.n_embedded),
+            )
+        )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if str(args.command) == "serve":
@@ -247,6 +319,10 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_messages(store, args)
             if command == "reindex":
                 return _cmd_reindex(store, backend, args)
+            if command == "note":
+                return _cmd_note(store, args)
+            if command == "source":
+                return _cmd_source(store, backend, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0
