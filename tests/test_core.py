@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.63")
+        self.assertEqual(VERSION, "0.2.64")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -522,24 +522,6 @@ class TestStore(unittest.TestCase):
             # Rollback: original chunks must be untouched
             texts = [t for _, t in s.text_chunks_for_source(src2.id)]
             self.assertEqual(texts, ["original chunk"])
-
-    def test_add_source_fk_violation_raises_notebook_not_found(self) -> None:
-        """add_source with a deleted notebook raises NOTEBOOK_NOT_FOUND (FK violation).
-
-        Before v0.2.53, any non-UNIQUE IntegrityError used the else branch and returned
-        NOTEBOOK_NOT_FOUND; other unexpected constraint types also hit this path.
-        With the fix, 'FOREIGN KEY' in the error message explicitly maps to
-        NOTEBOOK_NOT_FOUND, making the classification more robust.
-        """
-        with make_store() as s:
-            nb = s.create_notebook("nb-fk-test")
-            # Concurrent-delete simulation: delete the notebook so the next INSERT
-            # triggers a FOREIGN KEY constraint violation on sources.notebook_id
-            s.conn.execute("PRAGMA foreign_keys = ON")
-            s.delete_notebook(nb.id)
-            with self.assertRaises(StoreError) as cm:
-                s.add_source(nb.id, "txt", "t", "orig", "sha-fk")
-            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_add_note_missing_notebook_raises(self) -> None:
         """add_note() on a non-existent notebook must raise NOTEBOOK_NOT_FOUND."""
@@ -2435,23 +2417,6 @@ class TestSearch(unittest.TestCase):
             )
 
 
-class TestCLI(unittest.TestCase):
-    def test_serve_oserror_returns_exit_code_1(self) -> None:
-        """When `shoin serve` fails to bind the port (OSError), main() must return 1.
-
-        Before v0.2.41, the `serve()` call was outside the try/except block in
-        main(), so OSError (e.g., 'Address already in use') propagated as an
-        unhandled Python traceback instead of a clean error message + exit code 1.
-        """
-        from unittest.mock import patch
-        from shoin.cli import main
-
-        # serve is imported locally inside main() so patch it at the source module.
-        with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
-            rc = main(["serve"])
-        self.assertEqual(rc, 1)
-
-
 class TestQA(unittest.TestCase):
     def test_history_cite_re_strips_normal_citations(self) -> None:
         """_HISTORY_CITE_RE must strip [S1], [S1, S2], and full-width [Ｓ１] markers."""
@@ -4135,6 +4100,26 @@ class TestBM25MergePathCap(unittest.TestCase):
 
 class TestCLI(unittest.TestCase):
     """CLI main() error-handling tests."""
+
+    def test_serve_oserror_returns_exit_code_1(self) -> None:
+        """When `shoin serve` fails to bind the port (OSError), main() must return 1.
+
+        Before v0.2.41, the `serve()` call was outside the try/except block in
+        main(), so OSError (e.g., 'Address already in use') propagated as an
+        unhandled Python traceback instead of a clean error message + exit code 1.
+
+        This test previously lived in a duplicate `class TestCLI` definition earlier
+        in this file (line ~2438). Python silently rebinds the class name on
+        redefinition, so the earlier class — and this test — was never collected
+        by pytest/unittest; merged into the single TestCLI class here (v0.2.64).
+        """
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        # serve is imported locally inside main() so patch it at the source module.
+        with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
+            rc = main(["serve"])
+        self.assertEqual(rc, 1)
 
     def test_studio_no_citations_does_not_print_separator(self) -> None:
         """_cmd_studio must suppress the '---' separator when no citations are present.

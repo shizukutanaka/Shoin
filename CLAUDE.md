@@ -306,7 +306,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.63
+## Version History: v0.1.37 → v0.2.64
+
+### v0.2.64 (2026-07-01)
+**Fixed**: `ruff check .` (configured in `pyproject.toml`, never run as part of this audit loop's verification command until now) reported `tests/test_core.py` defined `class TestCLI(unittest.TestCase):` twice — once at line 2438 (a single test, `test_serve_oserror_returns_exit_code_1`) and again at line 4136 ("CLI main() error-handling tests"). Python silently rebinds the class name on the second `class` statement, so the first `TestCLI` object becomes unreachable — pytest/unittest test discovery only ever sees the second one. `test_serve_oserror_returns_exit_code_1` (added in v0.2.41 specifically to cover `main()`'s `except OSError` handler around the `serve()` call) had been **silently never executing** since the second `TestCLI` class was introduced; every subsequent `pytest tests/` run in this project's history reported it as passing without ever running it. Fix: merged the orphaned test into the surviving `TestCLI` class; deleted the now-empty duplicate class shell.
+
+**Fixed**: The same ruff run flagged `F811 Redefinition of unused test_add_source_fk_violation_raises_notebook_not_found` — two methods with the identical name in the same `TestStore` class (lines 526 and 698), both asserting the same behavior (`add_source()` on a deleted notebook raises `NOTEBOOK_NOT_FOUND`). Unlike the `TestCLI` case, this was a true duplicate, not a coverage loss: the surviving definition (line 698) already covered the exact scenario. Fix: removed the shadowed duplicate at line 526.
+
+`pytest tests/` now collects and runs 518 tests (up from 517 — the previously dead `test_serve_oserror_returns_exit_code_1` now actually executes and passes). `python -m mypy shoin/` remains clean. The remaining 29 `ruff check` findings (unused imports, ambiguous single-letter variable names, multiple-imports-per-line) in test files are cosmetic style issues with no functional impact and were left as-is per this project's audit discipline (fix confirmed bugs with concrete failing paths, not speculative style cleanup).
+
+**Fixed**: `pyproject.toml` version was `0.2.63`, aligned with `config.py` `VERSION = "0.2.64"`.
 
 ### v0.2.63 (2026-07-01)
 **Fixed**: `mypy --strict` (configured in `pyproject.toml`) reported 2 real type errors, never caught because mypy had not been run as part of the audit loop's verification command.
