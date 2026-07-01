@@ -276,6 +276,7 @@ const I18N = {
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
     "chat.misattr":"誤ソースの可能性","chat.confirmed":"根拠確認済み",
+    "chat.uncited":"無出典の断定文",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -301,6 +302,7 @@ const I18N = {
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
     "chat.misattr":"possible wrong source","chat.confirmed":"grounding confirmed",
+    "chat.uncited":"uncited assertions",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -596,6 +598,11 @@ function addMsg(role, body, report){
     if (report.confirmed && report.confirmed.length){
       c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
     }
+    if (report.uncited && report.uncited.length){
+      const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
+      b.title = report.uncited.join("\n");
+      c.append(b);
+    }
     if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < 0.5){
       c.append(el("span","badge warn", t("chat.coverage.low")));
     }
@@ -675,6 +682,11 @@ $("#askForm").onsubmit = async e=>{
             c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x).join(", ")));
           if (rpt.confirmed?.length)
             c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
+          if (rpt.uncited?.length){
+            const ub = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${rpt.uncited.length}`);
+            ub.title = rpt.uncited.join("\n");
+            c.append(ub);
+          }
           if (rpt.cited?.length && rpt.coverage < 0.5)
             c.append(el("span","badge warn", t("chat.coverage.low")));
           if (c.children.length) wrap.append(c);
@@ -719,6 +731,11 @@ function renderStudio(){
     const h = el("h4",null,t("studio."+o.kind));
     if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
     if (o.report && o.report.misattributed && o.report.misattributed.length) h.append(el("span","badge err", t("chat.misattr")));
+    if (o.report && o.report.uncited && o.report.uncited.length){
+      const ub = el("span","badge warn", `${t("chat.uncited")}: ${o.report.uncited.length}`);
+      ub.title = o.report.uncited.join("\n");
+      h.append(ub);
+    }
     if (o.report && o.report.cited && o.report.cited.length && o.report.coverage<0.5)
       h.append(el("span","badge warn", t("chat.coverage.low")));
     card.append(h);

@@ -329,7 +329,13 @@ def ask(
             )
         except LLMError:
             text = _degraded_text(hits)
-            report = make_report(text, context.source_titles, context.source_ids, context.source_bodies)
+            report = make_report(
+                text,
+                context.source_titles,
+                context.source_ids,
+                context.source_bodies,
+                check_uncited=False,
+            )
             report["degraded"] = True
             answer = Answer(text, hits, report, degraded=True)
 

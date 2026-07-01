@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.64")
+        self.assertEqual(VERSION, "0.2.65")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2865,6 +2865,118 @@ class TestCitation(unittest.TestCase):
         # Two chars must still produce exactly one bigram
         self.assertEqual(_bigrams("ab"), {"ab"})
         self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
+
+
+class TestUncitedSentences(unittest.TestCase):
+    """uncited_sentences() (v0.2.65): sentences with zero [S#] anywhere in them.
+
+    docs/product-review.md flagged this as the top remaining gap in citation
+    verification: verify_grounding() only checks sentences that ALREADY carry a
+    citation, so a hallucinated or simply unsupported claim with NO citation at
+    all was completely invisible to the machine checks.
+    """
+
+    def test_flags_sentence_with_no_citation(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "書院は軽量LLM向けのローカルツールである。"
+        out = uncited_sentences(text)
+        self.assertEqual(out, ["書院は軽量LLM向けのローカルツールである。"])
+
+    def test_does_not_flag_sentence_with_citation(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "書院は軽量LLM向けのローカルツールである。[S1]"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_mixed_cited_and_uncited_sentences(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "書院はローカルツールである[S1]。猫は液体であるという説がある。"
+        out = uncited_sentences(text)
+        self.assertEqual(out, ["猫は液体であるという説がある。"])
+
+    def test_ignores_trivial_short_fragments(self) -> None:
+        """Sentences too short to carry a claim (< 2 bigrams) must not be flagged."""
+        from shoin.citation import uncited_sentences
+
+        text = "はい。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_not_in_source_disclaimer(self) -> None:
+        """The system prompt's correct behavior for missing facts must not be flagged.
+
+        Rule 3 of SYSTEM_PROMPT instructs the model to explicitly say a fact is not
+        in the sources rather than guessing. That disclaimer sentence has no
+        citation by design — it must not be treated as an unsupported assertion.
+        """
+        from shoin.citation import uncited_sentences
+
+        text = "その件についてはソースに記載なしです。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_english_not_in_source_disclaimer(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "That detail is not in the source provided."
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_make_report_populates_uncited_when_sources_present(self) -> None:
+        from shoin.citation import make_report
+
+        text = "書院はローカルツールである[S1]。猫は液体であるという説がある。"
+        report = make_report(text, ["doc1"], [1], ["書院はローカルツールである。"])
+        self.assertEqual(report.get("uncited"), ["猫は液体であるという説がある。"])
+
+    def test_make_report_omits_uncited_key_when_fully_cited(self) -> None:
+        from shoin.citation import make_report
+
+        text = "書院はローカルツールである。[S1]"
+        report = make_report(text, ["doc1"], [1], ["書院はローカルツールである。"])
+        self.assertNotIn("uncited", report)
+
+    def test_make_report_skips_check_with_zero_sources(self) -> None:
+        """No sources means nothing to cite against — uncited must never appear."""
+        from shoin.citation import make_report
+
+        report = make_report("何らかの断定文。", [])
+        self.assertNotIn("uncited", report)
+
+    def test_make_report_check_uncited_false_bypasses_detection(self) -> None:
+        """check_uncited=False (used for qa._degraded_text) must skip the scan entirely."""
+        from shoin.citation import make_report
+
+        text = "LLMエンドポイントに接続できないため、回答生成を省略。関連箇所のみ提示:\n[S1] 抜粋。"
+        report = make_report(
+            text, ["doc1"], [1], ["抜粋。"], check_uncited=False
+        )
+        self.assertNotIn("uncited", report)
+
+    def test_ask_degraded_path_does_not_flag_meta_message_as_uncited(self) -> None:
+        """Integration: ask()'s LLMError fallback must not flag its own meta-prefix.
+
+        Before this would-be regression, make_report() on _degraded_text() output
+        would flag "LLMエンドポイントに接続できないため..." as an uncited assertion —
+        a false positive, since it's system messaging about connectivity, not a
+        claim about the source content.
+        """
+        from shoin.llm import LLMError
+        from shoin.qa import ask
+
+        class _DownLLM:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                raise LLMError("SYSTEM_SERVICE_UNAVAILABLE", "down")
+
+            def embed_one(self, text: str) -> list[float]:
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        with make_store() as s:
+            nb_id = seed(s)
+            answer = ask(s, _DownLLM(), nb_id, "書院とは何か", persist=False)
+        self.assertTrue(answer.degraded)
+        self.assertNotIn("uncited", answer.report)
 
 
 class TestStoreChunksForSource(unittest.TestCase):

@@ -31,6 +31,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
+        "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -44,6 +45,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
+        "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -124,6 +126,11 @@ def _print_report(report: CitationReport) -> None:
         else:
             marker = ""
         print(f"  [S{c}] {title}{marker}")
+    uncited = report.get("uncited") or []
+    if uncited:
+        print(_t("cite.uncited", n=str(len(uncited))))
+        for sentence in uncited:
+            print(f"  - {sentence}")
 
 
 def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
@@ -190,7 +197,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
     print(result.body)
-    if result.report["cited"]:
+    if result.report["cited"] or result.report.get("uncited"):
         print("---")
         _print_report(result.report)
     return 0

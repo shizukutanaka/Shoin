@@ -1,7 +1,7 @@
 """Citation extraction and machine verification.
 
 Differentiator (spec REQ-006): hallucinated attributions are mechanically
-detectable (arXiv:2412.18004). Three dependency-free, LLM-free checks run on
+detectable (arXiv:2412.18004). Four dependency-free, LLM-free checks run on
 every generated text:
 
 1. Range check (`validate_citations`): an [S#] number must point at a real
@@ -12,6 +12,10 @@ every generated text:
 3. Mis-numbering detection (`verify_grounding`): when a cited sentence does NOT
    match its cited source but DOES strongly match a *different* source, the
    citation number is very likely wrong — a high-precision error signal.
+4. Uncited-assertion detection (`uncited_sentences`): checks 2 and 3 only look
+   at sentences that already carry a citation. A hallucinated or unsupported
+   claim with *zero* citations anywhere in it is invisible to those checks —
+   this scans for exactly that gap (docs/product-review.md priority item #1).
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -22,7 +26,8 @@ than falsely accusing a correctly paraphrased answer.
 No aggregate grounding score is emitted: a ratio of confirmed/cited would be
 0.0 when all citations are valid synonym paraphrases (inconclusive, not bad),
 which contradicts the "stay silent when inconclusive" principle.  The
-`confirmed` and `misattributed` lists are the complete, honest signal.
+`confirmed`, `misattributed`, and `uncited` lists are the complete, honest
+signal — concrete evidence the user can inspect, not a single opaque number.
 """
 
 from __future__ import annotations
@@ -48,6 +53,21 @@ CONFIRM_MIN = 0.30
 # paraphrase (which matches nothing strongly) is never mistaken for a wrong number.
 MISMATCH_GAP = 0.20
 
+# Phrases the system prompt (qa.py SYSTEM_PROMPT rule 3) instructs the model to use
+# when a fact is not in the sources ("state explicitly that it's not in the source,
+# do not fill in by guessing"). A sentence containing one of these is the *correct*
+# response to missing information, not an unsupported assertion — it must not be
+# flagged by uncited_sentences() even though it carries no [S#] citation.
+_DISCLAIMER_MARKERS = (
+    "記載なし",
+    "記載がない",
+    "記載は見当たら",
+    "見つかりませんでした",
+    "not in the source",
+    "not mentioned",
+    "not found in the source",
+)
+
 
 class CitationReport(TypedDict):
     cited: list[int]
@@ -70,6 +90,11 @@ class CitationReport(TypedDict):
     # Allows the UI to show the supporting passage immediately on seal-click without
     # an extra HTTP fetch. Absent on old persisted reports — consumers must guard.
     source_excerpts: NotRequired[dict[str, str]]
+    # Sentences that assert content with zero [S#] citations anywhere in them —
+    # invisible to verify_grounding(), which only checks already-cited sentences.
+    # Present only when n_sources > 0 (nothing to cite against otherwise).
+    # Absent on old persisted reports — consumers must guard.
+    uncited: NotRequired[list[str]]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -172,13 +197,80 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
     return sorted(confirmed), sorted(misattributed)
 
 
+# Minimum non-whitespace character count in a sentence's citation-stripped body for
+# it to count as a "claim" worth flagging. Filters trivial acknowledgments ("はい。",
+# "そう。") without needing an LLM to classify sentence intent. Higher than the
+# generic 2-char _bigrams() floor used elsewhere, which is too lenient for this
+# purpose (a 3-char filler word already clears it).
+_MIN_CLAIM_CHARS = 5
+
+
+def uncited_sentences(text: str) -> list[str]:
+    """Sentences that assert content with zero [S#] citations anywhere in them.
+
+    verify_grounding() only ever looks at sentences that already carry a citation
+    (checking whether *that* citation is well-grounded). A hallucinated or simply
+    unsupported claim with no citation at all sails through untouched — this is
+    the gap docs/product-review.md flagged as the top remaining priority item.
+
+    The most common LLM citation placement is a *trailing* citation-only fragment
+    after the sentence boundary split (e.g. "Sentence. [S1]" -> ["Sentence.", "[S1]"],
+    the same pattern verify_grounding() resolves via prev_claim, v0.2.44). A sentence
+    is only flagged once we've confirmed no such trailing citation resolves it —
+    a sentence immediately followed by a citation-only fragment is NOT uncited.
+
+    Trivial fragments (too short to carry a claim, e.g. "はい。") and sentences
+    that explicitly say the fact is not in the sources (the *correct* response to
+    missing information per the system prompt, not an unsupported assertion) are
+    excluded so this stays a high-precision signal rather than flagging normal,
+    honest "not in the source" disclaimers.
+    """
+    out: list[str] = []
+    pending: str | None = None  # most recent uncited sentence, awaiting a trailing citation
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = extract_citations(sentence)
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+        if nums and not has_claim:
+            # Citation-only fragment (e.g. the "[S1]" tail of "Sentence. [S1]") —
+            # resolves whatever sentence it trails; that sentence is not uncited.
+            pending = None
+            continue
+        # Not a pure citation trailer: any still-pending sentence was never resolved
+        # by a trailing citation, so it truly has no citation attached — flag it.
+        if pending is not None:
+            out.append(pending)
+            pending = None
+        if nums:
+            continue  # this fragment carries its own citation — not uncited
+        if not has_claim:
+            continue  # too short/trivial to carry a claim worth flagging
+        if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
+            continue  # explicit "not in source" — correct behavior, not a gap
+        pending = sentence  # wait to see if a trailing citation-only fragment resolves it
+    if pending is not None:
+        out.append(pending)
+    return out
+
+
 def make_report(
     text: str,
     source_titles: list[str],
     source_ids: list[int] | None = None,
     source_bodies: list[str] | None = None,
+    *,
+    check_uncited: bool = True,
 ) -> CitationReport:
-    """Build the citation_report attached to every generated answer/output."""
+    """Build the citation_report attached to every generated answer/output.
+
+    check_uncited=False skips uncited_sentences() — used for degraded-mode text
+    (qa._degraded_text), which prepends a system meta-message ("LLM endpoint
+    unreachable...") that carries no citation but is not a content claim about
+    the sources; flagging it as an unsupported assertion would be a false positive.
+    """
     n = len(source_titles)
     valid, invalid = validate_citations(text, n)
     report = CitationReport(
@@ -207,4 +299,8 @@ def make_report(
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
+    if n and check_uncited:
+        uncited = uncited_sentences(text)
+        if uncited:
+            report["uncited"] = uncited
     return report

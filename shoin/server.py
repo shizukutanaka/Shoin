@@ -620,7 +620,11 @@ class _Handler(BaseHTTPRequestHandler):
                 client_gone = True
             full = "".join(parts)
             report = make_report(
-                full, context.source_titles, context.source_ids, context.source_bodies
+                full,
+                context.source_titles,
+                context.source_ids,
+                context.source_bodies,
+                check_uncited=not degraded,
             )
             if degraded:
                 report["degraded"] = True

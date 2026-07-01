@@ -46,9 +46,9 @@ Every answer and Studio output cites sources as `[S1]`, `[S2]`, etc. These are *
 - Examples: `[S1]`, `[Ｓ１]`, `[S1, S2]`, `[S1 and S3]` all parse correctly
 - First pass: extract all cited numbers, validate they fall in range 1..N_sources
 
-### Citation Verification: Three-Layer Machine Checks
+### Citation Verification: Four-Layer Machine Checks
 
-Citation hallucination (fabricated quotes, wrong numbers) is one of the most user-visible LLM failure modes. Shoin runs three dependency-free, LLM-free checks on every assistant response and Studio output:
+Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions) is one of the most user-visible LLM failure modes. Shoin runs four dependency-free, LLM-free checks on every assistant response and Studio output:
 
 **1. Range Check** (`validate_citations`): Detect `[S99]` when only 5 sources exist. Out-of-range numbers are the narrowest, highest-confidence hallucination signal.
 
@@ -56,7 +56,9 @@ Citation hallucination (fabricated quotes, wrong numbers) is one of the most use
 
 **3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP), the citation number is flagged `misattributed` — the model likely cited the wrong source.
 
-**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed` and `misattributed` lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
+**4. Uncited-Assertion Detection** (`uncited_sentences`, v0.2.65): Checks 2 and 3 only ever examine sentences that *already* carry a citation. A hallucinated or simply unsupported claim with *zero* citations anywhere in it is invisible to those checks — this was docs/product-review.md's top-priority open gap. `uncited_sentences()` scans for sentences with no `[S#]` marker, resolving the common trailing-citation pattern ("Sentence. [S1]") the same way `verify_grounding()` does, and excludes trivial filler and explicit "not in the source" disclaimers (the *correct* response to missing facts, not an unsupported assertion).
+
+**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, and `uncited` lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
 
 ### History Management: Stripping Stale Citations, Deduplicating Roles
 
@@ -235,8 +237,9 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `validate_citations()`: check against n_sources, split into valid/invalid
 - `_bigrams()`: character-level bigrams for overlap calculation
 - `verify_grounding()`: sentence-by-sentence comparison (source text vs. claim)
-- `make_report()`: construct CitationReport with confirmed/misattributed lists
-- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed
+- `uncited_sentences()`: sentences with zero [S#] anywhere in them — catches unsupported assertions `verify_grounding()` never looks at (v0.2.65)
+- `make_report()`: construct CitationReport with confirmed/misattributed/uncited lists
+- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed, uncited
 
 **`chunk.py`** (Text Chunking & Tokenization)
 - `is_cjk()`: Unicode range check (East Asian blocks + Thai/Lao/Myanmar/Khmer)
@@ -306,7 +309,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.64
+## Version History: v0.1.37 → v0.2.65
+
+### v0.2.65 (2026-07-01)
+**Feature**: Uncited-assertion detection — the top-priority open item from `docs/product-review.md`'s "未実装" (not yet implemented) list. `verify_grounding()`'s two existing checks (grounding confirmation, mis-numbering detection) only ever examine sentences that *already* carry a `[S#]` citation; a hallucinated or simply unsupported factual claim with zero citations anywhere in it was completely invisible to Shoin's citation verification, despite "the machine-checkable citation verification" being the product's flagship differentiator.
+
+- `citation.uncited_sentences(text) -> list[str]`: scans sentence-split fragments for ones with no citation marker anywhere. Mirrors `verify_grounding()`'s design: no aggregate score, a concrete list of the actual flagged sentences (the project's own v0.1.5 lesson — aggregate scores are misleading when partially inconclusive; lists are honest).
+- Resolves the most common LLM citation placement — a trailing citation-only fragment after the sentence-boundary split (`"Sentence. [S1]"` → `["Sentence.", "[S1]"]`, the same pattern `verify_grounding()` handles via `prev_claim`, v0.2.44) — via a `pending`/lookahead mechanism so a sentence immediately followed by its own trailing `[S#]` is correctly NOT flagged. An earlier draft without this lookahead flagged the single most common valid citation pattern in the whole system as an error; caught by writing `test_does_not_flag_sentence_with_citation` before shipping.
+- Excludes trivial filler (`_MIN_CLAIM_CHARS = 5`, so short acknowledgments like `"はい。"` don't count as claims) and sentences containing an explicit "not in the source" disclaimer (`_DISCLAIMER_MARKERS`) — the system prompt's rule 3 instructs the model to say exactly that when a fact is missing, so it is correct behavior, not an unsupported assertion.
+- `make_report()` gained `check_uncited: bool = True`. `qa.ask()`'s and `server._h_ask_sse()`'s degraded-mode fallback (`_degraded_text()`) pass `check_uncited=False`, because the degraded prefix ("LLM endpoint unreachable...") is system meta-commentary, not a claim about source content, and would otherwise be a guaranteed false positive on every degraded answer.
+- `CitationReport` gained `uncited: NotRequired[list[str]]`. `cli._print_report()` prints the count and each sentence; `cli._cmd_studio()`'s existing "suppress separator when nothing to show" guard (v0.2.55) was widened to `if result.report["cited"] or result.report.get("uncited")` so uncited-only reports aren't silently dropped. `index.html` renders a new `⚠ uncited assertions: N` badge (with the actual sentences in a hover tooltip) in the chat message renderer, the SSE streaming `done` handler, and the Studio output card header.
+- 11 regression tests added (`TestUncitedSentences`), including an integration test asserting `ask()`'s degraded path never flags its own meta-message.
+
+**Fixed**: `pyproject.toml` version was `0.2.64`, aligned with `config.py` `VERSION = "0.2.65"`.
 
 ### v0.2.64 (2026-07-01)
 **Fixed**: `ruff check .` (configured in `pyproject.toml`, never run as part of this audit loop's verification command until now) reported `tests/test_core.py` defined `class TestCLI(unittest.TestCase):` twice — once at line 2438 (a single test, `test_serve_oserror_returns_exit_code_1`) and again at line 4136 ("CLI main() error-handling tests"). Python silently rebinds the class name on the second `class` statement, so the first `TestCLI` object becomes unreachable — pytest/unittest test discovery only ever sees the second one. `test_serve_oserror_returns_exit_code_1` (added in v0.2.41 specifically to cover `main()`'s `except OSError` handler around the `serve()` call) had been **silently never executing** since the second `TestCLI` class was introduced; every subsequent `pytest tests/` run in this project's history reported it as passing without ever running it. Fix: merged the orphaned test into the surviving `TestCLI` class; deleted the now-empty duplicate class shell.
