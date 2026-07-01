@@ -293,6 +293,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
   - POST `/api/notebooks/{id}/sources` → ingest (file upload or URL)
   - GET `/api/notebooks/{id}/messages` → chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
+  - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
   - GET/POST `/api/health` → LLM status, embedding model
 - SSE Streaming: sends meta event (with citation report skeleton), delta events (tokens), done event (final report + status)
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
@@ -310,7 +311,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.66
+## Version History: v0.1.37 → v0.2.67
+
+### v0.2.67 (2026-07-01)
+**Feature**: Web UI reindex — a second Socratic "過不足" audit pass asked whether every CLI capability has Web UI parity, per Plan.md's explicit "CLI Parity (REQ-103)" design principle. `shoin reindex <id>` (rebuild embeddings after an `SHOIN_EMBED_MODEL` change) existed only as a CLI subcommand; a user running only the Web UI had no way to recover from a stale/mismatched embedding model without dropping to a terminal. `_check_embed_model_ok()` (`qa.py`) already silently falls back to BM25-only search on a mismatch — the fix was previously reachable only outside the app the mismatch was detected in.
+
+- `server.py`: new route `POST /api/notebooks/{id}/reindex` → `_h_nb_reindex()`, a thin wrapper around the existing `pipeline.reindex_notebook()` (already used by the CLI). Raises `NOTEBOOK_NOT_FOUND` (404) for a missing notebook, matching every other notebook-scoped route.
+- `index.html`: new "埋め込みを再構築" (Rebuild embeddings) button in the Studio pane below the export section, with a `title` tooltip (via the `data-i18n-title` pattern from v0.2.66) explaining when to use it. Reports `{n}/{total} チャンクを再埋め込みしました` via toast on completion.
+- 2 regression tests added (`ServerTest.test_reindex_endpoint_returns_embedded_and_total_counts`, `test_reindex_missing_notebook_returns_404`).
+
+**Fixed**: `pyproject.toml` version was `0.2.66`, aligned with `config.py` `VERSION = "0.2.67"`.
 
 ### v0.2.66 (2026-07-01)
 **Feature**: Citation verification status surfaced in Markdown export — a Socratic "過不足" (excess/deficient feature) audit of the product asked: does every exported artifact still carry the product's flagship differentiator (machine-checked citation verification)? Tracing `export_markdown()` found it reconstructed the `[S#]` source legend from `citation_report` but never rendered `confirmed`/`misattributed`/`uncited`/`degraded` — the exact verification signal. Once a Q&A exchange or Studio output was exported to Markdown (to share, archive, or paste into a report), it became visually indistinguishable from unverified prose; the newly-added `uncited` field (v0.2.65) had zero representation in exports either.

@@ -736,6 +736,34 @@ class ServerTest(unittest.TestCase):
             with self.assertRaises(ConnectionError, msg=f"{exc_class.__name__} must be ConnectionError"):
                 raise exc_class("test")
 
+    def test_reindex_endpoint_returns_embedded_and_total_counts(self) -> None:
+        """POST /api/notebooks/{id}/reindex must be reachable from the Web UI.
+
+        Before this endpoint existed, rebuilding embeddings after an
+        SHOIN_EMBED_MODEL change was CLI-only (`shoin reindex <id>`) — a user
+        running only the Web UI had no way to recover without a terminal
+        (Plan.md REQ-103: CLI/Web parity).
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "reindex-test"})
+        nb_id = nb["id"]
+        body = ("和紙は楮から作られる。" * 30).encode("utf-8")
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            body,
+            {"X-Filename": urllib.parse.quote("素材.txt")},
+        )
+        status, result = self._json("POST", f"/api/notebooks/{nb_id}/reindex")
+        self.assertEqual(status, 200)
+        self.assertIn("n_embedded", result)
+        self.assertIn("n_total", result)
+        self.assertGreaterEqual(result["n_total"], 1)
+
+    def test_reindex_missing_notebook_returns_404(self) -> None:
+        status, err = self._json("POST", "/api/notebooks/999999/reindex")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
 
 class NonStreamingLLMTest(unittest.TestCase):
     """Server falls back to non-streaming chat() when LLM has no chat_stream method."""

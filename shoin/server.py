@@ -23,7 +23,7 @@ from .config import MAX_QUESTION_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, refresh_source
+from .pipeline import index_source, refresh_source, reindex_notebook
 from .qa import (
     ChatBackend,
     _check_embed_model_ok,
@@ -209,6 +209,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("DELETE", r"^/api/notes/(\d+)$", "note_delete"),
         ("DELETE", r"^/api/notebooks/(\d+)/messages$", "nb_clear_chat"),
         ("GET", r"^/api/notebooks/(\d+)/export$", "export"),
+        ("POST", r"^/api/notebooks/(\d+)/reindex$", "nb_reindex"),
     )
 
     def _reject_cross_site(self, method: str) -> bool:
@@ -516,6 +517,14 @@ class _Handler(BaseHTTPRequestHandler):
             },
         )
         self.wfile.write(body)
+
+    def _h_nb_reindex(self, nb_id: int) -> None:
+        """Rebuild embeddings for a notebook. Previously CLI-only (`shoin reindex`);
+        a user running only the Web UI had no way to recover from an embedding-model
+        change without dropping to a terminal (Plan.md REQ-103: CLI/Web parity)."""
+        with Store(self.db) as store:
+            n_embedded, n_total = reindex_notebook(store, self.llm, nb_id)
+        self._json({"n_embedded": n_embedded, "n_total": n_total})
 
     # --- SSE ask --------------------------------------------------------
 

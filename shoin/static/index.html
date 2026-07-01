@@ -246,6 +246,9 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
         <a class="btn" id="exBib" download>BibTeX</a>
         <a class="btn" id="exRis" download>RIS</a>
       </div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
+      <div class="muted" data-i18n="reindex.head">埋め込み</div>
+      <button class="btn" id="reindexBtn" type="button" data-i18n="reindex.btn" data-i18n-title="reindex.hint" title="埋め込みモデル変更後に再構築する">埋め込みを再構築</button>
     </div>
   </section>
 </main>
@@ -283,6 +286,9 @@ const I18N = {
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "export.head":"エクスポート","viewer.close":"閉じる",
+    "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
+    "reindex.hint":"埋め込みモデル変更後に再構築する",
+    "reindex.ok":"{n}/{total} チャンクを再埋め込みしました",
     "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
@@ -310,6 +316,9 @@ const I18N = {
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "export.head":"Export","viewer.close":"Close",
+    "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
+    "reindex.hint":"Rebuild after changing the embedding model",
+    "reindex.ok":"Re-embedded {n}/{total} chunks",
     "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
@@ -768,6 +777,16 @@ $("#noteForm").onsubmit = async e=>{
     await jpost(`/api/notebooks/${nbId}/notes`, {title:$("#noteTitle").value, body:$("#noteBody").value});
     $("#noteTitle").value=""; $("#noteBody").value=""; openNotebook(nbId);
   }catch(err){ toast(err.message); }
+};
+$("#reindexBtn").onclick = async ()=>{
+  if (!cur) return;
+  const btn = $("#reindexBtn");
+  btn.disabled = true; const old = btn.textContent; btn.textContent = t("busy");
+  try{
+    const j = await (await api(`/api/notebooks/${cur.id}/reindex`, {method:"POST"})).json();
+    toast(t("reindex.ok").replace("{n}", j.n_embedded).replace("{total}", j.n_total));
+  }catch(err){ toast(err.message); }
+  finally{ btn.disabled = false; btn.textContent = old; }
 };
 
 /* ---------- adders ---------- */
