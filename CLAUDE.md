@@ -311,7 +311,21 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.68
+## Version History: v0.1.37 → v0.2.69
+
+### v0.2.69 (2026-07-01)
+**Feature**: `~/.config/shoin/config.json` support — a fourth Socratic "過不足" audit pass, this time cross-examining README.md's own promises against the actual codebase rather than CLI/Web parity. README.md has documented *"環境変数または `~/.config/shoin/config.json`"* (environment variables OR config.json) as the two configuration paths since v0.1.0 — but `grep -r "config.json" shoin/` returned zero matches. Every `config.py` accessor was `os.environ.get(...)`-only; the JSON config file was pure vaporware documented for 68 versions with no code ever reading it.
+
+- `config.config_file() -> Path`: `~/.config/shoin/config.json`, matching README's literal documented location.
+- `config._file_config() -> dict[str, str]`: best-effort JSON load; missing file, unreadable file, malformed JSON, or a non-object top level (e.g. a bare list) are all silently ignored — config.json is optional, never a hard dependency.
+- `config._get(key, default) -> str`: environment variable, then config.json, then the built-in default. Deliberately not `functools.lru_cache`d — `ui_lang()` is called on nearly every request-handling path via `_t()` (cli.py/export.py/qa.py/studio.py), and caching a tiny JSON read across process lifetime risks stale-value bugs (e.g. in tests that patch env/file state) for a negligible I/O saving.
+- `data_dir()`, `llm_url()`, `llm_model()`, `embed_model()`, `ui_lang()`, `port()` all now route through `_get()`, so every documented setting genuinely supports the config-file fallback README always claimed.
+- README.md also fixed: "三段の引用検証" (three-stage citation verification) was stale relative to `uncited_sentences()` (v0.2.65, this session's own fourth check) — now "四段" with the uncited-assertion check listed. Added a `config.json` example block to the Configuration section.
+- 6 regression tests (`TestConfigXDG`): config.json fallback when env unset, env-var precedence over config.json, missing-file fallback, malformed-JSON fallback, non-dict-top-level fallback. Verified live end-to-end (`HOME=<tmp> config.json → llm_model()` returns the file's value).
+
+`pytest tests/` now runs 547 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
+
+**Fixed**: `pyproject.toml` version was `0.2.68`, aligned with `config.py` `VERSION = "0.2.69"`.
 
 ### v0.2.68 (2026-07-01)
 **Feature**: CLI note/source management — a third Socratic "過不足" audit pass, this time asking whether Web UI capabilities are reachable from the CLI (the reverse of v0.2.67, which closed the Web-missing-CLI-feature gap). `cli.py`'s own module docstring claims *"the CLI exposes every core capability so the product is fully usable headless (REQ-103)"* — but notes (add/list/delete) and source management (delete/rename/refresh) existed only as Web API routes with zero CLI subcommands. A fully headless user (SSH-only server, no browser) had no way to manage notes or clean up/rename/refresh sources without importing `shoin.store`/`shoin.pipeline` directly in a Python REPL.

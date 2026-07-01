@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.68")
+        self.assertEqual(VERSION, "0.2.69")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4097,6 +4097,89 @@ class TestConfigXDG(unittest.TestCase):
         with patch.dict(os.environ, {"SHOIN_PORT": "9999"}):
             result = port()
         self.assertEqual(result, 9999)
+
+    def test_config_json_is_used_when_env_var_unset(self) -> None:
+        """README.md has documented '環境変数または ~/.config/shoin/config.json' since
+        v0.1.0, but no code ever read the file (v0.2.68 audit finding). config.json
+        must now be a real fallback when the corresponding env var is unset.
+        """
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text(json.dumps({"SHOIN_LLM_MODEL": "custom-model"}))
+            env = dict(os.environ)
+            env.pop("SHOIN_LLM_MODEL", None)
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(config_mod.llm_model(), "custom-model")
+
+    def test_env_var_takes_precedence_over_config_json(self) -> None:
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text(json.dumps({"SHOIN_LLM_MODEL": "file-model"}))
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, {"SHOIN_LLM_MODEL": "env-model"}):
+                    self.assertEqual(config_mod.llm_model(), "env-model")
+
+    def test_missing_config_json_falls_back_to_builtin_default(self) -> None:
+        import os
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        env = dict(os.environ)
+        env.pop("SHOIN_LLM_MODEL", None)
+        with patch.object(config_mod, "config_file", return_value=Path("/nonexistent/config.json")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(config_mod.llm_model(), "qwen3:4b")
+
+    def test_malformed_config_json_does_not_crash(self) -> None:
+        """Malformed JSON must fall back to the built-in default, not raise."""
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text("not valid json{{{")
+            env = dict(os.environ)
+            env.pop("SHOIN_LLM_MODEL", None)
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(config_mod.llm_model(), "qwen3:4b")
+
+    def test_config_json_non_dict_top_level_ignored(self) -> None:
+        """A config.json that is valid JSON but not an object (e.g. a bare list)
+        must be ignored gracefully, not raise AttributeError on .items()."""
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text("[1, 2, 3]")
+            env = dict(os.environ)
+            env.pop("SHOIN_LLM_MODEL", None)
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(config_mod.llm_model(), "qwen3:4b")
 
 
 class TestNegTerms(unittest.TestCase):
