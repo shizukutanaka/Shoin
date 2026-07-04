@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+> **Note**: This file was not kept up to date after v0.1.55. The project has
+> continued through v0.2.70 with the same bug-by-bug discipline, but those
+> entries live only in `CLAUDE.md`'s "Version History" section (and as a
+> one-line summary per version in `git log`) rather than here. Found by this
+> session's own Socratic "過不足" audit of the project's documentation.
+
 ## [v0.1.55] - 2026-06-14
 ### Fixed
 - **`_post()` が `resp.read().decode("utf-8")` を `errors="replace"` なしで呼んでおり、LLM が非 UTF-8 バイト (Latin-1 エラーメッセージ、バイナリレスポンスなど) を返すと `UnicodeDecodeError` が `LLMError` に変換されずに伝播する**: `_post()` 内の `try` ブロックは `urllib.error.HTTPError`、`OSError`、`json.JSONDecodeError` を捕捉するが `UnicodeDecodeError` (= `ValueError` のサブクラス) を含まない。LLM が不正な UTF-8 バイト列を返した場合、例外は `chat()` → `suggest_questions()`/`generate()` → `_h_questions()`/`_h_studio()` へと伝播し、`_dispatch()` の `except LLMError` で捕捉されずにハンドラがクラッシュする。`chat_stream()` (行 130) と `HTTPError` ボディ読み取り (行 60) は既に `errors="replace"` を使用していたが、`_post()` 本体 (行 58) だけ抜けていた。ソクラテス式問いかけ「3か所のデコードで一貫性があるか？」によって発見。`decode("utf-8", errors="replace")` に統一し、不正バイトは置換文字に変換後 `json.JSONDecodeError` として `LLMError("SYSTEM_LLM_BAD_RESPONSE", ...)` に昇格させる。

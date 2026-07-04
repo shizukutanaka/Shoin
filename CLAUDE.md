@@ -845,4 +845,4 @@ Neither `llm.py` production code needed a change — both failures were stale te
 
 ---
 
-End of guide. For detailed architecture decisions, see `Plan.md` and `docs/spec.md`. For security model, see `docs/adr/ADR-001-ssrf-ip-pinning.md`. For changelog granularity (bug-by-bug, v0.1.0 onward), see `CHANGELOG.md`.
+End of guide. For detailed architecture decisions, see `Plan.md` and `docs/spec.md`. For security model, see `docs/adr/ADR-001-ssrf-ip-pinning.md`. For changelog granularity (bug-by-bug): `CHANGELOG.md` covers v0.1.0–v0.1.55; it was not kept up to date after that point, so v0.1.56 onward is recorded only in this file's own "Version History" section above (and in `git log`, which has a one-line summary per version).
