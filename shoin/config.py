@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.69"
+VERSION = "0.2.70"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -18,6 +18,7 @@ CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth
 URL_TIMEOUT_SEC = 15
 URL_MAX_REDIRECTS = 3
+MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
 
 
 def config_file() -> Path:

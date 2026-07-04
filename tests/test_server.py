@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -1659,6 +1660,124 @@ class InputValidationSecurityTest(unittest.TestCase):
         data = _json.loads(raw)
         self.assertEqual(resp.status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+
+class _OverlapDetectingLLM:
+    """Records whether chat_stream() was ever entered while already active.
+
+    Used to prove generation_lock actually serializes LLM calls: without the
+    lock, concurrent requests' sleep() windows overlap and a violation is
+    recorded deterministically; with the lock, calls are strictly sequential.
+    """
+
+    embedding_model = ""
+    model = "fake-4b"
+
+    def __init__(self) -> None:
+        self._active = False
+        self._state_lock = threading.Lock()
+        self.violations = 0
+
+    def available(self) -> bool:
+        return True
+
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        return "これは何ですか？ [S1]。"
+
+    def chat_stream(
+        self, messages: list[dict[str, str]], temperature: float = 0.2
+    ) -> Iterator[str]:
+        with self._state_lock:
+            if self._active:
+                self.violations += 1
+            self._active = True
+        try:
+            time.sleep(0.15)
+            yield "回答"
+            yield "[S1]。"
+        finally:
+            with self._state_lock:
+                self._active = False
+
+    def embed_one(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+
+class GenerationSerializationTest(unittest.TestCase):
+    """generation_lock (v0.2.70) must serialize LLM generation across concurrent
+    requests — spec.md STRIDE DoS control '同時生成1', previously undocumented-
+    but-unimplemented (found by this session's Socratic audit of spec.md)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = _OverlapDetectingLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "gen.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> tuple[int, dict[str, object]]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {},
+        )
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read())
+
+    def test_concurrent_ask_requests_do_not_overlap_generation(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "concurrency-test"})
+        nb_id = nb["id"]
+        upload_body = ("並行実行のテスト用文書。" * 20).encode("utf-8")
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=upload_body,
+            method="POST",
+            headers={"X-Filename": urllib.parse.quote("doc.txt")},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        errors: list[Exception] = []
+
+        def fire() -> None:
+            try:
+                req = urllib.request.Request(
+                    self._url(f"/api/notebooks/{nb_id}/ask"),
+                    data=json.dumps({"question": "テストです"}).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+            except Exception as exc:  # pragma: no cover - surfaced via errors list
+                errors.append(exc)
+
+        threads = [threading.Thread(target=fire) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            self.llm.violations,
+            0,
+            "generation_lock must prevent overlapping chat_stream calls across "
+            "concurrent /ask requests",
+        )
 
 
 if __name__ == "__main__":

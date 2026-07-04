@@ -117,6 +117,7 @@ class _Handler(BaseHTTPRequestHandler):
     db: str
     questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
     questions_cache_lock: threading.Lock  # guards questions_cache across threads
+    generation_lock: threading.Lock  # serializes LLM generation (spec.md STRIDE DoS control)
 
     # --- plumbing -------------------------------------------------------
 
@@ -458,7 +459,9 @@ class _Handler(BaseHTTPRequestHandler):
         if kind not in KINDS:
             raise StoreError("STUDIO_KIND_INVALID", f"kind must be one of {KINDS}")
         with Store(self.db) as store:
-            result = generate(store, self.llm, nb_id, kind)
+            # spec.md STRIDE DoS control: serialize LLM generation (see _h_ask_sse).
+            with self.generation_lock:
+                result = generate(store, self.llm, nb_id, kind)
             self._json({"kind": result.kind, "body": result.body, "report": dict(result.report)})
 
     def _h_questions(self, nb_id: int) -> None:
@@ -472,7 +475,9 @@ class _Handler(BaseHTTPRequestHandler):
             if cached is not None and cached[0] == fingerprint:
                 self._json({"questions": cached[1]})
                 return
-            questions = suggest_questions(store, self.llm, nb_id)
+            # spec.md STRIDE DoS control: serialize LLM generation (see _h_ask_sse).
+            with self.generation_lock:
+                questions = suggest_questions(store, self.llm, nb_id)
             # Cache the result regardless of whether questions is empty.  An LLM
             # failure on an active notebook (non-empty fingerprint) returns [] but
             # NOT caching it causes every subsequent poll to fire a full LLM
@@ -614,9 +619,14 @@ class _Handler(BaseHTTPRequestHandler):
             degraded = False
             client_gone = False
             try:
-                for token in self._stream_chat(build_messages(question, context, history)):
-                    parts.append(token)
-                    self._sse("delta", {"text": token})
+                # spec.md STRIDE DoS control: serialize actual LLM generation so
+                # concurrent requests queue rather than multiply memory/compute load
+                # on the lightweight local endpoint. Retrieval/context-building above
+                # is not serialized; only the token-generation call is.
+                with self.generation_lock:
+                    for token in self._stream_chat(build_messages(question, context, history)):
+                        parts.append(token)
+                        self._sse("delta", {"text": token})
             except LLMError:
                 degraded = True
                 text = _degraded_text(hits)
@@ -672,6 +682,7 @@ def make_server(
             "db": db or str(db_path()),
             "questions_cache": {},
             "questions_cache_lock": threading.Lock(),
+            "generation_lock": threading.Lock(),
         },
     )
     return ThreadingHTTPServer((host, port), handler)

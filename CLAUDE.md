@@ -311,7 +311,22 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.69
+## Version History: v0.1.37 → v0.2.70
+
+### v0.2.70 (2026-07-01)
+**Feature**: LLM generation serialization + per-notebook chunk cap — a fifth Socratic "過不足" audit pass, this time cross-examining `docs/spec.md`'s own STRIDE DoS-control table against the codebase. spec.md has documented "DoS対策: アップロード10MB上限、同時生成1、チャンク数上限/notebook" (upload cap, single concurrent generation, per-notebook chunk cap) — the upload cap was real (`MAX_UPLOAD_BYTES`), but the other two were never implemented. `server.py` let `ThreadingHTTPServer` run unlimited concurrent LLM generations, and `pipeline.index_source()` had no ceiling on chunks accumulated per notebook.
+
+- `server.py`: new `generation_lock: threading.Lock` class attribute (same injection pattern as the existing `questions_cache_lock`), instantiated once in `make_server()`. Wraps only the actual LLM-generation call in `_h_ask_sse()` (the `_stream_chat()` loop), `_h_studio()` (`generate()`), and `_h_questions()` (`suggest_questions()`, cache-miss path only) — retrieval, context-building, and SSE header/meta-event sending are NOT serialized, only token generation itself. A concurrent second request blocks until the first's generation completes, which is the correct behavior for a single-user local app on a lightweight LLM endpoint (no retry/429 needed).
+- `config.MAX_CHUNKS_PER_NOTEBOOK = 50_000`: generous per-notebook ceiling. `pipeline.index_source()` checks `existing + new > limit` (via `store.counts()`) before `add_source()` commits, raising `IngestError("INGEST_NOTEBOOK_FULL")` so an over-limit ingest never leaves an orphaned source row.
+- Regression test for the lock uses a `_OverlapDetectingLLM` fake that records a violation if `chat_stream()` is entered while already active (with a `sleep(0.15)` window to make races deterministic); verified by temporarily reverting the lock and confirming the test fails with `violations=2` before restoring the fix.
+- Two pre-existing tests in `tests/test_core.py` construct `_Handler` instances manually via `_Handler.__new__()` (bypassing `make_server()`'s attribute injection) — both needed `handler.generation_lock = threading.Lock()` added alongside the existing `questions_cache_lock` line.
+- 2 chunk-cap regression tests (`TestChunkLimit`).
+
+**Fixed (docs)**: The same audit found `docs/spec.md` had drifted from the implementation in three more places — the search pipeline diagram still showed the pre-v0.2.56 Convex Combination fusion instead of RRF; REQ-006/引用検証仕様 documented only the range-check + coverage design instead of the four-stage verification (confirmed/misattributed/uncited, completed v0.2.65); and the migration description claimed "up/down両方向" when the actual implementation is intentionally up-only/append-only (down migrations are unsafe in SQLite). All three corrected to match the current, tested implementation. Also fixed the 非機能要件 logging line, which claimed JSON-structured logging with trace_id — the actual design (documented correctly in this file's own "No Distributed Tracing" section) is intentionally minimal stderr output; spec.md now matches. `SECURITY.md`'s Supported Versions table listed only `0.1.x`; added `0.2.x`.
+
+`pytest tests/` now runs 550 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
+
+**Fixed**: `pyproject.toml` version was `0.2.69`, aligned with `config.py` `VERSION = "0.2.70"`.
 
 ### v0.2.69 (2026-07-01)
 **Feature**: `~/.config/shoin/config.json` support — a fourth Socratic "過不足" audit pass, this time cross-examining README.md's own promises against the actual codebase rather than CLI/Web parity. README.md has documented *"環境変数または `~/.config/shoin/config.json`"* (environment variables OR config.json) as the two configuration paths since v0.1.0 — but `grep -r "config.json" shoin/` returned zero matches. Every `config.py` accessor was `os.environ.get(...)`-only; the JSON config file was pure vaporware documented for 68 versions with no code ever reading it.

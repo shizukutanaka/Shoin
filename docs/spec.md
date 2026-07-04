@@ -73,28 +73,30 @@ messages(id, notebook_id FK, role, body, citation_report JSON, created_at)
 schema_migrations(version)
 ```
 
-マイグレーション: `YYYYMMDDHHMMSS_<desc>` 連番、up/down両方向。
+マイグレーション: 整数連番(1, 2, 3, ...)・append-only・up専用。全DDLは`IF NOT EXISTS`等で冪等化し、同一バージョンの重複適用や複数プロセスからの同時マイグレーションでもクラッシュしない(v0.2.33で確立)。SQLiteではdownマイグレーションは一般に危険なため意図的に非対応。
 
 ## 検索パイプライン
 
 ```
 query → [BM25 (FTS5)] ─┐
-      → [vector (埋め込みAPI)] ─┤→ Convex Combination融合(adaptive alpha)
+      → [vector (埋め込みAPI)] ─┤→ RRF融合(Reciprocal Rank Fusion, k=60)
                                → レキシカルリランク + MMR → top-k(既定8) → プロンプト構築
 ```
 
-- 融合: CC方式、alpha はクエリ語彙性で適応調整(Hako実装の移植。根拠: arXiv:2604.01733, 2604.16394)
+- 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合/adaptive alphaは既存テスト互換のためコードとして残存
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
 - プロンプト: ソースを `[S1]..[Sn]` で番号付け、各ソースへ公平なトークン予算配分
 
-## 引用検証仕様 (差別化の核)
+## 引用検証仕様 (差別化の核、四段検証)
 
 根拠: hallucinated attributionは機械検出可能(arXiv:2412.18004)、answer-level指標はpartial failureを隠すためclaim-level検証が必要。
 
-1. 生成完了後、`\[S(\d+)\]` を全抽出
-2. 実在ソース数 n と照合 → 範囲外引用を `invalid_citations` としてフラグ
-3. `citation_report`: `{cited: [..], invalid: [..], coverage: cited/n, source_map: {S1: title}}`
-4. UI: invalid引用は赤表示、coverage<50%は注意バッジ
+1. **範囲チェック**: 生成完了後 `\[S(\d+)\]` を全抽出、実在ソース数 n と照合 → 範囲外引用を `invalid` としてフラグ
+2. **根拠確認**: 引用文とソース本文の文字bigram重複が閾値(0.30)以上なら `confirmed`
+3. **誤帰属検出**: 引用文が引用元ではなく**別の**ソースに強く一致(gap 0.20以上)する場合 `misattributed` としてフラグ
+4. **無出典断定検出**(v0.2.65): 引用が一切ない断定文を `uncited` としてフラグ。「ソースに記載なし」等の明示的免責文は除外
+5. `citation_report`: `{cited, invalid, coverage, source_map, confirmed, misattributed, uncited}`。集約スコアは持たない(同義語言い換えと誤帰属を字句信号だけでは区別できないため、確信できる場合のみ提示)
+6. UI: invalid引用は赤表示、coverage<50%は注意バッジ、uncited断定文は警告バッジ
 
 ## セキュリティ (STRIDE要点)
 
@@ -112,7 +114,7 @@ query → [BM25 (FTS5)] ─┐
 - 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
-- ログ: JSON構造化(timestamp/level/trace_id)、本文非含有
+- ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`DEBUG=1`で検索統計(BM25/vectorスコア、融合alpha)を出力。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
 
 ## 競合差別化
 

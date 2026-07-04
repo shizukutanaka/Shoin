@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.69")
+        self.assertEqual(VERSION, "0.2.70")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3337,6 +3337,7 @@ class TestServerSSE(unittest.TestCase):
             handler.llm = _FakeLLM()  # type: ignore[assignment]
             handler.questions_cache = {}
             handler.questions_cache_lock = threading.Lock()
+            handler.generation_lock = threading.Lock()
 
             sse_calls: list[str] = []
 
@@ -3407,6 +3408,7 @@ class TestServerSSE(unittest.TestCase):
             handler.llm = _ZeroTokenLLM()  # type: ignore[assignment]
             handler.questions_cache = {}
             handler.questions_cache_lock = threading.Lock()
+            handler.generation_lock = threading.Lock()
 
             sse_events: list[str] = []
 
@@ -3816,6 +3818,55 @@ class TestPipeline(unittest.TestCase):
         self.assertAlmostEqual(min(scores), 0.0, places=6, msg="vec-only bottom score must be 0.0")
         # Ordering must be preserved (vec=0.9 ranked above vec=0.4)
         self.assertEqual(result[0].chunk_id, 1, "highest vec score must rank first")
+
+
+class TestChunkLimit(unittest.TestCase):
+    """MAX_CHUNKS_PER_NOTEBOOK (v0.2.70): spec.md STRIDE DoS control 'チャンク数
+    上限/notebook', found unimplemented by this session's Socratic audit of spec.md.
+    """
+
+    def test_index_source_raises_when_limit_exceeded(self) -> None:
+        from unittest.mock import patch
+
+        from shoin.ingest import IngestError
+        from shoin.pipeline import index_source
+
+        with patch("shoin.pipeline.MAX_CHUNKS_PER_NOTEBOOK", 2):
+            with make_store() as s:
+                nb = s.create_notebook("chunk-limit-test")
+                src = s.add_source(nb.id, "txt", "doc1", "mem://d1", "sha1")
+                # Seed 2 existing chunks so the notebook is already at the limit.
+                s.add_chunks(src.id, ["chunk one", "chunk two"])
+                with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+                    f.write("これは3個目のチャンクを作るための十分に長い文章である。")
+                    path = f.name
+                try:
+                    with self.assertRaises(IngestError) as cm:
+                        index_source(s, nb.id, path)
+                    self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                finally:
+                    import os
+
+                    os.unlink(path)
+
+    def test_index_source_succeeds_within_limit(self) -> None:
+        from unittest.mock import patch
+
+        from shoin.pipeline import index_source
+
+        with patch("shoin.pipeline.MAX_CHUNKS_PER_NOTEBOOK", 100):
+            with make_store() as s:
+                nb = s.create_notebook("chunk-limit-ok-test")
+                with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+                    f.write("短い文書です。")
+                    path = f.name
+                try:
+                    result = index_source(s, nb.id, path)
+                    self.assertGreaterEqual(result.n_chunks, 1)
+                finally:
+                    import os
+
+                    os.unlink(path)
 
 
 class TestExport(unittest.TestCase):

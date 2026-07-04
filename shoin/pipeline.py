@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 
 from .chunk import split_text
+from .config import MAX_CHUNKS_PER_NOTEBOOK
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
@@ -138,6 +139,15 @@ def index_source(
     texts = split_text(extracted.text)
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
+    # spec.md STRIDE DoS control: cap total chunks per notebook. Checked before
+    # add_source so an over-limit ingest never commits an orphaned source row.
+    existing_chunks = store.counts(notebook_id)["chunks"]
+    if existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+        raise IngestError(
+            "INGEST_NOTEBOOK_FULL",
+            f"notebook chunk limit exceeded: {existing_chunks} existing + {len(texts)} new"
+            f" > {MAX_CHUNKS_PER_NOTEBOOK}",
+        )
     source = store.add_source(
         notebook_id, extracted.kind, title or extracted.title, extracted.origin, extracted.sha256
     )
