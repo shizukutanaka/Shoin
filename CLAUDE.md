@@ -311,7 +311,26 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.70
+## Version History: v0.1.37 → v0.2.71
+
+### v0.2.71 (2026-07-01)
+**Fixed**: A "make this commercial-grade quality" audit (2 parallel Explore agents surveying frontend + backend) found and fixed a real, empirically-reproduced concurrency bug in `store.py`'s startup path — not just a flaky test, an actual production reliability gap.
+
+- **Root cause**: `Store.__init__()` set `PRAGMA busy_timeout = 5000` *after* `PRAGMA journal_mode = WAL`. Switching a brand-new file to WAL mode briefly needs exclusive access to create the `-wal`/`-shm` files; when several threads raced to do this on the same fresh file simultaneously, whichever PRAGMA ran first — before busy_timeout had been configured — raised `OperationalError: database is locked` immediately instead of waiting. This was empirically reproduced at a ~13% failure rate over 40 runs of `test_migrate_concurrent_shared_db_file_no_crash`, previously worked around session-to-session via an ad-hoc `pytest --deselect` CLI flag with zero record of *why* anywhere in the repo.
+- Fix: reordered `busy_timeout` to be the *first* PRAGMA set, before `foreign_keys` and `journal_mode`. This alone roughly halved the failure rate (~13% → ~5%), confirming the diagnosis but not fully closing the window.
+- Added `store._retry_on_lock()`: a small shared retry-with-backoff helper (5 attempts, 50ms/attempt backoff) wrapping both the `journal_mode = WAL` PRAGMA and `Store.migrate()`. Safe to retry in both cases — `PRAGMA journal_mode` is idempotent, and `migrate()` re-reads the applied-version state from the DB before doing any work, so a retry after a partial failure just skips what a previous attempt already committed (the existing `IF NOT EXISTS`/`INSERT OR IGNORE` idempotency from v0.2.33 made this safe with no further changes).
+- Verified with 120 consecutive runs of the specific concurrency test post-fix: **0 failures**. `pytest tests/` (full suite, no `--deselect` needed for the first time this session) now runs clean: 551 passed.
+
+**Feature**: Frontend accessibility and UX-consistency fixes found by the same audit.
+
+- 11 hardcoded English `aria-label` values in `index.html` bypassed the existing `data-i18n`/`data-i18n-title` i18n convention (`langBtn`, `paneSrc`, `fileInput`, `urlInput`, `paneChat`, `#qs`, `paneStudio`, source-delete/view/citation-chip/note-delete dynamic labels) — Japanese-locale screen-reader users got English labels. Added a `data-i18n-aria` attribute pattern (same mechanism as `data-i18n-title`, v0.2.66) for the static elements, and routed the dynamically-generated ones through `t()` directly.
+- Inconsistent busy/disabled state during in-flight requests: `#nbForm`, `#noteForm`, `#urlBtn`, `#fileInput`, notebook rename/delete buttons, and the inline source-rename `commit()` had no disabled state while their request was in flight (risk of duplicate submissions on a double-click/double-Enter), while Studio-generate/reindex/source-refresh buttons already correctly did. Applied the same disable-during-request pattern uniformly.
+
+**Fixed (packaging)**: `pyproject.toml` had zero PyPI `classifiers` — no Python version, license, OS, or audience metadata, hurting PyPI discoverability. Added a standard classifier set (Development Status, Python 3.11/3.12, MIT License, OS Independent, audience/topic tags, Japanese/English natural language).
+
+**Known gap, not fixed (needs repo-admin action)**: The same audit confirmed `.github/workflows/` does not exist — **zero CI actually runs on this repo**. `ci/ci.yml` (lint → mypy --strict → test → coverage → secret-scan → SBOM) is fully written but parked in `ci/` per `ci/README.md`'s own explanation: a GitHub App `workflows` permission restriction prevents automated agents (including this session) from writing to `.github/workflows/`. Activating it requires a human with repo-admin access to run `git mv ci/ci.yml .github/workflows/ci.yml`. Every commit in this project's history — including all of this session's — has landed without automated verification.
+
+**Fixed**: `pyproject.toml` version was `0.2.70`, aligned with `config.py` `VERSION = "0.2.71"`.
 
 ### v0.2.70 (2026-07-01)
 **Feature**: LLM generation serialization + per-notebook chunk cap — a fifth Socratic "過不足" audit pass, this time cross-examining `docs/spec.md`'s own STRIDE DoS-control table against the codebase. spec.md has documented "DoS対策: アップロード10MB上限、同時生成1、チャンク数上限/notebook" (upload cap, single concurrent generation, per-notebook chunk cap) — the upload cap was real (`MAX_UPLOAD_BYTES`), but the other two were never implemented. `server.py` let `ThreadingHTTPServer` run unlimited concurrent LLM generations, and `pipeline.index_source()` had no ceiling on chunks accumulated per notebook.

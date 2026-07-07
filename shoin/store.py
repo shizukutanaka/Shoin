@@ -8,12 +8,39 @@ from __future__ import annotations
 
 import array
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypeVar, TypedDict
 
 from .config import MAX_NAME_LEN, MAX_TITLE_LEN
+
+_T = TypeVar("_T")
+
+
+def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
+    """Retry `fn` when SQLite reports 'database is locked'.
+
+    PRAGMA busy_timeout covers ordinary table-level lock contention, but a few
+    operations (switching a brand-new file to WAL mode, the first migration on a
+    shared file several threads open simultaneously) have a narrower lock window
+    that busy_timeout doesn't fully close. Re-running is safe for both call sites
+    that use this: PRAGMA journal_mode is idempotent, and migrate() re-reads the
+    applied-version state from the DB before doing any work.
+    """
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            last_exc = exc
+            time.sleep(0.05 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 class _Counts(TypedDict):
@@ -180,11 +207,20 @@ class Store:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        # ThreadingHTTPServer opens one Store per request: wait out writer
-        # overlap instead of failing immediately with SQLITE_BUSY.
+        # busy_timeout MUST be set before any statement that can block on a lock —
+        # including journal_mode itself. Switching a brand-new file to WAL mode
+        # briefly needs exclusive access to create the -wal/-shm files; when several
+        # threads race to do this simultaneously on the same fresh file, whichever
+        # PRAGMA runs first with no busy_timeout yet configured raised
+        # 'database is locked' immediately instead of waiting.
         self.conn.execute("PRAGMA busy_timeout = 5000")
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        # Even with busy_timeout set first, switching a brand-new file to WAL mode
+        # is still occasionally reported by SQLite as locked when several threads
+        # race to create the -wal/-shm files at the same instant (a narrower window
+        # than ordinary table-level busy_timeout coverage). Retry defends against
+        # that residual race; PRAGMA journal_mode is idempotent to re-run.
+        _retry_on_lock(lambda: self.conn.execute("PRAGMA journal_mode = WAL"))
         self.migrate()
 
     def close(self) -> None:
@@ -199,7 +235,16 @@ class Store:
     # --- migrations ---
 
     def migrate(self) -> int:
-        """Apply pending migrations. Returns the resulting schema version."""
+        """Apply pending migrations. Returns the resulting schema version.
+
+        Wrapped in _retry_on_lock: each retry re-reads `current` from the DB, so a
+        retry after a partial failure is safe — the already-idempotent
+        IF NOT EXISTS / INSERT OR IGNORE migrations below just skip what a previous
+        attempt already applied.
+        """
+        return _retry_on_lock(self._migrate_once)
+
+    def _migrate_once(self) -> int:
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)"
         )

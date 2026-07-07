@@ -170,7 +170,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   <span class="mark" aria-hidden="true">書院</span>
   <h1 id="nbTitle" data-i18n="app.title">Shoin</h1>
   <span class="lamp" id="lamp"><i></i><span id="lampText" data-i18n="app.lamp.off">LLM未接続</span></span>
-  <button id="langBtn" type="button" aria-label="Switch language">EN</button>
+  <button id="langBtn" type="button">EN</button>
 </header>
 <div id="banner" role="status"></div>
 <div class="tabs" role="tablist">
@@ -180,7 +180,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
 </div>
 <main>
   <!-- sources -->
-  <section class="pane" id="paneSrc" aria-label="Sources">
+  <section class="pane" id="paneSrc" data-i18n-aria="tabs.sources" aria-label="Sources">
     <div class="pane-head" data-i18n="sources.head">書 棚</div>
     <div class="pane-body">
       <ul id="nbList"></ul>
@@ -198,10 +198,10 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
       </div>
       <div class="adders" id="srcAdders" hidden>
         <div class="row">
-          <input type="file" id="fileInput" class="field" accept=".txt,.md,.html,.pdf" aria-label="Upload file">
+          <input type="file" id="fileInput" class="field" accept=".txt,.md,.html,.pdf" data-i18n-aria="a11y.upload" aria-label="Upload file">
         </div>
         <div class="row">
-          <input id="urlInput" class="field" placeholder="https://…" aria-label="URL">
+          <input id="urlInput" class="field" placeholder="https://…" data-i18n-aria="a11y.url" aria-label="URL">
           <button class="btn" id="urlBtn" type="button" data-i18n="sources.addurl">取込</button>
         </div>
       </div>
@@ -209,7 +209,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- chat -->
-  <section class="pane active" id="paneChat" aria-label="Chat">
+  <section class="pane active" id="paneChat" data-i18n-aria="tabs.chat" aria-label="Chat">
     <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span><button class="clear-chat" id="clearChat" type="button" data-i18n="chat.clear" hidden>クリア</button></div>
     <div class="pane-body" id="chat" aria-live="polite"></div>
     <div id="chatEmpty" class="empty" style="margin:14px" hidden>
@@ -217,7 +217,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
       <span data-i18n="chat.empty.body">下の入力欄から、資料に基づく質問をどうぞ。</span>
     </div>
     <div id="composer">
-      <div id="qs" aria-label="Suggested questions"></div>
+      <div id="qs" data-i18n-aria="a11y.questions" aria-label="Suggested questions"></div>
       <form id="askForm">
         <input id="askInput" class="field" data-i18n-ph="chat.placeholder" data-i18n-title="chat.hint" placeholder="資料への質問…" title="ヒント: -語 で除外検索(例: Python -legacy)" autocomplete="off">
         <button class="btn primary" id="askBtn" type="submit" data-i18n="chat.ask">尋ねる</button>
@@ -226,7 +226,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- studio + notes -->
-  <section class="pane" id="paneStudio" aria-label="Studio">
+  <section class="pane" id="paneStudio" data-i18n-aria="tabs.studio" aria-label="Studio">
     <div class="pane-head" data-i18n="studio.head">書 斎</div>
     <div class="pane-body">
       <div class="kinds" id="kinds"></div>
@@ -294,7 +294,10 @@ const I18N = {
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…",
-    "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)"
+    "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)",
+    "a11y.lang":"言語切替","a11y.upload":"ファイルをアップロード","a11y.url":"URL",
+    "a11y.questions":"推奨質問","a11y.delsrc":"ソースを削除","a11y.viewsrc":"ソースを表示: ",
+    "a11y.citation":"引用 S","a11y.delnote":"ノートを削除"
   },
   en: {
     "app.title":"Shoin","app.lamp.on":"LLM connected","app.lamp.off":"LLM offline",
@@ -324,7 +327,10 @@ const I18N = {
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…",
-    "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy)"
+    "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy)",
+    "a11y.lang":"Switch language","a11y.upload":"Upload file","a11y.url":"URL",
+    "a11y.questions":"Suggested questions","a11y.delsrc":"Delete source","a11y.viewsrc":"View source: ",
+    "a11y.citation":"Citation S","a11y.delnote":"Delete note"
   }
 };
 let lang = localStorage.getItem("shoin.lang") || (navigator.language||"ja").slice(0,2);
@@ -335,7 +341,9 @@ function applyI18n(){
   document.querySelectorAll("[data-i18n]").forEach(el=>{el.textContent=t(el.dataset.i18n);});
   document.querySelectorAll("[data-i18n-ph]").forEach(el=>{el.placeholder=t(el.dataset.i18nPh);});
   document.querySelectorAll("[data-i18n-title]").forEach(el=>{el.title=t(el.dataset.i18nTitle);});
+  document.querySelectorAll("[data-i18n-aria]").forEach(el=>{el.setAttribute("aria-label", t(el.dataset.i18nAria));});
   $("#langBtn").textContent = lang==="ja" ? "EN" : "日本語";
+  $("#langBtn").setAttribute("aria-label", t("a11y.lang"));
 }
 
 /* ---------- helpers ---------- */
@@ -371,23 +379,25 @@ async function loadNotebooks(){
       ev.stopPropagation();
       const newName = prompt(t("nb.rename"), nb.name);
       if (!newName || !newName.trim()) return;
+      ren.disabled = true; del.disabled = true;
       try{
         await api(`/api/notebooks/${nb.id}`, {method:"PATCH",
           headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:newName.trim()})});
         if (cur && cur.id===nb.id) cur.name = newName.trim();
         loadNotebooks(); renderNotebook();
-      }catch(e){ toast(e.message); }
+      }catch(e){ toast(e.message); ren.disabled = false; del.disabled = false; }
     };
     const del = el("button","ren del",null); del.textContent="×"; del.type="button";
     del.title=t("nb.delete");
     del.onclick = async ev=>{
       ev.stopPropagation();
       if (!confirm(t("nb.delete"))) return;
+      ren.disabled = true; del.disabled = true;
       try{
         await api(`/api/notebooks/${nb.id}`, {method:"DELETE"});
         if (cur && cur.id===nb.id) cur=null;
         loadNotebooks();
-      }catch(e){ toast(e.message); }
+      }catch(e){ toast(e.message); ren.disabled = false; del.disabled = false; }
     };
     li.append(name,c,ren,del);
     li.onclick = () => openNotebook(nb.id);
@@ -432,6 +442,7 @@ function renderNotebook(){
           if (committed) return; committed = true;
           const newTitle = input.value.trim();
           if (!newTitle || newTitle === s.title) { openNotebook(nb.id); return; }
+          input.disabled = true;
           try {
             await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
             toast(t("src.rename.ok")); openNotebook(nb.id);
@@ -455,14 +466,16 @@ function renderNotebook(){
           catch(e){ toast(e.message); ref.disabled=false; ref.textContent="↻"; } };
         row.append(ref);
       }
-      const del = el("button","src-act",null); del.textContent = "×"; del.setAttribute("aria-label","delete source");
+      const del = el("button","src-act",null); del.textContent = "×"; del.setAttribute("aria-label",t("a11y.delsrc"));
       del.onclick = async ev=>{ ev.stopPropagation();
-        try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
+        del.disabled = true;
+        try{ await api(`/api/sources/${s.id}`,{method:"DELETE"}); openNotebook(cur.id);}
+        catch(e){ toast(e.message); del.disabled = false; } };
       row.append(del);
       row.onclick = () => { if (tt.querySelector("input.src-rename")) return; showSource(s.id, s.title); };
       row.tabIndex = 0;
       row.setAttribute("role", "button");
-      row.setAttribute("aria-label", `View source: ${s.title}`);
+      row.setAttribute("aria-label", t("a11y.viewsrc") + s.title);
       row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showSource(s.id, s.title); } };
       list.append(row);
     });
@@ -511,7 +524,7 @@ function renderWithSeals(container, text, report){
         : misattr.has(n) ? t("chat.misattr") + (name ? " — " + name : "")
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + name : "")
         : name;
-      chip.setAttribute("aria-label", `Citation S${n}` + (name ? ": " + name : ""));
+      chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + name : ""));
       chip.onclick = () => openSeal(n, srcMap, idMap, excerpts);
       container.append(chip);
     });
@@ -764,7 +777,7 @@ function renderNotes(){
   }
   items.forEach(n=>{
     const card = el("div","card");
-    const x = el("button","x","×"); x.setAttribute("aria-label","delete note");
+    const x = el("button","x","×"); x.setAttribute("aria-label",t("a11y.delnote"));
     x.onclick = async ()=>{ try{ await api(`/api/notes/${n.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
     card.append(x, el("h4",null,n.title), el("div","bd",n.body));
     out.append(card);
@@ -773,10 +786,13 @@ function renderNotes(){
 $("#noteForm").onsubmit = async e=>{
   e.preventDefault(); if(!cur) return;
   const nbId = cur.id;
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
   try{
     await jpost(`/api/notebooks/${nbId}/notes`, {title:$("#noteTitle").value, body:$("#noteBody").value});
     $("#noteTitle").value=""; $("#noteBody").value=""; openNotebook(nbId);
   }catch(err){ toast(err.message); }
+  finally{ btn.disabled = false; }
 };
 $("#reindexBtn").onclick = async ()=>{
   if (!cur) return;
@@ -792,26 +808,34 @@ $("#reindexBtn").onclick = async ()=>{
 /* ---------- adders ---------- */
 $("#nbForm").onsubmit = async e=>{
   e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
   try{
     const j = await (await jpost("/api/notebooks", {name:$("#nbName").value})).json();
     $("#nbName").value=""; await openNotebook(j.id);
   }catch(err){ toast(err.message); }
+  finally{ btn.disabled = false; }
 };
 $("#fileInput").onchange = async e=>{
   const f = e.target.files[0]; if(!f || !cur) return;
   const nbId = cur.id;
+  e.target.disabled = true;
   try{
     await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
       headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f});
     e.target.value=""; toast(t("sources.added")); openNotebook(nbId);
   }catch(err){ e.target.value=""; toast(err.message); }
+  finally{ e.target.disabled = false; }
 };
 $("#urlBtn").onclick = async ()=>{
   const u = $("#urlInput").value.trim(); if(!u || !cur) return;
   const nbId = cur.id;
+  const btn = $("#urlBtn");
+  btn.disabled = true; const old = btn.textContent; btn.textContent = t("busy");
   try{ await jpost(`/api/notebooks/${nbId}/sources`, {target:u});
     $("#urlInput").value=""; toast(t("sources.added")); openNotebook(nbId);
   }catch(err){ toast(err.message); }
+  finally{ btn.disabled = false; btn.textContent = old; }
 };
 
 /* ---------- tabs / lang / health ---------- */
