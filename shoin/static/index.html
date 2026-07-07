@@ -170,7 +170,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   <span class="mark" aria-hidden="true">書院</span>
   <h1 id="nbTitle" data-i18n="app.title">Shoin</h1>
   <span class="lamp" id="lamp"><i></i><span id="lampText" data-i18n="app.lamp.off">LLM未接続</span></span>
-  <button id="langBtn" type="button">EN</button>
+  <button id="langBtn" type="button" aria-label="Switch language">EN</button>
 </header>
 <div id="banner" role="status"></div>
 <div class="tabs" role="tablist">
@@ -447,6 +447,7 @@ function renderNotebook(){
             await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
             toast(t("src.rename.ok")); openNotebook(nb.id);
           } catch(e) { toast(e.message); openNotebook(nb.id); }
+          finally { input.disabled = false; }
         };
         // relatedTarget check: if focus moves to another element within this row
         // (e.g. the delete or refresh button), skip blur-commit so the button click
@@ -647,10 +648,13 @@ function renderChatHistory(){
 }
 $("#clearChat").onclick = async ()=>{
   if (!cur) return;
+  const btn = $("#clearChat");
+  btn.disabled = true;
   try{
     await api(`/api/notebooks/${cur.id}/messages`, {method:"DELETE"});
     openNotebook(cur.id);
   }catch(e){ toast(e.message); }
+  finally{ btn.disabled = false; }
 };
 async function refreshQuestions(){
   $("#qs").replaceChildren();
@@ -778,7 +782,7 @@ function renderNotes(){
   items.forEach(n=>{
     const card = el("div","card");
     const x = el("button","x","×"); x.setAttribute("aria-label",t("a11y.delnote"));
-    x.onclick = async ()=>{ try{ await api(`/api/notes/${n.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} };
+    x.onclick = async ()=>{ x.disabled = true; try{ await api(`/api/notes/${n.id}`,{method:"DELETE"}); openNotebook(cur.id);}catch(e){toast(e.message);} finally{ x.disabled = false; } };
     card.append(x, el("h4",null,n.title), el("div","bd",n.body));
     out.append(card);
   });

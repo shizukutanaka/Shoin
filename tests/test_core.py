@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -34,7 +35,7 @@ from shoin.search import (
     strip_neg_terms,
 )
 from shoin.search import Hit, _char_bigrams
-from shoin.store import Store, StoreError, pack_vector, unpack_vector
+from shoin.store import Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
 EN = "Shoin is a local notebook. Citations are machine verified."
@@ -55,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.71")
+        self.assertEqual(VERSION, "0.2.72")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -779,6 +780,59 @@ class TestStore(unittest.TestCase):
                 s.create_notebook("disk")
             with Store(path) as s2:
                 self.assertEqual(s2.list_notebooks()[0].name, "disk")
+
+
+class TestRetryOnLock(unittest.TestCase):
+    """Deterministic coverage for _retry_on_lock(); the only prior coverage was
+    the probabilistic test_migrate_concurrent_shared_db_file_no_crash test above,
+    which exercises retry timing only by chance."""
+
+    def test_succeeds_after_transient_locked_errors(self) -> None:
+        calls = {"n": 0}
+
+        def flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        with patch("time.sleep"):
+            self.assertEqual(_retry_on_lock(flaky), "ok")
+        self.assertEqual(calls["n"], 3)
+
+    def test_raises_original_exception_after_exhausting_attempts(self) -> None:
+        def always_locked() -> str:
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch("time.sleep"):
+            with self.assertRaises(sqlite3.OperationalError) as cm:
+                _retry_on_lock(always_locked, attempts=3)
+        self.assertIn("locked", str(cm.exception).lower())
+
+    def test_non_locked_operational_error_raised_immediately(self) -> None:
+        calls = {"n": 0}
+
+        def bad_syntax() -> str:
+            calls["n"] += 1
+            raise sqlite3.OperationalError("near \"SELCT\": syntax error")
+
+        with self.assertRaises(sqlite3.OperationalError):
+            _retry_on_lock(bad_syntax)
+        self.assertEqual(calls["n"], 1, "must not retry non-lock OperationalErrors")
+
+    def test_attempts_zero_calls_fn_once_without_crashing(self) -> None:
+        """Before the fix, attempts=0 skipped the loop entirely, leaving last_exc
+        as None: `assert last_exc is not None` fired (or, under python -O, execution
+        fell through to `raise last_exc` with last_exc still None, raising a bare
+        TypeError that masked the real error)."""
+        calls = {"n": 0}
+
+        def fn() -> str:
+            calls["n"] += 1
+            return "direct"
+
+        self.assertEqual(_retry_on_lock(fn, attempts=0), "direct")
+        self.assertEqual(calls["n"], 1)
 
 
 class TestChunk(unittest.TestCase):

@@ -30,6 +30,8 @@ def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     that use this: PRAGMA journal_mode is idempotent, and migrate() re-reads the
     applied-version state from the DB before doing any work.
     """
+    if attempts < 1:
+        return fn()
     last_exc: sqlite3.OperationalError | None = None
     for attempt in range(attempts):
         try:
