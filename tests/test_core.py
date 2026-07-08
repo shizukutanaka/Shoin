@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.73")
+        self.assertEqual(VERSION, "0.2.74")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4845,6 +4845,96 @@ class TestCLINoteSourceParity(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("refreshed", out.getvalue())
             self.assertIn("3 chunks", out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+
+class TestCLIMessagesList(unittest.TestCase):
+    """CLI `messages list` (v0.2.74): cli.py's own module docstring claims 'the
+    CLI exposes every core capability so the product is fully usable headless
+    (REQ-103)'. `messages` only had a `clear` action — a headless (SSH-only, no
+    browser) user could destroy chat history but never read it back short of
+    `shoin export --format md`, which dumps the entire notebook rather than just
+    the chat log.
+    """
+
+    def _db(self) -> str:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            return f.name
+
+    def test_messages_list_shows_role_and_body(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("msg-cli-test").id
+                s.add_message(nb_id, "user", "質問です", "{}")
+                s.add_message(nb_id, "assistant", "回答です [S1]", "{}")
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "messages", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("user", text)
+            self.assertIn("質問です", text)
+            self.assertIn("assistant", text)
+            self.assertIn("回答です [S1]", text)
+        finally:
+            os.unlink(db_file)
+
+    def test_messages_list_empty_notebook_prints_hint(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("msg-cli-empty").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "messages", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("チャット履歴がありません", out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_messages_list_then_clear_roundtrip(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("msg-cli-roundtrip").id
+                s.add_message(nb_id, "user", "hello", "{}")
+
+            with patch("sys.stdout", io.StringIO()):
+                rc = main(["--db", db_file, "messages", "clear", str(nb_id)])
+            self.assertEqual(rc, 0)
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "messages", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("チャット履歴がありません", out.getvalue())
         finally:
             os.unlink(db_file)
 

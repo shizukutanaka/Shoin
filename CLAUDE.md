@@ -311,7 +311,15 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.73
+## Version History: v0.1.37 → v0.2.74
+
+### v0.2.74 (2026-07-08)
+**Feature**: `shoin messages list <notebook_id>` — a second background audit round (explicitly briefed to avoid re-checking anything already fixed, including v0.2.73) found that `cli.py`'s own module docstring claims "the CLI exposes every core capability so the product is fully usable headless (REQ-103)," a claim v0.2.68 acted on directly for notes and sources — but the `messages` subcommand only ever had a `clear` action, never a `list`. A headless (SSH-only, no browser) user could destroy a notebook's chat history but never read it back; the only workaround was `shoin export --format md`, which dumps the entire notebook (sources, notes, studio outputs, chat) rather than just the conversation log, and isn't documented anywhere as the intended substitute.
+
+- `cli.py`: new `messages list` subparser + `_cmd_messages()` branch, a thin wrapper around the existing `store.list_messages()` (already used by `server._notebook_json()` and `export.export_markdown()`). Prints `[id] role: body` per message, or a `msg.empty` hint (new i18n key, ja/en) for a notebook with no messages yet — matching the `note.empty`/`note list` pattern from v0.2.68 exactly, including that neither validates notebook existence first (`list_notes()` and `list_messages()` both silently return `[]` for a nonexistent notebook ID; only the destructive `clear`/`delete` actions call `get_notebook()` to raise `NOTEBOOK_NOT_FOUND` — pre-existing, intentional asymmetry, not touched here).
+- 3 regression tests (`TestCLIMessagesList`): list shows role+body for both a user and assistant turn (including a `[S1]` citation marker surviving verbatim), the empty-notebook hint, and a list→clear→list roundtrip confirming the hint reappears after clearing.
+
+`pytest tests/` now runs 559 tests (up from 556). `mypy shoin/` remains clean.
 
 ### v0.2.73 (2026-07-08)
 **Fixed**: A background research agent doing a fresh "過不足" gap audit (explicitly briefed to avoid re-litigating anything already in this changelog) found a real, concrete bug in `retrieve()` (`search.py`) that survived 72 prior versions and the v0.2.72 code-review pass: the negative-term filter (`-word` syntax, v0.2.47) could silently starve retrieval results below `k` — down to zero — instead of backfilling from valid lower-ranked candidates.

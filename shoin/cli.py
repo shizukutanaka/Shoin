@@ -28,6 +28,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.renamed": "改名完了: [{id}] {name}",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
+        "msg.empty": "チャット履歴がありません。",
         "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
@@ -48,6 +49,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.renamed": "Renamed: [{id}] {name}",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
+        "msg.empty": "No chat history.",
         "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
@@ -92,6 +94,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     msgs = sub.add_parser("messages", help="チャット履歴管理")
     msgssub = msgs.add_subparsers(dest="action", required=True)
+    msgs_list = msgssub.add_parser("list", help="一覧")
+    msgs_list.add_argument("notebook_id", type=int)
     msgs_clear = msgssub.add_parser("clear", help="履歴クリア")
     msgs_clear.add_argument("notebook_id", type=int)
 
@@ -189,7 +193,13 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
 
 def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
-    if action == "clear":
+    if action == "list":
+        messages = store.list_messages(int(args.notebook_id))
+        if not messages:
+            print(_t("msg.empty"))
+        for m in messages:
+            print(f"[{m['id']}] {m['role']}: {m['body']}")
+    elif action == "clear":
         store.clear_messages(int(args.notebook_id))
         print(_t("msg.cleared"))
     return 0
