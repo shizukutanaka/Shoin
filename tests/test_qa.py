@@ -343,6 +343,27 @@ class TestMultiTurn(unittest.TestCase):
             self.assertIn("user", roles)
             self.assertIn("assistant", roles)
 
+    def test_empty_assistant_reply_is_not_treated_as_orphan(self) -> None:
+        """An assistant row that was persisted with an empty body (degraded/error
+        path, or a zero-token LLM response — server.py always persists SOMETHING
+        even when full="", per v0.2.55) must NOT be confused with a true orphan
+        (no assistant row at all). If it were, the preceding user question would
+        be wrongly stripped as if unanswered, and expand_query()'s "prepend the
+        last user question" follow-up logic would silently anchor to an older,
+        stale question instead of the real most recent one.
+        """
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "答え1")
+            s.add_message(nb, "user", "問2")
+            s.add_message(nb, "assistant", "")  # persisted empty, e.g. zero-token reply
+            msgs = history_messages(s, nb)
+            contents = [m["content"] for m in msgs if m["role"] == "user"]
+            self.assertIn("問2", contents, "answered (even if emptily) user turn must survive")
+            expanded = expand_query("短い", msgs)
+            self.assertIn("問2", expanded, "expand_query must anchor to the real last question")
+
     def test_query_expand_short_followup(self) -> None:
         """Short follow-up gets the last user turn prepended for retrieval."""
         history: list[dict[str, str]] = [

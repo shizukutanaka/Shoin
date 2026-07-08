@@ -295,7 +295,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
   - DELETE `/api/notebooks/{id}/messages` → clear chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
   - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
-  - GET/POST `/api/health` → LLM status, embedding model
+  - GET `/api/health` → LLM status, embedding model (GET only; no POST route is registered)
 - SSE Streaming: sends meta event (with citation report skeleton), delta events (tokens), done event (final report + status)
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
@@ -312,7 +312,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.75
+## Version History: v0.1.37 → v0.2.76
+
+### v0.2.76 (2026-07-08)
+**Fixed**: A fourth background audit round found a genuine, subtle bug in `history_messages()` (`qa.py`): it conflated "no assistant reply row exists at all" (a true orphan, e.g. server crash before persisting anything) with "an assistant reply row exists but has an empty body" (a legitimate, already-persisted degraded/error/zero-token-response turn — server.py has always persisted *something* for every completed turn since v0.2.55, specifically so the DB never has a truly dangling question). Both cases produced an empty `body` after filtering and were indistinguishable by the time the trailing-user-turn-strip loop ran, so a real, answered (if emptily) user question got silently stripped from history as if it were an orphan.
+
+- **Concrete failing chain**: Q1→A1 (normal exchange), Q2→A2 where A2 is persisted with an empty body (zero-token LLM response from a reasoning model — the exact class of lightweight local model this project targets per CLAUDE.md's "Lightweight First" principle — or any of the SSE disconnect/`build_context`-exception paths that persist an empty assistant row), then Q3 is a short follow-up (`< 30 chars`, the threshold `expand_query()` uses). Before the fix: A2's empty body caused Q2 to look like a trailing orphan, `history_messages()` stripped it, and `expand_query()`'s "prepend the last user question" logic silently anchored Q3's retrieval to **Q1** instead of Q2 — the wrong topic, with no error signal anywhere.
+- Fix: compute `has_trailing_answer` from the **raw** last DB row's role (before any empty-body filtering), not from the post-filter list. Only strip the trailing user turn when the raw last row is genuinely a `user` row with zero reply rows at all; an assistant row — even an empty one — means the preceding user turn was legitimately handled and must survive into history.
+- Verified with a regression test (`test_empty_assistant_reply_is_not_treated_as_orphan`) that reproduces the exact 4-message chain above; confirmed it fails against the pre-fix code via `git stash` before restoring the fix (asserted `'問2' not found` pre-fix, passes post-fix). The existing `test_orphaned_user_message_trimmed_from_history` (true-orphan case, no trailing assistant row at all) continues to pass unchanged — confirming the fix is additive, not a regression of the original v0.1.52/v0.2.55 protection.
+
+**Fixed (docs)**: The same round re-checked CLAUDE.md's route list (the exact section that had the v0.2.75 bug) in the other direction — code-has-it-but-doc-doesn't and doc-claims-it-but-code-doesn't — and found `GET/POST /api/health` claimed a `POST` route that was never registered (`server.py`'s `_ROUTES` has only `("GET", r"^/api/health$", "health")`). Corrected to `GET` only.
+
+`pytest tests/` now runs 560 tests (up from 559). `mypy shoin/` remains clean.
 
 ### v0.2.75 (2026-07-08)
 **Fixed (docs)**: A third background audit round found that this file's own "Key Files & Sections" → `server.py` route list (the paragraph directly above "Version History") documented `GET /api/notebooks/{id}/messages → chat history` as a real endpoint — it never existed. The only route matching that path is `DELETE /api/notebooks/{id}/messages` (clear chat history, `server.py` line 211); chat history is actually delivered embedded as the `"messages"` array inside the combined `GET /api/notebooks/{id}` payload (`_notebook_json()`), and `index.html` confirms the frontend never calls the documented path for a GET. Anyone — a developer, an external script, or another agent — taking this doc at face value and issuing `GET /api/notebooks/1/messages` would get HTTP 405 `METHOD_NOT_ALLOWED` (the DELETE route's pattern matches the path, so `_dispatch()`'s wrong-verb branch fires) instead of the chat history they expected, with no hint from the response that the path itself was never real. Corrected the route list to describe actual behavior; no code changed, since the combined-payload design is the correct one (matches v0.2.74's finding that the CLI's own `messages list` reads the same `store.list_messages()` rather than a dedicated endpoint).

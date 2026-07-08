@@ -195,6 +195,12 @@ def history_messages(
 ) -> list[Message]:
     """Recent chat turns as prompt messages (multi-turn follow-up support)."""
     rows = store.list_messages_recent(notebook_id, limit)
+    # A true orphan (no assistant reply saved at all) only happens if the server
+    # crashed before persisting anything for that turn. Since v0.2.55, every SSE
+    # error/disconnect/zero-token-response path always persists an assistant row
+    # (possibly with empty body) — so an empty assistant body is NOT the same as
+    # a missing one, and must not be treated as an orphan below.
+    has_trailing_answer = bool(rows) and str(rows[-1]["role"]) != "user"
     out: list[Message] = []
     for r in rows:
         role = "user" if str(r["role"]) == "user" else "assistant"
@@ -225,11 +231,17 @@ def history_messages(
     # unanchored assertion ([system, asst, user, ...]) which is protocol-unusual.
     while out and out[0]["role"] == "assistant":
         out.pop(0)
-    # A trailing user turn without an assistant reply is an orphan (e.g. from an SSE
-    # disconnect). Including it would give the LLM two consecutive user messages
-    # ([…, user:orphan, user:current]), which is semantically wrong.
-    while out and out[-1]["role"] == "user":
-        out.pop()
+    # A trailing user turn with no assistant reply row at all is a true orphan
+    # (e.g. the server crashed before persisting anything for that turn).
+    # Including it would give the LLM two consecutive user messages
+    # ([…, user:orphan, user:current]), which is semantically wrong. But if the
+    # most recent row IS an assistant reply — even an empty one — the preceding
+    # user turn was legitimately answered (degraded/error path) and must be kept:
+    # otherwise expand_query()'s "prepend the last user question" follow-up logic
+    # silently anchors to a stale, older question instead of the real most recent one.
+    if not has_trailing_answer:
+        while out and out[-1]["role"] == "user":
+            out.pop()
     return out
 
 
