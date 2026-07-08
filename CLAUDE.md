@@ -311,7 +311,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.72
+## Version History: v0.1.37 → v0.2.73
+
+### v0.2.73 (2026-07-08)
+**Fixed**: A background research agent doing a fresh "過不足" gap audit (explicitly briefed to avoid re-litigating anything already in this changelog) found a real, concrete bug in `retrieve()` (`search.py`) that survived 72 prior versions and the v0.2.72 code-review pass: the negative-term filter (`-word` syntax, v0.2.47) could silently starve retrieval results below `k` — down to zero — instead of backfilling from valid lower-ranked candidates.
+
+- **Root cause**: `bm25_search()` already excludes negated-term hits internally (filters before returning), but `vector_search()` has no query text and does no such filtering. `retrieve()` fused the (already-filtered) BM25 hits with the (unfiltered) vector hits, ran `mmr(rerank(clean, fused), k)` to select the final `k` results — spending MMR's entire k-selection budget against a pool that still contained negated-term hits — and only *afterward* called `_apply_neg_filter()` on the already-selected top-`k` list. If the negated-term chunks happened to rank highest by vector similarity, MMR picked exactly those `k` slots, the post-hoc filter then removed all of them, and `retrieve()` returned fewer results than `k` (or an empty list) even though clean, relevant chunks existed one rank lower in the same pool and were never given a chance to be selected.
+- Reproduced concretely with a regression test before fixing: 6 chunks with a shared text prefix (so MMR's own diversity mechanism doesn't accidentally paper over the bug by disfavoring near-duplicate "legacy" chunks for unrelated reasons) where the 3 negated-term chunks have the highest cosine similarity to the query vector — `retrieve(..., "書院 -legacy", ..., k=3)` returned `[]` pre-fix, confirmed by temporarily reverting just the `search.py` change (`git stash`) and re-running the new test in isolation.
+- Fix: move the neg-term filter to apply to `vec_hits` *before* fusion/MMR (matching where `bm25_search()` already does its own filtering), so MMR only ever selects from an already-eligible pool. The redundant post-selection filter call is removed — filtering the inputs makes filtering the output unnecessary. `test_retrieve_neg_term_excludes_vec_hits` (v0.2.47) continues to pass unchanged; added `test_retrieve_neg_term_backfills_vec_hits_instead_of_starving` for the starvation case specifically.
+
+`pytest tests/` now runs 556 tests (up from 555). `mypy shoin/` remains clean.
 
 ### v0.2.72 (2026-07-07)
 **Fixed**: Ran `/code-review --effort high HEAD~1` against the v0.2.71 commit itself (8 finder angles, 1-vote recall-biased verify) — the first time this session invoked the code-review skill instead of doing purely manual audit passes, per the session's own personalized model-usage self-critique. It found that the v0.2.71 "commercial-grade quality" pass had introduced its own small gaps, ironic given the pass's subject matter.

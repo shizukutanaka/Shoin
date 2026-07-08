@@ -492,6 +492,14 @@ def retrieve(
     clean = strip_neg_terms(query) if negs else query
     bm25_hits = bm25_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
+    # bm25_search() already excludes negated-term hits internally; vector_search()
+    # has no query text to do the same, so filter it here. This must happen BEFORE
+    # fusion/MMR (not after, on the final k results): MMR spends its k-selection
+    # budget against this pool, so filtering post-selection can silently starve
+    # the result set below k (or to zero) when negated hits would otherwise have
+    # been MMR's top picks, even though valid candidates remain lower in the pool.
+    if negs:
+        vec_hits = _apply_neg_filter(vec_hits, negs)
     fused = rrf_fuse(bm25_hits, vec_hits)
     # Normalize RRF scores to [0,1] before lexical rerank so the weight=0.3
     # blend ratio is calibrated correctly. Without this, RRF scores (~0.01-0.03)
@@ -503,8 +511,4 @@ def retrieve(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    results = mmr(rerank(clean, fused), k)
-    # Apply negative-term filter after fusion so vector hits are also excluded.
-    if negs:
-        results = _apply_neg_filter(results, negs)
-    return results
+    return mmr(rerank(clean, fused), k)

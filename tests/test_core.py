@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.72")
+        self.assertEqual(VERSION, "0.2.73")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4330,7 +4330,7 @@ class TestNegTerms(unittest.TestCase):
             self.assertFalse(any("legacy" in t for t in texts), "negated hit should be excluded")
 
     def test_retrieve_neg_term_excludes_vec_hits(self) -> None:
-        """Negative-term filter applies after fusion so vector hits are also excluded."""
+        """Negative-term filter excludes vector hits too, not just BM25 hits."""
         with make_store() as s:
             nb_id = s.create_notebook("neg-vec").id
             src = s.add_source(nb_id, "txt", "doc", "mem://d", "sha-d")
@@ -4343,6 +4343,46 @@ class TestNegTerms(unittest.TestCase):
                 any("legacy" in h.text for h in hits),
                 "vector hits containing negated term must be excluded",
             )
+
+    def test_retrieve_neg_term_backfills_vec_hits_instead_of_starving(self) -> None:
+        """Regression: the neg-term filter must run BEFORE mmr()'s k-selection,
+        not after. Before the fix, vector_search() results were never filtered
+        until after mmr(rerank(...), k) had already spent its k-selection budget
+        on the unfiltered pool. If the negated-term chunks happened to have the
+        highest vector similarity, mmr() picked exactly those k slots, the
+        post-hoc filter then removed all of them, and retrieve() returned an
+        empty list even though clean, relevant chunks existed lower in the pool.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-vec-starve").id
+            src = s.add_source(nb_id, "txt", "doc", "mem://d", "sha-d")
+            # None of these chunks contain the BM25 query term "書院", so bm25_hits
+            # is empty and ranking is driven entirely by vector similarity. All six
+            # share the same prefix so MMR's bigram-overlap diversity term treats
+            # them as equally redundant with each other regardless of the
+            # legacy/clean suffix — otherwise MMR's own diversity mechanism could
+            # accidentally paper over the bug by disfavoring near-duplicate legacy
+            # chunks for unrelated reasons.
+            texts = [
+                "chunk about the topic. legacy marker here.",
+                "chunk about the topic. legacy marker here too.",
+                "chunk about the topic. legacy marker present now.",
+                "chunk about the topic. clean marker here.",
+                "chunk about the topic. clean marker here too.",
+                "chunk about the topic. clean marker present now.",
+            ]
+            s.add_chunks(src.id, texts)
+            chunks = s.chunks_for_notebook(nb_id)
+            for c in chunks:
+                # "legacy" chunks rank highest by cosine similarity; "clean" chunks
+                # rank lower but are still well within the retrieval pool (pool =
+                # max(k*3, 12) = 12, comfortably above these 6 chunks).
+                vec = [1.0, 0.0] if "legacy" in c.text else [0.9, 0.1]
+                s.set_embedding(c.id, vec)
+            hits = retrieve(s, nb_id, "書院 -legacy", query_vec=[1.0, 0.0], k=3)
+            self.assertTrue(hits, "must backfill from clean chunks instead of returning empty")
+            self.assertFalse(any("legacy" in h.text for h in hits))
+            self.assertTrue(all("clean" in h.text for h in hits))
 
 
 class TestBM25FTSLikeMerge(unittest.TestCase):
