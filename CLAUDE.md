@@ -291,7 +291,8 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
   - GET `/` → static index.html
   - GET/POST/DELETE `/api/notebooks/*` → CRUD
   - POST `/api/notebooks/{id}/sources` → ingest (file upload or URL)
-  - GET `/api/notebooks/{id}/messages` → chat history
+  - GET `/api/notebooks/{id}` → full notebook payload; chat history is embedded as its `"messages"` array (there is no dedicated GET route for messages alone — a prior version of this doc incorrectly claimed one existed, v0.2.75)
+  - DELETE `/api/notebooks/{id}/messages` → clear chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
   - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
   - GET/POST `/api/health` → LLM status, embedding model
@@ -311,7 +312,12 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.74
+## Version History: v0.1.37 → v0.2.75
+
+### v0.2.75 (2026-07-08)
+**Fixed (docs)**: A third background audit round found that this file's own "Key Files & Sections" → `server.py` route list (the paragraph directly above "Version History") documented `GET /api/notebooks/{id}/messages → chat history` as a real endpoint — it never existed. The only route matching that path is `DELETE /api/notebooks/{id}/messages` (clear chat history, `server.py` line 211); chat history is actually delivered embedded as the `"messages"` array inside the combined `GET /api/notebooks/{id}` payload (`_notebook_json()`), and `index.html` confirms the frontend never calls the documented path for a GET. Anyone — a developer, an external script, or another agent — taking this doc at face value and issuing `GET /api/notebooks/1/messages` would get HTTP 405 `METHOD_NOT_ALLOWED` (the DELETE route's pattern matches the path, so `_dispatch()`'s wrong-verb branch fires) instead of the chat history they expected, with no hint from the response that the path itself was never real. Corrected the route list to describe actual behavior; no code changed, since the combined-payload design is the correct one (matches v0.2.74's finding that the CLI's own `messages list` reads the same `store.list_messages()` rather than a dedicated endpoint).
+
+### v0.2.74 (2026-07-08)
 
 ### v0.2.74 (2026-07-08)
 **Feature**: `shoin messages list <notebook_id>` — a second background audit round (explicitly briefed to avoid re-checking anything already fixed, including v0.2.73) found that `cli.py`'s own module docstring claims "the CLI exposes every core capability so the product is fully usable headless (REQ-103)," a claim v0.2.68 acted on directly for notes and sources — but the `messages` subcommand only ever had a `clear` action, never a `list`. A headless (SSH-only, no browser) user could destroy a notebook's chat history but never read it back; the only workaround was `shoin export --format md`, which dumps the entire notebook (sources, notes, studio outputs, chat) rather than just the conversation log, and isn't documented anywhere as the intended substitute.
