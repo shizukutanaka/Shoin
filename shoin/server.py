@@ -240,11 +240,16 @@ class _Handler(BaseHTTPRequestHandler):
         """
         host = self.headers.get("Host") or ""
         if _hostname_of(host) not in _ALLOWED_HOSTNAMES:
-            self._error(403, "SECURITY_HOST_NOT_ALLOWED", f"unexpected Host: {host!r}")
+            # _safe_error, not _error: this runs before _dispatch()'s try/except
+            # even begins, so a dead-connection failure here (e.g. a rebinding
+            # probe that closed its socket before the response arrived) would
+            # otherwise propagate as a raw unhandled traceback — an unguarded
+            # single fault, not even the double-fault v0.2.89 fixed downstream.
+            self._safe_error(403, "SECURITY_HOST_NOT_ALLOWED", f"unexpected Host: {host!r}")
             return True
         origin = self.headers.get("Origin")
         if origin and method != "GET" and _hostname_of(origin) not in _ALLOWED_HOSTNAMES:
-            self._error(403, "SECURITY_CROSS_ORIGIN_BLOCKED", f"cross-site origin: {origin!r}")
+            self._safe_error(403, "SECURITY_CROSS_ORIGIN_BLOCKED", f"cross-site origin: {origin!r}")
             return True
         return False
 

@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.89")
+        self.assertEqual(VERSION, "0.2.90")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3705,6 +3705,26 @@ class TestServerSSE(unittest.TestCase):
 
         def _raise_dead_connection(*a, **kw):
             raise ConnectionResetError("client already gone")
+        handler._error = _raise_dead_connection  # type: ignore[assignment]
+
+        handler._dispatch("GET")  # must not raise
+
+    def test_reject_cross_site_survives_dead_connection_on_error_write(self) -> None:
+        """_reject_cross_site() runs BEFORE _dispatch()'s try/except even
+        begins, so a dead-connection failure while sending its 403 rejection
+        (e.g. a DNS-rebinding probe whose client already closed the socket)
+        was an unguarded SINGLE fault, not even the double-fault v0.2.89
+        fixed downstream — _reject_cross_site() still called raw _error()
+        instead of _safe_error() after that fix was added."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        handler.path = "/api/health"
+        handler._query = {}
+        handler.headers = {"Host": "evil.example"}
+
+        def _raise_dead_connection(*a, **kw):
+            raise BrokenPipeError("client already disconnected before response could be sent")
         handler._error = _raise_dead_connection  # type: ignore[assignment]
 
         handler._dispatch("GET")  # must not raise

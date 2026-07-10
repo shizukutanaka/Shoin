@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.89
+## Version History: v0.1.37 → v0.2.90
+
+### v0.2.90 (2026-07-08)
+**Fixed**: An eighteenth background audit round, specifically hunting for more instances of the v0.2.89 double-fault pattern, found `_reject_cross_site()` (`server.py`) still called raw `self._error()` instead of the newly-added `self._safe_error()` at both of its call sites. This is worse than the v0.2.89 case: `_reject_cross_site()` runs *before* `_dispatch()`'s try/except block even begins (line 252, `if self._reject_cross_site(method): return`), so a dead-connection failure while sending its 403 rejection isn't a double fault — it's a completely **unguarded single fault**, propagating straight out of `_dispatch()`/`do_GET` as a raw unhandled traceback.
+
+- **Concrete impact**: a client that sends a request with a spoofed/rebound `Host` header (or any request hitting the DNS-rebinding/CSRF guard, spec.md STRIDE) and closes its socket before the 403 response arrives — realistic for automated rebinding probes or a hung-up connection — triggers exactly the crash class v0.2.19's catch-all was built to prevent, on a code path that predates entering that catch-all entirely.
+- Reproduced directly: mocked `_error()` to raise `BrokenPipeError` and called `_dispatch("GET")` with a disallowed `Host` header — the exception propagated uncaught on the pre-fix code.
+- Fix: both `self._error(...)` calls in `_reject_cross_site()` now use `self._safe_error(...)`, matching the four call sites already converted in `_dispatch()`'s own except branches.
+- 1 regression test added; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 579 tests (up from 578). `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.89 (2026-07-08)
 **Fixed**: A seventeenth background audit round found `_dispatch()`'s (`server.py`) v0.2.19 catch-all exception handler could itself throw and escape uncaught — the exact class of crash that changelog entry claimed to have eliminated. All four `except` branches (`StoreError`/`IngestError`/`LLMError`/generic `Exception`) call `self._error(...)` to write an error response. If the *original* exception was itself a client disconnect (`BrokenPipeError`/`ConnectionResetError` — realistic under `generation_lock`, v0.2.70: a request queued behind an in-progress generation whose client gave up and closed the socket before the response could be written), the fallback `self._error(...)` performs a second write to the same dead socket, raising the same exception class again — this time completely outside any try/except, propagating through `do_GET`/`do_POST` as a genuine unhandled traceback.
