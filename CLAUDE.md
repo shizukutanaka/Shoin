@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.102
+## Version History: v0.1.37 → v0.2.103
+
+### v0.2.103 (2026-07-08)
+**Fixed**: A thirty-first background audit round found the v0.2.102 fix for `_file_config()` was itself incomplete — it only filtered JSON `null`, the specific case investigated that round, not the general principle its own comment claimed ("behaves like key not present... matching this function's own documented 'config.json is optional' contract"). Any other non-string JSON value — `true`/`false`, a list, a dict — was still blindly `str()`-coerced into a garbage setting string (`"True"`, `"['qwen3:4b']"`, `"{'a': 1}"`) instead of being treated as absent.
+
+- **Concrete impact**: a user hand-editing `~/.config/shoin/config.json` making the natural mistake of wrapping a value in an array (e.g. copying from an array-valued example, `{"SHOIN_LLM_MODEL": ["qwen3:4b"]}`) got `llm_model() == "['qwen3:4b']"`, sent verbatim as the `"model"` field in every `/chat/completions` request — breaking all LLM generation with an opaque HTTP error and zero diagnostic pointing back to the config file.
+- Live-reproduced: `{"SHOIN_LLM_MODEL": ["qwen3:4b"], "SHOIN_LANG": true, "SHOIN_DATA_DIR": {"a": 1}}` produced exactly the garbage strings described above pre-fix.
+- Fix: generalized the filter to explicitly allow only `str`/`int`/`float` scalars (checking `bool` first and excluding it, since `bool` is an `int` subclass in Python) and reject `None`/`list`/`dict` entirely. Plain unquoted numbers are deliberately still allowed through (`{"SHOIN_PORT": 8080}` is a natural, common way to write a port number in JSON) — confirmed this still works correctly alongside the new rejections.
+- 1 regression test added (`test_config_json_non_string_scalar_and_container_values_ignored`), covering list/bool/dict rejection and legitimate-int acceptance in one pass; verified fail-then-pass via `git stash` as with every fix this session. The v0.2.102 null-specific test continues to pass unchanged.
+
+`pytest tests/` now runs 594 tests (up from 593). `mypy shoin/` and `ruff check shoin/config.py` remain clean.
 
 ### v0.2.102 (2026-07-08)
 **Fixed**: A thirtieth background audit round found `_file_config()` (`config.py`, v0.2.69) called `str(v)` unconditionally on every JSON value in config.json — a JSON `null` (a well-formed value, e.g. a user writing `{"SHOIN_EMBED_MODEL": null}` intending "unset," a natural JSON idiom) was coerced to the literal string `"None"` instead of being treated as absent. This silently produced a wrong, truthy setting value rather than falling through to env/built-in-default the way the function's own docstring implies for unset settings ("config.json is optional... callers always let a set environment variable take precedence").

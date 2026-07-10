@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.102")
+        self.assertEqual(VERSION, "0.2.103")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4921,6 +4921,40 @@ class TestConfigXDG(unittest.TestCase):
                         config_mod.llm_model(), "real-model",
                         "a real, non-null config.json value must still work",
                     )
+
+    def test_config_json_non_string_scalar_and_container_values_ignored(self) -> None:
+        """v0.2.102's null filter only covered null specifically — bool, list,
+        and dict JSON values were still blindly str()-coerced into garbage
+        setting strings (e.g. "['qwen3:4b']", "True", "{'a': 1}"). These must
+        all fall back to the built-in default like an absent key, matching
+        the "config.json is optional" contract this function documents.
+        Plain numbers (int/float) ARE allowed through unquoted, since
+        {"SHOIN_PORT": 8080} is a natural way to write a port in JSON.
+        """
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text(json.dumps({
+                "SHOIN_LLM_MODEL": ["qwen3:4b"],
+                "SHOIN_LANG": True,
+                "SHOIN_PORT": 8080,
+                "SHOIN_DATA_DIR": {"a": 1},
+            }))
+            env = dict(os.environ)
+            for k in ("SHOIN_LLM_MODEL", "SHOIN_LANG", "SHOIN_PORT", "SHOIN_DATA_DIR"):
+                env.pop(k, None)
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(config_mod.llm_model(), "qwen3:4b", "list value must be ignored")
+                    self.assertEqual(config_mod.ui_lang(), "ja", "bool value must be ignored")
+                    self.assertEqual(config_mod.port(), 8080, "a plain int value must still work")
+                    self.assertNotIn("{'a': 1}", str(config_mod.data_dir()), "dict value must be ignored")
 
 
 class TestNegTerms(unittest.TestCase):

@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.102"
+VERSION = "0.2.103"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -43,15 +43,25 @@ def _file_config() -> dict[str, str]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    # A JSON null (Python None) is a well-formed value, not a malformed file —
-    # but str(None) == "None", a truthy non-empty string that would silently
-    # become the actual setting value instead of falling through to env/default
-    # the way an absent key correctly does. Filter it out so null behaves like
-    # "key not present in config.json", matching this function's own documented
-    # "config.json is optional" contract.
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if v is not None}
+    # Every non-string JSON value is a well-formed value, not a malformed file —
+    # but blindly str()-ing it can silently produce a wrong-but-truthy setting
+    # instead of falling through to env/default the way an absent key correctly
+    # does (the v0.2.102 fix only caught null; this generalizes it): null and
+    # containers (list/dict) never correspond to a sensible scalar setting, so
+    # they're dropped entirely (behave like an absent key). bool is checked
+    # before the int/float allowlist since bool is an int subclass in Python —
+    # str(True) == "True" is not a value any setting expects. Plain numbers
+    # (int/float) ARE allowed through: {"SHOIN_PORT": 8080} without quotes is
+    # the natural, common way to write a port number in JSON.
+    result: dict[str, str] = {}
+    for k, v in data.items():
+        if v is None or isinstance(v, (bool, list, dict)):
+            continue
+        if isinstance(v, (str, int, float)):
+            result[str(k)] = str(v)
+    return result
 
 
 def _get(key: str, default: str) -> str:
