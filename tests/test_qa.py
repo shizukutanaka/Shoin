@@ -205,6 +205,29 @@ class TestContext(unittest.TestCase):
         # Fallback title must be "source-9999", not raise StoreError
         self.assertEqual(ctx.source_titles, ["source-9999"])
 
+    def test_build_context_fullwidth_digits_do_not_bypass_budget(self) -> None:
+        """A chunk of fullwidth digits/letters must not bypass the token budget.
+
+        Before chunk.py's _CJK_RANGES included the Fullwidth Forms alphanumeric
+        sub-ranges, estimate_tokens() undercounted a long run of fullwidth
+        digits to near-zero (one ordinary kanji in the same chunk made
+        cost > 0, which also disabled the zero-token-script char-based
+        fallback from v0.2.52), so build_context() let the entire block
+        through untruncated regardless of budget_tokens.
+        """
+        from shoin.search import Hit
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("fullwidth-budget-test")
+            src = s.add_source(nb.id, "txt", "doc", "t", "sha-fw")
+            text = "本" + "０" * 50000
+            h = Hit(chunk_id=1, source_id=src.id, text=text, score=1.0)
+            ctx = build_context(s, [h], budget_tokens=1000)
+        self.assertLess(
+            len(ctx.block), 2000,
+            "a 50000-char fullwidth-digit run must be truncated to fit the token budget",
+        )
+
     def test_build_context_second_chunk_exceeds_per_source_budget_breaks(self) -> None:
         """Second chunk that would exceed per_source budget must be excluded (qa.py line 165)."""
         from shoin.search import Hit

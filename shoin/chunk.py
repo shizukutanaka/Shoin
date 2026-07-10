@@ -20,6 +20,9 @@ _CJK_RANGES = (
     (0x3400, 0x4DBF),    # CJK ext A
     (0x4E00, 0x9FFF),    # CJK unified ideographs
     (0xF900, 0xFAFF),    # CJK compat
+    (0xFF10, 0xFF19),    # fullwidth digits ０-９
+    (0xFF21, 0xFF3A),    # fullwidth Latin uppercase Ａ-Ｚ
+    (0xFF41, 0xFF5A),    # fullwidth Latin lowercase ａ-ｚ
     (0xFF66, 0xFF9D),    # halfwidth katakana
     (0xAC00, 0xD7A3),    # Hangul syllables
     (0x20000, 0x2A6DF),  # CJK ext B (supplementary plane — rare/historical chars)

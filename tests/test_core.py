@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.106")
+        self.assertEqual(VERSION, "0.2.107")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1097,6 +1097,32 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(is_cjk("\U0002CEB0"), "first CJK Ext G char must be CJK")
         # U+1F600 (emoji, outside all CJK ranges) must NOT be CJK
         self.assertFalse(is_cjk("\U0001F600"), "emoji outside CJK ranges must not be CJK")
+
+    def test_is_cjk_fullwidth_digits_and_letters(self) -> None:
+        """Fullwidth digits/letters (U+FF10-19, FF21-3A, FF41-5A) must count as CJK.
+
+        These are extremely common in real Japanese documents (invoices, IDs,
+        prices, dates use zenkaku digit formatting as a standard convention).
+        Before this fix, estimate_tokens() counted a long run of fullwidth
+        digits as ~0 tokens (neither is_cjk() nor the ASCII-only _WORD_RE
+        matched them), silently defeating both _hard_split()'s chunk-size
+        cap and build_context()'s per-source token budget for any document
+        containing such a run.
+        """
+        self.assertTrue(is_cjk("０"), "fullwidth digit must be CJK")
+        self.assertTrue(is_cjk("９"), "fullwidth digit must be CJK")
+        self.assertTrue(is_cjk("Ａ"), "fullwidth uppercase Latin must be CJK")
+        self.assertTrue(is_cjk("ａ"), "fullwidth lowercase Latin must be CJK")
+        block = "項目" + "０１２３４５６７８９" * 1200
+        self.assertEqual(
+            estimate_tokens(block), len(block),
+            "a long run of fullwidth digits must not be undercounted to near-zero",
+        )
+        chunks = split_text(block)
+        self.assertGreater(
+            len(chunks), 1,
+            "an oversize block of fullwidth digits must actually be split into chunks",
+        )
 
     def test_sentence_split_on_fullwidth_semicolon(self) -> None:
         """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""
