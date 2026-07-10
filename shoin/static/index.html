@@ -416,10 +416,66 @@ async function openNotebook(id){
     cur = j; renderNotebook(); loadNotebooks();
   }catch(e){ toast(e.message); }
 }
+// Enters inline-rename mode for a source row. Factored out of the dblclick
+// handler so renderNotebook() can also call it to RESTORE an in-progress,
+// uncommitted edit after a re-render — every unrelated write in the app
+// (note add/delete, upload, studio generate, clear-chat, ...) calls
+// openNotebook() on success, which used to unconditionally tear down and
+// rebuild #srcList, silently discarding whatever the user was mid-typing in
+// a rename input elsewhere on the page with no warning.
+function startSourceRename(s, tt, row, prefillValue){
+  const nb = cur;  // capture notebook reference; cur may drift if user switches
+  const input = document.createElement("input");
+  input.type = "text"; input.className = "src-rename"; input.dataset.srcId = s.id;
+  input.value = prefillValue !== undefined ? prefillValue : s.title;
+  // Prevent clicks inside the input from propagating to row.onclick (showSource)
+  input.onclick = e => e.stopPropagation();
+  tt.replaceChildren(input, el("div","k", s.kind));
+  input.focus(); input.select();
+  let committed = false;
+  const commit = async () => {
+    if (committed) return; committed = true;
+    const newTitle = input.value.trim();
+    if (!newTitle || newTitle === s.title) { openNotebook(nb.id); return; }
+    input.disabled = true;
+    try {
+      await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
+      toast(t("src.rename.ok")); openNotebook(nb.id);
+    } catch(e) { toast(e.message); openNotebook(nb.id); }
+    finally { input.disabled = false; }
+  };
+  // relatedTarget check: if focus moves to another element within this row
+  // (e.g. the delete or refresh button), skip blur-commit so the button click
+  // fires normally on its own; the button's onclick rebuilds the DOM anyway.
+  input.onblur = e => { if (row.contains(e.relatedTarget)) return; commit(); };
+  input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(nb.id);} };
+  return input;
+}
 function renderNotebook(){
   $("#nbTitle").textContent = cur ? `${t("app.title")} — ${cur.name}` : t("app.title");
   $("#srcAdders").hidden = !cur;
-  const list = $("#srcList"); list.replaceChildren();
+  const list = $("#srcList");
+  // Preserve an in-progress, uncommitted rename edit across this rebuild (see
+  // startSourceRename's comment for why this is needed).
+  const activeRename = document.activeElement;
+  let pendingRename = null;
+  if (activeRename && activeRename.classList?.contains("src-rename") && list.contains(activeRename)) {
+    pendingRename = {
+      srcId: Number(activeRename.dataset.srcId),
+      value: activeRename.value,
+      selStart: activeRename.selectionStart,
+      selEnd: activeRename.selectionEnd,
+    };
+    // Removing a focused element from the DOM fires a native blur event.
+    // startSourceRename's onblur handler would treat that as the user
+    // navigating away and auto-commit the (uncommitted) edit via PATCH —
+    // firing right as this rebuild is about to restore the same edit,
+    // racing its own restoration. Detach the old handlers first: this input
+    // is being replaced by a fresh one below with fresh handlers regardless.
+    activeRename.onblur = null;
+    activeRename.onkeydown = null;
+  }
+  list.replaceChildren();
   srcIndex.clear();
   if (cur){
     cur.sources.forEach((s,i)=>{
@@ -428,33 +484,7 @@ function renderNotebook(){
       row.append(el("span","no",`S${i+1}`));
       const tt = el("span","t", s.title); tt.append(el("div","k", s.kind));
       // Inline title editing: double-click turns the span into an input
-      tt.ondblclick = async ev => {
-        ev.stopPropagation();
-        const nb = cur;  // capture notebook reference; cur may drift if user switches
-        const input = document.createElement("input");
-        input.type = "text"; input.className = "src-rename"; input.value = s.title;
-        // Prevent clicks inside the input from propagating to row.onclick (showSource)
-        input.onclick = e => e.stopPropagation();
-        tt.replaceChildren(input, el("div","k", s.kind));
-        input.focus(); input.select();
-        let committed = false;
-        const commit = async () => {
-          if (committed) return; committed = true;
-          const newTitle = input.value.trim();
-          if (!newTitle || newTitle === s.title) { openNotebook(nb.id); return; }
-          input.disabled = true;
-          try {
-            await api(`/api/sources/${s.id}`, {method:"PATCH", body:JSON.stringify({title:newTitle})});
-            toast(t("src.rename.ok")); openNotebook(nb.id);
-          } catch(e) { toast(e.message); openNotebook(nb.id); }
-          finally { input.disabled = false; }
-        };
-        // relatedTarget check: if focus moves to another element within this row
-        // (e.g. the delete or refresh button), skip blur-commit so the button click
-        // fires normally on its own; the button's onclick rebuilds the DOM anyway.
-        input.onblur = e => { if (row.contains(e.relatedTarget)) return; commit(); };
-        input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(nb.id);} };
-      };
+      tt.ondblclick = ev => { ev.stopPropagation(); startSourceRename(s, tt, row); };
       tt.setAttribute("title", t("src.rename"));
       row.append(tt);
       // Refresh button for URL sources
@@ -479,6 +509,13 @@ function renderNotebook(){
       row.setAttribute("aria-label", t("a11y.viewsrc") + s.title);
       row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showSource(s.id, s.title); } };
       list.append(row);
+      // Restore an in-progress rename AFTER the row is attached to the live
+      // DOM — input.focus() inside startSourceRename() is a no-op on a
+      // detached element, so this must run after list.append(row) above.
+      if (pendingRename && pendingRename.srcId === s.id) {
+        const restored = startSourceRename(s, tt, row, pendingRename.value);
+        restored.setSelectionRange(pendingRename.selStart, pendingRename.selEnd);
+      }
     });
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();

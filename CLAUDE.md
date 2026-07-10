@@ -312,7 +312,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.87
+## Version History: v0.1.37 → v0.2.88
+
+### v0.2.88 (2026-07-08)
+**Fixed**: A sixteenth background audit round found `renderNotebook()` (`index.html`) silently discarded an in-progress, uncommitted source-rename edit whenever ANY unrelated write elsewhere in the app succeeded — note add/delete, upload, studio generation, clear-chat, source refresh/delete — all call `openNotebook()` on success, which unconditionally tore down and rebuilt `#srcList` from scratch with no awareness that a `.src-rename` input was mid-edit.
+
+- Extracted the inline-rename entry logic into a reusable `startSourceRename(s, tt, row, prefillValue)` function (previously inlined only in the dblclick handler), so `renderNotebook()` can also call it to *restore* an uncommitted edit after a rebuild it didn't cause.
+- Two bugs surfaced and fixed during live Playwright verification of the restore itself (not found by static reading alone — CLAUDE.md's own rule to verify UI changes in a real browser before calling them done caught both):
+  1. Removing the old (still-focused) input via `list.replaceChildren()` fires a native `blur` event; the old input's own `onblur` handler treated that as "user navigated away" and auto-committed the uncommitted edit via `PATCH` mid-rebuild, racing the restoration and immediately undoing it. Fixed by detaching the old input's `onblur`/`onkeydown` handlers before removal — it's being replaced by a fresh input with fresh handlers regardless.
+  2. The restore call originally ran *before* the row was appended to the live DOM, so `input.focus()` inside `startSourceRename()` was a no-op (you cannot focus a detached element). Fixed by moving the restore call to after `list.append(row)`.
+- Verified live end-to-end against a real running server: (a) a background re-render while the rename input remains focused now preserves both the typed value and cursor position and keeps focus; (b) genuinely blurring the input (e.g. clicking into an unrelated form field) still correctly auto-commits via the pre-existing `onblur` handler, unchanged; (c) the normal dblclick → type → Enter → commit flow and a full add-note/delete-source smoke pass both complete with zero console/page errors.
+- No pytest regression test added — this project's test suite has no Playwright/browser-automation coverage (frontend changes are verified live per CLAUDE.md's own UI-testing rule, not via a persisted automated test, matching how prior UI-only fixes this session were verified and documented).
+
+`pytest tests/` still runs 576 tests (no Python files changed this round). `mypy shoin/` and `ruff check` remain clean (no Python changes).
 
 ### v0.2.87 (2026-07-08)
 **Fixed**: A fifteenth background audit round — after a systematic sweep confirmed every `except sqlite3.IntegrityError`/`OperationalError` in the codebase now classifies correctly (v0.2.53/86's fixes are complete, and `add_note`/`delete_note` already have the v0.2.39 TOCTOU guard) — found `refresh_source()` (`pipeline.py`) unconditionally passed the freshly re-extracted page `<title>` to `replace_chunks_for_source()`, silently overwriting any custom title the user had set via `PATCH /api/sources/{id}` (the "Source Title Edit" feature, added in the *same* v0.2.35 commit as refresh). `refresh_source()`'s own docstring only promises to update *content* ("Re-fetch a URL source in-place, replacing all chunks... while keeping the source ID"); it says nothing about title, yet title was clobbered on every single refresh regardless.
