@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.81")
+        self.assertEqual(VERSION, "0.2.82")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2723,6 +2723,64 @@ class TestQA(unittest.TestCase):
                 ):
                     with self.assertRaises(_StoreError) as cm:
                         ask(s, _NoLLM(), nb_id, "notebook", persist=False)
+            self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+
+    def test_studio_generate_build_context_db_lock_raises_store_error(self) -> None:
+        """studio.generate() must have the same sqlite3.OperationalError guard
+        around build_context() that qa.ask() has had since v0.2.44 — it was found
+        to be missing (a bare OperationalError propagated to server.py's
+        catch-all, returning HTTP 500 with only type(exc).__name__ as the message
+        instead of ask()'s clean HTTP 400 SYSTEM_DB_LOCKED with the actual lock
+        text) despite both functions calling the exact same build_context() for
+        the exact same reason."""
+        import sqlite3 as _sqlite3
+        from unittest.mock import patch
+
+        from shoin.store import StoreError as _StoreError
+        from shoin.studio import generate
+
+        class _NoLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                return "unused"
+
+        with make_store() as s:
+            nb_id = seed(s)
+            with patch(
+                "shoin.studio.build_context",
+                side_effect=_sqlite3.OperationalError("database is locked"),
+            ):
+                with self.assertRaises(_StoreError) as cm:
+                    generate(s, _NoLLM(), nb_id, "briefing", persist=False)
+            self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+
+    def test_suggest_questions_build_context_db_lock_raises_store_error(self) -> None:
+        """suggest_questions() has the identical unguarded build_context() call
+        as generate() did — same fix, same reasoning. A DB lock must raise
+        SYSTEM_DB_LOCKED, not be silently swallowed into [] the way this
+        function's own except LLMError does (that's specifically for "LLM
+        unreachable", a different, genuinely-best-effort failure class)."""
+        import sqlite3 as _sqlite3
+        from unittest.mock import patch
+
+        from shoin.store import StoreError as _StoreError
+        from shoin.studio import suggest_questions
+
+        class _NoLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                return "unused"
+
+        with make_store() as s:
+            nb_id = seed(s)
+            with patch(
+                "shoin.studio.build_context",
+                side_effect=_sqlite3.OperationalError("database is locked"),
+            ):
+                with self.assertRaises(_StoreError) as cm:
+                    suggest_questions(s, _NoLLM(), nb_id)
             self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
 
 

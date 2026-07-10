@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.81
+## Version History: v0.1.37 → v0.2.82
+
+### v0.2.82 (2026-07-08)
+**Fixed**: A tenth background audit round, specifically hunting for more instances of the v0.2.81 "sibling functions, inconsistent guard" pattern, found `studio.py`'s `generate()` and `suggest_questions()` both lacked the `sqlite3.OperationalError` guard around `build_context()` that `qa.ask()` has had since v0.2.44. All three functions call the exact same `build_context()` for the exact same reason (a `get_source()` inside it can hit SQLite's `busy_timeout` under WAL lock contention), but only `ask()` had ever been given the fix.
+
+- **Concrete impact**: under lock contention, `POST /api/notebooks/{id}/studio` and `GET /api/notebooks/{id}/questions` propagated a bare `sqlite3.OperationalError` into `server.py`'s catch-all (`_dispatch()`), returning HTTP 500 with `code="SYSTEM_INTERNAL_ERROR"` and a message of just `type(exc).__name__` — literally the string `"OperationalError"`, since that branch passes `type(exc).__name__` rather than `str(exc)`, dropping the actual "database is locked" diagnostic text entirely. `ask()`'s equivalent failure returns a clean HTTP 400 `SYSTEM_DB_LOCKED` with the real message.
+- Fix: both functions now use the identical `try/except sqlite3.OperationalError → raise StoreError("SYSTEM_DB_LOCKED", ...)` pattern as `ask()`. For `suggest_questions()` specifically: a DB lock is a different failure class from the `LLMError` this function already swallows into `[]` (that catch is for "LLM unreachable," a deliberate best-effort degradation per its own docstring) — a DB lock now raises rather than silently returning an empty suggestion list indistinguishable from "notebook has no sources."
+- 2 regression tests added (`generate()` and `suggest_questions()`, mirroring the existing `ask()` test); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 571 tests (up from 569). `mypy shoin/` and `ruff check shoin/studio.py` remain clean.
 
 ### v0.2.81 (2026-07-08)
 **Fixed**: A ninth background audit round, deliberately moved to fresh territory now that the citation-question-detection area was structurally closed in v0.2.80, found that `refresh_source()` (`pipeline.py`) completely bypassed the `MAX_CHUNKS_PER_NOTEBOOK` DoS cap (v0.2.70's spec.md STRIDE control). `index_source()` checks `existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK` before committing a new source; `refresh_source()` — which also inserts new chunks, via `store.replace_chunks_for_source()` — never referenced `MAX_CHUNKS_PER_NOTEBOOK` at all. Confirmed via grep: the constant appears in `pipeline.py` only inside `index_source()`.

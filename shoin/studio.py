@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
@@ -164,7 +165,16 @@ def generate(
     hits = overview_hits(store, notebook_id)
     if not hits:
         raise StoreError("NOTEBOOK_EMPTY", "notebook has no sources to ground on")
-    context = build_context(store, hits, budget_tokens=STUDIO_BUDGET_TOKENS)
+    # Mirrors qa.ask()'s identical guard (v0.2.44) around the same build_context()
+    # call: a bare sqlite3.OperationalError from a WAL busy_timeout would otherwise
+    # propagate to server.py's catch-all, which returns HTTP 500 with only
+    # type(exc).__name__ as the message (the real "database is locked" text is
+    # dropped) instead of ask()'s clean HTTP 400 SYSTEM_DB_LOCKED with the actual
+    # lock message.
+    try:
+        context = build_context(store, hits, budget_tokens=STUDIO_BUDGET_TOKENS)
+    except sqlite3.OperationalError as exc:
+        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
     sh = _t("sources_header")
     ih = _t("instructions_header")
     cn = _t("citation_note")
@@ -189,7 +199,16 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     hits = overview_hits(store, notebook_id, per_source=2)
     if not hits:
         return []
-    context = build_context(store, hits, budget_tokens=1600)
+    # Same guard as generate() above and qa.ask() (v0.2.44) around the identical
+    # build_context() call. A DB lock is a different failure class from the
+    # LLMError this function already swallows into [] below (that's specifically
+    # for "LLM unreachable", a best-effort degradation) — raise so the caller gets
+    # a diagnosable SYSTEM_DB_LOCKED error instead of a silent, misleading "no
+    # suggestions" result indistinguishable from "no sources".
+    try:
+        context = build_context(store, hits, budget_tokens=1600)
+    except sqlite3.OperationalError as exc:
+        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
     sh = _t("sources_header")
     prompt = _t("question_prompt").format(n=n)
     user = f"## {sh}\n{context.block}\n\n{prompt}"
