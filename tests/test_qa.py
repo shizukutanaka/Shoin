@@ -453,6 +453,35 @@ class TestMultiTurn(unittest.TestCase):
             expanded = expand_query("短い", msgs)
             self.assertIn("問2", expanded, "expand_query must anchor to the real last question")
 
+    def test_empty_assistant_reply_history_does_not_break_role_alternation(self) -> None:
+        """The exact scenario from test_empty_assistant_reply_is_not_treated_as_orphan,
+        carried all the way into build_messages(): history_messages() correctly
+        keeps the trailing user turn (its assistant reply was persisted empty),
+        but build_messages() must not then place a second "user" role directly
+        after it — [..., user:問2, user:<new question>] violates the OpenAI API
+        role-alternation invariant this codebase already fixed twice (v0.1.52,
+        v0.2.20) for other causes of consecutive same-role turns.
+        """
+        s, nb = seeded_store()
+        with s:
+            s.add_message(nb, "user", "問1")
+            s.add_message(nb, "assistant", "答え1")
+            s.add_message(nb, "user", "問2")
+            s.add_message(nb, "assistant", "")  # persisted empty, e.g. zero-token reply
+            hist = history_messages(s, nb)
+            self.assertEqual(hist[-1]["role"], "user", "sanity: history ends in a user turn")
+            ctx = build_context(s, [])
+            msgs = build_messages("問3", ctx, hist)
+            roles = [m["role"] for m in msgs]
+            for a, b in zip(roles, roles[1:]):
+                self.assertNotEqual(a, b, f"consecutive same-role turns in {roles}")
+            # The trailing user turn itself is dropped from the prompt (its
+            # content already reached retrieval via expand_query(), called by
+            # the real ask()/server.py callers with this same history before
+            # build_messages()), but the final new-question turn must survive.
+            self.assertEqual(roles[-1], "user")
+            self.assertIn("問3", msgs[-1]["content"])
+
     def test_query_expand_short_followup(self) -> None:
         """Short follow-up gets the last user turn prepended for retrieval."""
         history: list[dict[str, str]] = [

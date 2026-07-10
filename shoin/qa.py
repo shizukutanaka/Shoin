@@ -285,10 +285,20 @@ def history_messages(
 def build_messages(
     question: str, context: GroundedContext, history: list[Message] | None = None
 ) -> list[Message]:
+    hist = list(history or [])
+    # A trailing user turn in history (its assistant reply was persisted empty —
+    # see history_messages()'s has_trailing_answer comment) must not be followed
+    # directly by the new user turn below: that would give the LLM two
+    # consecutive user messages, violating OpenAI API alternation. Callers
+    # already pass this same history to expand_query() *before* calling this
+    # function, so retrieval expansion still sees and uses the trailing turn;
+    # only the prompt sent to the LLM needs the duplicate role dropped.
+    if hist and hist[-1]["role"] == "user":
+        hist = hist[:-1]
     user = _t("user_prompt_template").format(context=context.block, question=question)
     return [
         {"role": "system", "content": _t("system_prompt")},
-        *(history or []),
+        *hist,
         {"role": "user", "content": user},
     ]
 
