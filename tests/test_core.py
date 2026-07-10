@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.118")
+        self.assertEqual(VERSION, "0.2.119")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1207,6 +1207,29 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         overlap = _tail(chunks[0], CHUNK_OVERLAP)
         self.assertLessEqual(estimate_tokens(overlap), CHUNK_OVERLAP)
+
+    def test_tail_non_ascii_alphabetic_scripts_do_not_undercount(self) -> None:
+        """_tail() must agree with estimate_tokens() for non-ASCII, non-CJK
+        alphabetic text (accented Latin, Cyrillic, Greek, ...) — same defect
+        class as test_non_ascii_alphabetic_scripts_do_not_undercount in
+        test_qa.py's TestTruncateTokens, for the sibling backward-scanning
+        function. Before this fix, ch.isalnum() (Unicode-wide) merged runs
+        that _WORD_RE (ASCII-only, estimate_tokens()'s actual cost model)
+        would split at each non-ASCII letter, so _tail() under-counted and
+        returned more text than the requested token budget allowed.
+        """
+        from shoin.chunk import _tail
+
+        text = (
+            "The café in Zürich serves crème brûlée and naïve tourists "
+            "love café Beyoncé Müller "
+        ) * 5
+        for tokens in (5, 50, 64):
+            out = _tail(text, tokens)
+            self.assertEqual(
+                estimate_tokens(out), tokens,
+                f"_tail(text, {tokens}) must cost exactly {tokens} tokens",
+            )
 
     def test_sentence_split_on_fullwidth_semicolon(self) -> None:
         """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""

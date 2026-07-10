@@ -1034,6 +1034,32 @@ class TestTruncateTokens(unittest.TestCase):
         # generous limit — this must not regress the existing behavior.
         self.assertEqual(_truncate_tokens("parse_user_input", 5), "parse_user_input")
 
+    def test_non_ascii_alphabetic_scripts_do_not_undercount(self) -> None:
+        """_truncate_tokens() must agree with estimate_tokens() (the authoritative
+        cost function _WORD_RE/is_cjk() define) for non-ASCII, non-CJK alphabetic
+        text — accented Latin (café, Zürich, Müller), Cyrillic, Greek, etc.
+
+        Before this fix, the run-detection check used ch.isalnum() — Unicode-wide,
+        true for these scripts — while _WORD_RE (estimate_tokens()'s actual cost
+        model) is ASCII-only. A word like "Müller" was scanned as ONE run (flat
+        1-token base cost) by _truncate_tokens(), but _WORD_RE.findall("Müller")
+        matches ['M', 'ller'] — TWO separate 1-token runs — so _truncate_tokens()
+        under-counted and let more text through than the caller's limit allowed.
+        """
+        from shoin.chunk import estimate_tokens
+        from shoin.qa import _truncate_tokens
+
+        text = (
+            "The café in Zürich serves crème brûlée and naïve tourists "
+            "love café Beyoncé Müller "
+        ) * 5
+        for limit in (5, 50):
+            out = _truncate_tokens(text, limit)
+            self.assertEqual(
+                estimate_tokens(out), limit,
+                f"_truncate_tokens(text, {limit}) must cost exactly {limit} tokens",
+            )
+
 
 class TestValidateCitationsEdgeCases(unittest.TestCase):
     def test_negative_n_sources_all_invalid(self) -> None:

@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .chunk import _LONG_RUN_THRESHOLD, estimate_tokens, is_cjk
+from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, estimate_tokens, is_cjk
 from .citation import CitationReport, make_report
 from .config import TOP_K, ui_lang
 from .llm import LLMError, Message
@@ -139,7 +139,7 @@ def _truncate_tokens(text: str, limit: int) -> str:
         if is_cjk(ch):
             acc += 1
             run_len = 0
-        elif ch.isalnum() or ch == '_':
+        elif _is_word_char(ch):
             run_len += 1
             # First char of a run costs its flat 1-token base (matches
             # chunk.estimate_tokens()'s word-run model). A run longer than

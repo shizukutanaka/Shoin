@@ -50,6 +50,20 @@ def is_cjk(ch: str) -> bool:
     return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
 
 
+def _is_word_char(ch: str) -> bool:
+    """True for exactly the characters _WORD_RE ([A-Za-z0-9_]) matches.
+
+    _tail() and _truncate_tokens() scan character-by-character to detect word
+    runs and must agree with _WORD_RE (the source of truth estimate_tokens()
+    uses) on run boundaries. Python's str.isalnum() is Unicode-wide — true
+    for Cyrillic/Greek/accented-Latin/etc. — so using it directly let those
+    scripts merge into a single run that _WORD_RE would split at each
+    non-ASCII letter, undercounting the true token cost and letting more
+    text through than the caller's limit allows.
+    """
+    return ch.isascii() and (ch.isalnum() or ch == "_")
+
+
 def _run_token_cost(n: int) -> int:
     """Token cost of a single word-ish run of length *n* (see _LONG_RUN_THRESHOLD)."""
     if n <= _LONG_RUN_THRESHOLD:
@@ -148,7 +162,7 @@ def _tail(text: str, tokens: int) -> str:
             acc += 1
             if acc >= tokens:
                 return text[i:].lstrip()
-        elif ch.isalnum() or ch == '_':
+        elif _is_word_char(ch):
             run_len += 1
             # A normal-length word/identifier is only credited once fully
             # scanned (at its left boundary, below) so a short word is never
