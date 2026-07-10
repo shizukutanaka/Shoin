@@ -184,6 +184,20 @@ def refresh_source(
     texts = split_text(extracted.text)
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
+    # spec.md STRIDE DoS control (same guard as index_source): cap total chunks
+    # per notebook. Subtract this source's own current chunk count first — a
+    # refresh REPLACES this source's chunks, it doesn't add a new source, so the
+    # check must be against the notebook total *excluding* what's about to be
+    # replaced, or a same-size (or shrinking) refresh at/near the cap would be
+    # wrongly rejected.
+    notebook_chunks = store.counts(src.notebook_id)["chunks"]
+    this_source_chunks = len(store.text_chunks_for_source(source_id))
+    if notebook_chunks - this_source_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+        raise IngestError(
+            "INGEST_NOTEBOOK_FULL",
+            f"notebook chunk limit exceeded: {notebook_chunks - this_source_chunks} existing"
+            f" (excl. this source) + {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
+        )
     # Pass sha256/title to replace_chunks_for_source so the metadata update happens
     # in the SAME transaction as the chunk replacement — eliminating the two-phase
     # commit gap that previously left new chunks committed with stale sha256/title

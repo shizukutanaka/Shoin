@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.80")
+        self.assertEqual(VERSION, "0.2.81")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4018,6 +4018,73 @@ class TestChunkLimit(unittest.TestCase):
                     import os
 
                     os.unlink(path)
+
+    def test_refresh_source_raises_when_limit_exceeded(self) -> None:
+        """refresh_source() must enforce MAX_CHUNKS_PER_NOTEBOOK too — it was
+        found to bypass the cap entirely (index_source() checked it, but
+        refresh_source(), which also inserts new chunks via
+        replace_chunks_for_source(), never did). A refreshed URL source that
+        grows over time had no ceiling, fully defeating the documented
+        per-notebook DoS cap for any source reachable via refresh."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted, IngestError
+        from shoin.pipeline import index_source, refresh_source
+
+        with patch("shoin.pipeline.MAX_CHUNKS_PER_NOTEBOOK", 5):
+            with make_store() as s:
+                nb_id = s.create_notebook("refresh-limit-nb").id
+                src1 = s.add_source(nb_id, "txt", "a", "mem://a", "sha-a")
+                s.add_chunks(src1.id, [f"chunk {i}" for i in range(3)])
+                original = Extracted(
+                    kind="url", title="b", text="one short chunk of text here.",
+                    origin="http://refresh-limit.test", sha256="sha-b",
+                )
+                with patch("shoin.pipeline.extract_url", return_value=original):
+                    res0 = index_source(s, nb_id, "http://refresh-limit.test")
+                self.assertEqual(s.counts(nb_id)["chunks"], 4, "3 + 1 = at the 5 cap minus 1")
+                grown = Extracted(
+                    kind="url", title="b2", text="irrelevant, split_text is patched below",
+                    origin="http://refresh-limit.test", sha256="sha-b2",
+                )
+                # Patch split_text directly rather than crafting real text long enough
+                # to force multiple 512-token chunks — deterministic regardless of
+                # tokenizer internals.
+                with patch("shoin.pipeline.extract_url", return_value=grown), \
+                     patch("shoin.pipeline.split_text", return_value=["c1", "c2", "c3"]):
+                    with self.assertRaises(IngestError) as cm:
+                        refresh_source(s, res0.source.id)
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+
+    def test_refresh_source_same_size_at_cap_not_wrongly_rejected(self) -> None:
+        """The fix must subtract the source's OWN existing chunk count before
+        checking the cap — otherwise a same-size (or shrinking) refresh of a
+        source already counted in the notebook total would be wrongly rejected
+        even though it doesn't grow the notebook past the cap at all."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        with patch("shoin.pipeline.MAX_CHUNKS_PER_NOTEBOOK", 4):
+            with make_store() as s:
+                nb_id = s.create_notebook("refresh-samesize-nb").id
+                src1 = s.add_source(nb_id, "txt", "a", "mem://a", "sha-a")
+                s.add_chunks(src1.id, [f"chunk {i}" for i in range(3)])
+                original = Extracted(
+                    kind="url", title="b", text="one short chunk of text here.",
+                    origin="http://refresh-samesize.test", sha256="sha-b",
+                )
+                with patch("shoin.pipeline.extract_url", return_value=original):
+                    res0 = index_source(s, nb_id, "http://refresh-samesize.test")
+                self.assertEqual(s.counts(nb_id)["chunks"], 4, "exactly at the cap")
+                same_size = Extracted(
+                    kind="url", title="b2", text="a different but equally short chunk.",
+                    origin="http://refresh-samesize.test", sha256="sha-b2",
+                )
+                with patch("shoin.pipeline.extract_url", return_value=same_size):
+                    result = refresh_source(s, res0.source.id)  # must not raise
+                self.assertEqual(result.n_chunks, 1)
 
 
 class TestExport(unittest.TestCase):

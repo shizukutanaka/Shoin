@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.80
+## Version History: v0.1.37 → v0.2.81
+
+### v0.2.81 (2026-07-08)
+**Fixed**: A ninth background audit round, deliberately moved to fresh territory now that the citation-question-detection area was structurally closed in v0.2.80, found that `refresh_source()` (`pipeline.py`) completely bypassed the `MAX_CHUNKS_PER_NOTEBOOK` DoS cap (v0.2.70's spec.md STRIDE control). `index_source()` checks `existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK` before committing a new source; `refresh_source()` — which also inserts new chunks, via `store.replace_chunks_for_source()` — never referenced `MAX_CHUNKS_PER_NOTEBOOK` at all. Confirmed via grep: the constant appears in `pipeline.py` only inside `index_source()`.
+
+- **Concrete impact**: a URL source that grows over time (a paginated archive, a feed, an attacker-controlled endpoint) can be refreshed repeatedly via `shoin source refresh` or `POST /api/sources/{id}/refresh` with no ceiling on how many chunks each refresh adds, fully defeating the documented per-notebook cap for any source reachable via refresh — not just a theoretical gap, reproduced live with the cap monkeypatched to 5: `replace_chunks_for_source()` happily inserted 20 chunks into an already-over-cap notebook.
+- Fix: `refresh_source()` now computes `notebook_chunks - this_source_chunks + len(texts)` before replacing — subtracting the source's own current chunk count first, since a refresh *replaces* that source's chunks rather than adding a new source. Without the subtraction, a same-size (or shrinking) refresh of a source already counted in the notebook total would be wrongly rejected even though it doesn't grow the notebook past the cap at all; verified this directly (a refresh at exactly the cap, replacing 4 chunks with 1, succeeds without raising).
+- 2 regression tests added: the over-cap growing-refresh case correctly raises `INGEST_NOTEBOOK_FULL`, and the same-size-at-cap case correctly does not. Verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 569 tests (up from 567). `mypy shoin/` and `ruff check shoin/pipeline.py` remain clean.
 
 ### v0.2.80 (2026-07-08)
 **Fixed**: An eighth background audit round, explicitly briefed to do one final adversarial pass on the question-detection heuristic before considering it closed (given v0.2.77/78/79 were three successive partial fixes to the same spot), found a fourth gap — and confirmed the deeper root cause: the heuristic existed as **two independently-maintained copies** in two files that kept drifting apart, not one heuristic with isolated bugs. `studio.py`'s `suggest_questions()` has always had a first-word English-question-starter check ("LLMs asked for 'no decoration' often omit trailing '?' in list form" — its own comment) that `uncited_sentences()` never had at all, despite v0.2.77-79's comments each claiming the two "agree."
