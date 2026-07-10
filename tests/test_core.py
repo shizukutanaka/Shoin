@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.116")
+        self.assertEqual(VERSION, "0.2.117")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5490,6 +5490,97 @@ class TestCLI(unittest.TestCase):
             output = captured.getvalue()
             self.assertIn("## Mindmap", output)
             self.assertNotIn("---", output, "separator must be suppressed when no citations exist")
+        finally:
+            os.unlink(db_file)
+
+    def test_ask_lone_separator_suppressed_for_non_degraded_empty_report(self) -> None:
+        """_cmd_ask must suppress the '---' separator for a non-degraded answer
+        whose citation report is genuinely empty (cited/invalid/uncited all
+        empty) — e.g. the model correctly follows the system prompt's "say so
+        explicitly" rule for a fact not in the sources, which
+        uncited_sentences() deliberately excludes via _DISCLAIMER_MARKERS
+        (citation.py). Before this fix, _cmd_ask's guard only checked
+        `answer.hits and not answer.degraded`, not report content — unlike
+        _cmd_studio's stronger v0.2.55 guard — so this exact non-degraded,
+        zero-citation combination printed a lone '---' with nothing under it.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.citation import CitationReport
+        from shoin.qa import Answer
+        from shoin.search import Hit
+        from shoin.store import Store
+
+        report: CitationReport = CitationReport(
+            cited=[], invalid=[], coverage=0.0, n_sources=1,
+            source_map={"S1": "doc"}, confirmed=[], misattributed=[],
+        )
+        fake_hit = Hit(chunk_id=1, source_id=1, text="body", score=1.0)
+        fake_answer = Answer(text="ソースに記載なし。", hits=[fake_hit], report=report, degraded=False)
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("test")
+                s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                nb_id = nb.id
+
+            captured = io.StringIO()
+            with patch("shoin.cli.ask", return_value=fake_answer):
+                with patch("sys.stdout", captured):
+                    rc = main(["--db", db_file, "ask", str(nb_id), "question"])
+            self.assertEqual(rc, 0)
+            output = captured.getvalue()
+            self.assertIn("ソースに記載なし。", output)
+            self.assertNotIn("---", output, "separator must be suppressed when report is empty")
+        finally:
+            os.unlink(db_file)
+
+    def test_studio_invalid_only_report_still_prints_separator(self) -> None:
+        """_cmd_studio must still print the '---' separator/report when the
+        citation report has ONLY out-of-range (invalid) citations — cited and
+        uncited both empty. _print_report() does print something for this
+        case (the "検証失敗の引用" warning), but the pre-fix guard
+        (`result.report["cited"] or result.report.get("uncited")`) missed
+        `invalid` entirely, silently dropping that warning from CLI output.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.citation import CitationReport
+        from shoin.studio import StudioResult
+        from shoin.store import Store
+
+        report: CitationReport = CitationReport(
+            cited=[], invalid=[99], coverage=0.0, n_sources=1,
+            source_map={"S1": "doc"}, confirmed=[], misattributed=[],
+        )
+        fake_result = StudioResult(kind="briefing", body="回答は [S99] を参照。", report=report)
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("test")
+                s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                nb_id = nb.id
+
+            captured = io.StringIO()
+            with patch("shoin.cli.generate", return_value=fake_result):
+                with patch("sys.stdout", captured):
+                    rc = main(["--db", db_file, "studio", str(nb_id), "briefing"])
+            self.assertEqual(rc, 0)
+            output = captured.getvalue()
+            self.assertIn("---", output, "separator must be printed when invalid citations exist")
+            self.assertIn("S99", output)
         finally:
             os.unlink(db_file)
 

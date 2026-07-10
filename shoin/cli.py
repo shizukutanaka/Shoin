@@ -234,7 +234,15 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         )
     answer = ask(store, llm, int(args.notebook_id), question, k=int(args.k))
     print(answer.text)
-    if answer.hits and not answer.degraded:
+    # A non-degraded answer can still legitimately carry an empty report — e.g.
+    # the model correctly follows the system prompt's "say so explicitly" rule
+    # for a fact not in the sources, which uncited_sentences() deliberately
+    # excludes from `uncited` (citation.py's _DISCLAIMER_MARKERS). Printing a
+    # bare "---" with nothing under it is the same defect v0.2.27/v0.2.55 fixed
+    # elsewhere; guard on actual report content too, not just hits/degraded.
+    if answer.hits and not answer.degraded and (
+        answer.report["cited"] or answer.report["invalid"] or answer.report.get("uncited")
+    ):
         print("---")
         _print_report(answer.report)
     return 0
@@ -243,7 +251,11 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
     print(result.body)
-    if result.report["cited"] or result.report.get("uncited"):
+    # _print_report() also prints something for an invalid-only report (out-of-
+    # range [S#] citations, cli.py's own _print_report()) — the pre-existing
+    # guard here missed that case, silently dropping the warning from CLI
+    # output. Same fix shape as _cmd_ask()'s report-content guard.
+    if result.report["cited"] or result.report["invalid"] or result.report.get("uncited"):
         print("---")
         _print_report(result.report)
     return 0
