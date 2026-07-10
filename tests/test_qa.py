@@ -152,6 +152,47 @@ class TestContext(unittest.TestCase):
         self.assertEqual(msgs[0]["role"], "system")
         self.assertIn("<<<SOURCE", msgs[1]["content"])
 
+    def test_default_budget_leaves_room_for_full_prompt_within_context_tokens(self) -> None:
+        """build_context()'s default budget_tokens must be its documented
+        ~1000-token "source text" sub-share (SOURCE_TEXT_TOKENS), not the full
+        2400-token CONTEXT_TOKENS total (CLAUDE.md's own breakdown: ~900 system
+        prompt+headers / ~1000 source text / ~400 history / ~100 query).
+
+        Before this fix, ask()/_h_ask_sse() called build_context(store, hits)
+        with no override, so the misleading default let source text alone
+        consume the ENTIRE documented total — with TOP_K sources of ample text
+        and zero history, the full system+source-text+query prompt already
+        overshot CONTEXT_TOKENS by 200+ tokens before the ~400-token history
+        allowance was even added.
+        """
+        from shoin.chunk import estimate_tokens
+        from shoin.config import TOP_K
+        from shoin.qa import CONTEXT_TOKENS, SOURCE_TEXT_TOKENS
+        from shoin.search import Hit
+
+        s = Store(":memory:")
+        with s:
+            nb = s.create_notebook("budget-test")
+            hits = []
+            long_text = "This is a long paragraph with enough words to matter. " * 40
+            for i in range(TOP_K):
+                src = s.add_source(nb.id, "txt", f"doc{i}", f"mem://{i}", f"sha-{i}")
+                s.add_chunks(src.id, [long_text])
+                hits.append(Hit(chunk_id=i, source_id=src.id, text=long_text, score=1.0))
+
+            ctx = build_context(s, hits)  # default budget_tokens, matching ask()'s call
+            msgs = build_messages("What is the summary of these documents?", ctx, history=None)
+            total = sum(estimate_tokens(m["content"]) for m in msgs)
+
+            self.assertLess(
+                total, CONTEXT_TOKENS,
+                "system prompt + source text + query alone must not exceed the "
+                "documented total prompt budget, even before history is added",
+            )
+            # Sanity: the fix is specifically that the default is SOURCE_TEXT_TOKENS,
+            # a real sub-share of CONTEXT_TOKENS, not CONTEXT_TOKENS itself.
+            self.assertLess(SOURCE_TEXT_TOKENS, CONTEXT_TOKENS)
+
     def test_build_context_missing_source_uses_fallback_title(self) -> None:
         """If a source is deleted between retrieval and context building, fallback title is used."""
         from shoin.search import Hit

@@ -21,7 +21,16 @@ from .llm import LLMError, Message
 from .search import Hit, retrieve
 from .store import Store, StoreError
 
-CONTEXT_TOKENS = 2400  # lightweight-LLM friendly context budget
+CONTEXT_TOKENS = 2400  # lightweight-LLM friendly context budget: the TOTAL prompt
+# (see CLAUDE.md's "Token-Aware Truncation" breakdown: ~900 system prompt+headers,
+# ~1000 source text, ~400 history, ~100 query). SOURCE_TEXT_TOKENS below is that
+# ~1000-token sub-share; build_context()'s budget_tokens parameter divides
+# WHATEVER it's given across sources, so passing the full CONTEXT_TOKENS there (as
+# ask()/_h_ask_sse() used to, via the misleading default) let source text alone
+# consume the entire documented total before system prompt/history/query are even
+# added on top — a real, measured ~250+ token overshoot past CONTEXT_TOKENS with
+# TOP_K sources and no history yet (v0.2.100).
+SOURCE_TEXT_TOKENS = 1000
 HISTORY_MESSAGES = 6  # recent turns carried into the prompt (REQ-005 follow-ups)
 HISTORY_TOKENS_EACH = 160  # per-message truncation keeps history within budget
 
@@ -135,9 +144,16 @@ def _truncate_tokens(text: str, limit: int) -> str:
 
 
 def build_context(
-    store: Store, hits: list[Hit], budget_tokens: int = CONTEXT_TOKENS
+    store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
 ) -> GroundedContext:
-    """Group hits by source (relevance order) under a fair per-source budget."""
+    """Group hits by source (relevance order) under a fair per-source budget.
+
+    budget_tokens defaults to SOURCE_TEXT_TOKENS (~1000, CLAUDE.md's documented
+    "source text" sub-share of the 2400-token total), not CONTEXT_TOKENS itself —
+    callers building the full ask()/SSE prompt (system prompt + source text +
+    history + query) must not let source text alone consume the whole budget.
+    studio.py passes its own explicit budget_tokens for its different prompt shape.
+    """
     order: list[int] = []
     grouped: dict[int, list[Hit]] = {}
     for h in hits:

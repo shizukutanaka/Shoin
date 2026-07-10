@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.99
+## Version History: v0.1.37 → v0.2.100
+
+### v0.2.100 (2026-07-08)
+**Fixed**: A twenty-eighth background audit round, explicitly barred from the now-closed echo-mismatch pattern, found `build_context()`'s default `budget_tokens` was the full documented `CONTEXT_TOKENS` total (2400) instead of its documented "source text" sub-share (~1000, per CLAUDE.md's own "Token-Aware Truncation" breakdown: ~900 system prompt+headers, ~1000 source text, ~400 history, ~100 query). `qa.ask()` and `server._h_ask_sse()` both call `build_context(store, hits)` with no override, so this misleading default let source text alone consume the entire documented total prompt budget before the system prompt, history, and query were even added on top — directly undermining the project's stated purpose of fitting prompts within lightweight 4K–8K-context local models (Qwen3-4B, Phi-4, Gemma-3).
+
+- Reproduced with the exact production call pattern: `TOP_K` (8) sources of ample text through `build_context()`'s old default, then `build_messages()` — the system+source-text+query prompt alone totaled ~2646 tokens, already ~246 tokens over the documented 2400-token *total*, before the ~400-token history allowance was even added.
+- Fix: added `SOURCE_TEXT_TOKENS = 1000` as the documented sub-share constant, and changed `build_context()`'s default parameter from `CONTEXT_TOKENS` to `SOURCE_TEXT_TOKENS`. `studio.py`'s two call sites (`STUDIO_BUDGET_TOKENS`, `1600`) already passed their own explicit budgets for their different prompt shapes and are unaffected. No other call sites in the codebase relied on the old default (confirmed by grep).
+- 1 regression test added (`test_default_budget_leaves_room_for_full_prompt_within_context_tokens`), using the same real production call pattern rather than a synthetic edge case; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 591 tests (up from 590). `mypy shoin/` and `ruff check shoin/qa.py` remain clean.
 
 ### v0.2.99 (2026-07-08)
 **Fixed**: A twenty-seventh background audit round found the CLI `notebook rename` action had the same echo-mismatch bug class fixed three times already for source titles (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`, v0.2.95 CLI `source rename`) — this time for notebook names. `store.rename_notebook()` does `name = name.strip()` before persisting, but `_cmd_notebook()`'s "rename" action printed `str(args.name)`, the raw unstripped CLI argument, nine lines above the already-fixed `source rename` action in the same file.
