@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.113")
+        self.assertEqual(VERSION, "0.2.114")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1123,6 +1123,50 @@ class TestChunk(unittest.TestCase):
             len(chunks), 1,
             "an oversize block of fullwidth digits must actually be split into chunks",
         )
+
+    def test_long_unbroken_ascii_run_not_undercounted_to_near_zero(self) -> None:
+        """A single unbroken alphanumeric run (base64 data: URI, long hex hash,
+        minified code with no spaces) must not estimate to ~1 token regardless
+        of length. Before this fix, _WORD_RE.findall() matched such a run as
+        ONE regex match, and estimate_tokens() counted len(matches) — one
+        match = one token no matter how long — so a 200,000-character run
+        estimated to a single-digit token count, silently defeating both
+        split_text()'s CHUNK_TOKENS cap (the block was never split) and
+        build_context()'s per-source token budget (the whole blob sailed
+        through untruncated). This is a different, more general defect than
+        the CJK-range-coverage gaps (v0.2.50/52/107): here the count is a
+        small nonzero number, so it evades every `tok == 0` fallback.
+        """
+        import random
+        import string
+
+        from shoin.chunk import _tail
+
+        rng = random.Random(0)
+        blob = "".join(rng.choices(string.ascii_letters + string.digits, k=3000))
+        text = f"See the embedded data below.\n\n{blob}\n\nEnd of document."
+
+        self.assertGreater(
+            estimate_tokens(text), 600,
+            "a 3000-char unbroken run must cost roughly len/4 tokens, not ~1",
+        )
+        chunks = split_text(text)
+        self.assertGreater(
+            len(chunks), 1,
+            "an oversize unbroken run must actually be split into multiple chunks",
+        )
+        # _tail must also be able to stop mid-run instead of pulling in the
+        # entire multi-thousand-character run regardless of the token budget.
+        tail = _tail(blob, 10)
+        self.assertLess(
+            len(tail), len(blob),
+            "_tail with a small token budget must not return the entire long run",
+        )
+
+        # A normal-length word/identifier must be completely unaffected —
+        # this must still cost exactly 1 token, matching every other
+        # estimate_tokens/_truncate_tokens/_tail test in this file.
+        self.assertEqual(estimate_tokens("parse_user_input"), 1)
 
     def test_sentence_split_on_fullwidth_semicolon(self) -> None:
         """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""

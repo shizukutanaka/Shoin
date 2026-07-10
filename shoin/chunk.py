@@ -34,15 +34,32 @@ _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])|(?<=\.)(?=\s)")
 
+# Words/identifiers up to this length cost a flat 1 token (CLAUDE.md's documented
+# "ASCII words: 1 token per word" model — real natural-language words and typical
+# identifiers rarely exceed this). An unbroken alphanumeric run LONGER than this
+# (a base64 data: URI, a long hex hash, minified/obfuscated code with no spaces)
+# is weighted at ~4 chars/token beyond the threshold instead of still costing a
+# flat 1 token regardless of length — without this, estimate_tokens() undercounts
+# a 200,000-character run to a single-digit token count, silently defeating both
+# split_text()'s chunk-size cap and build_context()'s per-source token budget.
+_LONG_RUN_THRESHOLD = 40
+
 
 def is_cjk(ch: str) -> bool:
     cp = ord(ch)
     return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
 
 
+def _run_token_cost(n: int) -> int:
+    """Token cost of a single word-ish run of length *n* (see _LONG_RUN_THRESHOLD)."""
+    if n <= _LONG_RUN_THRESHOLD:
+        return 1
+    return 1 + (n - _LONG_RUN_THRESHOLD + 3) // 4
+
+
 def estimate_tokens(text: str) -> int:
     cjk = sum(1 for ch in text if is_cjk(ch))
-    words = len(_WORD_RE.findall(text))
+    words = sum(_run_token_cost(len(m)) for m in _WORD_RE.findall(text))
     return cjk + words
 
 
@@ -112,17 +129,32 @@ def _tail(text: str, tokens: int) -> str:
     if tokens <= 0:
         return ""
     acc = 0
+    run_len = 0
     for i in range(len(text) - 1, -1, -1):
         ch = text[i]
         if is_cjk(ch):
+            run_len = 0
             acc += 1
-        elif not (ch.isalnum() or ch == '_') and i + 1 < len(text) and (text[i + 1].isalnum() or text[i + 1] == '_'):
-            acc += 1  # word boundary crossed
-        if acc >= tokens:
-            # For CJK, position i IS the token — include it.
-            # For word boundaries, i is the non-alnum separator before the word
-            # that starts at i+1 — exclude the separator.
-            return (text[i:] if is_cjk(ch) else text[i + 1 :]).lstrip()
+            if acc >= tokens:
+                return text[i:].lstrip()
+        elif ch.isalnum() or ch == '_':
+            run_len += 1
+            # A normal-length word/identifier is only credited once fully
+            # scanned (at its left boundary, below) so a short word is never
+            # cut mid-word. A run longer than _LONG_RUN_THRESHOLD also gets
+            # interim credits every ~4 chars so a pathologically long
+            # unbroken run (base64 blob, long hash) can still be bounded
+            # instead of pulling the whole thing in regardless of *tokens*.
+            if run_len > _LONG_RUN_THRESHOLD and (run_len - _LONG_RUN_THRESHOLD) % 4 == 1:
+                acc += 1
+                if acc >= tokens:
+                    return text[i:].lstrip()
+        else:
+            if run_len:
+                acc += 1  # word boundary crossed: credit the run that just ended
+                run_len = 0
+                if acc >= tokens:
+                    return text[i + 1 :].lstrip()
     return text
 
 

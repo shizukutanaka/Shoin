@@ -1011,6 +1011,29 @@ class TestTruncateTokens(unittest.TestCase):
 
         self.assertEqual(_truncate_tokens("", 10), "")
 
+    def test_long_unbroken_run_is_bounded_not_sent_through_untouched(self) -> None:
+        """A single unbroken alphanumeric run (base64 blob, long hash) must be
+        truncated to roughly `limit` tokens, not returned in full regardless of
+        length. Before this fix, _truncate_tokens() only incremented its token
+        counter once per transition into a new alnum run — never while scanning
+        through the run itself — so it could not stop mid-run no matter how
+        long the run was. Through the real build_context() (SOURCE_TEXT_TOKENS
+        budget), this let a chunk containing such a run sail through completely
+        untruncated into the LLM prompt.
+        """
+        from shoin.qa import _truncate_tokens
+
+        blob = "a1b2c3d4e5" * 5000  # 50,000-char unbroken alphanumeric run
+        truncated = _truncate_tokens(blob, 50)
+        self.assertLess(
+            len(truncated), 1000,
+            "a 50-token limit against a 50000-char unbroken run must bound the output",
+        )
+
+        # A normal-length identifier must still be returned whole for a
+        # generous limit — this must not regress the existing behavior.
+        self.assertEqual(_truncate_tokens("parse_user_input", 5), "parse_user_input")
+
 
 class TestValidateCitationsEdgeCases(unittest.TestCase):
     def test_negative_n_sources_all_invalid(self) -> None:
