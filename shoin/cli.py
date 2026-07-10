@@ -12,7 +12,7 @@ import sys
 from collections.abc import Sequence
 
 from .citation import CitationReport
-from .config import MAX_QUESTION_LEN, TOP_K, VERSION, db_path, port, ui_lang
+from .config import MAX_QUESTION_LEN, MAX_TITLE_LEN, TOP_K, VERSION, db_path, port, ui_lang
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -286,7 +286,12 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     elif action == "rename":
         src = store.get_source(int(args.source_id))
         store.update_source_title(src.id, str(args.title), src.origin)
-        print(_t("src.renamed", id=str(src.id), title=str(args.title)))
+        # update_source_title() silently truncates to MAX_TITLE_LEN before
+        # persisting (config.py: "source titles silently truncated") — echo
+        # the same truncated value here, not the raw CLI argument, matching
+        # the v0.2.93/94 fix applied to this endpoint's Web API siblings.
+        printed_title = str(args.title).strip()[:MAX_TITLE_LEN]
+        print(_t("src.renamed", id=str(src.id), title=printed_title))
     elif action == "refresh":
         result = refresh_source(store, int(args.source_id), llm)
         print(

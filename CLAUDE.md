@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.94
+## Version History: v0.1.37 → v0.2.95
+
+### v0.2.95 (2026-07-08)
+**Fixed**: A twenty-third background audit round found the same title-truncation-echo-mismatch bug class (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`) in a third, CLI-side call site: `_cmd_source()`'s "rename" action (`cli.py`) printed `str(args.title)` — the raw, untruncated CLI argument — in its confirmation message, instead of the value `update_source_title()` actually truncated to `MAX_TITLE_LEN` (500 chars) before persisting.
+
+- **Concrete impact**: `shoin source rename <id> "<550-char title>"` prints "改名完了: [1] " followed by the full 550-char string, implying that's the new title, while the DB row only holds the first 500 characters — a headless/SSH user scripting off this output (or just trusting it) is told something false about their own data.
+- Live-reproduced: CLI stdout showed a 550-char title while the persisted title was 500 chars.
+- Fix: apply the identical `.strip()[:MAX_TITLE_LEN]` transform to the value used in the confirmation message, mirroring the Web API fixes.
+- 1 regression test added (`test_source_rename_cli_message_matches_persisted_truncated_title`); verified fail-then-pass via `git stash` as with every fix this session. Confirmed `_cmd_notebook()`'s "new" action is NOT affected — it already correctly uses the returned `nb.name`, not `args.name`.
+
+`pytest tests/` now runs 585 tests (up from 584). `mypy shoin/` and `ruff check shoin/cli.py` remain clean.
 
 ### v0.2.94 (2026-07-08)
 **Fixed**: A twenty-second background audit round found `_h_src_patch()` (`server.py`, source rename) had the exact same bug class v0.2.93 just fixed in the sibling `_h_src_upload()`: `store.update_source_title()` silently truncates to `MAX_TITLE_LEN` (500 chars) before persisting, but the handler's response echoed the raw, untruncated request-body title. Skipping a second `get_source()` fetch (a deliberate v0.2.45 TOCTOU-avoidance choice, to avoid a delete-race window returning a misleading 404 after a successful update) meant the response could diverge from the DB with no concurrency involved at all — the update itself does the silent transform.
