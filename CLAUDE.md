@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.93
+## Version History: v0.1.37 → v0.2.94
+
+### v0.2.94 (2026-07-08)
+**Fixed**: A twenty-second background audit round found `_h_src_patch()` (`server.py`, source rename) had the exact same bug class v0.2.93 just fixed in the sibling `_h_src_upload()`: `store.update_source_title()` silently truncates to `MAX_TITLE_LEN` (500 chars) before persisting, but the handler's response echoed the raw, untruncated request-body title. Skipping a second `get_source()` fetch (a deliberate v0.2.45 TOCTOU-avoidance choice, to avoid a delete-race window returning a misleading 404 after a successful update) meant the response could diverge from the DB with no concurrency involved at all — the update itself does the silent transform.
+
+- Live-reproduced against a real running server: `PATCH /api/sources/{id}` with a 550-char title returned HTTP 200 with the full 550-char title in the response, while a follow-up `GET /api/notebooks/{id}` showed the persisted title truncated to 500.
+- Fix: apply the identical `title[:MAX_TITLE_LEN]` truncation to the response value — no second DB round trip needed (the TOCTOU-avoidance property v0.2.45 established is preserved), just matching the deterministic transform `update_source_title()` itself already applies.
+- 1 regression test added (`test_rename_response_title_matches_persisted_truncated_title`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 584 tests (up from 583). `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.93 (2026-07-08)
 **Fixed**: A twenty-first background audit round found `_h_src_upload()` (`server.py`) returned the raw, untruncated filename in its HTTP response instead of `result.source.title` — the title actually persisted by `add_source()`, which silently truncates to `MAX_TITLE_LEN` (500 chars, `config.py`: `"source titles silently truncated (external content)"`). The sibling URL-ingestion handler `_h_src_add()` already did this correctly (`"title": result.source.title`); only the upload path used the pre-truncation `raw_name`.

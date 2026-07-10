@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .citation import make_report
-from .config import MAX_QUESTION_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
+from .config import MAX_QUESTION_LEN, MAX_TITLE_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -466,7 +466,11 @@ class _Handler(BaseHTTPRequestHandler):
             store.update_source_title(src_id, title, src.origin)
         # Use src_id and title from the request — no second get_source() to avoid
         # a TOCTOU window where a concurrent delete would return HTTP 404 despite
-        # the update having already committed successfully.
+        # the update having already committed successfully. But update_source_title()
+        # itself silently truncates to MAX_TITLE_LEN before persisting (same class of
+        # bug v0.2.93 fixed in _h_src_upload) — apply the identical truncation here so
+        # the response matches what was actually written, without a second DB round trip.
+        title = title[:MAX_TITLE_LEN]
         # A renamed title changes the prompt build_context() sends to the LLM the
         # same way a content refresh does (same fix as _h_src_refresh, v0.2.36):
         # evict stale question suggestions, since the cache key is source IDs only

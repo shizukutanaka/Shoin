@@ -1249,6 +1249,41 @@ class SourceRenameCacheTest(unittest.TestCase):
             "renaming a source must invalidate the questions cache (one new LLM call)",
         )
 
+    def test_rename_response_title_matches_persisted_truncated_title(self) -> None:
+        """PATCH /api/sources/{id}'s response must report the TRUNCATED title
+        actually persisted by update_source_title() (MAX_TITLE_LEN), not the
+        raw request-body value. Same bug class as v0.2.93's _h_src_upload fix,
+        found in this sibling endpoint: skipping a second get_source() fetch
+        (a deliberate v0.2.45 TOCTOU-avoidance choice) meant the response could
+        diverge from the DB even with no concurrency involved, since the
+        update itself silently truncates."""
+        from shoin.config import MAX_TITLE_LEN
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "改名切り詰めテスト"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("知識ベース文書。" * 50).encode(),
+            method="POST",
+            headers={"X-Filename": "kb2.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        _, nb_full = self._json("GET", f"/api/notebooks/{nb_id}")
+        src_id = nb_full["sources"][0]["id"]
+
+        long_title = "B" * 550
+        status, patch_result = self._json("PATCH", f"/api/sources/{src_id}", {"title": long_title})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(patch_result["title"]), MAX_TITLE_LEN)
+
+        _, nb_after = self._json("GET", f"/api/notebooks/{nb_id}")
+        persisted_title = nb_after["sources"][0]["title"]
+        self.assertEqual(
+            patch_result["title"], persisted_title,
+            "PATCH response title must match what was actually persisted",
+        )
+
 
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
