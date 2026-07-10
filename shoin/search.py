@@ -16,13 +16,19 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from .chunk import is_cjk
+from .chunk import _CJK_RANGES, is_cjk
 from .config import TOP_K
 from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _DIGIT_RE = re.compile(r"\d")
-_NEG_RE = re.compile(r"(?<![A-Za-z0-9_])-([A-Za-z0-9_]+|[\u3041-\u30FF\u4E00-\u9FFF]+)")
+# Built from chunk._CJK_RANGES (the same table is_cjk()/query_terms()/fts_query()
+# already use) instead of a second hand-picked range literal \u2014 the original
+# hardcoded [\u3041-\u30FF\u4E00-\u9FFF] only covered hiragana/katakana/CJK
+# ideographs, silently failing (and inverting into a positive match) for
+# Hangul, Thai, Lao, Myanmar, Khmer, CJK ext A-H, and fullwidth digits/letters.
+_CJK_NEG_CLASS = "".join(f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES)
+_NEG_RE = re.compile(rf"(?<![A-Za-z0-9_])-([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)")
 
 
 def _esc_like(s: str) -> str:

@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.117")
+        self.assertEqual(VERSION, "0.2.118")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5172,6 +5172,23 @@ class TestNegTerms(unittest.TestCase):
     def test_neg_terms_cjk(self) -> None:
         self.assertEqual(neg_terms("書院 -Python"), ["python"])
 
+    def test_neg_terms_non_hiragana_katakana_kanji_scripts(self) -> None:
+        """neg_terms()'s own docstring documents CJK negation generally
+        ("-word", "-日本語"), but _NEG_RE hardcoded a narrow, independent CJK
+        range literal ([ぁ-ヿ一-鿿]) covering only hiragana/katakana/CJK
+        ideographs — every other script is_cjk()/query_terms()/fts_query()
+        recognize (chunk._CJK_RANGES) was invisible to negation. Not just
+        ignored: since strip_neg_terms() also failed to remove the -word
+        token, the term survived into the query and was tokenized as an
+        ordinary CJK run, inverting the user's exclusion into an inclusion.
+        Fixed by building _NEG_RE's CJK class from the same _CJK_RANGES table
+        instead of a second hand-picked copy that can silently drift.
+        """
+        self.assertEqual(neg_terms("AI -한국어"), ["한국어"])  # Hangul
+        self.assertEqual(neg_terms("-ภาษาไทย"), ["ภาษาไทย"])  # Thai
+        self.assertEqual(neg_terms("-㐅"), ["㐅"])  # CJK ext A
+        self.assertEqual(strip_neg_terms("AI -한국어"), "AI")
+
     def test_neg_terms_none(self) -> None:
         self.assertEqual(neg_terms("書院 引用"), [])
 
@@ -5216,6 +5233,27 @@ class TestNegTerms(unittest.TestCase):
                 any("legacy" in h.text for h in hits),
                 "vector hits containing negated term must be excluded",
             )
+
+    def test_retrieve_neg_term_hangul_excludes_matching_source(self) -> None:
+        """End-to-end reproduction of the _NEG_RE script-coverage gap through the
+        real retrieve() pipeline: a Hangul negated term must actually exclude
+        the source containing it, not silently fail (or invert into a positive
+        match, since strip_neg_terms() also failed to remove the un-recognized
+        -word token from the query).
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-hangul").id
+            src_ko = s.add_source(nb_id, "txt", "ko", "mem://ko", "sha-ko")
+            s.add_chunks(src_ko.id, ["이것은 한국어 문서입니다 AI 기술에 대해 설명합니다."])
+            src_en = s.add_source(nb_id, "txt", "en", "mem://en", "sha-en")
+            s.add_chunks(
+                src_en.id,
+                ["This document discusses AI technology without any Korean text at all."],
+            )
+            hits = retrieve(s, nb_id, "AI -한국어", k=10)
+            source_ids = {h.source_id for h in hits}
+            self.assertNotIn(src_ko.id, source_ids, "Hangul-negated source must be excluded")
+            self.assertIn(src_en.id, source_ids, "non-matching source must still be returned")
 
     def test_retrieve_neg_term_backfills_vec_hits_instead_of_starving(self) -> None:
         """Regression: the neg-term filter must run BEFORE mmr()'s k-selection,
