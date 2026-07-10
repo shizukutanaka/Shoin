@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.85")
+        self.assertEqual(VERSION, "0.2.86")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -523,6 +523,60 @@ class TestStore(unittest.TestCase):
             # Rollback: original chunks must be untouched
             texts = [t for _, t in s.text_chunks_for_source(src2.id)]
             self.assertEqual(texts, ["original chunk"])
+
+    def test_replace_chunks_non_fk_integrity_error_raises_internal_not_not_found(self) -> None:
+        """A non-UNIQUE, non-FOREIGN-KEY IntegrityError (e.g. NOT NULL, CHECK) mid-INSERT
+        must raise SYSTEM_INTERNAL_ERROR, not the misleading SOURCE_NOT_FOUND the previous
+        catch-all fell through to. The exact same bug class was fixed in add_source()
+        (v0.2.53) but never ported to this sibling method: server.py maps any *_NOT_FOUND
+        code straight to HTTP 404, so a real constraint violation (source fully intact)
+        was reported to callers as "source not found," actively misleading them.
+
+        Also verifies the transaction correctly rolls back on this failure path: the
+        original chunks must remain untouched.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-integrity")
+            src = s.add_source(nb.id, "url", "a", "https://a.com", "sha-a")
+            s.add_chunks(src.id, ["old chunk one", "old chunk two"])
+
+            class _FailingConn:
+                """Delegates all conn calls to the real conn, except the 2nd chunk
+                INSERT, which raises a non-UNIQUE, non-FOREIGN-KEY IntegrityError."""
+                def __init__(self, real):
+                    self._real = real
+                    self._insert_count = 0
+
+                def execute(self, sql, params=()):
+                    if sql.startswith("INSERT INTO chunks"):
+                        self._insert_count += 1
+                        if self._insert_count == 2:
+                            raise sqlite3.IntegrityError("NOT NULL constraint failed: chunks.text")
+                    return self._real.execute(sql, params)
+
+                def __enter__(self):
+                    return self._real.__enter__()
+
+                def __exit__(self, *a):
+                    return self._real.__exit__(*a)
+
+                def __getattr__(self, name):
+                    return getattr(self._real, name)
+
+            real_conn = s.conn
+            s.conn = _FailingConn(real_conn)
+            try:
+                with self.assertRaises(StoreError) as cm:
+                    s.replace_chunks_for_source(src.id, ["new1", "new2", "new3"])
+            finally:
+                s.conn = real_conn
+
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            # The source must still exist — this was never a deletion.
+            self.assertIsNotNone(s.get_source(src.id))
+            # Rollback: original chunks must be untouched.
+            texts = [t for _, t in s.text_chunks_for_source(src.id)]
+            self.assertEqual(texts, ["old chunk one", "old chunk two"])
 
     def test_add_note_missing_notebook_raises(self) -> None:
         """add_note() on a non-existent notebook must raise NOTEBOOK_NOT_FOUND."""

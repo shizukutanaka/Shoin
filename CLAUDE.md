@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.85
+## Version History: v0.1.37 → v0.2.86
+
+### v0.2.86 (2026-07-08)
+**Fixed**: A fourteenth background audit round found `replace_chunks_for_source()` (`store.py`, used by `refresh_source()`) misclassified any non-UNIQUE `sqlite3.IntegrityError` as `SOURCE_NOT_FOUND` — the exact bug class v0.2.53 fixed in its sibling `add_source()` ("classified any non-UNIQUE `IntegrityError` as `NOTEBOOK_NOT_FOUND`... Fix: explicitly check for `'FOREIGN KEY'`... all other `IntegrityError` variants now raise `SYSTEM_INTERNAL_ERROR`"), but that fix was never ported to this method, despite both being touched in the *same* v0.2.53 changelog entry for an unrelated atomicity issue.
+
+- **Concrete impact**: `server.py` maps any `*_NOT_FOUND` code straight to HTTP 404. A genuine constraint violation during `POST /api/sources/{id}/refresh` (NOT NULL, CHECK, or any future constraint that isn't the UNIQUE `(notebook_id, sha256)` or the `chunks.source_id` FOREIGN KEY) would report the source as deleted — HTTP 404 — even though it's fully intact, actively misleading both the UI and any script/CLI-parity caller.
+- Live-reproduced with a connection wrapper that raises a NOT NULL-style `IntegrityError` mid-INSERT-loop (not a real deletion): pre-fix reported `SOURCE_NOT_FOUND` while `get_source()` confirmed the source still existed; the transaction correctly rolled back (old chunks intact) even before this fix — only the error *classification* was wrong, not the transaction's atomicity.
+- Fix: mirror `add_source()`'s exact three-way classification — `"UNIQUE" in str(e)` → `SOURCE_ALREADY_EXISTS`, `"FOREIGN KEY" in str(e)` → `SOURCE_NOT_FOUND` (the genuine case, since `chunks.source_id REFERENCES sources(id) ON DELETE CASCADE` means a real concurrent deletion legitimately raises this), anything else → `SYSTEM_INTERNAL_ERROR`.
+- 1 regression test added (`test_replace_chunks_non_fk_integrity_error_raises_internal_not_not_found`), which also incidentally re-verifies the existing rollback/atomicity guarantee (old chunks untouched) on this exact failure path; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 575 tests (up from 574). `mypy shoin/` and `ruff check shoin/store.py` remain clean.
 
 ### v0.2.85 (2026-07-08)
 **Fixed**: A thirteenth background audit round found `chat_stream()` (`llm.py`) had no response-size cap at all, despite `_post()` (the sibling blocking-call method) being fixed for the exact same threat in v0.2.37 ("`_post()` called `resp.read()` with no size limit. A malicious or buggy LLM endpoint returning gigabytes would be read entirely into memory... Fix: cap at 32 MB"). `chat_stream()` iterates `for raw in resp:` line-by-line with zero bound on cumulative bytes across the SSE loop — actually more attacker-favorable than the pre-v0.2.37 `_post()` bug, since a misbehaving or compromised endpoint (`SHOIN_LLM_URL` pointed at an untrusted service) could stream unbounded `data: {...}` lines and OOM the process on the exact 4-8GB RAM systems this project targets per CLAUDE.md's own "Lightweight First" principle.

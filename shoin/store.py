@@ -458,7 +458,17 @@ class Store:
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source")
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement")
+            if "FOREIGN KEY" in str(e):
+                # chunks.source_id REFERENCES sources(id) ON DELETE CASCADE — this is
+                # the genuine concurrent-deletion case: the source row was removed
+                # between get_source() above and this INSERT.
+                raise StoreError(
+                    "SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement"
+                )
+            # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate as a
+            # generic internal error rather than a misleading SOURCE_NOT_FOUND (mirrors
+            # the same v0.2.53 fix already applied to add_source(), never ported here).
+            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
         return ids
 
     def update_source_sha256(self, source_id: int, sha256: str, title: str) -> None:
