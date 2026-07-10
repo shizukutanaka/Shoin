@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.79")
+        self.assertEqual(VERSION, "0.2.80")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3014,6 +3014,26 @@ class TestUncitedSentences(unittest.TestCase):
         from shoin.citation import uncited_sentences
 
         self.assertEqual(uncited_sentences("この技術の利点について教えてください。"), [])
+
+    def test_ignores_english_question_without_trailing_mark(self) -> None:
+        """studio.py's suggest_questions() has always recognized English questions
+        with no trailing "?" via a question-starter-word check ("LLMs asked for
+        'no decoration' often omit trailing '?' in list form" — its own comment),
+        but uncited_sentences() never had this check at all — a fourth successive
+        gap in the "these two heuristics agree" claim (v0.2.77-79 fixed three
+        others). Fixed in v0.2.80 by extracting looks_like_question() as the one
+        shared implementation both functions now call, closing this class of bug
+        structurally instead of patching another individual case."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(uncited_sentences("What is the main benefit of the new policy."), [])
+        self.assertEqual(uncited_sentences("How does this system work."), [])
+        self.assertEqual(uncited_sentences("Why did this happen."), [])
+        # A real unsupported claim is still flagged.
+        self.assertEqual(
+            uncited_sentences("Paris has existed for centuries."),
+            ["Paris has existed for centuries."],
+        )
 
     def test_make_report_ja_study_guide_style_qa_not_flagged_when_answers_cited(self) -> None:
         """End-to-end reproduction of the formal-JA question false positive."""

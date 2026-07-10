@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.79
+## Version History: v0.1.37 → v0.2.80
+
+### v0.2.80 (2026-07-08)
+**Fixed**: An eighth background audit round, explicitly briefed to do one final adversarial pass on the question-detection heuristic before considering it closed (given v0.2.77/78/79 were three successive partial fixes to the same spot), found a fourth gap — and confirmed the deeper root cause: the heuristic existed as **two independently-maintained copies** in two files that kept drifting apart, not one heuristic with isolated bugs. `studio.py`'s `suggest_questions()` has always had a first-word English-question-starter check ("LLMs asked for 'no decoration' often omit trailing '?' in list form" — its own comment) that `uncited_sentences()` never had at all, despite v0.2.77-79's comments each claiming the two "agree."
+
+- Live-reproduced: `uncited_sentences("What is the main benefit of the new policy.")` and `"How does this system work."` (no trailing `?`, exactly the LLM behavior `suggest_questions()`'s own comment documents as common) were both flagged as unsupported claims.
+- Rather than a fifth patch adding one more case to `citation.py`'s copy, extracted `looks_like_question()` as the single shared implementation in `citation.py` (question-mark substring after NFKC normalization, JA suffix set, EN starter-word set — the union of everything both copies previously checked separately). `uncited_sentences()` and `studio.py`'s `suggest_questions()` now both call this one function; the two can no longer independently drift, since there is only one implementation left to drift.
+- Verified byte-identical behavior preserved for `suggest_questions()`'s existing test coverage (NFKC normalization order and the `"?" in q` substring check, not `endswith`, are both preserved exactly) — no regression in the un-changed original heuristic's own scope, only the addition of what `uncited_sentences()` was missing.
+- 1 more regression test added (3 EN question-starter forms without trailing punctuation, plus a control case confirming a real unsupported claim is still flagged); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 567 tests (up from 566). `mypy shoin/` and `ruff check shoin/citation.py shoin/studio.py` remain clean.
 
 ### v0.2.79 (2026-07-08)
 **Fixed**: A seventh background audit round, specifically briefed to re-scrutinize the v0.2.78 fix itself rather than broaden scope (given v0.2.77's first attempt at this same fix had itself been incomplete), found the v0.2.78 fix was *also* incomplete in a small but concrete way: its own comment claimed to "reuse the same suffix set studio.py's `suggest_questions()` already established... so the two question-detection heuristics in this codebase agree" — but the ported tuple was `("か", "でしょう")`, silently dropping `"ください"` (polite request form, e.g. "…について教えてください。") from `suggest_questions()`'s actual three-item tuple `("か", "ください", "でしょう")`. The claim of agreement was false as written.

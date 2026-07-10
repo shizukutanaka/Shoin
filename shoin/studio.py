@@ -12,7 +12,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .citation import CitationReport, make_report
+from .citation import CitationReport, looks_like_question, make_report
 from .config import ui_lang
 from .llm import LLMError
 from .qa import _t as _qa_t, ChatBackend, build_context
@@ -202,20 +202,12 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         )
     except LLMError:
         return []
-    # Common English question-starter words. LLMs asked for "no decoration" often
-    # omit trailing "?" in list form; these words reliably identify questions.
-    _EN_QUESTION_STARTERS = frozenset(
-        "what how why when where who which does is are was were will would could should can".split()
-    )
+    # Question detection is shared with citation.py's uncited_sentences() via
+    # looks_like_question() — see that function's docstring for why this used to
+    # be two independently-drifting copies of the same heuristic.
     questions: list[str] = []
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
-        q_base = q.rstrip("。.!?")  # strip trailing punctuation for endswith check
-        first_word = q.split()[0].lower() if q.split() else ""
-        if len(q) >= 2 and (
-            "?" in q
-            or q_base.endswith(("か", "ください", "でしょう"))
-            or first_word in _EN_QUESTION_STARTERS
-        ):
+        if len(q) >= 2 and looks_like_question(q):
             questions.append(q)
     return questions[:n]

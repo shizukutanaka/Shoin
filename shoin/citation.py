@@ -68,6 +68,36 @@ _DISCLAIMER_MARKERS = (
     "not found in the source",
 )
 
+# Common English question-starter words. LLMs asked for "no decoration" often
+# omit trailing "?" in list form; these words reliably identify questions.
+_EN_QUESTION_STARTERS = frozenset(
+    "what how why when where who which does is are was were will would could should can".split()
+)
+
+
+def looks_like_question(text: str) -> bool:
+    """Heuristic "is this a question" detector.
+
+    Single source of truth for a check needed in two places — uncited_sentences()
+    below (a question asserts nothing, so it must not be flagged as an unsupported
+    claim) and studio.py's suggest_questions() (extracting candidate questions from
+    LLM output). v0.2.77 through v0.2.79 each independently discovered the other
+    call site recognized a question pattern this one didn't (？/か/でしょう/ください,
+    one at a time) — three successive partial fixes to two copies of the same
+    heuristic drifting apart. Centralizing it here means the two can no longer
+    diverge; both call sites now go through this one function.
+
+    NFKC-normalizes first so full-width "？" is treated identically to ASCII "?".
+    """
+    norm = unicodedata.normalize("NFKC", text)
+    if "?" in norm:
+        return True
+    base = norm.rstrip("。.!?")
+    if base.endswith(("か", "ください", "でしょう")):
+        return True
+    first_word = norm.split()[0].lower() if norm.split() else ""
+    return first_word in _EN_QUESTION_STARTERS
+
 
 class CitationReport(TypedDict):
     cited: list[int]
@@ -256,13 +286,8 @@ def uncited_sentences(text: str) -> list[str]:
         # per output (studio.py prompts), and each becomes its own citation-less
         # sentence at this split boundary — flagging them would violate this
         # module's own "stay silent unless certain" principle by systematically
-        # false-positiving every well-formed, correctly-cited FAQ/study-guide
-        # output. Formal written Japanese ends a question in か。 with no "?" at
-        # all (e.g. "利点は何か。"); reuse the same suffix set studio.py's
-        # suggest_questions() already established for identifying JA questions,
-        # so the two question-detection heuristics in this codebase agree.
-        _q_base = sentence.rstrip("。.!?？")
-        if sentence.endswith(("?", "？")) or _q_base.endswith(("か", "ください", "でしょう")):
+        # false-positiving every well-formed, correctly-cited FAQ/study-guide output.
+        if looks_like_question(sentence):
             continue
         pending = sentence  # wait to see if a trailing citation-only fragment resolves it
     if pending is not None:
