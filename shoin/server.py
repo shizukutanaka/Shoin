@@ -444,7 +444,12 @@ class _Handler(BaseHTTPRequestHandler):
                 result = index_source(store, nb_id, str(tmp_path), self.llm, title=raw_name)
                 self._json(
                     {
-                        "source": {"id": result.source.id, "title": raw_name},
+                        # result.source.title, not raw_name: add_source() silently
+                        # truncates to MAX_TITLE_LEN, so a filename over that limit
+                        # would otherwise report a title back to the client that
+                        # was never actually persisted (matches _h_src_add()'s
+                        # existing correct pattern below).
+                        "source": {"id": result.source.id, "title": result.source.title},
                         "n_chunks": result.n_chunks,
                         "n_embedded": result.n_embedded,
                     },

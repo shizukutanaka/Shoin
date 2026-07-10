@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.92
+## Version History: v0.1.37 → v0.2.93
+
+### v0.2.93 (2026-07-08)
+**Fixed**: A twenty-first background audit round found `_h_src_upload()` (`server.py`) returned the raw, untruncated filename in its HTTP response instead of `result.source.title` — the title actually persisted by `add_source()`, which silently truncates to `MAX_TITLE_LEN` (500 chars, `config.py`: `"source titles silently truncated (external content)"`). The sibling URL-ingestion handler `_h_src_add()` already did this correctly (`"title": result.source.title`); only the upload path used the pre-truncation `raw_name`.
+
+- **Concrete impact**: a file uploaded with a filename (from the `X-Filename` header) over 500 characters got a `201` response claiming the full untruncated name, but a subsequent `GET /api/notebooks/{id}` showed the truncated 500-char title actually in the DB — any API consumer trusting the upload response instead of re-fetching (a script, another agent, a future UI change) would be told a title that was never actually retrievable.
+- Live-reproduced against a real running server: uploaded a 604-char filename, response title length was 604, but the stored title length was 500 — mismatched.
+- Fix: changed the response to use `result.source.title`, matching `_h_src_add()`'s existing correct pattern.
+- 1 regression test added (`test_upload_response_title_matches_persisted_truncated_title`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 583 tests (up from 582). `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.92 (2026-07-08)
 **Fixed**: A twentieth background audit round found `_h_note_add()` (`server.py`) still used the exact `str(data.get(...) or "")` type-confusion pattern v0.2.38 fixed for `title` — but only for `title`, one field over: `body = str(data.get("body") or "")`. A `POST /api/notebooks/{id}/notes` with `{"title": "T", "body": [1, 2, 3]}` returned HTTP 201 and silently persisted Python's `str()` coercion of the list (`"[1, 2, 3]"`) as the note body, instead of being rejected the way an equally-malformed `title` field already correctly is.

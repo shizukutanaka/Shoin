@@ -232,6 +232,38 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
         self.assertEqual(status, 200)
 
+    def test_upload_response_title_matches_persisted_truncated_title(self) -> None:
+        """_h_src_upload()'s response must report the TRUNCATED title actually
+        persisted by add_source() (MAX_TITLE_LEN, config.py), not the raw,
+        untruncated filename. Found returning the untruncated raw_name while
+        the sibling _h_src_add() (URL ingestion) already correctly returns
+        result.source.title — a filename over 500 chars got a 201 response
+        claiming a title that was never actually retrievable afterward.
+        """
+        from shoin.config import MAX_TITLE_LEN
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "長いファイル名テスト"})
+        nb_id = nb["id"]
+
+        long_name = "A" * 600 + ".txt"
+        body = ("十分な長さの本文。" * 10).encode("utf-8")
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            body,
+            {"X-Filename": urllib.parse.quote(long_name)},
+        )
+        self.assertEqual(status, 201)
+        up = json.loads(raw)
+        self.assertEqual(len(up["source"]["title"]), MAX_TITLE_LEN)
+
+        status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        stored_title = detail["sources"][0]["title"]
+        self.assertEqual(
+            up["source"]["title"], stored_title,
+            "upload response title must match what was actually persisted",
+        )
+
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
         (e.g. sqlite3.OperationalError: database is locked) must return HTTP 500
