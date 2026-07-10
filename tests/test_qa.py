@@ -228,6 +228,38 @@ class TestContext(unittest.TestCase):
             "a 50000-char fullwidth-digit run must be truncated to fit the token budget",
         )
 
+    def test_build_context_source_count_does_not_unboundedly_grow_budget(self) -> None:
+        """build_context()'s per-source MIN_PER_SOURCE_TOKENS(64) floor exists so
+        a handful of sources each get a meaningful minimum share, but it has no
+        corresponding ceiling on its own: once len(order) exceeds
+        budget_tokens // MIN_PER_SOURCE_TOKENS, the floor overrides the fair
+        division and total consumption becomes MIN_PER_SOURCE_TOKENS * len(order)
+        — unbounded in source count. qa.ask()'s retrieve(k=TOP_K) call site
+        never reaches this (TOP_K=8 sources, 8*64=512 well under budget), but
+        studio.py's overview_hits() samples from EVERY source in the notebook
+        with no cap — a notebook with many small sources (URL clippings, short
+        docs) silently blew Studio's documented STUDIO_BUDGET_TOKENS budget.
+        """
+        from shoin.chunk import estimate_tokens
+        from shoin.search import Hit
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("many-sources-budget-test")
+            hits = []
+            for i in range(200):
+                src = s.add_source(nb.id, "txt", f"doc{i}", f"mem://{i}", f"sha{i}")
+                hits.append(Hit(chunk_id=i, source_id=src.id, text=f"文書{i}の内容。" * 10, score=1.0))
+            budget = 2800  # matches studio.STUDIO_BUDGET_TOKENS
+            ctx = build_context(s, hits, budget_tokens=budget)
+        self.assertLess(
+            estimate_tokens(ctx.block), budget * 1.5,
+            "total context cost must not grow unboundedly with source count",
+        )
+        self.assertLessEqual(
+            len(ctx.source_titles), budget // 64,
+            "source count must be capped to what the per-source floor can support",
+        )
+
     def test_build_context_second_chunk_exceeds_per_source_budget_breaks(self) -> None:
         """Second chunk that would exceed per_source budget must be excluded (qa.py line 165)."""
         from shoin.search import Hit

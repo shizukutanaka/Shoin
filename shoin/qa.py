@@ -40,6 +40,11 @@ HISTORY_TOKENS_EACH = 160  # per-message ceiling, so one long turn can't eat the
 # other three (now correctly enforced) shares, pushing the real worst-case prompt
 # to ~2960 — the same overshoot class v0.2.100 fixed for source text (v0.2.101).
 HISTORY_TOKENS_TOTAL = 400
+# The minimum per-source share build_context() guarantees even when dividing
+# budget_tokens across many sources would otherwise give each an unusably
+# small slice. See build_context()'s own comment for why this floor also
+# needs a corresponding cap on the number of sources included.
+MIN_PER_SOURCE_TOKENS = 64
 
 # Brackets that contain an S-number, e.g. [S1] / [S1, S2] / [Ｓ１]. History
 # citations refer to a *previous* context numbering, so they are stripped
@@ -177,11 +182,23 @@ def build_context(
             order.append(h.source_id)
         grouped[h.source_id].append(h)
 
+    # MIN_PER_SOURCE_TOKENS below gives each source a meaningful minimum share
+    # (qa.ask()'s normal case: retrieve(k=TOP_K) caps hits at 8 distinct
+    # sources, so the floor is harmless there). But callers like studio.py's
+    # overview_hits() sample from EVERY source in the notebook with no cap —
+    # once len(order) exceeds budget_tokens // MIN_PER_SOURCE_TOKENS, the
+    # floor overrides the division and total consumption becomes
+    # MIN_PER_SOURCE_TOKENS * len(order), unbounded in source count, silently
+    # defeating budget_tokens for large notebooks. Cap the number of sources
+    # actually included to what the floor can support within budget_tokens —
+    # order is source-id-first-seen, so this drops the lowest-priority tail.
+    order = order[: max(budget_tokens // MIN_PER_SOURCE_TOKENS, 1)]
+
     titles: list[str] = []
     bodies: list[str] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
-    per_source = max(budget_tokens // max(len(order), 1), 64)
+    per_source = max(budget_tokens // max(len(order), 1), MIN_PER_SOURCE_TOKENS)
     for idx, source_id in enumerate(order, start=1):
         try:
             title = store.get_source(source_id).title
