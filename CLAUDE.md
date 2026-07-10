@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.103
+## Version History: v0.1.37 → v0.2.104
+
+### v0.2.104 (2026-07-08)
+**Fixed**: A thirty-second background audit round, deliberately trying a cross-cutting consistency angle rather than another field-specific hunt, found `add_chunks()` (`store.py`) was a third sibling with the exact IntegrityError-misclassification bug v0.2.53 fixed in `add_source()` and v0.2.86 fixed in `replace_chunks_for_source()` — never ported to this one. All three share the identical `INSERT ... source_id REFERENCES sources(id)` FK shape; `add_chunks()` still had the pre-v0.2.53 catch-all: any `sqlite3.IntegrityError` at all — not just a genuine `FOREIGN KEY` violation from concurrent deletion — was reported as `SOURCE_NOT_FOUND`.
+
+- Live-reproduced: `add_chunks(src.id, [None])` (triggering a `NOT NULL` violation on `chunks.text`, not a deletion) raised `StoreError("SOURCE_NOT_FOUND", "source 1 was deleted during chunk insertion")` while the source demonstrably still existed — a fabricated diagnosis identical in class to the exact bug already fixed twice elsewhere.
+- **Concrete impact**: `server.py` maps any `*_NOT_FOUND` code straight to HTTP 404. A future schema tightening (a `CHECK` constraint, a caller bug passing wrong-typed data past mypy at runtime) would surface as a spurious "source not found" 404 instead of a genuine 500, actively misleading users and sending debugging effort toward a nonexistent race condition instead of the real defect.
+- Fix: mirror the identical pattern already used in the other two siblings — check `"FOREIGN KEY" in str(e)` before mapping to `SOURCE_NOT_FOUND` (the genuine concurrent-deletion case); anything else raises `SYSTEM_INTERNAL_ERROR`.
+- 1 regression test added (`test_add_chunks_non_fk_integrity_error_raises_internal_not_not_found`); verified fail-then-pass via `git stash` as with every fix this session. The existing genuine-deletion test (`test_add_chunks_with_deleted_source_raises_source_not_found`) continues to pass unchanged, confirmed directly alongside the fix.
+
+`pytest tests/` now runs 595 tests (up from 594). `mypy shoin/` and `ruff check shoin/store.py` remain clean.
 
 ### v0.2.103 (2026-07-08)
 **Fixed**: A thirty-first background audit round found the v0.2.102 fix for `_file_config()` was itself incomplete — it only filtered JSON `null`, the specific case investigated that round, not the general principle its own comment claimed ("behaves like key not present... matching this function's own documented 'config.json is optional' contract"). Any other non-string JSON value — `true`/`false`, a list, a dict — was still blindly `str()`-coerced into a garbage setting string (`"True"`, `"['qwen3:4b']"`, `"{'a': 1}"`) instead of being treated as absent.

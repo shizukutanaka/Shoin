@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.103")
+        self.assertEqual(VERSION, "0.2.104")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -789,6 +789,29 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_chunks(src.id, ["chunk text"])
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_add_chunks_non_fk_integrity_error_raises_internal_not_not_found(self) -> None:
+        """A non-FOREIGN-KEY IntegrityError (e.g. a future NOT NULL/CHECK
+        violation on chunks) must raise SYSTEM_INTERNAL_ERROR, not the
+        misleading SOURCE_NOT_FOUND the previous catch-all fell through to.
+
+        add_chunks() is a third sibling with the identical
+        "INSERT ... source_id REFERENCES sources(id)" FK shape as add_source()
+        (fixed v0.2.53) and replace_chunks_for_source() (fixed v0.2.86) — this
+        method never got the same fix. server.py maps any *_NOT_FOUND code
+        straight to HTTP 404, so a real constraint violation (source fully
+        intact) was reported to callers as "source not found," actively
+        misleading them — a fabricated diagnosis pointing at a nonexistent
+        race condition instead of the real defect.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("n-integrity")
+            src = s.add_source(nb.id, "txt", "a", "o", "h-integrity")
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, [None])  # type: ignore[list-item]  # triggers NOT NULL, not FK
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            # The source must still exist — this was never a deletion.
+            self.assertIsNotNone(s.get_source(src.id))
 
     def test_add_source_fk_violation_raises_notebook_not_found(self) -> None:
         """If the notebook is deleted between get_notebook() and the INSERT,

@@ -513,8 +513,18 @@ class Store:
                         (source_id, seq, text),
                     )
                     ids.append(int(cur.lastrowid or 0))
-        except sqlite3.IntegrityError:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk insertion")
+        except sqlite3.IntegrityError as e:
+            if "FOREIGN KEY" in str(e):
+                # chunks.source_id REFERENCES sources(id) — this is the genuine
+                # concurrent-deletion case: the source row was removed mid-insert.
+                raise StoreError(
+                    "SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk insertion"
+                )
+            # Unexpected constraint violation (e.g. future CHECK, NOT NULL) — propagate
+            # as a generic internal error rather than a misleading SOURCE_NOT_FOUND.
+            # Mirrors the same v0.2.53 fix already applied to add_source() and
+            # replace_chunks_for_source() (v0.2.86), never ported to this third sibling.
+            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
         return ids
 
     def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
