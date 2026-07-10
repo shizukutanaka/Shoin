@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.105
+## Version History: v0.1.37 → v0.2.106
+
+### v0.2.106 (2026-07-10)
+**Fixed**: A thirty-fourth background audit round, tracing `_h_src_upload()`'s (`server.py`) `X-Filename` header handling back to its only caller, found the correctness of the whole function depends entirely on an undocumented, unenforced convention: `index.html:866` always sends `X-Filename: encodeURIComponent(f.name)`. Python's stdlib `http.server`/`email.parser` decodes header bytes as Latin-1, not UTF-8 — a client that sends a non-ASCII filename as raw UTF-8 bytes (not percent-encoded) gets a silently, permanently corrupted title with zero error signal, since `urllib.parse.unquote()` only reverses `%XX` escapes and cannot repair a Latin-1 mis-decode.
+
+- **Concrete impact, live-reproduced**: opened a raw socket and POSTed to `/api/notebooks/{id}/upload` with the literal UTF-8 bytes for `日本語.txt` in the `X-Filename` header (no percent-encoding). Before the fix: `HTTP/1.0 201 Created`, `{"source": {"id": 1, "title": "æ\x97¥æ\x9c¬èª\x9e.txt"}, ...}` — the upload succeeds and the title is permanently mojibake, with no indication anything went wrong. Any non-browser client (a curl script, a different frontend, a future mobile app) that didn't know about the `encodeURIComponent()` convention would hit this on every non-ASCII filename.
+- Fix: before the existing `unquote()`/`Path(...).name` processing, attempt a guarded Latin-1→UTF-8 round-trip on the raw header value (`header_name.encode("latin-1").decode("utf-8")`, falling back to the original value on `UnicodeDecodeError`/`UnicodeEncodeError`). This recovers the correct Unicode text for a raw-UTF-8-bytes client. The existing `index.html` percent-encoded path is unaffected: percent-encoded ASCII round-trips through Latin-1→UTF-8 unchanged (ASCII is valid in both encodings), so `unquote()` still runs correctly afterward and decodes the `%XX` escapes as before.
+- Verified both paths after the fix with the same raw-socket reproduction: the raw-UTF-8-bytes case now correctly persists `"日本語.txt"`; the existing percent-encoded case (`index.html`'s actual behavior) continues to work unchanged.
+- 2 regression tests added to `tests/test_server.py`: `test_upload_raw_utf8_filename_header_not_mojibake` (uses `http.client` with `putheader()` passed raw UTF-8 bytes directly, bypassing any client-side percent-encoding, to prove the header-decode fix rather than a client encoding convention) and `test_upload_percent_encoded_filename_still_works` (confirms the existing convention is unaffected). Verified fail-then-pass via `git stash` on `shoin/server.py` alone: the mojibake test failed with the exact pre-fix corrupted string (`'æ\x97¥æ\x9c¬èª\x9e.txt' != '日本語.txt'`) before the fix, passed after.
+
+`pytest tests/` now runs 601 tests (up from 599). `mypy shoin/` and `ruff check shoin/` remain clean (the one pre-existing `search.py` F541 finding is untouched by this change).
 
 ### v0.2.105 (2026-07-08)
 **Fixed**: A thirty-third background audit round, explicitly instructed to do an exhaustive final sweep of every `sqlite3.IntegrityError` catch site in the codebase (following the v0.2.53/v0.2.86/v0.2.104 pattern found three times already), found the "port the fix to every sibling" discipline had itself been applied to only 3 of 7 sites. `grep -rn "except sqlite3.IntegrityError" shoin/` confirmed all 7 catch sites live in `store.py` (none in `pipeline.py`/`server.py`/`qa.py`/`studio.py`/`cli.py`); 4 more still used the old bare, unconditional form, unconditionally re-raising a misleading error code for *any* `IntegrityError`:

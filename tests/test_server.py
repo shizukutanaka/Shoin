@@ -705,6 +705,47 @@ class ServerTest(unittest.TestCase):
         # Null byte is stripped → filename becomes "evil.txt" → upload succeeds
         self.assertEqual(status, 201)
 
+    def test_upload_raw_utf8_filename_header_not_mojibake(self) -> None:
+        """X-Filename sent as raw UTF-8 bytes (not percent-encoded) must decode
+        correctly, not silently corrupt into mojibake.
+
+        http.server/email.parser decode header bytes as Latin-1, not UTF-8. The
+        only client in this repo (index.html) works around this by always
+        percent-encoding via encodeURIComponent() before sending — but that
+        convention is undocumented and unenforced. Before the fix, a client
+        sending raw UTF-8 bytes got a permanently corrupted title with zero
+        error signal (HTTP 201, garbage title). Verified via a raw socket
+        (http.client, not urllib) so the header bytes are sent exactly as given,
+        bypassing any client-side percent-encoding.
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "raw-utf8-header"})
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("POST", f"/api/notebooks/{nb['id']}/upload")
+        body = ("生の UTF-8 ヘッダーのテスト文書。" * 20).encode("utf-8")
+        conn.putheader("Content-Length", str(len(body)))
+        conn.putheader("X-Filename", "日本語.txt".encode("utf-8"))
+        conn.endheaders(body)
+        resp = conn.getresponse()
+        data = json.loads(resp.read())
+        conn.close()
+        self.assertEqual(resp.status, 201)
+        self.assertEqual(data["source"]["title"], "日本語.txt")
+
+    def test_upload_percent_encoded_filename_still_works(self) -> None:
+        """The existing index.html convention (encodeURIComponent before send)
+        must be unaffected by the raw-UTF-8-recovery fix: ASCII percent-encoded
+        header values round-trip through the Latin-1->UTF-8 recovery unchanged.
+        """
+        _, nb = self._json("POST", "/api/notebooks", {"name": "percent-encoded-still-ok"})
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            ("引き続き動作することを確認する文書。" * 20).encode(),
+            {"X-Filename": urllib.parse.quote("日本語2.txt")},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(raw)["source"]["title"], "日本語2.txt")
+
     def test_upload_tempfile_write_failure_does_not_leak_temp_file(self) -> None:
         """If tmp.write() raises mid-upload, the temp file must be cleaned up.
 

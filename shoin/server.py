@@ -411,8 +411,21 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
     def _h_src_upload(self, nb_id: int) -> None:
+        header_name = self.headers.get("X-Filename") or "upload.txt"
+        # http.server/email.parser decode header bytes as Latin-1, not UTF-8. The
+        # only client in this repo (index.html) works around this by always
+        # percent-encoding via encodeURIComponent() before sending, but that
+        # convention is undocumented and unenforced — a client sending raw UTF-8
+        # bytes gets silently mis-decoded mojibake that unquote() cannot fix (it
+        # only reverses %XX escapes). Recover via a Latin-1->UTF-8 round-trip
+        # first; ASCII/percent-encoded values round-trip unchanged, so the
+        # existing encodeURIComponent() path is unaffected.
+        try:
+            header_name = header_name.encode("latin-1").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
         raw_name = (
-            Path(urllib.parse.unquote(self.headers.get("X-Filename") or "upload.txt")).name
+            Path(urllib.parse.unquote(header_name)).name
             or "upload.txt"
         ).replace("\x00", "").replace("\r", "").replace("\n", "") or "upload.txt"
         suffix = Path(raw_name).suffix.lower() or ".txt"
