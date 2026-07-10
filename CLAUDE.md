@@ -177,15 +177,13 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 **Mitigation**: The design is intentional. Shallow context encourages focused, specific questions rather than open-ended exploration. For exploratory work, Studio outputs (briefing, timeline, mindmap) pre-synthesize the sources into digests.
 
-### No Batch Embeddings API Support
+### Embedding Batch Size Is a Fixed Constant
 
-**Problem**: `ChatBackend.embed_one(text)` embeds a single chunk at a time. Ingest of a 100-chunk source triggers 100 HTTP requests to the embeddings endpoint (Ollama `/api/embeddings`, llama.cpp `/embeddings`).
+**Correction (v0.2.112)**: This section previously claimed `ChatBackend.embed_one(text)` embeds one chunk per HTTP request and that batching was unimplemented ("Ollama and llama.cpp have different batch API signatures... A batch API would require vendor detection"). That was never true of the actual code: `LLMClient.embed(texts: list[str])` (`llm.py`) has always sent a single `POST /embeddings` with `{"model": ..., "input": texts}` — the standard OpenAI-compatible batch shape — and `_embed_chunks()` (`pipeline.py`) has always preferred it over `embed_one()`, grouping texts into batches of `EMBED_BATCH = 16` and issuing one HTTP request per batch (`pipeline.py`: `for i in range(0, len(texts), EMBED_BATCH): vectors = embed(texts[i:i+EMBED_BATCH])`). `embed_one()` exists only as a `ChatBackend` protocol convenience for single-text callers (e.g. query-time embedding in `search.py`) and as the fallback for a hypothetical backend that doesn't implement `embed()` at all — not the code path production ingest actually takes. A 100-chunk source therefore triggers `ceil(100/16) = 7` embedding requests, not 100.
 
-**Impact**: Ingest of large PDFs is slow (~2–5 seconds per source on typical hardware). For users adding dozens of sources in a session, this compounds.
+**Actual remaining gap**: `EMBED_BATCH` is a hardcoded module constant in `pipeline.py`, not adaptive to endpoint capacity and not configurable via an environment variable. A user running an endpoint that comfortably handles much larger batches (or one that's memory-constrained and would prefer smaller ones) has no way to tune this without editing source.
 
-**Why Not Fixed**: Ollama and llama.cpp have different batch API signatures and conventions. Shoin prioritizes simplicity and broad compatibility (works with any OpenAI-compatible endpoint). A batch API would require vendor detection or optional configuration.
-
-**Workaround**: Disable embeddings (leave `SHOIN_EMBED_MODEL` unset) if ingest speed matters more than semantic search.
+**Workaround**: Disable embeddings (leave `SHOIN_EMBED_MODEL` unset) if ingest speed still matters more than semantic search on your hardware.
 
 ### UI State Management Could Be More Robust
 
@@ -312,7 +310,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.111
+## Version History: v0.1.37 → v0.2.112
+
+### v0.2.112 (2026-07-10)
+**Fixed (docs)**: A fortieth background audit round found the "No Batch Embeddings API Support" section of this very file (the "Known Weaknesses & Tech Debt" section) was factually false and had been for the entire session — no prior audit round had ever checked a "Known Weaknesses" doc claim against the actual code. It claimed `ChatBackend.embed_one(text)` embeds one chunk per HTTP request ("Ingest of a 100-chunk source triggers 100 HTTP requests") and that batching was unimplemented ("Ollama and llama.cpp have different batch API signatures... A batch API would require vendor detection or optional configuration"). Neither claim was ever true of the actual code: `LLMClient.embed(texts: list[str])` (`llm.py`) has always sent a single `POST /embeddings` with `{"model": ..., "input": texts}` — the standard OpenAI-compatible batch shape — and `_embed_chunks()` (`pipeline.py`) has always preferred it over `embed_one()`, grouping texts into batches of `EMBED_BATCH = 16` per HTTP request. `embed()` predates essentially this entire changelog (added in v0.1.29, well before the v0.1.37 start of this document's version history).
+
+- Live-reproduced: ran `pipeline.index_source()` against a real `Store` with a `FakeLLM` tracking separate call counts for `embed()` (batch) and `embed_one()` (per-chunk), on a 50-chunk source. Result: `embed() batch calls: 4` (= `ceil(50/16)`), `embed_one() calls: 0` — confirming production ingest exclusively uses the batch path. For the doc's own "100-chunk source" example, the true request count is `ceil(100/16) = 7`, not 100.
+- **Concrete impact of the stale doc**: a contributor reading "Why Not Fixed" would believe batching is architecturally hard and unimplemented, risking either wasted re-implementation effort or avoidance of the area under a false premise; a user diagnosing slow ingest would be given a wrong root-cause model (O(n) requests instead of the actual O(n/16)).
+- Fix: rewrote the section (renamed to "Embedding Batch Size Is a Fixed Constant") to describe what's actually true — batching exists and is preferred — and narrowed the "remaining gap" to something genuinely unaddressed: `EMBED_BATCH=16` is a hardcoded module constant in `pipeline.py` with no environment-variable override, confirmed via `grep -n EMBED_BATCH shoin/*.py` (only the one definition and its two use sites, no config plumbing anywhere).
+- No code changes — this is a documentation-only correction. No regression test applicable (nothing in the test suite asserts CLAUDE.md prose); the live reproduction above is the verification.
+
+`pytest tests/` still runs 606 tests (no Python files changed this round). `mypy shoin/` and `ruff check shoin/` remain clean (no Python changes).
 
 ### v0.2.111 (2026-07-10)
 **Fixed**: A thirty-ninth background audit round found CLI `note add` (`_cmd_note()`, `cli.py`) was the sixth site of the same title-echo-mismatch bug class fixed five times already this session (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`, v0.2.95 CLI `source rename`, v0.2.99 CLI `notebook rename`): `store.add_note()` (`store.py:594`) does `title = title.strip()` before persisting, but the CLI's confirmation `print()` used the raw, unstripped `str(args.title)` — a call site never given the same treatment.
