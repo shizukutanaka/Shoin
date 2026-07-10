@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.78
+## Version History: v0.1.37 → v0.2.79
+
+### v0.2.79 (2026-07-08)
+**Fixed**: A seventh background audit round, specifically briefed to re-scrutinize the v0.2.78 fix itself rather than broaden scope (given v0.2.77's first attempt at this same fix had itself been incomplete), found the v0.2.78 fix was *also* incomplete in a small but concrete way: its own comment claimed to "reuse the same suffix set studio.py's `suggest_questions()` already established... so the two question-detection heuristics in this codebase agree" — but the ported tuple was `("か", "でしょう")`, silently dropping `"ください"` (polite request form, e.g. "…について教えてください。") from `suggest_questions()`'s actual three-item tuple `("か", "ください", "でしょう")`. The claim of agreement was false as written.
+
+- Live-reproduced: `uncited_sentences("この技術の利点について教えてください。")` returned the sentence as a false-positive unsupported claim, despite it being a polite-form question asserting nothing — the same false-positive class v0.2.77/78 both set out to eliminate, just for this one remaining suffix.
+- Fix: added `"ください"` back to the tuple, restoring actual parity with `studio.py`'s heuristic.
+- 1 more regression test added; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 566 tests (up from 565). `mypy shoin/` and `ruff check shoin/citation.py` remain clean.
 
 ### v0.2.78 (2026-07-08)
 **Fixed**: A sixth background audit round, explicitly briefed to re-examine the v0.2.77 fix itself, found that fix was incomplete: `uncited_sentences()`'s question-exclusion guard only recognized `?`/`？`-suffixed questions, not the extremely common formal-Japanese question construction ending in `か。` with no question mark at all (e.g. `この技術の利点は何か。`) — the natural register for `study_guide`'s own JA prompt ("理解確認の設問"). This re-triggered the exact systematic false-positive v0.2.77 set out to eliminate, just for the JA-formal-register half of it. Notably, the sibling function in the same codebase, `suggest_questions()` (`studio.py`), already recognized this exact pattern (`q_base.endswith(("か", "ください", "でしょう"))`) — the v0.2.77 fix had reused a narrower heuristic than the one already established elsewhere.

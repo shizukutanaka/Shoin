@@ -262,7 +262,7 @@ def uncited_sentences(text: str) -> list[str]:
         # suggest_questions() already established for identifying JA questions,
         # so the two question-detection heuristics in this codebase agree.
         _q_base = sentence.rstrip("。.!?？")
-        if sentence.endswith(("?", "？")) or _q_base.endswith(("か", "でしょう")):
+        if sentence.endswith(("?", "？")) or _q_base.endswith(("か", "ください", "でしょう")):
             continue
         pending = sentence  # wait to see if a trailing citation-only fragment resolves it
     if pending is not None:

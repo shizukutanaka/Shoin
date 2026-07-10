@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.78")
+        self.assertEqual(VERSION, "0.2.79")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3004,6 +3004,16 @@ class TestUncitedSentences(unittest.TestCase):
 
         self.assertEqual(uncited_sentences("この技術の利点は何か。"), [])
         self.assertEqual(uncited_sentences("導入にはどれくらいの期間が必要でしょうか。"), [])
+
+    def test_ignores_polite_request_form_question(self) -> None:
+        """The v0.2.78 fix's own comment claimed to "reuse the same suffix set"
+        as suggest_questions() (studio.py), which recognizes ("か", "ください",
+        "でしょう") — but v0.2.78 only ported ("か", "でしょう"), omitting
+        "ください" (polite request form, e.g. "...教えてください。"). That made
+        the two heuristics diverge despite the comment claiming they agree."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(uncited_sentences("この技術の利点について教えてください。"), [])
 
     def test_make_report_ja_study_guide_style_qa_not_flagged_when_answers_cited(self) -> None:
         """End-to-end reproduction of the formal-JA question false positive."""
