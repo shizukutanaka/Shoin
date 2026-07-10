@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.76
+## Version History: v0.1.37 → v0.2.77
+
+### v0.2.77 (2026-07-08)
+**Fixed**: A fifth background audit round found that `uncited_sentences()` (`citation.py`, v0.2.65) systematically false-positived on the `faq` and `study_guide` Studio kinds — the exact two kinds whose own prompts ask the LLM for 5-8 questions per output (`studio.py`'s `faq`/`study_guide` prompt templates). Every question line in a generated FAQ or study guide has no `[S#]` marker of its own (a question asserts nothing, so there is nothing to cite), but `uncited_sentences()` had no way to tell "a claim with no citation" (the real gap it exists to catch) apart from "a question with no citation" (structurally never a claim) — it flagged both identically.
+
+- Reproduced directly: `make_report()` on a correctly-cited 2-question FAQ (each answer properly citing its source, `confirmed: [1, 2]`) still returned `uncited: ['Q1: ...?', 'Q2: ...?']` — a systematic false positive on every single generation of these two kinds, not an edge case, undermining this module's own explicitly documented design principle (`citation.py`'s module docstring: the checks "stay silent otherwise rather than falsely accusing a correctly paraphrased answer").
+- Fix: `uncited_sentences()` now skips any fragment ending in `?`/`？` — a question is never itself an assertion requiring a citation. The existing `pending`-fragment-flush logic is unaffected: a genuine uncited claim that happens to precede a question in the same text is still correctly flagged (verified with a dedicated regression test), so the fix narrowly targets question fragments themselves, not sentences near them.
+- 3 regression tests added: bare question sentences (English + Japanese) are not flagged; a real unsupported claim following a question is still flagged; and an end-to-end `make_report()` reproduction of the exact FAQ false-positive scenario now correctly omits the `uncited` key. Verified the new tests fail against the pre-fix code via `git stash` before restoring the fix.
+
+`pytest tests/` now runs 563 tests (up from 560). `mypy shoin/` and `ruff check shoin/citation.py` remain clean.
 
 ### v0.2.76 (2026-07-08)
 **Fixed**: A fourth background audit round found a genuine, subtle bug in `history_messages()` (`qa.py`): it conflated "no assistant reply row exists at all" (a true orphan, e.g. server crash before persisting anything) with "an assistant reply row exists but has an empty body" (a legitimate, already-persisted degraded/error/zero-token-response turn — server.py has always persisted *something* for every completed turn since v0.2.55, specifically so the DB never has a truly dangling question). Both cases produced an empty `body` after filtering and were indistinguishable by the time the trailing-user-turn-strip loop ran, so a real, answered (if emptily) user question got silently stripped from history as if it were an orphan.

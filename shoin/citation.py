@@ -219,11 +219,13 @@ def uncited_sentences(text: str) -> list[str]:
     is only flagged once we've confirmed no such trailing citation resolves it —
     a sentence immediately followed by a citation-only fragment is NOT uncited.
 
-    Trivial fragments (too short to carry a claim, e.g. "はい。") and sentences
+    Trivial fragments (too short to carry a claim, e.g. "はい。"), sentences
     that explicitly say the fact is not in the sources (the *correct* response to
-    missing information per the system prompt, not an unsupported assertion) are
-    excluded so this stays a high-precision signal rather than flagging normal,
-    honest "not in the source" disclaimers.
+    missing information per the system prompt, not an unsupported assertion), and
+    questions (a question asserts nothing — the faq/study_guide Studio kinds ask
+    5-8 questions per output by design) are excluded so this stays a
+    high-precision signal rather than flagging normal, honest "not in the
+    source" disclaimers or well-formed FAQ/study-guide question lines.
     """
     out: list[str] = []
     pending: str | None = None  # most recent uncited sentence, awaiting a trailing citation
@@ -250,6 +252,13 @@ def uncited_sentences(text: str) -> list[str]:
             continue  # too short/trivial to carry a claim worth flagging
         if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
+        if sentence.endswith(("?", "？")):
+            continue  # a question asserts nothing; the faq/study_guide kinds ask
+            # 5-8 questions per output (studio.py prompts), and each becomes its
+            # own citation-less sentence at this split boundary — flagging them
+            # would violate this module's own "stay silent unless certain"
+            # principle by systematically false-positiving every well-formed,
+            # correctly-cited FAQ/study-guide output.
         pending = sentence  # wait to see if a trailing citation-only fragment resolves it
     if pending is not None:
         out.append(pending)

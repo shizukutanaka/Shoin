@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.76")
+        self.assertEqual(VERSION, "0.2.77")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2974,6 +2974,46 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "That detail is not in the source provided."
         self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_question_sentences(self) -> None:
+        """A question asserts nothing and must not be flagged as an unsupported
+        claim. The faq/study_guide Studio kinds prompt the LLM for 5-8 questions
+        per output; each becomes its own citation-less sentence at the sentence-
+        split boundary, so without this guard every well-formed, correctly-cited
+        FAQ/study-guide output would systematically false-positive."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(uncited_sentences("What is the capital of France?"), [])
+        self.assertEqual(uncited_sentences("書院とは何ですか？"), [])
+
+    def test_flags_non_question_sentence_after_a_question(self) -> None:
+        """The question guard must not suppress a genuine unsupported claim that
+        merely follows a question in the same text."""
+        from shoin.citation import uncited_sentences
+
+        text = "What is the capital of France? Paris has existed for centuries."
+        self.assertEqual(uncited_sentences(text), ["Paris has existed for centuries."])
+
+    def test_make_report_faq_style_qa_not_flagged_when_answers_cited(self) -> None:
+        """End-to-end reproduction of the faq/study_guide Studio kind false
+        positive: every question in a correctly-cited Q&A output must not appear
+        in the uncited list."""
+        from shoin.citation import make_report
+
+        text = (
+            "Q1: What is the capital of France?\n"
+            "A1: Paris is the capital of France. [S1]\n\n"
+            "Q2: What is its population?\n"
+            "A2: About 2.1 million. [S2]"
+        )
+        report = make_report(
+            text,
+            ["Doc A", "Doc B"],
+            [10, 20],
+            ["Paris is the capital of France.", "The population is about 2.1 million."],
+        )
+        self.assertNotIn("uncited", report)
+        self.assertEqual(report["confirmed"], [1, 2])
 
     def test_make_report_populates_uncited_when_sources_present(self) -> None:
         from shoin.citation import make_report
