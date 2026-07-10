@@ -448,7 +448,21 @@ function startSourceRename(s, tt, row, prefillValue){
   // (e.g. the delete or refresh button), skip blur-commit so the button click
   // fires normally on its own; the button's onclick rebuilds the DOM anyway.
   input.onblur = e => { if (row.contains(e.relatedTarget)) return; commit(); };
-  input.onkeydown = e => { if (e.key==="Enter"){e.preventDefault();commit();} if(e.key==="Escape"){openNotebook(nb.id);} };
+  input.onkeydown = e => {
+    if (e.key==="Enter"){e.preventDefault();commit();}
+    if (e.key==="Escape"){
+      // Mark committed (so onblur's commit() below is a no-op) and blur
+      // BEFORE reloading: renderNotebook()'s "preserve an in-progress
+      // rename across an unrelated rebuild" logic keys off whether this
+      // input is still document.activeElement, and since openNotebook()
+      // is async, it would otherwise still be focused when the reload
+      // completes — resurrecting the exact edit the user just cancelled
+      // with the discarded text still in it.
+      committed = true;
+      input.blur();
+      openNotebook(nb.id);
+    }
+  };
   return input;
 }
 function renderNotebook(){
