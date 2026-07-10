@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.90
+## Version History: v0.1.37 → v0.2.91
+
+### v0.2.91 (2026-07-08)
+**Fixed**: A nineteenth background audit round, moved to fresh territory now that server.py's disconnect-handling area was closed, found `store.update_source_title()` had no empty/whitespace-title validation at all — it relied entirely on the caller to guard against this. The Web API path (`PATCH /api/sources/{id}`) is protected by `server.py`'s `_require()` (strips and rejects empty/whitespace with `VALIDATION_REQUIRED_FIELD_MISSING`) before ever calling this method, but the CLI path (`shoin source rename`, v0.2.68, explicitly meant to give "the SAME" capability per `cli.py`'s own REQ-103 CLI-parity claim) called `store.update_source_title()` directly with zero validation — `_cmd_source()`'s "rename" branch just passes `str(args.title)` straight through.
+
+- **Concrete impact**: `shoin source rename 5 ""` (or an accidental `shoin source rename 5 "   "` from a shell quoting mistake) silently persisted a blank/invisible source title with exit code 0, while the equivalent `PATCH /api/sources/5` request would have returned HTTP 400. Live-reproduced: both empty and whitespace-only renames via the CLI succeeded and were written to the DB before the fix.
+- Fix: moved the guard to the store level — `update_source_title()` now strips and rejects an empty title with `StoreError("VALIDATION_REQUIRED_FIELD_MISSING", ...)`, mirroring the exact pattern `add_note()` already uses for the identical class of gap. This protects every caller (CLI, Web, and any future one) uniformly rather than patching only the CLI path; the Web path's existing `_require()` check is now a redundant-but-harmless first line of defense, not the only one.
+- 2 regression tests added: a store-level test (empty/whitespace/tab-newline all rejected, title unchanged) and a CLI-level test confirming `main()` exits 1 with a clean `VALIDATION_REQUIRED_FIELD_MISSING` stderr message instead of silently persisting. Verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 581 tests (up from 579). `mypy shoin/` and `ruff check shoin/store.py` remain clean.
 
 ### v0.2.90 (2026-07-08)
 **Fixed**: An eighteenth background audit round, specifically hunting for more instances of the v0.2.89 double-fault pattern, found `_reject_cross_site()` (`server.py`) still called raw `self._error()` instead of the newly-added `self._safe_error()` at both of its call sites. This is worse than the v0.2.89 case: `_reject_cross_site()` runs *before* `_dispatch()`'s try/except block even begins (line 252, `if self._reject_cross_site(method): return`), so a dead-connection failure while sending its 403 rejection isn't a double fault — it's a completely **unguarded single fault**, propagating straight out of `_dispatch()`/`do_GET` as a raw unhandled traceback.

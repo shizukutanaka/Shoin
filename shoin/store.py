@@ -366,7 +366,9 @@ class Store:
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
-        title = title[:MAX_TITLE_LEN]
+        title = title.strip()[:MAX_TITLE_LEN]
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         src = self.get_source(source_id)  # also validates existence; notebook_id needed below
         cur = self.conn.execute(
             "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)

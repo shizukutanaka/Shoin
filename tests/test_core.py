@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.90")
+        self.assertEqual(VERSION, "0.2.91")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -401,6 +401,27 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_source_title(99999, "x", "x")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_update_source_title_empty_or_whitespace_raises(self) -> None:
+        """update_source_title() must reject an empty/whitespace-only title.
+
+        The Web API path (PATCH /api/sources/{id}) already rejects this via
+        server.py's _require() before calling this method, but the CLI path
+        (`shoin source rename`, v0.2.68, explicitly meant to give the SAME
+        capability per CLAUDE.md's REQ-103 CLI-parity claim) called this
+        method directly with no validation at all, silently persisting a
+        blank/invisible source title that the Web API's equivalent request
+        would have rejected with HTTP 400. The guard belongs here, at the
+        store level, so every caller (present and future) is protected.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "original.txt", "original.txt", "hw")
+            for bad in ("", "   ", "\t\n"):
+                with self.assertRaises(StoreError) as cm:
+                    s.update_source_title(src.id, bad, "original.txt")
+                self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+            self.assertEqual(s.get_source(src.id).title, "original.txt")
 
     def test_replace_chunks_for_source_swaps_content(self) -> None:
         """replace_chunks_for_source must atomically delete old chunks and insert new ones."""
@@ -5287,6 +5308,35 @@ class TestCLINoteSourceParity(unittest.TestCase):
                 src = s.get_source(src_id)
             self.assertEqual(src.title, "new title")
             self.assertEqual(src.origin, "mem://original", "origin must survive a rename")
+        finally:
+            os.unlink(db_file)
+
+    def test_source_rename_empty_title_rejected_not_silently_persisted(self) -> None:
+        """CLI `source rename` must reject an empty title with a clean error
+        and exit code 1, matching what PATCH /api/sources/{id} already
+        enforces via server.py's _require() — not silently persist a blank
+        title (found to do so before the store-level guard was added)."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("src-rename-empty-test").id
+                src_id = s.add_source(nb_id, "txt", "original title", "mem://original", "sha1").id
+
+            err_out = io.StringIO()
+            with patch("sys.stderr", err_out):
+                rc = main(["--db", db_file, "source", "rename", str(src_id), ""])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err_out.getvalue())
+
+            with Store(db_file) as s:
+                self.assertEqual(s.get_source(src_id).title, "original title")
         finally:
             os.unlink(db_file)
 
