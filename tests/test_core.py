@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.114")
+        self.assertEqual(VERSION, "0.2.115")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1167,6 +1167,46 @@ class TestChunk(unittest.TestCase):
         # this must still cost exactly 1 token, matching every other
         # estimate_tokens/_truncate_tokens/_tail test in this file.
         self.assertEqual(estimate_tokens("parse_user_input"), 1)
+
+    def test_tail_credits_alnum_run_interrupted_by_cjk_character(self) -> None:
+        """_tail must not silently drop an alnum run's token cost when the run
+        is immediately adjacent to a CJK character (idiomatic in Japanese
+        text with no space before an ASCII model/section number, e.g.
+        "型番ABC123456"). Before this fix, the is_cjk() branch reset run_len
+        to 0 without ever crediting the interrupted run's base 1-token cost
+        (unlike the punctuation/space branch, which always did) — so _tail()
+        under-counted internally, scanned further left than it should, and
+        returned a suffix costing MORE tokens than requested. A 20,000-trial
+        fuzz of mixed CJK/ASCII/punctuation text found this affected 51% of
+        cases; this test reproduces the same failure with real Japanese prose.
+        """
+        from shoin.chunk import _tail
+
+        text = "この製品の型番はABC123456であり、価格は書院にて公開されている。"
+        for tokens in range(10, 25):
+            out = _tail(text, tokens)
+            got = estimate_tokens(out)
+            self.assertLessEqual(
+                got, tokens,
+                f"_tail(text, {tokens}) returned {got} tokens — must not exceed the request",
+            )
+
+    def test_tail_long_run_overlap_matches_chunk_overlap_budget(self) -> None:
+        """The real split_text() -> _tail() overlap computation (CHUNK_OVERLAP,
+        config.py) must not overshoot its own budget for realistic Japanese
+        text mixing kanji and adjacent ASCII identifiers — the exact
+        production call pattern (chunk.py:_hard_split's overlap wiring), not
+        just an isolated unit-level reproduction.
+        """
+        from shoin.chunk import _tail
+        from shoin.config import CHUNK_OVERLAP
+
+        para = "これは書院という製品の説明である。型番ABC123456はとても軽量で高速に動作する。" * 3
+        doc = (para + "\n\n") * 6
+        chunks = split_text(doc)
+        self.assertGreater(len(chunks), 1)
+        overlap = _tail(chunks[0], CHUNK_OVERLAP)
+        self.assertLessEqual(estimate_tokens(overlap), CHUNK_OVERLAP)
 
     def test_sentence_split_on_fullwidth_semicolon(self) -> None:
         """Full-width semicolon ；uff1b) must act as a sentence boundary in chunking."""

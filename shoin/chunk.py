@@ -130,10 +130,21 @@ def _tail(text: str, tokens: int) -> str:
         return ""
     acc = 0
     run_len = 0
+    run_credited = False  # base 1-token cost of the current run already counted
     for i in range(len(text) - 1, -1, -1):
         ch = text[i]
         if is_cjk(ch):
+            if run_len and not run_credited:
+                # An alnum run was interrupted by this CJK character (common in
+                # Japanese text with no space before an ASCII model/section
+                # number, e.g. "型番ABC123456") — credit the run's base token
+                # cost here, the same way the punctuation/space branch below
+                # does, so it isn't silently dropped from the count.
+                acc += 1
+                if acc >= tokens:
+                    return text[i + 1 :].lstrip()
             run_len = 0
+            run_credited = False
             acc += 1
             if acc >= tokens:
                 return text[i:].lstrip()
@@ -141,20 +152,36 @@ def _tail(text: str, tokens: int) -> str:
             run_len += 1
             # A normal-length word/identifier is only credited once fully
             # scanned (at its left boundary, below) so a short word is never
-            # cut mid-word. A run longer than _LONG_RUN_THRESHOLD also gets
-            # interim credits every ~4 chars so a pathologically long
-            # unbroken run (base64 blob, long hash) can still be bounded
-            # instead of pulling the whole thing in regardless of *tokens*.
-            if run_len > _LONG_RUN_THRESHOLD and (run_len - _LONG_RUN_THRESHOLD) % 4 == 1:
+            # cut mid-word. Once a run proves "long" (run_len exceeds the
+            # threshold), its base cost is locked in regardless of where it
+            # eventually ends, so it's credited immediately here instead of
+            # waiting for a boundary that a pathologically long run (base64
+            # blob, long hash) may never reach before *tokens* is satisfied —
+            # deferring it in that case would silently drop the base cost.
+            # Beyond that, interim credits every ~4 chars keep such a run
+            # bounded instead of pulling the whole thing in regardless of
+            # *tokens*.
+            if run_len == _LONG_RUN_THRESHOLD + 1:
+                run_credited = True
+                # Both the base cost (locked in the moment the run proves
+                # "long") and the first interim credit for crossing the
+                # threshold land on this same character — matching
+                # _run_token_cost()'s closed form (1 + ceil((n-40)/4), whose
+                # ceil term's first unit is also earned at n=41).
+                acc += 2
+                if acc >= tokens:
+                    return text[i:].lstrip()
+            elif run_len > _LONG_RUN_THRESHOLD and (run_len - _LONG_RUN_THRESHOLD) % 4 == 1:
                 acc += 1
                 if acc >= tokens:
                     return text[i:].lstrip()
         else:
-            if run_len:
+            if run_len and not run_credited:
                 acc += 1  # word boundary crossed: credit the run that just ended
-                run_len = 0
                 if acc >= tokens:
                     return text[i + 1 :].lstrip()
+            run_len = 0
+            run_credited = False
     return text
 
 
