@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.82
+## Version History: v0.1.37 → v0.2.83
+
+### v0.2.83 (2026-07-08)
+**Fixed**: An eleventh background audit round found `_h_src_patch()` (source rename, `server.py`) never invalidates `questions_cache`, unlike its sibling `_h_src_refresh()` (v0.2.36), which does: `with self.questions_cache_lock: self.questions_cache.pop(nb_id, None)`. The cache fingerprint is `tuple(s.id for s in store.sources_for_notebook(nb_id))` — source IDs only — and a rename doesn't change those, so the cache never self-expires. `build_context()` (`qa.py`) embeds each source's title directly into the LLM prompt (`f"[S{idx}] {title}\n<<<SOURCE S{idx}\n..."`), so a rename changes exactly what a refresh changes, but only refresh got the eviction fix.
+
+- **Concrete impact**: a user generates question suggestions, renames a source to fix a typo or clarify its content, reopens the suggestions panel — gets stale suggestions generated from the old title, and the LLM is never re-invoked, indefinitely (the cache only expires when sources are added/deleted/refreshed, not renamed). Live-reproduced against a real running server: warmed the cache (1 LLM call), renamed a source via `PATCH /api/sources/{id}`, requested suggestions again — chat call count stayed at 1 instead of incrementing to 2.
+- Fix: `_h_src_patch()` now evicts `questions_cache[src.notebook_id]` after a successful rename, using the exact same pattern as `_h_src_refresh()`.
+- 1 regression test added (`SourceRenameCacheTest`, live server + `FakeLLM` call-count assertion, mirroring the existing `ClearChatCacheTest` pattern); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 572 tests (up from 571). `mypy shoin/` remains clean; the 5 `ruff check` findings in `test_server.py` are unchanged pre-existing style issues, none touching the new test class (confirmed by line-range comparison).
 
 ### v0.2.82 (2026-07-08)
 **Fixed**: A tenth background audit round, specifically hunting for more instances of the v0.2.81 "sibling functions, inconsistent guard" pattern, found `studio.py`'s `generate()` and `suggest_questions()` both lacked the `sqlite3.OperationalError` guard around `build_context()` that `qa.ask()` has had since v0.2.44. All three functions call the exact same `build_context()` for the exact same reason (a `get_source()` inside it can hit SQLite's `busy_timeout` under WAL lock contention), but only `ask()` had ever been given the fix.

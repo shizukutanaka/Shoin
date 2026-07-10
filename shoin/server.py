@@ -424,6 +424,12 @@ class _Handler(BaseHTTPRequestHandler):
         # Use src_id and title from the request — no second get_source() to avoid
         # a TOCTOU window where a concurrent delete would return HTTP 404 despite
         # the update having already committed successfully.
+        # A renamed title changes the prompt build_context() sends to the LLM the
+        # same way a content refresh does (same fix as _h_src_refresh, v0.2.36):
+        # evict stale question suggestions, since the cache key is source IDs only
+        # and a rename doesn't change those, so it would never self-expire.
+        with self.questions_cache_lock:
+            self.questions_cache.pop(src.notebook_id, None)
         self._json({"id": src_id, "title": title})
 
     def _h_src_delete(self, src_id: int) -> None:

@@ -1148,6 +1148,76 @@ class ClearChatCacheTest(unittest.TestCase):
                          "clearing chat must not invalidate the questions cache")
 
 
+class SourceRenameCacheTest(unittest.TestCase):
+    """Renaming a source must invalidate the questions cache, the same way
+    _h_src_refresh already does (v0.2.36). The cache fingerprint is source IDs
+    only, unchanged by a rename, so without an explicit eviction the cache would
+    never self-expire and would keep serving suggestions generated from the old
+    title indefinitely — build_context() embeds the source title directly into
+    the LLM prompt, so a rename changes exactly what a refresh changes.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "rn.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_rename_source_invalidates_questions_cache(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "改名キャッシュ"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("知識ベース文書。" * 50).encode(),
+            method="POST",
+            headers={"X-Filename": "kb.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        _, nb_full = self._json("GET", f"/api/notebooks/{nb_id}")
+        src_id = nb_full["sources"][0]["id"]
+
+        before = self.llm.chat_count
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        after_warm = self.llm.chat_count
+        self.assertEqual(after_warm, before + 1)  # one LLM call to warm the cache
+
+        status, _ = self._json("PATCH", f"/api/sources/{src_id}", {"title": "改名後のタイトル"})
+        self.assertEqual(status, 200)
+
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.llm.chat_count, after_warm + 1,
+            "renaming a source must invalidate the questions cache (one new LLM call)",
+        )
+
+
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
 
