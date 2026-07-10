@@ -84,10 +84,11 @@ Retrieval combines two signals:
 - Cosine similarity is computed in-process over notebook chunks (local scale, no external API)
 - Normalizes NaN/Inf results to 0.0 (guards against corrupted embeddings from broken endpoints)
 
-**Fusion** (Convex Combination):
-- Linear combination: `score = alpha * vec_score + (1-alpha) * bm25_score`
-- Adaptive alpha: natural-language queries (ending in `？`, `?`, or `か`) get higher alpha (+0.15) to prioritize semantic search
-- Min-max normalization accounts for different score ranges per query (scores are local, not global)
+**Fusion** (Reciprocal Rank Fusion, RRF — since v0.2.56):
+- `rrf_fuse(bm25_hits, vec_hits)`: `score = Σ 1/(k + rank + 1)` with k=60 (Cormack SIGIR 2009), summed across whichever result lists a chunk appears in
+- Uses only rank positions, bypassing the scale incompatibility between raw FTS5 BM25 values and cosine similarity scores in [0,1] — no per-query normalization or alpha tuning needed
+- A chunk found by both BM25 (rank 1) and vector (rank 1) scores ≈0.0328; found by only one at rank 1 scores ≈0.0164, naturally combining both signals
+- `fuse()`/`adaptive_alpha()` (the earlier convex-combination design: `score = alpha * vec_score + (1-alpha) * bm25_score`, with alpha adjusted for natural-language queries/identifiers/short keywords) still exist in `search.py` for backward compatibility with existing tests, but `retrieve()` no longer calls either — RRF scores are min-max normalized to [0,1] before being passed to the lexical MMR reranker below
 
 **MMR Reranking** (Maximum Marginal Relevance):
 - After fusion, the top-k hits are reranked to maximize relevance while minimizing redundancy
@@ -173,7 +174,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 - Long sources are truncated; users may not see the full text.
 - Rare multi-turn conversations (10+ turns) risk dropping early history due to token limit.
-- Very large notebooks (500+ sources) retrieve only TOP_K=10 sources, potentially missing nuanced cross-source synthesis.
+- Very large notebooks (500+ sources) retrieve only TOP_K=8 sources, potentially missing nuanced cross-source synthesis.
 
 **Mitigation**: The design is intentional. Shallow context encourages focused, specific questions rather than open-ended exploration. For exploratory work, Studio outputs (briefing, timeline, mindmap) pre-synthesize the sources into digests.
 
@@ -310,7 +311,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.112
+## Version History: v0.1.37 → v0.2.113
+
+### v0.2.113 (2026-07-10)
+**Fixed (docs)**: A forty-first background audit round, following on from v0.2.112's discovery that a "Known Weaknesses" claim was stale, spot-checked the rest of that section and the "Core Concepts" search prose against the actual code and found two more drifted claims in this same file:
+
+1. **`TOP_K` misstated as 10**: "Known Weaknesses & Tech Debt" → "Lightweight LLM Compatibility" claimed "Very large notebooks (500+ sources) retrieve only TOP_K=10 sources" — but `config.py: TOP_K = 8` has been 8 since the constant was introduced; every call site (`search.py`, `qa.py`, `cli.py`) uses this default unmodified, and production `server.py` never overrides it. Live-reproduced: `retrieve()` against a real 20-chunk notebook with default `k` returned exactly 8 hits. Notably, this exact same file's own v0.2.100 changelog entry (written 13 versions earlier) already correctly states "`TOP_K` (8)" in its own reproduction text — the file had been internally self-contradictory (line 176 said 10, the v0.2.100 entry said 8) since 2026-07-08, unnoticed through 41 rounds of self-auditing until this one actually diffed the two claims.
+2. **Stale pre-RRF fusion description**: "Core Concepts" → "Vector + BM25 Hybrid Retrieval" still described the pre-v0.2.56 convex-combination design ("Fusion (Convex Combination): `score = alpha * vec_score + (1-alpha) * bm25_score`... Adaptive alpha... Min-max normalization") as if it were the current pipeline. `search.py`'s actual `retrieve()` has called `rrf_fuse(bm25_hits, vec_hits)` exclusively since v0.2.56 — `fuse()`/`adaptive_alpha()` still exist in the module only for backward compatibility with older tests, per that function's own docstring, and are never invoked by `retrieve()`.
+
+- Fix: corrected `TOP_K=10` → `TOP_K=8`. Rewrote the Fusion subsection to describe RRF (the actual current algorithm, `score = Σ 1/(k+rank+1)`, k=60) and explicitly note `fuse()`/`adaptive_alpha()` are retained-but-unused legacy code, not the live path.
+- No code changes — both are documentation-only corrections, verified against the actual running `retrieve()`/`config.TOP_K` rather than assumed from memory. No regression test applicable.
+
+`pytest tests/` still runs 606 tests (no Python files changed this round). `mypy shoin/` and `ruff check shoin/` remain clean (no Python changes).
 
 ### v0.2.112 (2026-07-10)
 **Fixed (docs)**: A fortieth background audit round found the "No Batch Embeddings API Support" section of this very file (the "Known Weaknesses & Tech Debt" section) was factually false and had been for the entire session — no prior audit round had ever checked a "Known Weaknesses" doc claim against the actual code. It claimed `ChatBackend.embed_one(text)` embeds one chunk per HTTP request ("Ingest of a 100-chunk source triggers 100 HTTP requests") and that batching was unimplemented ("Ollama and llama.cpp have different batch API signatures... A batch API would require vendor detection or optional configuration"). Neither claim was ever true of the actual code: `LLMClient.embed(texts: list[str])` (`llm.py`) has always sent a single `POST /embeddings` with `{"model": ..., "input": texts}` — the standard OpenAI-compatible batch shape — and `_embed_chunks()` (`pipeline.py`) has always preferred it over `embed_one()`, grouping texts into batches of `EMBED_BATCH = 16` per HTTP request. `embed()` predates essentially this entire changelog (added in v0.1.29, well before the v0.1.37 start of this document's version history).
