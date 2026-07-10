@@ -494,8 +494,16 @@ class Store:
             cur = self.conn.execute(
                 "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
             )
-        except sqlite3.IntegrityError:
-            raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source")
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise StoreError(
+                    "SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source"
+                )
+            # This is an UPDATE that never touches notebook_id, so no FOREIGN KEY
+            # violation is possible here — anything else (e.g. a NOT NULL on the
+            # sha256 column) is a genuine unexpected constraint violation, not a
+            # duplicate-hash collision. Mirrors the v0.2.53/86/104 fix pattern.
+            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
         if cur.rowcount == 0:
             raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
         self.touch_notebook(src.notebook_id)
@@ -594,7 +602,12 @@ class Store:
                 "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
                 (notebook_id, title, body, _now()),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            if "FOREIGN KEY" not in str(e):
+                # notes has no UNIQUE constraint, so the only expected IntegrityError
+                # here is the FK on notebook_id (genuine concurrent deletion).
+                # Mirrors the v0.2.53/86/104 fix pattern.
+                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during note insertion",
@@ -630,7 +643,12 @@ class Store:
                 " created_at) VALUES (?,?,?,?,?)",
                 (notebook_id, kind, body, citation_report, _now()),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            if "FOREIGN KEY" not in str(e):
+                # studio_outputs has no UNIQUE constraint, so the only expected
+                # IntegrityError here is the FK on notebook_id (genuine concurrent
+                # deletion). Mirrors the v0.2.53/86/104 fix pattern.
+                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during studio output insertion",
@@ -662,7 +680,12 @@ class Store:
                 " VALUES (?,?,?,?,?)",
                 (notebook_id, role, body, citation_report, _now()),
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            if "FOREIGN KEY" not in str(e):
+                # messages has no UNIQUE constraint, so the only expected
+                # IntegrityError here is the FK on notebook_id (genuine concurrent
+                # deletion). Mirrors the v0.2.53/86/104 fix pattern.
+                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during message insertion",

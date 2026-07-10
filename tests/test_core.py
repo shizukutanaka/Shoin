@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.104")
+        self.assertEqual(VERSION, "0.2.105")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -811,6 +811,57 @@ class TestStore(unittest.TestCase):
                 s.add_chunks(src.id, [None])  # type: ignore[list-item]  # triggers NOT NULL, not FK
             self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
             # The source must still exist — this was never a deletion.
+            self.assertIsNotNone(s.get_source(src.id))
+
+    def test_add_message_non_fk_integrity_error_raises_internal_not_not_found(self) -> None:
+        """A fourth sibling with the same bug family: a non-FOREIGN-KEY
+        IntegrityError on messages (no UNIQUE constraint on this table, so
+        the only expected violation is the FK on notebook_id) must raise
+        SYSTEM_INTERNAL_ERROR, not the misleading NOTEBOOK_NOT_FOUND the
+        previous catch-all fell through to. A full sweep (following
+        v0.2.104) found 4 more sibling functions never given this fix:
+        add_message, add_note, add_studio_output, update_source_sha256.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("n-msg-integrity")
+            with self.assertRaises(StoreError) as cm:
+                s.add_message(nb.id, "user", None, "{}")  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertIsNotNone(s.get_notebook(nb.id))
+
+    def test_add_note_non_fk_integrity_error_raises_internal_not_not_found(self) -> None:
+        """Same bug family, add_note() sibling (notes has no UNIQUE constraint,
+        so the only expected IntegrityError is the FK on notebook_id)."""
+        with make_store() as s:
+            nb = s.create_notebook("n-note-integrity")
+            with self.assertRaises(StoreError) as cm:
+                s.add_note(nb.id, "title", None)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertIsNotNone(s.get_notebook(nb.id))
+
+    def test_add_studio_output_non_fk_integrity_error_raises_internal_not_not_found(self) -> None:
+        """Same bug family, add_studio_output() sibling (studio_outputs has no
+        UNIQUE constraint, so the only expected IntegrityError is the FK on
+        notebook_id)."""
+        with make_store() as s:
+            nb = s.create_notebook("n-studio-integrity")
+            with self.assertRaises(StoreError) as cm:
+                s.add_studio_output(nb.id, "briefing", None, "{}")  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertIsNotNone(s.get_notebook(nb.id))
+
+    def test_update_source_sha256_non_unique_integrity_error_raises_internal(self) -> None:
+        """update_source_sha256() must not misclassify a non-UNIQUE
+        IntegrityError (e.g. a NOT NULL violation) as SOURCE_ALREADY_EXISTS.
+        Unlike its INSERT-based siblings, this method is an UPDATE that never
+        touches notebook_id, so no FOREIGN KEY violation is possible here —
+        the discrimination is UNIQUE (genuine collision) vs. everything else."""
+        with make_store() as s:
+            nb = s.create_notebook("n-sha-integrity")
+            src = s.add_source(nb.id, "url", "title", "https://x.com", "sha-orig")
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src.id, None, "new title")  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
             self.assertIsNotNone(s.get_source(src.id))
 
     def test_add_source_fk_violation_raises_notebook_not_found(self) -> None:

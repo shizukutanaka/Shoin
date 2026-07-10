@@ -312,7 +312,21 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.104
+## Version History: v0.1.37 → v0.2.105
+
+### v0.2.105 (2026-07-08)
+**Fixed**: A thirty-third background audit round, explicitly instructed to do an exhaustive final sweep of every `sqlite3.IntegrityError` catch site in the codebase (following the v0.2.53/v0.2.86/v0.2.104 pattern found three times already), found the "port the fix to every sibling" discipline had itself been applied to only 3 of 7 sites. `grep -rn "except sqlite3.IntegrityError" shoin/` confirmed all 7 catch sites live in `store.py` (none in `pipeline.py`/`server.py`/`qa.py`/`studio.py`/`cli.py`); 4 more still used the old bare, unconditional form, unconditionally re-raising a misleading error code for *any* `IntegrityError`:
+
+- `add_note()` — always raised `NOTEBOOK_NOT_FOUND`
+- `add_studio_output()` — always raised `NOTEBOOK_NOT_FOUND`
+- `add_message()` — always raised `NOTEBOOK_NOT_FOUND`
+- `update_source_sha256()` — always raised `SOURCE_ALREADY_EXISTS`
+
+- Live-reproduced all 4: `add_message(nb.id, "user", None, "{}")`, `add_note(nb.id, "title", None)`, and `add_studio_output(nb.id, "briefing", None, "{}")` (each triggering a genuine `NOT NULL` violation, not a deletion) all raised `NOTEBOOK_NOT_FOUND` with the notebook demonstrably still present; `update_source_sha256(src.id, None, "title")` (a `NOT NULL` on `sources.sha256`) raised `SOURCE_ALREADY_EXISTS` instead of reflecting the real cause.
+- Fix: `add_note()`/`add_studio_output()`/`add_message()` now check `"FOREIGN KEY" in str(e)` before mapping to `NOTEBOOK_NOT_FOUND` (none of these three tables have a `UNIQUE` constraint, so FK-vs-else is the complete discrimination). `update_source_sha256()` — an `UPDATE` that never touches `notebook_id`, so no FK violation is possible there at all — checks `"UNIQUE" in str(e)` before mapping to `SOURCE_ALREADY_EXISTS` instead. All four now raise `SYSTEM_INTERNAL_ERROR` for anything else, matching the established pattern.
+- 4 regression tests added, one per function, plus verified every genuine FK/UNIQUE case (concurrent notebook deletion, real sha256 collision) still classifies correctly. Verified fail-then-pass for all 4 via `git stash` as with every fix this session. The `sqlite3.OperationalError`/`SYSTEM_DB_LOCKED` sibling-classification family was also swept this round and confirmed fully consistent — no further gaps there.
+
+`pytest tests/` now runs 599 tests (up from 595). `mypy shoin/` and `ruff check shoin/store.py` remain clean.
 
 ### v0.2.104 (2026-07-08)
 **Fixed**: A thirty-second background audit round, deliberately trying a cross-cutting consistency angle rather than another field-specific hunt, found `add_chunks()` (`store.py`) was a third sibling with the exact IntegrityError-misclassification bug v0.2.53 fixed in `add_source()` and v0.2.86 fixed in `replace_chunks_for_source()` — never ported to this one. All three share the identical `INSERT ... source_id REFERENCES sources(id)` FK shape; `add_chunks()` still had the pre-v0.2.53 catch-all: any `sqlite3.IntegrityError` at all — not just a genuine `FOREIGN KEY` violation from concurrent deletion — was reported as `SOURCE_NOT_FOUND`.
