@@ -626,7 +626,19 @@ class _Handler(BaseHTTPRequestHandler):
             hits = retrieve(store, nb_id, retrieval_q, query_vec=qvec)
             store.add_message(nb_id, "user", question, "{}")
 
-            self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
+            try:
+                self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
+            except ConnectionError:
+                # Client disconnected before SSE headers could even be sent. Save an
+                # empty assistant message so the orphaned user turn (already
+                # persisted above) is not visible in list_messages() on page reload —
+                # same guard already applied to the meta-send ConnectionError path
+                # (v0.2.49) and the build_context exception path (v0.2.39).
+                try:
+                    store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))
+                except Exception:
+                    pass
+                return
             if not hits:
                 no_hit = _qa_t("no_hit")
                 report = make_report(no_hit, [])

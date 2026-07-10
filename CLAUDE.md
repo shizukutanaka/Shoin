@@ -311,7 +311,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.115
+## Version History: v0.1.37 → v0.2.116
+
+### v0.2.116 (2026-07-10)
+**Fixed**: A forty-fourth background audit round, pivoting away from the now-thoroughly-audited token-estimation area, found `_h_ask_sse()` (`server.py`) had one remaining unguarded write in its own disconnect-handling chain — the same "orphaned user turn" bug class fixed three times already in this exact function (v0.2.39 `build_context()` exceptions, v0.2.49 the `meta`-send `ConnectionError`, v0.2.55 zero-token replies), just one statement earlier than any of them. `store.add_message(nb_id, "user", question, "{}")` persists the user's turn, and the very next statement — `self._headers(200, "text/event-stream; charset=utf-8", ...)`, the first write of the SSE response (`end_headers()` → `flush_headers()` → `self.wfile.write(...)`) — was completely unguarded. If the client had already disconnected by that point (a real, reachable window: retrieval just ran and can take time; the user can navigate away, cancel the fetch, or close the tab), `self.wfile.write()` raises `BrokenPipeError`/`ConnectionResetError` (`ConnectionError` subclasses), which propagated uncaught to `_dispatch()`'s generic exception handler — HTTP 500, and no code path ever ran to attach the compensating empty assistant message the three sibling fixes rely on.
+
+- Live-reproduced against a real running server: patched `_Handler._headers` to raise `ConnectionError` specifically for the SSE content-type (simulating a client that disconnected right as headers were about to be sent), then asked a real question. Before the fix: `Internal error handling POST /api/notebooks/1/ask: ConnectionError`, HTTP 500, and `store.list_messages(nb_id)` showed exactly one row — the user's question — with zero assistant rows, reproducing the same "unanswered question on page reload" UX failure the v0.2.55 changelog entry describes, via a codepath none of the three prior fixes touch. Confirmed via grep that `tests/test_server.py`'s `SSEConnectionErrorTest` class (which exhaustively covers `ConnectionError` on the `meta`/`delta`/`done` `_sse()` calls) had zero coverage of `_headers()` itself.
+- Fix: wrapped the initial `self._headers(...)` call in the same `try/except ConnectionError` pattern already used for the `meta`-send guard immediately below it — on failure, persist an empty assistant message (matching the three sibling guards exactly) and return.
+- Verified live after the fix with the same reproduction: `store.list_messages(nb_id)` now shows the user row correctly paired with an empty assistant row, closing the pair.
+- 1 regression test added (`test_headers_write_connection_error_does_not_orphan_user_turn`, `SSEConnectionErrorTest` in `tests/test_server.py`), patching `_Handler._headers` (not `_sse`, which the class's four existing tests all patch) to fail specifically on the SSE content-type. Verified fail-then-pass via `git stash` on `shoin/server.py` alone: pre-fix, `list_messages()` returned exactly 1 row instead of the expected paired 2.
+
+`pytest tests/` now runs 611 tests (up from 610). `mypy shoin/` and `ruff check shoin/` remain clean (the one pre-existing `search.py` F541 finding is untouched by this change).
 
 ### v0.2.115 (2026-07-10)
 **Fixed**: A forty-third background audit round, applying the same "unbounded-run assumption" lens that found v0.2.114's bug, found `_tail()` (`chunk.py`) — the sibling function `_truncate_tokens()`'s v0.2.114 fix was ported to — had two of its own defects in the same area, both concrete and live-reproduced rather than speculative:

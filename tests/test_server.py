@@ -1665,6 +1665,55 @@ class SSEConnectionErrorTest(unittest.TestCase):
         # Server must complete gracefully; client_gone was set to True
         self.assertIsInstance(raw, bytes)
 
+    def test_headers_write_connection_error_does_not_orphan_user_turn(self) -> None:
+        """ConnectionError while writing the initial SSE headers (self._headers(),
+        server.py, before any _sse() event is ever attempted) must not leave the
+        just-persisted user turn dangling with no assistant reply. The three
+        sibling ConnectionError/exception guards in _h_ask_sse() (build_context
+        exceptions v0.2.39, meta-send v0.2.49, zero-token replies v0.2.55) all
+        compensate by persisting an empty assistant message — this path, one
+        statement earlier in the same function, previously had no guard at all
+        and let the raw ConnectionError propagate to _dispatch()'s generic
+        exception handler instead.
+        """
+        from unittest.mock import patch
+        from shoin.server import _Handler
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "headers-ce"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original_headers = _Handler._headers
+
+        def headers_fail_on_sse(self_h, status, ctype, extra=None):
+            if ctype.startswith("text/event-stream"):
+                raise ConnectionError("test disconnect before SSE headers sent")
+            return original_headers(self_h, status, ctype, extra)
+
+        with patch.object(_Handler, "_headers", headers_fail_on_sse):
+            # No response is ever written (headers failed before any bytes went
+            # out), so the client observes a closed connection rather than an
+            # HTTPError — that's the expected client-side symptom of the fix.
+            try:
+                self._ask_raw(nb_id, "テスト文書の内容は？")
+            except http.client.RemoteDisconnected:
+                pass
+
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            msgs = store.list_messages(nb_id)
+        self.assertEqual(len(msgs), 2, "user turn must be paired with a compensating assistant row")
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[1]["role"], "assistant")
+        self.assertEqual(msgs[1]["body"], "")
+
     def test_drain_empty_read_breaks_loop(self) -> None:
         """_drain must break when rfile.read() returns empty bytes (server.py 166).
 
