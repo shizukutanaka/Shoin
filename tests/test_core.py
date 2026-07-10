@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.77")
+        self.assertEqual(VERSION, "0.2.78")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2993,6 +2993,33 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "What is the capital of France? Paris has existed for centuries."
         self.assertEqual(uncited_sentences(text), ["Paris has existed for centuries."])
+
+    def test_ignores_formal_japanese_question_ending_in_ka_period(self) -> None:
+        """Formal written Japanese ends a question in か。 with no "?" at all —
+        the natural register for study_guide's own prompt ("理解確認の設問"). The
+        v0.2.77 fix only recognized ?/？-suffixed questions; this must not
+        regress to flagging the か。 form the same way suggest_questions()
+        (studio.py) already recognizes it."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(uncited_sentences("この技術の利点は何か。"), [])
+        self.assertEqual(uncited_sentences("導入にはどれくらいの期間が必要でしょうか。"), [])
+
+    def test_make_report_ja_study_guide_style_qa_not_flagged_when_answers_cited(self) -> None:
+        """End-to-end reproduction of the formal-JA question false positive."""
+        from shoin.citation import make_report
+
+        text = (
+            "Q1: この技術の利点は何か。\n"
+            "A1: 利点はコストの削減である。[S1]\n\n"
+            "Q2: 導入にはどれくらいの期間が必要か。\n"
+            "A2: 約3か月である。[S2]"
+        )
+        report = make_report(
+            text, ["Doc A", "Doc B"], [1, 2], ["利点はコストの削減である。", "約3か月である。"]
+        )
+        self.assertNotIn("uncited", report)
+        self.assertEqual(report["confirmed"], [1, 2])
 
     def test_make_report_faq_style_qa_not_flagged_when_answers_cited(self) -> None:
         """End-to-end reproduction of the faq/study_guide Studio kind false

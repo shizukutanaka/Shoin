@@ -252,13 +252,18 @@ def uncited_sentences(text: str) -> list[str]:
             continue  # too short/trivial to carry a claim worth flagging
         if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
-        if sentence.endswith(("?", "？")):
-            continue  # a question asserts nothing; the faq/study_guide kinds ask
-            # 5-8 questions per output (studio.py prompts), and each becomes its
-            # own citation-less sentence at this split boundary — flagging them
-            # would violate this module's own "stay silent unless certain"
-            # principle by systematically false-positiving every well-formed,
-            # correctly-cited FAQ/study-guide output.
+        # A question asserts nothing; the faq/study_guide kinds ask 5-8 questions
+        # per output (studio.py prompts), and each becomes its own citation-less
+        # sentence at this split boundary — flagging them would violate this
+        # module's own "stay silent unless certain" principle by systematically
+        # false-positiving every well-formed, correctly-cited FAQ/study-guide
+        # output. Formal written Japanese ends a question in か。 with no "?" at
+        # all (e.g. "利点は何か。"); reuse the same suffix set studio.py's
+        # suggest_questions() already established for identifying JA questions,
+        # so the two question-detection heuristics in this codebase agree.
+        _q_base = sentence.rstrip("。.!?？")
+        if sentence.endswith(("?", "？")) or _q_base.endswith(("か", "でしょう")):
+            continue
         pending = sentence  # wait to see if a trailing citation-only fragment resolves it
     if pending is not None:
         out.append(pending)

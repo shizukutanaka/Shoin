@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.77
+## Version History: v0.1.37 → v0.2.78
+
+### v0.2.78 (2026-07-08)
+**Fixed**: A sixth background audit round, explicitly briefed to re-examine the v0.2.77 fix itself, found that fix was incomplete: `uncited_sentences()`'s question-exclusion guard only recognized `?`/`？`-suffixed questions, not the extremely common formal-Japanese question construction ending in `か。` with no question mark at all (e.g. `この技術の利点は何か。`) — the natural register for `study_guide`'s own JA prompt ("理解確認の設問"). This re-triggered the exact systematic false-positive v0.2.77 set out to eliminate, just for the JA-formal-register half of it. Notably, the sibling function in the same codebase, `suggest_questions()` (`studio.py`), already recognized this exact pattern (`q_base.endswith(("か", "ください", "でしょう"))`) — the v0.2.77 fix had reused a narrower heuristic than the one already established elsewhere.
+
+- Reproduced directly: a correctly-cited JA study-guide-style Q&A (`この技術の利点は何か。` / `導入にはどれくらいの期間が必要か。`, both answers properly citing `[S1]`/`[S2]`) still returned both questions in `uncited`, despite `confirmed` correctly showing both grounded.
+- Fix: `uncited_sentences()` now strips trailing `。.!?？` and also checks for a `か`/`でしょう` suffix, matching `suggest_questions()`'s existing heuristic so the two question-detection mechanisms in this codebase agree instead of diverging.
+- 3 more regression tests added (bare か。/でしょうか。 forms, plus an end-to-end `make_report()` reproduction); verified fail-then-pass via `git stash` as with every fix this session. The v0.2.77 English/？-suffixed tests continue to pass unchanged.
+
+`pytest tests/` now runs 565 tests (up from 563). `mypy shoin/` and `ruff check shoin/citation.py` remain clean.
 
 ### v0.2.77 (2026-07-08)
 **Fixed**: A fifth background audit round found that `uncited_sentences()` (`citation.py`, v0.2.65) systematically false-positived on the `faq` and `study_guide` Studio kinds — the exact two kinds whose own prompts ask the LLM for 5-8 questions per output (`studio.py`'s `faq`/`study_guide` prompt templates). Every question line in a generated FAQ or study guide has no `[S#]` marker of its own (a question asserts nothing, so there is nothing to cite), but `uncited_sentences()` had no way to tell "a claim with no citation" (the real gap it exists to catch) apart from "a question with no citation" (structurally never a claim) — it flagged both identically.
