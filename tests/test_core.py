@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.119")
+        self.assertEqual(VERSION, "0.2.120")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1541,6 +1541,59 @@ class TestIngest(unittest.TestCase):
         self.assertNotIn("well-formed comment", text)
         self.assertIn("Before comment", text)
         self.assertIn("After comment", text)
+
+    def test_html_mismatched_noscript_closer_in_body_does_not_swallow_rest(self) -> None:
+        """An unclosed/mismatched-closer <noscript> INSIDE <body> must not
+        silently discard all subsequent body content.
+
+        v0.2.40 fixed this only for <head> (handle_endtag resets _skip_depth
+        at </head>). There was no equivalent recovery for the same tag
+        dangling inside <body> — _skip_depth stayed elevated for the rest of
+        parsing, and every subsequent handle_data() call was silently
+        dropped, with no error and no INGEST_EMPTY signal (text before the
+        dangling tag already made it through). A mismatched closing tag
+        (</noscript-analytics> instead of </noscript> — a realistic typo in
+        a broken analytics snippet) reproduces the same failure as a
+        genuinely absent closer.
+        """
+        html = (
+            "<html><body>"
+            "<p>Section 1: Important paragraph.</p>"
+            "<noscript><img src=\"pixel.gif\"></noscript-analytics>"
+            "<p>Section 2: Important paragraph that must not be lost.</p>"
+            "</body></html>"
+        )
+        _, text = html_to_text(html)
+        self.assertIn("Section 1", text)
+        self.assertIn("Section 2", text, "content after the dangling <noscript> must not be lost")
+
+    def test_html_unclosed_template_in_body_does_not_swallow_rest(self) -> None:
+        """The same class of fix applied to <template>, the other skip-tag
+        that (unlike <script>/<style>) is not a real CDATA content element
+        and has no browser-spec reason to swallow to end-of-document when
+        genuinely unclosed."""
+        html = "<html><body><p>Before template.</p><template><p>After unclosed template.</p></body></html>"
+        _, text = html_to_text(html)
+        self.assertIn("Before template", text)
+        self.assertIn(
+            "After unclosed template", text,
+            "content after an unclosed <template> must not be lost",
+        )
+
+    def test_html_well_formed_noscript_in_body_still_skipped(self) -> None:
+        """A normal, properly-closed <noscript> in <body> must still have its
+        content excluded — the unbalanced-tag fix must not affect this case."""
+        html = (
+            "<html><body>"
+            "<p>Before.</p>"
+            "<noscript>fallback content, should be ignored</noscript>"
+            "<p>After noscript, well formed.</p>"
+            "</body></html>"
+        )
+        _, text = html_to_text(html)
+        self.assertNotIn("fallback content", text)
+        self.assertIn("Before", text)
+        self.assertIn("After noscript, well formed", text)
 
     def test_html_table_cells_separated_by_newlines(self) -> None:
         """<td> and <th> must produce newline boundaries so cell values don't merge."""

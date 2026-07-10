@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import urllib.parse
@@ -141,6 +142,22 @@ class _HTMLText(HTMLParser):
             self.parts.append(data)
 
 
+_SKIP_TAG_BALANCE = (
+    # (open regex, close regex, tag name). script/style are deliberately
+    # excluded: an unclosed <script>/<style> legitimately swallows the rest
+    # of the document per real browser tokenizer behavior (they're CDATA
+    # content elements), so that's not a defect to neutralize. noscript and
+    # template are NOT CDATA elements — an unclosed or mismatched-closer one
+    # (e.g. a typo'd </noscript-analytics> from a broken analytics snippet)
+    # is purely an artifact of this module's own balanced-counter _skip_depth
+    # tracking having no recovery path, unlike <head> (which already resets
+    # _skip_depth at </head>, v0.2.40) — this covers the same class of bug
+    # when it happens inside <body> instead.
+    (re.compile(r"<noscript\b", re.I), re.compile(r"</noscript\s*>", re.I), "noscript"),
+    (re.compile(r"<template\b", re.I), re.compile(r"</template\s*>", re.I), "template"),
+)
+
+
 def html_to_text(html: str) -> tuple[str, str]:
     """Return (title, text) extracted from an HTML document."""
     # An unclosed <!-- comment causes stdlib html.parser.HTMLParser to buffer
@@ -156,6 +173,18 @@ def html_to_text(html: str) -> tuple[str, str]:
     if html.count("<!--") > html.count("-->"):
         last_open = html.rfind("<!--")
         html = html[:last_open] + "<!---->" + html[last_open + len("<!--") :]
+    # Same neutralization technique for an unbalanced <noscript>/<template>:
+    # find the last unmatched opening tag and inject a synthetic closer
+    # immediately after it (converting it to an empty, already-closed
+    # element), so _skip_depth doesn't stay elevated for the rest of the
+    # document and swallow all subsequent body content.
+    for open_re, close_re, tag in _SKIP_TAG_BALANCE:
+        opens = open_re.findall(html)
+        if len(opens) > len(close_re.findall(html)):
+            last_match = list(open_re.finditer(html))[-1]
+            gt = html.find(">", last_match.end())
+            if gt != -1:
+                html = html[: gt + 1] + f"</{tag}>" + html[gt + 1 :]
     parser = _HTMLText()
     parser.feed(html)
     raw = "".join(parser.parts)
