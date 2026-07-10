@@ -108,9 +108,21 @@ def _embed_chunks(
             store.conn.rollback()
         except Exception:
             pass
-    if done:
-        # Record the model used so a future model change triggers the mismatch
-        # warning even when a previous run only partially succeeded.
+    # Only record the model as "current" when every chunk in this call actually
+    # got a fresh vector, OR this is the non-force (index_source) path where an
+    # un-embedded chunk is simply NULL — safely excluded by vector_search()'s
+    # `WHERE embedding IS NOT NULL`, not a corrupting wrong-model vector.
+    # force=True (reindex_notebook) OVERWRITES existing vectors in place: a
+    # partial failure there leaves some chunks with fresh current_model vectors
+    # and others with their OLD, untouched, different-model vectors — both
+    # non-NULL, both included in cosine comparisons. Recording embed_model as
+    # fully consistent in that case (done > 0 but done < len(texts)) would make
+    # _check_embed_model_ok() report no mismatch over a DB that is provably
+    # still mixed, silently defeating the exact guard this exists to protect.
+    # Leaving the setting untouched instead means it still reflects the OLD
+    # model, so the mismatch guard correctly disables vector search until a
+    # subsequent reindex fully succeeds.
+    if done and (not force or done == len(texts)):
         store.set_setting("embed_model", current_model)
     return done
 

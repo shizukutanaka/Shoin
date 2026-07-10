@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.83")
+        self.assertEqual(VERSION, "0.2.84")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3760,6 +3760,61 @@ class TestPipeline(unittest.TestCase):
             finally:
                 s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
         self.assertEqual(n, 0)
+
+    def test_reindex_partial_failure_does_not_falsely_clear_mismatch_guard(self) -> None:
+        """A partial reindex_notebook() failure (force=True) must NOT record
+        embed_model as fully consistent — it was found to do so, silently
+        defeating _check_embed_model_ok()'s mismatch guard.
+
+        force=True OVERWRITES existing vectors in place: a partial failure
+        leaves some chunks with fresh current-model vectors and others with
+        their OLD, untouched, different-model vectors — both non-NULL, both
+        included in cosine comparisons. Recording embed_model as consistent in
+        that case would make _check_embed_model_ok() report no mismatch over a
+        DB that is provably still mixed. Contrast with the non-force
+        (index_source) path, where an un-embedded chunk is simply NULL — safely
+        excluded by vector_search()'s WHERE embedding IS NOT NULL, not a
+        corrupting wrong-model vector — so partial success there correctly still
+        updates the setting (see test_embed_chunks_done_counts_actual_pairs...
+        and friends, unaffected by this fix).
+        """
+        from shoin.llm import LLMError
+        from shoin.pipeline import reindex_notebook
+        from shoin.qa import _check_embed_model_ok
+
+        class PartialFailLLM:
+            embedding_model = "model-B"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls += 1
+                if self.calls == 1:
+                    return [[0.9, 0.8, 0.7] for _ in texts]
+                raise LLMError("SYSTEM_LLM_TIMEOUT", "endpoint dropped")
+
+        with make_store() as s:
+            nb_id = s.create_notebook("partial-reindex").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-pr")
+            texts = [f"chunk number {i} with some content" for i in range(20)]
+            chunk_ids = s.add_chunks(src.id, texts)
+            for cid in chunk_ids:
+                s.set_embedding(cid, [0.1, 0.2, 0.3, 0.4, 0.5], commit=False)
+            s.conn.commit()
+            s.set_setting("embed_model", "model-A")
+
+            llm = PartialFailLLM()
+            n_embedded, n_total = reindex_notebook(s, llm, nb_id)
+            self.assertLess(n_embedded, n_total, "test must actually exercise partial failure")
+            self.assertEqual(
+                s.get_setting("embed_model"), "model-A",
+                "setting must stay at the OLD model — the reindex did not fully succeed",
+            )
+            self.assertFalse(
+                _check_embed_model_ok(s, llm),
+                "mismatch guard must correctly detect the still-mixed DB and disable vector search",
+            )
 
     def test_embed_chunks_model_name_whitespace_normalized(self) -> None:
         """Model name with leading/trailing whitespace must not cause false mismatch.

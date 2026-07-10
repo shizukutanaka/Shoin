@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.83
+## Version History: v0.1.37 → v0.2.84
+
+### v0.2.84 (2026-07-08)
+**Fixed**: A twelfth background audit round found that `_embed_chunks()` (`pipeline.py`) could silently defeat its own embedding-model mismatch guard after a partial `reindex_notebook()` failure. The unconditional `if done: store.set_setting("embed_model", current_model)` recorded the new model as fully consistent whenever *any* chunk succeeded — but `reindex_notebook()` calls `_embed_chunks(..., force=True)`, which OVERWRITES existing vectors in place. If the embedding endpoint drops mid-run (network failure, restart, timeout — the same class of transient failure `_embed_chunks()`'s own `except LLMError: pass` comment says is expected), the chunks a later batch never reached still hold their OLD, untouched, different-model vectors — non-NULL, and therefore still included in `vector_search()`'s cosine comparisons. Recording `embed_model` as the new model in that state made `_check_embed_model_ok()` (`qa.py`) report *no* mismatch over a DB that was provably still mixed — exactly the corruption its own docstring says it exists to prevent ("Mixing embeddings from two models makes cosine scores meaningless").
+
+- Live-reproduced: seeded 40 chunks with model-A vectors, ran `reindex_notebook()` with a fake LLM that succeeds on batch 1 (16 chunks) then raises `LLMError` on batch 2 — `embed_model` setting was written as model-B, `_check_embed_model_ok()` returned `True` (no mismatch), while 24/40 chunks still held 5-dim model-A vectors alongside 16 3-dim model-B ones.
+- Fix: only record `embed_model` on the `force=True` path when *every* chunk in the call succeeded (`done == len(texts)`); on partial failure the setting is left at the old model, so the guard correctly reports a mismatch and disables vector search until a full reindex succeeds. The non-force (`index_source`) path is unaffected and deliberately unchanged — an un-embedded chunk there is simply `NULL` (safely excluded by `vector_search()`'s `WHERE embedding IS NOT NULL`), not a stale wrong-model vector, so partial success correctly still updates the setting exactly as before.
+- 1 regression test added (`test_reindex_partial_failure_does_not_falsely_clear_mismatch_guard`), asserting the setting stays at the old model and the mismatch guard correctly fires; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 573 tests (up from 572). `mypy shoin/` and `ruff check shoin/pipeline.py` remain clean.
 
 ### v0.2.83 (2026-07-08)
 **Fixed**: An eleventh background audit round found `_h_src_patch()` (source rename, `server.py`) never invalidates `questions_cache`, unlike its sibling `_h_src_refresh()` (v0.2.36), which does: `with self.questions_cache_lock: self.questions_cache.pop(nb_id, None)`. The cache fingerprint is `tuple(s.id for s in store.sources_for_notebook(nb_id))` — source IDs only — and a rename doesn't change those, so the cache never self-expires. `build_context()` (`qa.py`) embeds each source's title directly into the LLM prompt (`f"[S{idx}] {title}\n<<<SOURCE S{idx}\n..."`), so a rename changes exactly what a refresh changes, but only refresh got the eviction fix.
