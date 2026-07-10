@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.101"
+VERSION = "0.2.102"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -43,7 +43,15 @@ def _file_config() -> dict[str, str]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    # A JSON null (Python None) is a well-formed value, not a malformed file —
+    # but str(None) == "None", a truthy non-empty string that would silently
+    # become the actual setting value instead of falling through to env/default
+    # the way an absent key correctly does. Filter it out so null behaves like
+    # "key not present in config.json", matching this function's own documented
+    # "config.json is optional" contract.
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v is not None}
 
 
 def _get(key: str, default: str) -> str:

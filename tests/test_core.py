@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.101")
+        self.assertEqual(VERSION, "0.2.102")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4885,6 +4885,42 @@ class TestConfigXDG(unittest.TestCase):
             with patch.object(config_mod, "config_file", return_value=cfg_path):
                 with patch.dict(os.environ, env, clear=True):
                     self.assertEqual(config_mod.llm_model(), "qwen3:4b")
+
+    def test_config_json_null_value_falls_back_instead_of_becoming_literal_none(self) -> None:
+        """A JSON null in config.json (a well-formed value, e.g. a user writing
+        {"SHOIN_EMBED_MODEL": null} to mean "unset") must fall through to the
+        built-in default, not become the literal string "None".
+
+        _file_config()'s dict comprehension called str(v) on every value
+        unconditionally; str(None) == "None", a truthy non-empty string that
+        silently became the actual setting — e.g. embed_model() returning
+        "None" instead of degrading to BM25-only, since (embed_model or "")
+        checks throughout the codebase only catch an empty string, not the
+        string "None".
+        """
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import shoin.config as config_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = Path(d) / "config.json"
+            cfg_path.write_text(json.dumps({"SHOIN_EMBED_MODEL": None, "SHOIN_LLM_MODEL": "real-model"}))
+            env = dict(os.environ)
+            env.pop("SHOIN_EMBED_MODEL", None)
+            env.pop("SHOIN_LLM_MODEL", None)
+            with patch.object(config_mod, "config_file", return_value=cfg_path):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(
+                        config_mod.embed_model(), "nomic-embed-text",
+                        "null must fall back to the built-in default, not become 'None'",
+                    )
+                    self.assertEqual(
+                        config_mod.llm_model(), "real-model",
+                        "a real, non-null config.json value must still work",
+                    )
 
 
 class TestNegTerms(unittest.TestCase):

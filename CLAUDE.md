@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.101
+## Version History: v0.1.37 → v0.2.102
+
+### v0.2.102 (2026-07-08)
+**Fixed**: A thirtieth background audit round found `_file_config()` (`config.py`, v0.2.69) called `str(v)` unconditionally on every JSON value in config.json — a JSON `null` (a well-formed value, e.g. a user writing `{"SHOIN_EMBED_MODEL": null}` intending "unset," a natural JSON idiom) was coerced to the literal string `"None"` instead of being treated as absent. This silently produced a wrong, truthy setting value rather than falling through to env/built-in-default the way the function's own docstring implies for unset settings ("config.json is optional... callers always let a set environment variable take precedence").
+
+- **Concrete impact**: `embed_model()` would return the string `"None"` instead of degrading to BM25-only search, since the codebase's `(embed_model or "").strip()` guards throughout `qa.py`/`llm.py` only catch an empty string, not the string `"None"` — a truthy value gets sent as a real model name to the embeddings endpoint on every request. The same coercion corrupts `SHOIN_LLM_URL` → `"None"` and `SHOIN_DATA_DIR` → a bogus directory literally named `None` under cwd.
+- Live-reproduced: a config.json with `{"SHOIN_EMBED_MODEL": null}` produced `embed_model() == "None"` before the fix.
+- Fix: filter out `None` values in `_file_config()`'s dict comprehension, so a JSON `null` behaves like an absent key and correctly falls through to env/default — matching the function's own documented contract.
+- 1 regression test added (`test_config_json_null_value_falls_back_instead_of_becoming_literal_none`); verified fail-then-pass via `git stash` as with every fix this session. The existing `TestConfigXDG` suite (missing file, malformed JSON, non-dict top-level) continues to pass unchanged.
+
+`pytest tests/` now runs 593 tests (up from 592). `mypy shoin/` and `ruff check shoin/config.py` remain clean.
 
 ### v0.2.101 (2026-07-08)
 **Fixed**: A twenty-ninth background audit round, following directly from v0.2.100's discovery that `build_context()`'s default budget didn't actually enforce its documented sub-share, found the SAME class of gap in `history_messages()`: `HISTORY_MESSAGES(6) * HISTORY_TOKENS_EACH(160) = 960`, not the CLAUDE.md-documented "~400 tokens: recent history" sub-share. The existing per-message `HISTORY_TOKENS_EACH=160` cap only ever bounded *each individual* message — there was no code anywhere enforcing a ceiling on the *sum* across all included messages.
