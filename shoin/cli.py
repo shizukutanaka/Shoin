@@ -267,8 +267,12 @@ def _cmd_reindex(store: Store, llm: ChatBackend, args: argparse.Namespace) -> in
 def _cmd_note(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "add":
-        note_id = store.add_note(int(args.notebook_id), str(args.title), str(args.body))
-        print(_t("note.added", id=str(note_id), title=str(args.title)))
+        # add_note() strips whitespace before persisting (store.py); echo the
+        # same stripped value here, not the raw CLI argument, matching the
+        # v0.2.93/94/95/99 fix applied to this codebase's other echo sites.
+        title = str(args.title).strip()
+        note_id = store.add_note(int(args.notebook_id), title, str(args.body))
+        print(_t("note.added", id=str(note_id), title=title))
     elif action == "list":
         notes = store.list_notes(int(args.notebook_id))
         if not notes:

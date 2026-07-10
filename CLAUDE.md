@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.110
+## Version History: v0.1.37 → v0.2.111
+
+### v0.2.111 (2026-07-10)
+**Fixed**: A thirty-ninth background audit round found CLI `note add` (`_cmd_note()`, `cli.py`) was the sixth site of the same title-echo-mismatch bug class fixed five times already this session (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`, v0.2.95 CLI `source rename`, v0.2.99 CLI `notebook rename`): `store.add_note()` (`store.py:594`) does `title = title.strip()` before persisting, but the CLI's confirmation `print()` used the raw, unstripped `str(args.title)` — a call site never given the same treatment.
+
+- Live-reproduced: `shoin note add 1 "  Padded Title  " "body"` printed `追加: [1]   Padded Title  ` (leading/trailing spaces intact), while `store.list_notes()` confirmed the persisted row actually holds `'Padded Title'` — a false statement about the user's own data, identical in class and impact to the five prior fixes.
+- Fix: compute the stripped title once and use it for both the `add_note()` call and the confirmation message, mirroring the exact pattern already used for `source rename` (`cli.py`) and `notebook rename` (`cli.py`).
+- 1 regression test added (`test_note_add_cli_message_matches_persisted_stripped_title`), using an exact string comparison against `_t()`'s own template output — not a `.strip()`'d substring check, which would mask this exact bug since both the buggy padded value and the fixed value strip down to the same substring (the same trap the v0.2.99 changelog entry called out). Verified fail-then-pass via `git stash` on `shoin/cli.py` alone: pre-fix, the printed message was `'追加: [1]   Padded Title  \n'` against an expected `'追加: [1] Padded Title\n'`.
+
+`pytest tests/` now runs 606 tests (up from 605). `mypy shoin/` and `ruff check shoin/` remain clean (the one pre-existing `search.py` F541 finding is untouched by this change).
 
 ### v0.2.110 (2026-07-10)
 **Fixed**: A thirty-eighth background audit round found `build_messages()` (`qa.py`) could reintroduce the exact consecutive-same-role prompt bug this codebase already fixed twice for other causes (v0.1.52 "Role Deduplication," v0.2.20 leading-assistant guard) — this time via `history_messages()`'s own v0.2.76 fix. When the most recent assistant reply was persisted with an empty body (a zero-token reasoning-model response, or any of the SSE disconnect/`build_context`-exception paths from v0.2.39/v0.2.49/v0.2.55 that intentionally persist `store.add_message(nb_id, "assistant", "", ...)`), `history_messages()` correctly keeps the preceding user turn (v0.2.76's whole point — treating it as answered, not orphaned) but the returned list then legitimately ends in a `"user"` role. `build_messages()` (qa.py:285-293, pre-fix) unconditionally appended `{"role": "user", "content": user}` right after `*(history or [])` with no check for this, so the final prompt sent to the LLM ended `[..., {"role": "user", ...}, {"role": "user", ...}]` — two consecutive user turns, violating OpenAI API alternation, exactly the invariant `history_messages()`'s own inline comment says must never happen ("would give the LLM two consecutive user messages... which is semantically wrong").

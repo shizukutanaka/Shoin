@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.110")
+        self.assertEqual(VERSION, "0.2.111")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5644,6 +5644,50 @@ class TestCLINoteSourceParity(unittest.TestCase):
 
             with Store(db_file) as s:
                 self.assertEqual(s.get_notebook(nb_id).name, "Padded Name")
+        finally:
+            os.unlink(db_file)
+
+    def test_note_add_cli_message_matches_persisted_stripped_title(self) -> None:
+        """CLI `note add`'s confirmation message must report the
+        WHITESPACE-STRIPPED title actually persisted by add_note() (which
+        does `title = title.strip()` before INSERT), not the raw CLI
+        argument. Same bug class as v0.2.93-95/99 (source upload/patch/
+        rename, notebook rename all echoing an untransformed value), found
+        in this sibling note-add call site.
+
+        Uses an exact string comparison against _t()'s own template rather
+        than a stripped/parsed substring — a naive `.strip()` on the parsed
+        output would mask this exact bug, since both the buggy padded value
+        and the fixed value strip down to the same substring (the same trap
+        called out in the notebook-rename test above).
+        """
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import _t, main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("note-add-strip-test").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(
+                    ["--db", db_file, "note", "add", str(nb_id), "  Padded Title  ", "本文"]
+                )
+            self.assertEqual(rc, 0)
+
+            with Store(db_file) as s:
+                notes = s.list_notes(nb_id)
+                self.assertEqual(len(notes), 1)
+                note_id = notes[0]["id"]
+                self.assertEqual(notes[0]["title"], "Padded Title")
+
+            expected = _t("note.added", id=str(note_id), title="Padded Title") + "\n"
+            self.assertEqual(out.getvalue(), expected)
         finally:
             os.unlink(db_file)
 
