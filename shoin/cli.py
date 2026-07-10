@@ -187,7 +187,10 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
         print(_t("nb.deleted"))
     elif action == "rename":
         store.rename_notebook(int(args.notebook_id), str(args.name))
-        print(_t("nb.renamed", id=str(args.notebook_id), name=str(args.name)))
+        # rename_notebook() strips whitespace before persisting — echo the same
+        # stripped value here, not the raw CLI argument, matching the v0.2.93-95
+        # fix already applied to this action's sibling, source rename, below.
+        print(_t("nb.renamed", id=str(args.notebook_id), name=str(args.name).strip()))
     return 0
 
 

@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.98
+## Version History: v0.1.37 → v0.2.99
+
+### v0.2.99 (2026-07-08)
+**Fixed**: A twenty-seventh background audit round found the CLI `notebook rename` action had the same echo-mismatch bug class fixed three times already for source titles (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`, v0.2.95 CLI `source rename`) — this time for notebook names. `store.rename_notebook()` does `name = name.strip()` before persisting, but `_cmd_notebook()`'s "rename" action printed `str(args.name)`, the raw unstripped CLI argument, nine lines above the already-fixed `source rename` action in the same file.
+
+- **Concrete impact**: `shoin notebook rename 1 "  Padded Name  "` persists `"Padded Name"` but prints a confirmation claiming the name is `"  Padded Name  "` — a headless/scripting user trusting stdout is told something false about their own data.
+- Live-reproduced: CLI output showed the padded name while the DB held the stripped version.
+- Fix: apply `.strip()` to the value used in the confirmation message, matching `rename_notebook()`'s own transform.
+- 1 regression test added, using an exact string comparison against the same `_t()` template (a naive `.strip()` on the parsed output would have masked this exact bug, since both the buggy padded value and the fixed value strip down to the same substring — caught this while writing the test, before it could ship as a false-negative regression test). Verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 590 tests (up from 589). `mypy shoin/` and `ruff check shoin/cli.py` remain clean.
 
 ### v0.2.98 (2026-07-08)
 **Fixed**: A twenty-sixth background audit round found `replace_chunks_for_source()` (`store.py`) had a TOCTOU race that could reintroduce the exact bug v0.2.87 fixed — refresh silently overwriting a user's custom source title — via a race instead of unconditionally. `src.title` (used as the Python-side fallback `title or src.title` when `refresh_source()` deliberately passes `title=None` to preserve a custom rename) is read by `get_source()` *before* the transaction begins (SQLite's implicit `BEGIN` only fires at the first DML statement, not at `with self.conn:` entry). A concurrent `PATCH /api/sources/{id}` rename that commits in the window between that read and this method's own `UPDATE` was silently clobbered by the stale pre-transaction snapshot.

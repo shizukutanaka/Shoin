@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.98")
+        self.assertEqual(VERSION, "0.2.99")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5418,6 +5418,43 @@ class TestCLINoteSourceParity(unittest.TestCase):
                 src = s.get_source(src_id)
             self.assertEqual(src.title, "new title")
             self.assertEqual(src.origin, "mem://original", "origin must survive a rename")
+        finally:
+            os.unlink(db_file)
+
+    def test_notebook_rename_cli_message_matches_persisted_stripped_name(self) -> None:
+        """CLI `notebook rename`'s confirmation message must report the
+        WHITESPACE-STRIPPED name actually persisted by rename_notebook(), not
+        the raw CLI argument. Same bug class as v0.2.93-95 (source
+        upload/patch/rename echoing an untransformed value), found in this
+        sibling notebook action — nine lines above source rename in the same
+        file, never given the same treatment.
+
+        Uses an exact string comparison against _t()'s own template rather
+        than a stripped/parsed substring — a naive `.strip()` on the parsed
+        output would mask this exact bug, since both the buggy padded value
+        and the fixed value strip down to the same substring.
+        """
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import _t, main
+        from shoin.store import Store
+
+        db_file = self._db()
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("notebook-rename-strip-test").id
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "notebook", "rename", str(nb_id), "  Padded Name  "])
+            self.assertEqual(rc, 0)
+            expected = _t("nb.renamed", id=str(nb_id), name="Padded Name") + "\n"
+            self.assertEqual(out.getvalue(), expected)
+
+            with Store(db_file) as s:
+                self.assertEqual(s.get_notebook(nb_id).name, "Padded Name")
         finally:
             os.unlink(db_file)
 
