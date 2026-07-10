@@ -539,6 +539,11 @@ function renderNotebook(){
 /* ---------- citations: 蔵書印 chips ---------- */
 function renderWithSeals(container, text, report){
   container.replaceChildren();
+  // Match citation.py's NFKC-before-regex behavior: a JP-first local model
+  // commonly emits full-width citation brackets/digits (［Ｓ１］), which the
+  // backend already normalizes and verifies, but the ASCII-only \[ \] \d
+  // regexes below would otherwise leave as dead, unstyled text.
+  text = text.normalize("NFKC");
   const invalid = new Set((report && report.invalid) || []);
   const misattr = new Set((report && report.misattributed) || []);
   const confirmed = new Set((report && report.confirmed) || []);
