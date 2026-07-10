@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.107")
+        self.assertEqual(VERSION, "0.2.108")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3376,6 +3376,25 @@ class TestUncitedSentences(unittest.TestCase):
         self.assertEqual(
             uncited_sentences("Paris has existed for centuries."),
             ["Paris has existed for centuries."],
+        )
+
+    def test_ignores_english_contraction_question_without_trailing_mark(self) -> None:
+        """_EN_QUESTION_STARTERS only ever contained bare words ("what", "how",
+        "who", ...); a question starting with a contracted form ("What's",
+        "How's", "Who's") without a trailing "?" produced first_word == "what's"
+        etc., which matched no frozenset entry — so a genuine question was
+        wrongly flagged as an unsupported claim, and the identical gap silently
+        dropped such lines from studio.py's suggest_questions() output too."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(uncited_sentences("What's the deadline for the project."), [])
+        self.assertEqual(uncited_sentences("Who's responsible for this task."), [])
+        self.assertEqual(uncited_sentences("Where's the report located."), [])
+        # A word that merely starts with a question-starter prefix but isn't a
+        # contraction of it (e.g. "Whatever") must not be treated as a question.
+        self.assertEqual(
+            uncited_sentences("Whatever happened to the report."),
+            ["Whatever happened to the report."],
         )
 
     def test_make_report_ja_study_guide_style_qa_not_flagged_when_answers_cited(self) -> None:

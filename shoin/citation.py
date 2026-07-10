@@ -95,7 +95,9 @@ def looks_like_question(text: str) -> bool:
     base = norm.rstrip("。.!?")
     if base.endswith(("か", "ください", "でしょう")):
         return True
-    first_word = norm.split()[0].lower() if norm.split() else ""
+    # Strip a trailing contraction ("What's", "Who'd", "What'll") before the
+    # lookup — the bare frozenset entries would otherwise never match "what's".
+    first_word = norm.split()[0].lower().split("'")[0] if norm.split() else ""
     return first_word in _EN_QUESTION_STARTERS
 
 
