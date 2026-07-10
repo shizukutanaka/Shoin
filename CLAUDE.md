@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.97
+## Version History: v0.1.37 → v0.2.98
+
+### v0.2.98 (2026-07-08)
+**Fixed**: A twenty-sixth background audit round found `replace_chunks_for_source()` (`store.py`) had a TOCTOU race that could reintroduce the exact bug v0.2.87 fixed — refresh silently overwriting a user's custom source title — via a race instead of unconditionally. `src.title` (used as the Python-side fallback `title or src.title` when `refresh_source()` deliberately passes `title=None` to preserve a custom rename) is read by `get_source()` *before* the transaction begins (SQLite's implicit `BEGIN` only fires at the first DML statement, not at `with self.conn:` entry). A concurrent `PATCH /api/sources/{id}` rename that commits in the window between that read and this method's own `UPDATE` was silently clobbered by the stale pre-transaction snapshot.
+
+- **Concrete impact**: a user renames a URL source to a custom title at nearly the same moment a `↻ Refresh` completes its network fetch and begins committing new chunks; the refresh's stale in-memory title snapshot wins, and the rename is lost with zero error or indication to either request.
+- Reproduced directly by injecting the concurrent rename into `get_source()` itself — exactly where the real race window is — and confirmed the pre-fix code loses the rename while correctly-fixed code preserves it.
+- Fix: replaced the Python-side `title or src.title` fallback with SQL-side `title=COALESCE(?, title)`, so the fallback resolves against whatever the row's title actually is *at UPDATE-time*, atomically, rather than a stale out-of-transaction Python read.
+- 1 regression test added (`test_replace_chunks_title_fallback_does_not_clobber_concurrent_rename`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 589 tests (up from 588). `mypy shoin/` and `ruff check shoin/store.py` remain clean.
 
 ### v0.2.97 (2026-07-08)
 **Fixed**: A twenty-fifth background audit round found `html_to_text()`/`_HTMLText` (`ingest.py`) silently discarded all content after an unclosed `<!--` comment — the same "all-or-nothing where graceful degradation should apply" shape v0.2.96 just fixed for PDF pages, but via a completely different mechanism. Python's stdlib `html.parser.HTMLParser` buffers an unclosed `<!--` comment and, on `close()`, flushes everything from `<!--` through end-of-document as a single comment payload (verified directly against the stdlib); `_HTMLText` has no `handle_comment` override, so that payload — and every real tag/text node inside it — is silently discarded with no error and no `INGEST_EMPTY` signal (text *before* the dangling `<!--` still makes it through, so the empty-content guard never fires).

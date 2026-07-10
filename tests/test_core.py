@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.97")
+        self.assertEqual(VERSION, "0.2.98")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -525,6 +525,43 @@ class TestStore(unittest.TestCase):
             updated = s.get_source(src.id)
             self.assertEqual(updated.sha256, "sha-new")
             self.assertEqual(updated.title, "new title")
+
+    def test_replace_chunks_title_fallback_does_not_clobber_concurrent_rename(self) -> None:
+        """A concurrent PATCH /api/sources/{id} rename landing between
+        replace_chunks_for_source()'s pre-transaction get_source() read and its
+        own UPDATE must survive — not be silently overwritten by the stale
+        pre-transaction snapshot of the title.
+
+        get_source() reads src.title BEFORE the transaction begins (SQLite's
+        implicit BEGIN only fires at the first DML statement, not at `with
+        self.conn:` entry). refresh_source() (v0.2.87) deliberately passes
+        title=None so this method's own `title or src.title` fallback keeps
+        whatever title is currently set — but resolving that fallback from a
+        pre-transaction Python read meant a rename committed in the race
+        window was clobbered by the stale value, reintroducing exactly the
+        v0.2.87 bug (refresh overwriting a custom rename) via a race instead
+        of unconditionally. Reproduced by injecting the concurrent rename
+        into get_source() itself, exactly where the real race window is.
+        """
+        with make_store() as s:
+            nb = s.create_notebook("nb-race")
+            src = s.add_source(nb.id, "url", "Original Page Title", "https://x.com", "sha-orig")
+            s.add_chunks(src.id, ["old content"])
+
+            orig_get_source = s.get_source
+            calls = {"n": 0}
+
+            def racy_get_source(source_id: int):
+                result = orig_get_source(source_id)
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    s.update_source_title(source_id, "My Custom Curated Name", result.origin)
+                return result
+
+            with patch.object(s, "get_source", side_effect=racy_get_source):
+                s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
+
+            self.assertEqual(s.get_source(src.id).title, "My Custom Curated Name")
 
     def test_replace_chunks_with_sha256_collision_raises_source_already_exists(self) -> None:
         """replace_chunks_for_source with a sha256 that matches another source must raise

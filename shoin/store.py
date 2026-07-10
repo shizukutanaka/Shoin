@@ -450,9 +450,17 @@ class Store:
                     )
                     ids.append(int(cur.lastrowid or 0))
                 if sha256 is not None:
+                    # COALESCE(?, title), not a Python-side `title or src.title` fallback:
+                    # src.title was read by get_source() BEFORE this transaction began, so
+                    # a concurrent PATCH /api/sources/{id} rename that commits in the window
+                    # between that read and this UPDATE would be silently clobbered by the
+                    # stale snapshot — reintroducing exactly the bug v0.2.87 fixed (refresh
+                    # overwriting a user's custom title), just via a race instead of always.
+                    # Resolving the fallback in SQL reads the CURRENT row value atomically.
+                    new_title = title[:MAX_TITLE_LEN] if title is not None else None
                     meta_cur = self.conn.execute(
-                        "UPDATE sources SET sha256=?, title=? WHERE id=?",
-                        (sha256, (title or src.title)[:MAX_TITLE_LEN], source_id),
+                        "UPDATE sources SET sha256=?, title=COALESCE(?, title) WHERE id=?",
+                        (sha256, new_title, source_id),
                     )
                     if meta_cur.rowcount == 0:
                         raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
