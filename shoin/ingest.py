@@ -143,6 +143,19 @@ class _HTMLText(HTMLParser):
 
 def html_to_text(html: str) -> tuple[str, str]:
     """Return (title, text) extracted from an HTML document."""
+    # An unclosed <!-- comment causes stdlib html.parser.HTMLParser to buffer
+    # everything from "<!--" through end-of-document and flush it as one
+    # comment payload on close() (verified against the stdlib directly) —
+    # _HTMLText has no handle_comment override, so that payload, and every
+    # real tag/text node inside it, is silently discarded with no error and
+    # no INGEST_EMPTY signal (text before the dangling "<!--" already made it
+    # through). A truncated network fetch or one forgotten "-->" would
+    # otherwise drop the rest of the document with zero indication anything
+    # was lost. Neutralize a genuinely unbalanced "<!--" by closing it
+    # immediately (an empty comment) so real content after it still parses.
+    if html.count("<!--") > html.count("-->"):
+        last_open = html.rfind("<!--")
+        html = html[:last_open] + "<!---->" + html[last_open + len("<!--") :]
     parser = _HTMLText()
     parser.feed(html)
     raw = "".join(parser.parts)

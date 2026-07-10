@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.96
+## Version History: v0.1.37 → v0.2.97
+
+### v0.2.97 (2026-07-08)
+**Fixed**: A twenty-fifth background audit round found `html_to_text()`/`_HTMLText` (`ingest.py`) silently discarded all content after an unclosed `<!--` comment — the same "all-or-nothing where graceful degradation should apply" shape v0.2.96 just fixed for PDF pages, but via a completely different mechanism. Python's stdlib `html.parser.HTMLParser` buffers an unclosed `<!--` comment and, on `close()`, flushes everything from `<!--` through end-of-document as a single comment payload (verified directly against the stdlib); `_HTMLText` has no `handle_comment` override, so that payload — and every real tag/text node inside it — is silently discarded with no error and no `INGEST_EMPTY` signal (text *before* the dangling `<!--` still makes it through, so the empty-content guard never fires).
+
+- **Concrete impact**: a truncated network fetch, a developer's single forgotten `-->`, or a CMS export bug produces an HTML source where ingestion reports success but every paragraph after the unclosed comment silently vanishes from the indexed text — retrieval/citations for those sections simply never exist, with zero signal to the user.
+- Reproduced directly: fed a 4-section HTML document with an unclosed `<!--` before section 3; sections 3 and 4 were completely absent from the extracted text pre-fix.
+- Fix: before parsing, detect a genuinely unbalanced comment marker (`html.count("<!--") > html.count("-->")`) and neutralize the last unclosed `<!--` by closing it immediately (an empty comment), so the real content that follows parses normally instead of being buffered into oblivion. A well-formed, properly-closed comment is completely unaffected — confirmed with a dedicated regression test that its content is still correctly excluded from extracted text.
+- 2 regression tests added (`test_html_unclosed_comment_does_not_swallow_rest_of_document`, `test_html_well_formed_comment_still_ignored`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 588 tests (up from 586). `mypy shoin/` and `ruff check shoin/ingest.py` remain clean.
 
 ### v0.2.96 (2026-07-08)
 **Fixed**: A twenty-fourth background audit round, deliberately pivoted to fresh territory after three rounds closed the title-truncation-echo pattern, found `pdf_to_text()` (`ingest.py`) discarded ALL extracted pages when a single page's `extract_text()` call raised — a real, documented pypdf failure mode (malformed content stream, bad font, corrupt xref entry on one page of an otherwise-fine PDF). The list comprehension `[page.extract_text() or "" for page in reader.pages]` ran inside one shared `try/except`, so one bad page among many good ones aborted extraction of the entire document, contradicting the project's own stated "Graceful Degradation" design principle (CLAUDE.md: "Studio outputs have fallback text... History_messages() survives malformed chats") — already applied the same way to per-batch embedding failures in `pipeline.py`'s `_embed_chunks()`.

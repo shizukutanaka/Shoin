@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.96")
+        self.assertEqual(VERSION, "0.2.97")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1259,6 +1259,44 @@ class TestIngest(unittest.TestCase):
         title, text = html_to_text(html)
         self.assertIn("Content here", text,
                       "body text must be extracted even when <noscript> is unclosed in <head>")
+
+    def test_html_unclosed_comment_does_not_swallow_rest_of_document(self) -> None:
+        """An unclosed <!-- comment must not silently discard everything after it.
+
+        Python's stdlib html.parser.HTMLParser buffers an unclosed <!-- comment
+        and, on close(), flushes everything from "<!--" to end-of-document as one
+        comment payload. _HTMLText has no handle_comment override, so that payload
+        (and every real tag/text node inside it) was silently discarded with no
+        error and no INGEST_EMPTY signal — a truncated network fetch or one
+        forgotten "-->" would drop the rest of the document with zero indication
+        anything was lost.
+        """
+        html = (
+            "<html><head><title>Report</title></head><body>"
+            "<p>Section 1: Introduction text that matters.</p>"
+            "<!-- unclosed comment starts here"
+            "<p>Section 3: the critical conclusion. Numbers: 42</p>"
+            "<p>Section 4: more content.</p>"
+        )
+        title, text = html_to_text(html)
+        self.assertIn("Section 1", text)
+        self.assertIn("Section 3", text, "content after an unclosed comment must not be lost")
+        self.assertIn("Section 4", text, "content after an unclosed comment must not be lost")
+
+    def test_html_well_formed_comment_still_ignored(self) -> None:
+        """A normal, properly-closed comment must still be excluded from the
+        extracted text — the unclosed-comment fix must not affect this case."""
+        html = (
+            "<html><body>"
+            "<p>Before comment.</p>"
+            "<!-- this is a normal well-formed comment, should be ignored -->"
+            "<p>After comment.</p>"
+            "</body></html>"
+        )
+        _, text = html_to_text(html)
+        self.assertNotIn("well-formed comment", text)
+        self.assertIn("Before comment", text)
+        self.assertIn("After comment", text)
 
     def test_html_table_cells_separated_by_newlines(self) -> None:
         """<td> and <th> must produce newline boundaries so cell values don't merge."""
