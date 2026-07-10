@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.95
+## Version History: v0.1.37 → v0.2.96
+
+### v0.2.96 (2026-07-08)
+**Fixed**: A twenty-fourth background audit round, deliberately pivoted to fresh territory after three rounds closed the title-truncation-echo pattern, found `pdf_to_text()` (`ingest.py`) discarded ALL extracted pages when a single page's `extract_text()` call raised — a real, documented pypdf failure mode (malformed content stream, bad font, corrupt xref entry on one page of an otherwise-fine PDF). The list comprehension `[page.extract_text() or "" for page in reader.pages]` ran inside one shared `try/except`, so one bad page among many good ones aborted extraction of the entire document, contradicting the project's own stated "Graceful Degradation" design principle (CLAUDE.md: "Studio outputs have fallback text... History_messages() survives malformed chats") — already applied the same way to per-batch embedding failures in `pipeline.py`'s `_embed_chunks()`.
+
+- Reproduced directly: mocked a 3-page PDF reader where the middle page's `extract_text()` raises; pre-fix, `pdf_to_text()` raised `IngestError("INGEST_PARSE_FAILED")` and lost all 3 pages' worth of real, extractable content.
+- Fix: extract each page independently inside its own `try/except`, skipping (not discarding the whole document for) a page that fails; a page that raises no longer prevents its siblings from contributing text. The outer `try/except` around `PdfReader(BytesIO(data))` construction itself is unchanged — a genuinely unparseable file (not a valid PDF at all) still correctly raises `INGEST_PARSE_FAILED` immediately, confirmed the existing `test_pdf_to_text_parse_error_raises_ingest_error` test still passes unchanged.
+- 1 regression test added (`test_pdf_to_text_one_bad_page_does_not_discard_good_pages`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 586 tests (up from 585). `mypy shoin/` and `ruff check shoin/ingest.py` remain clean.
 
 ### v0.2.95 (2026-07-08)
 **Fixed**: A twenty-third background audit round found the same title-truncation-echo-mismatch bug class (v0.2.93 `_h_src_upload`, v0.2.94 `_h_src_patch`) in a third, CLI-side call site: `_cmd_source()`'s "rename" action (`cli.py`) printed `str(args.title)` — the raw, untruncated CLI argument — in its confirmation message, instead of the value `update_source_title()` actually truncated to `MAX_TITLE_LEN` (500 chars) before persisting.

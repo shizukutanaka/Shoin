@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.95")
+        self.assertEqual(VERSION, "0.2.96")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1636,6 +1636,41 @@ class TestIngest(unittest.TestCase):
         with self.assertRaises(IngestError) as cm:
             pdf_to_text(b"not a real pdf at all")
         self.assertEqual(cm.exception.code, "INGEST_PARSE_FAILED")
+
+    def test_pdf_to_text_one_bad_page_does_not_discard_good_pages(self) -> None:
+        """A single page whose extract_text() raises (a real pypdf failure mode
+        — malformed content stream, bad font, corrupt xref entry) must not
+        discard every other page's perfectly good text. Before this fix, the
+        list comprehension ran inside one shared try/except, so one bad page
+        among many good ones aborted the ENTIRE document — zero content
+        indexed — contradicting the project's own graceful-degradation
+        principle (CLAUDE.md: "Studio outputs have fallback text...
+        History_messages() survives malformed chats"), already applied the
+        same way to per-batch embedding failures in pipeline.py.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from shoin.ingest import pdf_to_text
+
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+
+        good1 = MagicMock()
+        good1.extract_text.return_value = "quarterly revenue grew by 12 percent"
+        bad = MagicMock()
+        bad.extract_text.side_effect = Exception("malformed content stream on this page")
+        good2 = MagicMock()
+        good2.extract_text.return_value = "board approved a new dividend policy"
+
+        fake_reader = MagicMock()
+        fake_reader.pages = [good1, bad, good2]
+
+        with patch("pypdf.PdfReader", return_value=fake_reader):
+            result = pdf_to_text(b"fake pdf bytes")
+        self.assertIn("quarterly revenue grew by 12 percent", result)
+        self.assertIn("board approved a new dividend policy", result)
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""

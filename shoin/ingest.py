@@ -161,9 +161,20 @@ def pdf_to_text(data: bytes) -> str:
         ) from exc
     try:
         reader = PdfReader(BytesIO(data))
-        pages = [page.extract_text() or "" for page in reader.pages]
     except Exception as exc:
         raise IngestError("INGEST_PARSE_FAILED", f"PDF parse failed: {exc}") from exc
+    # Extract each page independently: a malformed content stream, bad font,
+    # or corrupt xref entry on ONE page (a real pypdf failure mode) must not
+    # discard every other page's perfectly good text — matches the project's
+    # own graceful-degradation principle (CLAUDE.md: "Studio outputs have
+    # fallback text... History_messages() survives malformed chats"), already
+    # applied the same way to per-batch embedding failures in pipeline.py.
+    pages: list[str] = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception:
+            continue
     return "\n\n".join(p.strip() for p in pages if p.strip())
 
 
