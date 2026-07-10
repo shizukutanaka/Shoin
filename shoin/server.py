@@ -205,6 +205,21 @@ class _Handler(BaseHTTPRequestHandler):
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}")
         return value
 
+    def _optional_str(self, data: Json, key: str) -> str:
+        """Like _require(), but the field may be missing or empty — only its
+        TYPE is validated. Without this, a non-string optional field (e.g. a
+        JSON list/dict/bool) silently gets Python's str()/repr() coercion
+        applied instead of being rejected — the exact type-confusion class
+        v0.2.38 fixed for required fields via _require(), left unpatched for
+        optional ones.
+        """
+        raw = data.get(key)
+        if raw is not None and not isinstance(raw, str):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
+            )
+        return raw or ""
+
     # --- routing --------------------------------------------------------
 
     _ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -525,7 +540,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_note_add(self, nb_id: int) -> None:
         data = self._read_json()
         title = self._require(data, "title")
-        body = str(data.get("body") or "")
+        body = self._optional_str(data, "body")
         with Store(self.db) as store:
             note_id = store.add_note(nb_id, title, body)
             self._json({"id": note_id}, 201)

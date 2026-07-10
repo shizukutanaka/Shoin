@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.91
+## Version History: v0.1.37 → v0.2.92
+
+### v0.2.92 (2026-07-08)
+**Fixed**: A twentieth background audit round found `_h_note_add()` (`server.py`) still used the exact `str(data.get(...) or "")` type-confusion pattern v0.2.38 fixed for `title` — but only for `title`, one field over: `body = str(data.get("body") or "")`. A `POST /api/notebooks/{id}/notes` with `{"title": "T", "body": [1, 2, 3]}` returned HTTP 201 and silently persisted Python's `str()` coercion of the list (`"[1, 2, 3]"`) as the note body, instead of being rejected the way an equally-malformed `title` field already correctly is.
+
+- Live-reproduced against a real running server: list/dict/bool bodies all returned 201 and were stored as their Python `repr()` strings, not the JSON the client actually sent.
+- Fix: added `_optional_str()` — the same type-check `_require()` already does, but without the "must be non-empty" requirement (since `body` is legitimately optional, unlike `title`). `_h_note_add()` now uses it in place of the raw `str(...)` coercion.
+- 1 regression test added (`test_add_note_with_non_string_body_returns_400`, live server); verified fail-then-pass via `git stash` as with every fix this session. Grepped for the same `str(data.get(...) or "")` pattern elsewhere in `server.py` — this was the only remaining occurrence.
+
+`pytest tests/` now runs 582 tests (up from 581). `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.91 (2026-07-08)
 **Fixed**: A nineteenth background audit round, moved to fresh territory now that server.py's disconnect-handling area was closed, found `store.update_source_title()` had no empty/whitespace-title validation at all — it relied entirely on the caller to guard against this. The Web API path (`PATCH /api/sources/{id}`) is protected by `server.py`'s `_require()` (strips and rejects empty/whitespace with `VALIDATION_REQUIRED_FIELD_MISSING`) before ever calling this method, but the CLI path (`shoin source rename`, v0.2.68, explicitly meant to give "the SAME" capability per `cli.py`'s own REQ-103 CLI-parity claim) called `store.update_source_title()` directly with zero validation — `_cmd_source()`'s "rename" branch just passes `str(args.title)` straight through.

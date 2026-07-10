@@ -1731,6 +1731,34 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_add_note_with_non_string_body_returns_400(self) -> None:
+        """POST /api/notebooks/{id}/notes with a non-string "body" must return 400,
+        not silently persist Python's str()/repr() of the value.
+
+        _h_note_add used `body = str(data.get("body") or "")` for the body field,
+        unlike title (already protected by _require() since v0.2.38) — a JSON
+        list/dict/bool body was silently coerced to its Python repr (e.g. "[1, 2, 3]")
+        and persisted with HTTP 201, instead of being rejected as malformed input.
+        """
+        import json as _json
+
+        nb_body = _json.dumps({"name": "note-body-type-test"}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(
+            "POST", "/api/notebooks", body=nb_body,
+            headers={"Content-Type": "application/json"},
+        )
+        nb_id = _json.loads(conn.getresponse().read())["id"]
+
+        note_body = _json.dumps({"title": "T", "body": [1, 2, 3]}).encode()
+        status, raw = self._raw_post(
+            f"/api/notebooks/{nb_id}/notes", note_body,
+            {"Content-Type": "application/json"},
+        )
+        data = _json.loads(raw)
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 class _OverlapDetectingLLM:
     """Records whether chat_stream() was ever entered while already active.
