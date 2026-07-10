@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.86")
+        self.assertEqual(VERSION, "0.2.87")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -4015,7 +4015,13 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(result.source.title, "Mock Page")
 
     def test_refresh_source_replaces_chunks_keeps_id(self) -> None:
-        """refresh_source must keep the source ID and replace chunks with fresh content."""
+        """refresh_source must keep the source ID and replace chunks with fresh content.
+
+        Title is deliberately NOT updated by refresh (v0.2.87) — it was found to
+        unconditionally overwrite a user's custom rename with the freshly
+        re-extracted page title on every refresh. Title management is the
+        exclusive job of PATCH /api/sources/{id}; refresh only updates content.
+        """
         from unittest.mock import patch
 
         from shoin.ingest import Extracted
@@ -4032,10 +4038,41 @@ class TestPipeline(unittest.TestCase):
             with patch("shoin.pipeline.extract_url", return_value=updated):
                 res1 = refresh_source(s, source_id)
         self.assertEqual(res1.source.id, source_id, "source ID must be preserved")
-        self.assertEqual(res1.source.title, "Page v2")
+        self.assertEqual(res1.source.title, "Page v1", "refresh must not overwrite the title")
         self.assertEqual(res1.source.sha256, "sha-v2")
         with make_store() as s2:
             pass  # store closed; already verified above
+
+    def test_refresh_source_preserves_user_renamed_title(self) -> None:
+        """A user's custom rename (PATCH /api/sources/{id}) must survive a
+        subsequent refresh, even when the re-fetched page has a different
+        <title>. Found to be silently clobbered before v0.2.87 — refresh
+        unconditionally passed the freshly re-extracted title to
+        replace_chunks_for_source with no check for a prior manual rename."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        original = Extracted(
+            kind="url", title="Original Page Title", origin="http://rename-refresh.test",
+            sha256="sha-a", text="original content",
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("rename-refresh-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://rename-refresh.test")
+            source_id = res0.source.id
+            s.update_source_title(source_id, "My Custom Curated Name", "http://rename-refresh.test")
+
+            refreshed = Extracted(
+                kind="url", title="A Totally Different New Title", origin="http://rename-refresh.test",
+                sha256="sha-b", text="updated content",
+            )
+            with patch("shoin.pipeline.extract_url", return_value=refreshed):
+                result = refresh_source(s, source_id)
+        self.assertEqual(result.source.title, "My Custom Curated Name")
+        self.assertEqual(result.source.sha256, "sha-b")
 
     def test_refresh_source_nonurl_raises(self) -> None:
         """refresh_source on a file source must raise INGEST_REFRESH_NOT_URL."""

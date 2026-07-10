@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.86
+## Version History: v0.1.37 → v0.2.87
+
+### v0.2.87 (2026-07-08)
+**Fixed**: A fifteenth background audit round — after a systematic sweep confirmed every `except sqlite3.IntegrityError`/`OperationalError` in the codebase now classifies correctly (v0.2.53/86's fixes are complete, and `add_note`/`delete_note` already have the v0.2.39 TOCTOU guard) — found `refresh_source()` (`pipeline.py`) unconditionally passed the freshly re-extracted page `<title>` to `replace_chunks_for_source()`, silently overwriting any custom title the user had set via `PATCH /api/sources/{id}` (the "Source Title Edit" feature, added in the *same* v0.2.35 commit as refresh). `refresh_source()`'s own docstring only promises to update *content* ("Re-fetch a URL source in-place, replacing all chunks... while keeping the source ID"); it says nothing about title, yet title was clobbered on every single refresh regardless.
+
+- **Concrete impact**: a user who curates a meaningful name for a URL source (e.g. "Q3 Pricing Doc" instead of the site's raw `<title>`) loses that label the next time they click the `↻` refresh button — the UI shows a generic "Source refreshed" toast with zero indication the title reverted, and there was no way to opt out.
+- Live-reproduced: renamed a source to "My Custom Curated Name," refreshed it against a page reporting a different `<title>`, and the stored title reverted to the raw page title every time.
+- Fix: `refresh_source()` no longer passes `title=` to `replace_chunks_for_source()` at all — only `sha256` (content) is updated. `replace_chunks_for_source()`'s own `title or src.title` fallback then correctly leaves whatever title is currently set (custom or original) untouched. Title management remains the exclusive job of `PATCH /api/sources/{id}`, matching the docstring's own scope.
+- Updated `test_refresh_source_replaces_chunks_keeps_id` (which asserted the old, now-intentionally-changed behavior) and added `test_refresh_source_preserves_user_renamed_title`; verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 576 tests (up from 575). `mypy shoin/` and `ruff check shoin/pipeline.py` remain clean.
 
 ### v0.2.86 (2026-07-08)
 **Fixed**: A fourteenth background audit round found `replace_chunks_for_source()` (`store.py`, used by `refresh_source()`) misclassified any non-UNIQUE `sqlite3.IntegrityError` as `SOURCE_NOT_FOUND` — the exact bug class v0.2.53 fixed in its sibling `add_source()` ("classified any non-UNIQUE `IntegrityError` as `NOTEBOOK_NOT_FOUND`... Fix: explicitly check for `'FOREIGN KEY'`... all other `IntegrityError` variants now raise `SYSTEM_INTERNAL_ERROR`"), but that fix was never ported to this method, despite both being touched in the *same* v0.2.53 changelog entry for an unrelated atomicity issue.

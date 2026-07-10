@@ -210,13 +210,20 @@ def refresh_source(
             f"notebook chunk limit exceeded: {notebook_chunks - this_source_chunks} existing"
             f" (excl. this source) + {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
         )
-    # Pass sha256/title to replace_chunks_for_source so the metadata update happens
-    # in the SAME transaction as the chunk replacement — eliminating the two-phase
-    # commit gap that previously left new chunks committed with stale sha256/title
+    # Pass sha256 to replace_chunks_for_source so the metadata update happens in
+    # the SAME transaction as the chunk replacement — eliminating the two-phase
+    # commit gap that previously left new chunks committed with a stale sha256
     # if the process was killed between the two separate commits.
-    chunk_ids = store.replace_chunks_for_source(
-        source_id, texts, sha256=extracted.sha256, title=extracted.title
-    )
+    #
+    # title is deliberately NOT passed: refresh's own docstring only promises to
+    # update *content* ("replacing all chunks... while keeping the source ID"),
+    # and title management is the exclusive job of PATCH /api/sources/{id} (the
+    # "Source Title Edit" feature, added in the same commit as refresh). Passing
+    # extracted.title here unconditionally overwrote a user's custom rename with
+    # the raw page <title> on every refresh, with no way to opt out and no signal
+    # in the UI that it happened. Omitting it leaves replace_chunks_for_source's
+    # `title or src.title` fallback keep whatever title is currently set.
+    chunk_ids = store.replace_chunks_for_source(source_id, texts, sha256=extracted.sha256)
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
     updated_src = store.get_source(source_id)
     return IndexResult(updated_src, len(chunk_ids), n_embedded)
