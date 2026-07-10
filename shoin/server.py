@@ -141,6 +141,24 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, code: str, message: str) -> None:
         self._json({"error": {"code": code, "message": message}}, status)
 
+    def _safe_error(self, status: int, code: str, message: str) -> None:
+        """_error(), but swallows a dead-connection write failure.
+
+        Used from _dispatch()'s exception handlers, where the original
+        exception may itself BE a client disconnect (e.g. a request queued
+        behind generation_lock whose client gave up and closed the socket
+        before the response could be written). Calling self._error() there
+        attempts a second write to the same dead socket, raising the same
+        exception class again — this time with nothing left to catch it,
+        producing exactly the unhandled traceback the catch-all in
+        _dispatch() (v0.2.19) was written to eliminate. There is nothing
+        more to do if the client is already gone, so this logs and moves on.
+        """
+        try:
+            self._error(status, code, message)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            print(f"Client disconnected before error response could be sent: {exc}", file=sys.stderr)
+
     def _read_json(self) -> Json:
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -256,18 +274,18 @@ class _Handler(BaseHTTPRequestHandler):
                         status = 409
                     else:
                         status = 400
-                    self._error(status, exc.code, str(exc))
+                    self._safe_error(status, exc.code, str(exc))
                 except IngestError as exc:
-                    self._error(400, exc.code, str(exc))
+                    self._safe_error(400, exc.code, str(exc))
                 except LLMError as exc:
-                    self._error(502, exc.code, str(exc))
+                    self._safe_error(502, exc.code, str(exc))
                 except Exception as exc:
                     print(
                         f"Internal error handling {method} {parsed.path}: "
                         f"{type(exc).__name__}: {exc}",
                         file=sys.stderr,
                     )
-                    self._error(500, "SYSTEM_INTERNAL_ERROR", type(exc).__name__)
+                    self._safe_error(500, "SYSTEM_INTERNAL_ERROR", type(exc).__name__)
                 return
         path_matched = any(re.match(pattern, parsed.path) for _, pattern, _ in self._ROUTES)
         if path_matched:

@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.88")
+        self.assertEqual(VERSION, "0.2.89")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3666,6 +3666,48 @@ class TestServerSSE(unittest.TestCase):
         finally:
             os.unlink(db_path)
 
+    def test_safe_error_swallows_dead_connection_errors(self) -> None:
+        """_safe_error() must swallow a dead-connection failure from the error
+        response write itself, not propagate it.
+
+        _dispatch()'s exception handlers call this instead of _error() directly
+        because the original exception being handled may itself BE a client
+        disconnect (e.g. a request queued behind generation_lock whose client
+        gave up before the response could be written) — writing the error
+        response then hits the same dead socket and raises again, this time
+        with nothing left to catch it, producing exactly the unhandled
+        traceback v0.2.19's _dispatch() catch-all was written to eliminate.
+        """
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        for exc_type in (BrokenPipeError, ConnectionResetError, OSError):
+            def _raise(*a, _exc=exc_type, **kw):
+                raise _exc("client gone")
+            handler._error = _raise  # type: ignore[assignment]
+            handler._safe_error(500, "SYSTEM_INTERNAL_ERROR", "boom")  # must not raise
+
+    def test_dispatch_catch_all_does_not_propagate_when_error_write_fails(self) -> None:
+        """End-to-end reproduction: a handler raises a generic exception, and
+        the fallback error-response write ALSO fails with a dead-connection
+        error (the double-fault scenario). _dispatch() itself must not let
+        the second exception escape."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        handler.path = "/api/health"
+        handler._query = {}
+        handler._reject_cross_site = lambda method: False  # type: ignore[assignment]
+
+        def _raise_generic(*a, **kw):
+            raise RuntimeError("handler blew up")
+        handler._h_health = _raise_generic  # type: ignore[assignment]
+
+        def _raise_dead_connection(*a, **kw):
+            raise ConnectionResetError("client already gone")
+        handler._error = _raise_dead_connection  # type: ignore[assignment]
+
+        handler._dispatch("GET")  # must not raise
 
     def test_zero_token_llm_response_saves_empty_assistant_message(self) -> None:
         """When chat_stream yields zero tokens (e.g. reasoning model with no content),

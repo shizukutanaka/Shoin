@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.88
+## Version History: v0.1.37 → v0.2.89
+
+### v0.2.89 (2026-07-08)
+**Fixed**: A seventeenth background audit round found `_dispatch()`'s (`server.py`) v0.2.19 catch-all exception handler could itself throw and escape uncaught — the exact class of crash that changelog entry claimed to have eliminated. All four `except` branches (`StoreError`/`IngestError`/`LLMError`/generic `Exception`) call `self._error(...)` to write an error response. If the *original* exception was itself a client disconnect (`BrokenPipeError`/`ConnectionResetError` — realistic under `generation_lock`, v0.2.70: a request queued behind an in-progress generation whose client gave up and closed the socket before the response could be written), the fallback `self._error(...)` performs a second write to the same dead socket, raising the same exception class again — this time completely outside any try/except, propagating through `do_GET`/`do_POST` as a genuine unhandled traceback.
+
+- Reproduced deterministically with raw sockets: held `generation_lock` with a slow streaming request on notebook A, queued a `GET /api/notebooks/B/questions` behind it, hard-RST-closed that connection while queued, then let the lock release — the server log showed exactly the predicted double fault (`ConnectionResetError` caught by the catch-all, then `BrokenPipeError` from the fallback write escaping unhandled).
+- Fix: added `_safe_error()`, which calls `_error()` inside a `try/except (BrokenPipeError, ConnectionResetError, OSError)` that logs and swallows — there is nothing more to do once the client is confirmed gone. All four `_dispatch()` except branches now call `_safe_error()` instead of `_error()` directly, since any of them (not just the catch-all) could hit the same double-fault if the connection died before the response was written.
+- 2 regression tests added: a direct unit test of `_safe_error()` swallowing all three dead-connection exception types, and an end-to-end reproduction of the double-fault through `_dispatch()` itself (handler raises a generic exception, the fallback write also raises `ConnectionResetError`, `_dispatch()` must not propagate). Verified fail-then-pass via `git stash` as with every fix this session — the second test reproduces the exact unhandled-exception traceback shape on the pre-fix code.
+
+`pytest tests/` now runs 578 tests (up from 576). `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.88 (2026-07-08)
 **Fixed**: A sixteenth background audit round found `renderNotebook()` (`index.html`) silently discarded an in-progress, uncommitted source-rename edit whenever ANY unrelated write elsewhere in the app succeeded — note add/delete, upload, studio generation, clear-chat, source refresh/delete — all call `openNotebook()` on success, which unconditionally tore down and rebuilt `#srcList` from scratch with no awareness that a `.src-rename` input was mid-edit.
