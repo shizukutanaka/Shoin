@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.84")
+        self.assertEqual(VERSION, "0.2.85")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -3327,6 +3327,45 @@ class TestLLMClient(unittest.TestCase):
                     tokens.append(tok)
         self.assertEqual(tokens, ["hello"])          # partial output before truncation
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_chat_stream_enforces_32mb_size_cap(self) -> None:
+        """chat_stream() must cap cumulative bytes read across the SSE loop,
+        matching _post()'s 32 MB guard (v0.2.37) against a runaway/malicious
+        endpoint. chat_stream() was found to have NO cap at all, iterating
+        `for raw in resp` with no bound on total bytes — worse than the
+        already-fixed _post() case since it evaded the guard entirely, on the
+        exact 4-8GB RAM systems this project targets."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError, _MAX_RESPONSE
+
+        # Each line is ~1KB; enough lines to exceed the 32 MB cap partway through.
+        line = (
+            b'data: {"choices":[{"delta":{"content":"' + b"x" * 950 + b'"}}]}\n'
+        )
+        n_lines = (_MAX_RESPONSE // len(line)) + 100  # deliberately past the cap
+
+        class _HugeStreamResp:
+            def __enter__(self) -> "_HugeStreamResp":
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+            def __iter__(self):  # type: ignore[override]
+                for _ in range(n_lines):
+                    yield line
+
+        with patch("urllib.request.urlopen", return_value=_HugeStreamResp()):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            gen = client.chat_stream([{"role": "user", "content": "hi"}])
+            collected = 0
+            with self.assertRaises(LLMError) as cm:
+                for tok in gen:
+                    collected += len(tok)
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        self.assertIn("32 MB", str(cm.exception))
+        self.assertLess(collected, n_lines * len(line), "must stop before consuming everything")
 
     def test_post_http_error_body_read_is_capped(self) -> None:
         """_post() must read at most 300 bytes of an HTTP error body before decoding.

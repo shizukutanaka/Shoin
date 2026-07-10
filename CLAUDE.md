@@ -312,7 +312,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.84
+## Version History: v0.1.37 → v0.2.85
+
+### v0.2.85 (2026-07-08)
+**Fixed**: A thirteenth background audit round found `chat_stream()` (`llm.py`) had no response-size cap at all, despite `_post()` (the sibling blocking-call method) being fixed for the exact same threat in v0.2.37 ("`_post()` called `resp.read()` with no size limit. A malicious or buggy LLM endpoint returning gigabytes would be read entirely into memory... Fix: cap at 32 MB"). `chat_stream()` iterates `for raw in resp:` line-by-line with zero bound on cumulative bytes across the SSE loop — actually more attacker-favorable than the pre-v0.2.37 `_post()` bug, since a misbehaving or compromised endpoint (`SHOIN_LLM_URL` pointed at an untrusted service) could stream unbounded `data: {...}` lines and OOM the process on the exact 4-8GB RAM systems this project targets per CLAUDE.md's own "Lightweight First" principle.
+
+- Live-reproduced: mocked a streaming response emitting ~44,000 ~1KB SSE lines (~42MB total); `chat_stream()` consumed all of it with no error before the fix.
+- Fix: hoisted `_MAX_RESPONSE = 32 * 1024 * 1024` from a local variable inside `_post()` to a module-level constant shared by both methods. `chat_stream()`'s loop now tracks cumulative bytes read and raises `LLMError("SYSTEM_LLM_BAD_RESPONSE", "stream exceeded 32 MB size limit")` once the cap is exceeded — the same exception type and code the loop's existing `{"error": ...}` SSE-payload check already raises, so `server.py`'s existing `_h_ask_sse()` error handling needed no changes to correctly surface this new failure mode.
+- 1 regression test added (`test_chat_stream_enforces_32mb_size_cap`); verified fail-then-pass via `git stash` as with every fix this session.
+
+`pytest tests/` now runs 574 tests (up from 573). `mypy shoin/` and `ruff check shoin/llm.py` remain clean.
 
 ### v0.2.84 (2026-07-08)
 **Fixed**: A twelfth background audit round found that `_embed_chunks()` (`pipeline.py`) could silently defeat its own embedding-model mismatch guard after a partial `reindex_notebook()` failure. The unconditional `if done: store.set_setting("embed_model", current_model)` recorded the new model as fully consistent whenever *any* chunk succeeded — but `reindex_notebook()` calls `_embed_chunks(..., force=True)`, which OVERWRITES existing vectors in place. If the embedding endpoint drops mid-run (network failure, restart, timeout — the same class of transient failure `_embed_chunks()`'s own `except LLMError: pass` comment says is expected), the chunks a later batch never reached still hold their OLD, untouched, different-model vectors — non-NULL, and therefore still included in `vector_search()`'s cosine comparisons. Recording `embed_model` as the new model in that state made `_check_embed_model_ok()` (`qa.py`) report *no* mismatch over a DB that was provably still mixed — exactly the corruption its own docstring says it exists to prevent ("Mixing embeddings from two models makes cosine scores meaningless").

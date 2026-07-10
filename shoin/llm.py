@@ -20,6 +20,12 @@ CHAT_TIMEOUT_SEC = 180
 EMBED_TIMEOUT_SEC = 60
 HEALTH_TIMEOUT_SEC = 3
 
+# 32 MB — guard against a runaway/malicious endpoint. Shared by _post() (single
+# resp.read() call) and chat_stream() (cumulative bytes across the SSE loop,
+# v0.2.85 — chat_stream() had no cap at all despite handling the identical
+# threat model _post() was fixed for in v0.2.37).
+_MAX_RESPONSE = 32 * 1024 * 1024
+
 
 class LLMError(Exception):
     """LLM transport/protocol error with a stable error code."""
@@ -54,7 +60,6 @@ class LLMClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        _MAX_RESPONSE = 32 * 1024 * 1024  # 32 MB — guard against runaway endpoints
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 # Read one byte beyond the limit so len > _MAX_RESPONSE is the correct
@@ -146,9 +151,15 @@ class LLMClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        total_bytes = 0
         try:
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
                 for raw in resp:
+                    total_bytes += len(raw)
+                    if total_bytes > _MAX_RESPONSE:
+                        raise LLMError(
+                            "SYSTEM_LLM_BAD_RESPONSE", "stream exceeded 32 MB size limit"
+                        )
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
