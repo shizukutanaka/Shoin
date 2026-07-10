@@ -312,7 +312,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.100
+## Version History: v0.1.37 → v0.2.101
+
+### v0.2.101 (2026-07-08)
+**Fixed**: A twenty-ninth background audit round, following directly from v0.2.100's discovery that `build_context()`'s default budget didn't actually enforce its documented sub-share, found the SAME class of gap in `history_messages()`: `HISTORY_MESSAGES(6) * HISTORY_TOKENS_EACH(160) = 960`, not the CLAUDE.md-documented "~400 tokens: recent history" sub-share. The existing per-message `HISTORY_TOKENS_EACH=160` cap only ever bounded *each individual* message — there was no code anywhere enforcing a ceiling on the *sum* across all included messages.
+
+- **Concrete impact**: a history-heavy multi-turn conversation (each retained turn near the 160-token per-message cap) could add up to 960 tokens of history on top of the other three, now-correctly-enforced shares (900 system prompt + 1000 source text + 100 query, per v0.2.100), pushing the real worst-case prompt to ~2960 tokens — well past the documented 2400-token `CONTEXT_TOKENS` ceiling this project explicitly targets for lightweight 4K–8K-context local models.
+- Reproduced directly: 3 turn-pairs of substantial length through `history_messages()` summed to 960 tokens total, exactly matching `HISTORY_MESSAGES * HISTORY_TOKENS_EACH` and confirming no total cap existed.
+- Fix: added `HISTORY_TOKENS_TOTAL = 400` and restructured `history_messages()` to build the message list *most-recent-first* (prioritizing the newest, most relevant turns), tracking a running token total and stopping once the cumulative budget is exhausted, then reversing back to chronological order before the existing dedup/leading-assistant-trim/trailing-orphan post-processing runs unchanged. The per-message `HISTORY_TOKENS_EACH` cap is retained alongside the new total cap (whichever is tighter applies to each message), so one very long single turn still can't dominate the budget on its own.
+- 1 regression test added (`test_history_total_tokens_capped_at_documented_subshare`); verified fail-then-pass via `git stash` as with every fix this session. The existing `test_history_is_bounded` (message-count and per-message-length bounds) continues to pass unchanged — this fix is additive, not a behavior regression of that guarantee.
+
+`pytest tests/` now runs 592 tests (up from 591). `mypy shoin/` and `ruff check shoin/qa.py` remain clean.
 
 ### v0.2.100 (2026-07-08)
 **Fixed**: A twenty-eighth background audit round, explicitly barred from the now-closed echo-mismatch pattern, found `build_context()`'s default `budget_tokens` was the full documented `CONTEXT_TOKENS` total (2400) instead of its documented "source text" sub-share (~1000, per CLAUDE.md's own "Token-Aware Truncation" breakdown: ~900 system prompt+headers, ~1000 source text, ~400 history, ~100 query). `qa.ask()` and `server._h_ask_sse()` both call `build_context(store, hits)` with no override, so this misleading default let source text alone consume the entire documented total prompt budget before the system prompt, history, and query were even added on top — directly undermining the project's stated purpose of fitting prompts within lightweight 4K–8K-context local models (Qwen3-4B, Phi-4, Gemma-3).

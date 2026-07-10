@@ -32,7 +32,14 @@ CONTEXT_TOKENS = 2400  # lightweight-LLM friendly context budget: the TOTAL prom
 # TOP_K sources and no history yet (v0.2.100).
 SOURCE_TEXT_TOKENS = 1000
 HISTORY_MESSAGES = 6  # recent turns carried into the prompt (REQ-005 follow-ups)
-HISTORY_TOKENS_EACH = 160  # per-message truncation keeps history within budget
+HISTORY_TOKENS_EACH = 160  # per-message ceiling, so one long turn can't eat the whole budget
+# HISTORY_MESSAGES(6) * HISTORY_TOKENS_EACH(160) = 960, not the ~400 documented as
+# history's sub-share of CONTEXT_TOKENS (CLAUDE.md) — the per-message cap alone was
+# never actually enforcing a TOTAL ceiling across all included messages. A
+# history-heavy multi-turn conversation could add up to 960 tokens on top of the
+# other three (now correctly enforced) shares, pushing the real worst-case prompt
+# to ~2960 — the same overshoot class v0.2.100 fixed for source text (v0.2.101).
+HISTORY_TOKENS_TOTAL = 400
 
 # Brackets that contain an S-number, e.g. [S1] / [S1, S2] / [Ｓ１]. History
 # citations refer to a *previous* context numbering, so they are stripped
@@ -217,8 +224,14 @@ def history_messages(
     # (possibly with empty body) — so an empty assistant body is NOT the same as
     # a missing one, and must not be treated as an orphan below.
     has_trailing_answer = bool(rows) and str(rows[-1]["role"]) != "user"
-    out: list[Message] = []
-    for r in rows:
+    # Build most-recent-first so HISTORY_TOKENS_TOTAL prioritizes keeping the
+    # newest turns (most relevant for continuing the conversation) when the sum
+    # would otherwise exceed the total history budget — rows are already in
+    # chronological (oldest-first) order, so iterate in reverse and re-reverse
+    # at the end to restore chronological order for the prompt.
+    reversed_out: list[Message] = []
+    total_tokens = 0
+    for r in reversed(rows):
         role = "user" if str(r["role"]) == "user" else "assistant"
         raw = str(r["body"])
         # Strip stale [S#] citation markers only from assistant messages: assistant
@@ -230,7 +243,15 @@ def history_messages(
         body = re.sub(r" {2,}", " ", raw).strip()
         if not body:
             continue
-        out.append({"role": role, "content": _truncate_tokens(body, HISTORY_TOKENS_EACH)})
+        remaining_total = HISTORY_TOKENS_TOTAL - total_tokens
+        if remaining_total <= 0:
+            break
+        content = _truncate_tokens(body, min(HISTORY_TOKENS_EACH, remaining_total))
+        if not content:
+            break
+        reversed_out.append({"role": role, "content": content})
+        total_tokens += estimate_tokens(content)
+    out = list(reversed(reversed_out))
     # Citation stripping can reduce an assistant message to empty (skipped above),
     # producing consecutive same-role pairs ([user, user] or [asst, asst]).
     # Remove the earlier message of each such pair so the sequence stays alternating.

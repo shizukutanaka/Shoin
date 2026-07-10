@@ -358,6 +358,31 @@ class TestMultiTurn(unittest.TestCase):
             for m in msgs:
                 self.assertLess(len(m["content"]), 4000)
 
+    def test_history_total_tokens_capped_at_documented_subshare(self) -> None:
+        """history_messages()'s TOTAL token sum must respect HISTORY_TOKENS_TOTAL
+        (~400, CLAUDE.md's documented history sub-share of CONTEXT_TOKENS) —
+        not just each individual message's own HISTORY_TOKENS_EACH (160) cap.
+
+        HISTORY_MESSAGES(6) * HISTORY_TOKENS_EACH(160) = 960, not ~400: the
+        per-message cap alone never enforced a total ceiling across all
+        included messages. A history-heavy multi-turn conversation could add
+        up to 960 tokens on top of the other three (correctly-enforced, since
+        v0.2.100) shares, pushing the real worst-case prompt well past the
+        documented CONTEXT_TOKENS ceiling — the same overshoot class v0.2.100
+        fixed for source text, but for history.
+        """
+        from shoin.chunk import estimate_tokens
+        from shoin.qa import HISTORY_TOKENS_TOTAL
+
+        s, nb = seeded_store()
+        with s:
+            for i in range(3):
+                s.add_message(nb, "user", "質問についての詳細な説明を含む長めの文章です。" * 10)
+                s.add_message(nb, "assistant", "回答についての詳細な説明を含む長めの文章です。" * 10)
+            msgs = history_messages(s, nb)
+            total = sum(estimate_tokens(m["content"]) for m in msgs)
+            self.assertLessEqual(total, HISTORY_TOKENS_TOTAL)
+
     def test_first_turn_has_no_history(self) -> None:
         s, nb = seeded_store()
         with s:
