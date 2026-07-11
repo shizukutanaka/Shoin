@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from .chunk import split_text
+from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
 from .config import MAX_CHUNKS_PER_NOTEBOOK
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
@@ -17,6 +17,31 @@ from .qa import ChatBackend
 from .store import Source, Store, StoreError
 
 EMBED_BATCH = 16
+
+
+def _embed_input(context: str, text: str) -> str:
+    """The string handed to the embedding model for a chunk.
+
+    Prepending the heading breadcrumb lets the vector capture which section a
+    chunk belongs to (the deterministic, LLM-free half of contextual retrieval).
+    Chunks with no breadcrumb (context='') embed exactly their text, so notebooks
+    indexed before migration 5 produce byte-identical embedding inputs and need
+    no re-index for correctness. index_source and reindex_notebook MUST both route
+    through here so a notebook never mixes context-aware and text-only vectors.
+    """
+    return f"{context}\n\n{text}" if context else text
+
+
+def _chunk_context(title: str, breadcrumb: str) -> str:
+    """Combine the source title with a chunk's heading breadcrumb into one context.
+
+    The title is shared by every chunk of a source (it discriminates across
+    sources — a query naming the document lifts all its chunks); the breadcrumb
+    discriminates within a source. Capped to the same bound split_text_with_context
+    applies to breadcrumbs so a long title can't unbalance the index or embedding.
+    """
+    parts = [p for p in (title.strip(), breadcrumb.strip()) if p]
+    return " > ".join(parts)[:_MAX_CONTEXT_CHARS]
 
 
 @dataclass
@@ -148,7 +173,9 @@ def index_source(
         extracted = extract_file(target)
     # Guard before add_source so that zero-text documents don't leave an orphaned
     # source row (no chunks → permanently invisible to all retrieval queries).
-    texts = split_text(extracted.text)
+    pairs = split_text_with_context(extracted.text)
+    contexts = [c for c, _ in pairs]
+    texts = [t for _, t in pairs]
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
     # spec.md STRIDE DoS control: cap total chunks per notebook. Checked before
@@ -160,11 +187,14 @@ def index_source(
             f"notebook chunk limit exceeded: {existing_chunks} existing + {len(texts)} new"
             f" > {MAX_CHUNKS_PER_NOTEBOOK}",
         )
+    title_used = title or extracted.title
     source = store.add_source(
-        notebook_id, extracted.kind, title or extracted.title, extracted.origin, extracted.sha256
+        notebook_id, extracted.kind, title_used, extracted.origin, extracted.sha256
     )
-    chunk_ids = store.add_chunks(source.id, texts)
-    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
+    full_contexts = [_chunk_context(source.title, c) for c in contexts]
+    chunk_ids = store.add_chunks(source.id, texts, full_contexts)
+    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
+    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     return IndexResult(source, len(chunk_ids), n_embedded)
 
 
@@ -193,7 +223,9 @@ def refresh_source(
     ).fetchone()
     if dup:
         raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
-    texts = split_text(extracted.text)
+    pairs = split_text_with_context(extracted.text)
+    contexts = [c for c, _ in pairs]
+    texts = [t for _, t in pairs]
     if not texts:
         raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
     # spec.md STRIDE DoS control (same guard as index_source): cap total chunks
@@ -223,8 +255,15 @@ def refresh_source(
     # the raw page <title> on every refresh, with no way to opt out and no signal
     # in the UI that it happened. Omitting it leaves replace_chunks_for_source's
     # `title or src.title` fallback keep whatever title is currently set.
-    chunk_ids = store.replace_chunks_for_source(source_id, texts, sha256=extracted.sha256)
-    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
+    # src.title (not extracted.title) is used for the breadcrumb prefix: refresh
+    # deliberately keeps the existing title (see the title-omission note above), so
+    # the chunk context must reflect the title actually on the source row.
+    full_contexts = [_chunk_context(src.title, c) for c in contexts]
+    chunk_ids = store.replace_chunks_for_source(
+        source_id, texts, sha256=extracted.sha256, contexts=full_contexts
+    )
+    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
+    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     updated_src = store.get_source(source_id)
     return IndexResult(updated_src, len(chunk_ids), n_embedded)
 
@@ -236,10 +275,13 @@ def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[
     Raises StoreError(NOTEBOOK_NOT_FOUND) if the notebook does not exist.
     """
     store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    rows = store.id_text_chunks_for_notebook(notebook_id)
+    rows = store.id_context_text_chunks_for_notebook(notebook_id)
     if not rows:
         return 0, 0
     chunk_ids = [r[0] for r in rows]
-    texts = [r[1] for r in rows]
-    n_embedded = _embed_chunks(store, llm, chunk_ids, texts, force=True)
+    # Re-embed the SAME context+text string index_source used, so a reindexed
+    # notebook never mixes context-aware and text-only vectors. The stored context
+    # column already holds the full title+breadcrumb, so no reconstruction needed.
+    embed_texts = [_embed_input(r[1], r[2]) for r in rows]
+    n_embedded = _embed_chunks(store, llm, chunk_ids, embed_texts, force=True)
     return n_embedded, len(rows)

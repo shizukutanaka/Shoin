@@ -56,12 +56,12 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.122")
+        self.assertEqual(VERSION, "0.2.123")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
-            self.assertEqual(s.migrate(), 4)
-            self.assertEqual(s.migrate(), 4)
+            self.assertEqual(s.migrate(), 5)
+            self.assertEqual(s.migrate(), 5)
 
     def test_migration_schema_version_and_tables_always_consistent(self) -> None:
         """After migrate() on a fresh file DB, all version records and their corresponding
@@ -4762,11 +4762,14 @@ class TestChunkLimit(unittest.TestCase):
                     kind="url", title="b2", text="irrelevant, split_text is patched below",
                     origin="http://refresh-limit.test", sha256="sha-b2",
                 )
-                # Patch split_text directly rather than crafting real text long enough
+                # Patch the chunker directly rather than crafting real text long enough
                 # to force multiple 512-token chunks — deterministic regardless of
-                # tokenizer internals.
+                # tokenizer internals. Each chunk carries an empty heading breadcrumb.
                 with patch("shoin.pipeline.extract_url", return_value=grown), \
-                     patch("shoin.pipeline.split_text", return_value=["c1", "c2", "c3"]):
+                     patch(
+                         "shoin.pipeline.split_text_with_context",
+                         return_value=[("", "c1"), ("", "c2"), ("", "c3")],
+                     ):
                     with self.assertRaises(IngestError) as cm:
                         refresh_source(s, res0.source.id)
                 self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
@@ -6162,6 +6165,153 @@ class TestCLIMessagesList(unittest.TestCase):
             self.assertIn("チャット履歴がありません", out.getvalue())
         finally:
             os.unlink(db_file)
+
+
+class TestChunkContext(unittest.TestCase):
+    """Contextual chunk metadata (migration 5): heading breadcrumbs indexed
+    alongside chunk text so a term in a section heading retrieves chunks that
+    were split away from that heading."""
+
+    def test_split_text_output_unchanged_by_context(self) -> None:
+        """split_text() must return byte-identical chunk text to the chunk_text
+        of split_text_with_context() — the context is additive, never altering
+        what is stored, displayed, or citation-verified."""
+        from shoin.chunk import split_text_with_context
+
+        doc = (
+            "# 見出しA\n本文いちが続く文章。もう少し長い説明。\n\n"
+            "## 見出しB\n別の段落の内容がここにある。詳細な記述。\n\n"
+            "### 見出しC\n最後の節の本文テキスト。"
+        )
+        for ct, ov in ((40, 0), (20, 5), (200, 30)):
+            plain = split_text(doc, chunk_tokens=ct, overlap_tokens=ov)
+            paired = split_text_with_context(doc, chunk_tokens=ct, overlap_tokens=ov)
+            self.assertEqual(plain, [t for _, t in paired])
+
+    def test_breadcrumb_tracks_heading_hierarchy(self) -> None:
+        """Nested headings build a ' > '-joined breadcrumb; a same-or-shallower
+        heading pops deeper sections off the stack."""
+        from shoin.chunk import split_text_with_context
+
+        doc = (
+            "# トップ\n序文。\n\n"
+            "## 子1\n子1の本文。\n\n"
+            "### 孫\n孫の本文。\n\n"
+            "## 子2\n子2の本文。"
+        )
+        pairs = split_text_with_context(doc, chunk_tokens=8, overlap_tokens=0)
+        ctx_by_text = {t.split("\n")[0]: c for c, t in pairs}
+        self.assertEqual(ctx_by_text["# トップ"], "トップ")
+        self.assertEqual(ctx_by_text["## 子1"], "トップ > 子1")
+        self.assertEqual(ctx_by_text["### 孫"], "トップ > 子1 > 孫")
+        # 子2 (level 2) pops 孫 (level 3) AND 子1 (level 2) back to トップ.
+        self.assertEqual(ctx_by_text["## 子2"], "トップ > 子2")
+
+    def test_context_capped(self) -> None:
+        """A pathologically deep/long heading path is capped so it can't bloat
+        the index or dominate the embedding input."""
+        from shoin.chunk import _MAX_CONTEXT_CHARS, split_text_with_context
+
+        doc = "\n\n".join(f"{'#' * min(i + 1, 6)} {'長' * 50}\n本文{i}" for i in range(6))
+        pairs = split_text_with_context(doc, chunk_tokens=8, overlap_tokens=0)
+        for ctx, _ in pairs:
+            self.assertLessEqual(len(ctx), _MAX_CONTEXT_CHARS)
+
+    def test_chunk_split_off_heading_still_retrievable(self) -> None:
+        """The core win: chunks split away from their heading (heading term
+        absent from the body) are retrievable because the breadcrumb is indexed
+        with every chunk. Before migration 5 only the heading-bearing chunk matched."""
+        from shoin.chunk import split_text_with_context
+        from shoin.pipeline import _chunk_context
+
+        body = "。".join(f"細胞で起きる反応その{i}の詳細な説明が延々と続く記述" for i in range(30))
+        doc = f"# 光合成のしくみ\n{body}"
+        pairs = split_text_with_context(doc, chunk_tokens=60, overlap_tokens=0)
+        texts = [t for _, t in pairs]
+        # Sanity: only the first chunk keeps the literal heading term in its body.
+        self.assertGreater(len(texts), 5)
+        self.assertEqual(sum("光合成" in t for t in texts), 1)
+
+        with make_store() as s:
+            nb = s.create_notebook("bio")
+            src = s.add_source(nb.id, "txt", "生物ノート", "mem://b", "sha-b")
+            contexts = [_chunk_context(src.title, c) for c, _ in pairs]
+            s.add_chunks(src.id, texts, contexts)
+            hits = bm25_search(s, nb.id, "光合成", len(texts))
+            # Far more than the single heading-bearing chunk is now retrieved.
+            self.assertGreater(len(hits), 1)
+
+    def test_source_title_in_context_matches_across_source(self) -> None:
+        """The source title folded into every chunk's context lets a query that
+        names the document retrieve its chunks even when the body never repeats
+        the title."""
+        from shoin.pipeline import _chunk_context
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "アインシュタイン相対論", "mem://e", "sha-e")
+            # Body deliberately omits the title words.
+            texts = ["時間と空間は観測者に依存する。", "重力は幾何学的な効果である。"]
+            contexts = [_chunk_context(src.title, "") for _ in texts]
+            s.add_chunks(src.id, texts, contexts)
+            hits = bm25_search(s, nb.id, "相対論", 5)
+            self.assertGreater(len(hits), 0)
+
+    def test_add_chunks_context_length_mismatch_raises(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, ["a", "b"], ["only-one-context"])
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_add_chunks_without_contexts_defaults_empty(self) -> None:
+        """Backward compatibility: callers passing no contexts still work; the
+        context column defaults to '' and retrieval falls back to text-only."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            ids = s.add_chunks(src.id, ["猫は液体である", "犬は固体である"])
+            self.assertEqual(len(ids), 2)
+            row = s.conn.execute(
+                "SELECT context FROM chunks WHERE id=?", (ids[0],)
+            ).fetchone()
+            self.assertEqual(row["context"], "")
+
+    def test_upgrade_v4_to_v5_backfills_fts(self) -> None:
+        """Applying migration 5 to a v4 database adds the context column and
+        rebuilds chunks_fts with every pre-existing chunk backfilled, and the
+        delete trigger stays consistent after the rebuild."""
+        import shoin.store as store_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "upgrade.db")
+            original = store_mod.MIGRATIONS[:]
+            try:
+                store_mod.MIGRATIONS = [m for m in original if m[0] <= 4]
+                s = Store(path)
+                nb = s.create_notebook("n")
+                src = s.add_source(nb.id, "txt", "旧", "mem://o", "sha")
+                # v4 chunks table has no context column — insert text only.
+                s.conn.execute(
+                    "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
+                    (src.id, 0, "旧チャンク 太陽光 の本文"),
+                )
+                s.conn.commit()
+                s.close()
+            finally:
+                store_mod.MIGRATIONS = original
+
+            s2 = Store(path)  # applies migration 5
+            self.assertEqual(s2.migrate(), 5)
+            cols = [r[1] for r in s2.conn.execute("PRAGMA table_info(chunks)").fetchall()]
+            self.assertIn("context", cols)
+            hits = bm25_search(s2, nb.id, "太陽光", 5)
+            self.assertEqual(len(hits), 1)  # backfilled chunk is searchable
+            s2.delete_notebook(nb.id)
+            n_fts = s2.conn.execute("SELECT COUNT(*) AS n FROM chunks_fts").fetchone()["n"]
+            self.assertEqual(int(n_fts), 0)  # delete trigger consistent post-rebuild
+            s2.close()
 
 
 if __name__ == "__main__":

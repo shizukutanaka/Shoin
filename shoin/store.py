@@ -147,6 +147,38 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX IF NOT EXISTS idx_messages_notebook_id_desc ON messages(notebook_id, id DESC);
         """,
     ),
+    (
+        5,
+        # Contextual chunk metadata: a per-chunk heading breadcrumb (chunk.py's
+        # split_text_with_context) is indexed ALONGSIDE the chunk text so a query
+        # term that appears in a section heading — but not the chunk body — still
+        # retrieves that chunk (deterministic, LLM-free variant of Anthropic's
+        # Contextual Retrieval, 2024). chunks_fts gains a `context` column and the
+        # triggers mirror both columns. Rebuilt from scratch because FTS5 external-
+        # content tables cannot ALTER in a column; DROP+CREATE+backfill is the
+        # supported path. Existing chunks backfill with context='' (no heading data
+        # on record) and degrade to the previous text-only behaviour until re-indexed.
+        # All DDL is IF NOT EXISTS / idempotent so a concurrent re-run is a no-op.
+        """
+        ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT '';
+        DROP TRIGGER IF EXISTS chunks_ai;
+        DROP TRIGGER IF EXISTS chunks_ad;
+        DROP TABLE IF EXISTS chunks_fts;
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+          context, text, content='chunks', content_rowid='id', tokenize='trigram'
+        );
+        INSERT INTO chunks_fts(rowid, context, text)
+          SELECT id, context, text FROM chunks;
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+          INSERT INTO chunks_fts(rowid, context, text)
+          VALUES (new.id, new.context, new.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, context, text)
+          VALUES('delete', old.id, old.context, old.text);
+        END;
+        """,
+    ),
 ]
 
 
@@ -424,6 +456,7 @@ class Store:
         *,
         sha256: str | None = None,
         title: str | None = None,
+        contexts: list[str] | None = None,
     ) -> list[int]:
         """Atomically replace all chunks for a source (DELETE old + INSERT new).
 
@@ -438,15 +471,21 @@ class Store:
         """
         if not texts:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "replacement chunk list must not be empty")
+        if contexts is not None and len(contexts) != len(texts):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
+            )
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
                 self.conn.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
                 for seq, text in enumerate(texts):
+                    ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
-                        "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
-                        (source_id, seq, text),
+                        "INSERT INTO chunks(source_id, seq, text, context) VALUES (?,?,?,?)",
+                        (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
                 if sha256 is not None:
@@ -509,16 +548,24 @@ class Store:
         self.touch_notebook(src.notebook_id)
         self.conn.commit()
 
-    def add_chunks(self, source_id: int, texts: list[str]) -> list[int]:
+    def add_chunks(
+        self, source_id: int, texts: list[str], contexts: list[str] | None = None
+    ) -> list[int]:
         if not texts:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "chunk list must not be empty")
+        if contexts is not None and len(contexts) != len(texts):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
+            )
         ids: list[int] = []
         try:
             with self.conn:
                 for seq, text in enumerate(texts):
+                    ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
-                        "INSERT INTO chunks(source_id, seq, text) VALUES (?,?,?)",
-                        (source_id, seq, text),
+                        "INSERT INTO chunks(source_id, seq, text, context) VALUES (?,?,?,?)",
+                        (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
         except sqlite3.IntegrityError as e:
@@ -581,6 +628,22 @@ class Store:
             (notebook_id,),
         ).fetchall()
         return [(int(r["id"]), str(r["text"])) for r in rows]
+
+    def id_context_text_chunks_for_notebook(
+        self, notebook_id: int
+    ) -> list[tuple[int, str, str]]:
+        """Return (chunk_id, context, text) triples for all chunks in a notebook.
+
+        Used by reindex_notebook so re-embedding feeds the model the SAME
+        context+text string index_source did — otherwise a reindexed notebook
+        would mix context-aware and text-only vectors that no longer compare.
+        """
+        rows = self.conn.execute(
+            "SELECT c.id, c.context, c.text FROM chunks c JOIN sources s ON s.id=c.source_id"
+            " WHERE s.notebook_id=? ORDER BY c.id",
+            (notebook_id,),
+        ).fetchall()
+        return [(int(r["id"]), str(r["context"]), str(r["text"])) for r in rows]
 
     @staticmethod
     def _row_to_chunk(r: sqlite3.Row) -> Chunk:

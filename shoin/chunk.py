@@ -34,6 +34,13 @@ _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])|(?<=\.)(?=\s)")
 
+# Upper bound on a chunk's contextual breadcrumb (heading path joined with " > ").
+# The breadcrumb is prepended to the chunk only for RETRIEVAL (FTS5 + embedding),
+# never shown to the user or fed to citation verification, so it needs to carry the
+# heading signal without bloating the index. A deeply nested document with long
+# headings could otherwise produce a breadcrumb longer than the chunk itself.
+_MAX_CONTEXT_CHARS = 200
+
 # Words/identifiers up to this length cost a flat 1 token (CLAUDE.md's documented
 # "ASCII words: 1 token per word" model — real natural-language words and typical
 # identifiers rarely exceed this). An unbroken alphanumeric run LONGER than this
@@ -199,29 +206,87 @@ def _tail(text: str, tokens: int) -> str:
     return text
 
 
+def _heading_level(line: str) -> int:
+    """ATX heading depth of *line* (number of leading '#'), or 0 if not a heading."""
+    if not _HEADING_RE.match(line):
+        return 0
+    n = 0
+    for ch in line:
+        if ch == "#":
+            n += 1
+        else:
+            break
+    return n
+
+
+def _context_blocks(text: str) -> list[tuple[str, str]]:
+    """Yield (breadcrumb, block) pairs, tracking the markdown heading hierarchy.
+
+    The breadcrumb is the chain of enclosing headings joined with " > " (e.g.
+    "モデル構成 > エンコーダ"). It captures the section a block lives under so that
+    a chunk split away from its heading — or merged across heading-less prose —
+    still carries the section context for retrieval.  Purely structural: no LLM,
+    no extra latency, derived from the same _blocks() split split_text() uses.
+    """
+    stack: list[tuple[int, str]] = []
+    out: list[tuple[str, str]] = []
+    for block in _blocks(text):
+        first = block.split("\n", 1)[0]
+        lvl = _heading_level(first)
+        if lvl:
+            # A heading closes every open section at the same or deeper level.
+            while stack and stack[-1][0] >= lvl:
+                stack.pop()
+            title = first[lvl:].strip().rstrip("#").strip()
+            if title:
+                stack.append((lvl, title))
+        out.append((" > ".join(t for _, t in stack), block))
+    return out
+
+
+def split_text_with_context(
+    text: str,
+    chunk_tokens: int = CHUNK_TOKENS,
+    overlap_tokens: int = CHUNK_OVERLAP,
+) -> list[tuple[str, str]]:
+    """Like split_text(), but pairs each chunk with its heading breadcrumb.
+
+    Returns (context, chunk_text) tuples. The chunk_text is byte-for-byte
+    identical to what split_text() returns for the same input; the context is
+    the breadcrumb of the heading section in which the chunk *begins* (the tail
+    carried over from a previous chunk for overlap keeps the new chunk's own
+    section, since that is where the fresh content lives).
+    """
+    pieces: list[tuple[str, str]] = []
+    for ctx, block in _context_blocks(text):
+        if estimate_tokens(block) > chunk_tokens:
+            pieces.extend((ctx, p) for p in _hard_split(block, chunk_tokens))
+        else:
+            pieces.append((ctx, block))
+
+    chunks: list[tuple[str, str]] = []
+    buf = ""
+    buf_ctx = ""
+    for ctx, piece in pieces:
+        candidate = f"{buf}\n\n{piece}" if buf else piece
+        if buf and estimate_tokens(candidate) > chunk_tokens:
+            chunks.append((buf_ctx, buf))
+            buf = _tail(buf, overlap_tokens)
+            buf = f"{buf}\n\n{piece}" if buf else piece
+            buf_ctx = ctx
+        else:
+            if not buf:
+                buf_ctx = ctx
+            buf = candidate
+    if buf.strip():
+        chunks.append((buf_ctx, buf))
+    return [(c[:_MAX_CONTEXT_CHARS], t.strip()) for c, t in chunks if t.strip()]
+
+
 def split_text(
     text: str,
     chunk_tokens: int = CHUNK_TOKENS,
     overlap_tokens: int = CHUNK_OVERLAP,
 ) -> list[str]:
     """Split *text* into chunks of ~chunk_tokens with overlap between chunks."""
-    pieces: list[str] = []
-    for block in _blocks(text):
-        if estimate_tokens(block) > chunk_tokens:
-            pieces.extend(_hard_split(block, chunk_tokens))
-        else:
-            pieces.append(block)
-
-    chunks: list[str] = []
-    buf = ""
-    for piece in pieces:
-        candidate = f"{buf}\n\n{piece}" if buf else piece
-        if buf and estimate_tokens(candidate) > chunk_tokens:
-            chunks.append(buf)
-            buf = _tail(buf, overlap_tokens)
-            buf = f"{buf}\n\n{piece}" if buf else piece
-        else:
-            buf = candidate
-    if buf.strip():
-        chunks.append(buf)
-    return [c.strip() for c in chunks if c.strip()]
+    return [t for _, t in split_text_with_context(text, chunk_tokens, overlap_tokens)]
