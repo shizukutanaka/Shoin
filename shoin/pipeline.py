@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
-from .config import MAX_CHUNKS_PER_NOTEBOOK
+from .config import MAX_CHUNKS_PER_NOTEBOOK, embed_batch
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
@@ -100,10 +100,14 @@ def _embed_chunks(
         return 0
     done = 0
     expected_dim: int | None = None
+    # SHOIN_EMBED_BATCH overrides the module default when set; the module
+    # constant stays the fallback so existing callers (and tests that patch
+    # shoin.pipeline.EMBED_BATCH) keep their behavior when the env is unset.
+    batch_size = embed_batch() or EMBED_BATCH
     try:
-        for i in range(0, len(texts), EMBED_BATCH):
-            batch_ids = chunk_ids[i : i + EMBED_BATCH]
-            vectors = embed(texts[i : i + EMBED_BATCH])
+        for i in range(0, len(texts), batch_size):
+            batch_ids = chunk_ids[i : i + batch_size]
+            vectors = embed(texts[i : i + batch_size])
             count = 0
             for cid, vec in zip(batch_ids, vectors):
                 # Establish expected dimension from the first vector and validate all

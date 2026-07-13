@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.123"
+VERSION = "0.2.124"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -108,3 +108,21 @@ def port() -> int:
         return int(_get("SHOIN_PORT", "") or DEFAULT_PORT)
     except (ValueError, TypeError):
         return DEFAULT_PORT
+
+
+def embed_batch() -> int | None:
+    """Optional override for the embedding batch size (SHOIN_EMBED_BATCH).
+
+    Returns None when unset/invalid so pipeline.py falls back to its EMBED_BATCH
+    module default (16). Lets users tune batch size to their endpoint's capacity
+    (larger for fast endpoints, smaller for memory-constrained ones) — previously
+    a hardcoded constant with no override, per CLAUDE.md's own known-gap note.
+    """
+    raw = _get("SHOIN_EMBED_BATCH", "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return n if n >= 1 else None

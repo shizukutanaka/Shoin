@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar, TypedDict
 
+from .chunk import _MAX_CONTEXT_CHARS
 from .config import MAX_NAME_LEN, MAX_TITLE_LEN
 
 _T = TypeVar("_T")
@@ -176,6 +177,27 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
           INSERT INTO chunks_fts(chunks_fts, rowid, context, text)
           VALUES('delete', old.id, old.context, old.text);
+        END;
+        """,
+    ),
+    (
+        6,
+        # UPDATE trigger for the external-content FTS index. Migrations 1/5 only
+        # ever mirrored INSERT and DELETE because no code path updated chunk rows'
+        # indexed columns — but update_source_title() now refreshes chunks.context
+        # when a source is renamed (keeping the v0.2.123 title-in-context signal
+        # fresh). Without this trigger, any UPDATE of text/context would silently
+        # desynchronize chunks_fts from the chunks table: FTS5 external-content
+        # tables see only what the triggers tell them, and a stale index is the
+        # exact silent-staleness failure class this project repeatedly fixes.
+        # Scoped to OF text, context so the frequent embedding-BLOB updates
+        # (set_embedding) don't pay double FTS writes.
+        """
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF text, context ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, context, text)
+          VALUES('delete', old.id, old.context, old.text);
+          INSERT INTO chunks_fts(rowid, context, text)
+          VALUES (new.id, new.context, new.text);
         END;
         """,
     ),
@@ -402,13 +424,56 @@ class Store:
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         src = self.get_source(source_id)  # also validates existence; notebook_id needed below
-        cur = self.conn.execute(
-            "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
-        )
-        if cur.rowcount == 0:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-        self.touch_notebook(src.notebook_id)
-        self.conn.commit()
+        with self.conn:
+            # Re-read the title INSIDE the transaction (not src.title from the
+            # pre-transaction snapshot) so the chunk-context prefix rewrite below
+            # keys off the row's actual current value — same stale-snapshot
+            # concern the v0.2.98 COALESCE fix addressed for refresh.
+            row = self.conn.execute(
+                "SELECT title FROM sources WHERE id=?", (source_id,)
+            ).fetchone()
+            if row is None:
+                raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+            old_title = str(row["title"])
+            cur = self.conn.execute(
+                "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
+            )
+            if cur.rowcount == 0:
+                raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+            if title != old_title:
+                self._rewrite_chunk_context_titles(source_id, old_title, title)
+            self.touch_notebook(src.notebook_id)
+
+    def _rewrite_chunk_context_titles(
+        self, source_id: int, old_title: str, new_title: str
+    ) -> None:
+        """Refresh the title prefix in each chunk's context after a source rename.
+
+        v0.2.123 folds the source title into every chunk's context breadcrumb
+        ("title > heading > …") for retrieval. Without this rewrite, a renamed
+        source keeps matching FTS queries for its OLD title — and never matches
+        its new one — indefinitely. Runs inside the caller's transaction (the
+        migration-6 chunks_au trigger keeps chunks_fts in sync with each UPDATE).
+        Rows whose context doesn't start with the old title (pre-migration-5
+        backfills with context='', or a title truncated mid-word by the 200-char
+        context cap) are left untouched — no match means no safe rewrite.
+        """
+        prefix = f"{old_title} > "
+        rows = self.conn.execute(
+            "SELECT id, context FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchall()
+        for r in rows:
+            ctx = str(r["context"])
+            if ctx == old_title:
+                new_ctx = new_title
+            elif ctx.startswith(prefix):
+                new_ctx = f"{new_title} > {ctx[len(prefix):]}"
+            else:
+                continue
+            self.conn.execute(
+                "UPDATE chunks SET context=? WHERE id=?",
+                (new_ctx[:_MAX_CONTEXT_CHARS], r["id"]),
+            )
 
     def sources_for_notebook(self, notebook_id: int) -> list[Source]:
         rows = self.conn.execute(

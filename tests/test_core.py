@@ -56,12 +56,12 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.123")
+        self.assertEqual(VERSION, "0.2.124")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
-            self.assertEqual(s.migrate(), 5)
-            self.assertEqual(s.migrate(), 5)
+            self.assertEqual(s.migrate(), 6)
+            self.assertEqual(s.migrate(), 6)
 
     def test_migration_schema_version_and_tables_always_consistent(self) -> None:
         """After migrate() on a fresh file DB, all version records and their corresponding
@@ -6278,6 +6278,107 @@ class TestChunkContext(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["context"], "")
 
+    def test_rename_source_refreshes_chunk_context_titles(self) -> None:
+        """update_source_title() must rewrite the title prefix in each chunk's
+        context (v0.2.124). Before the fix, a renamed source kept matching FTS
+        queries for its OLD title — and never matched its new one — indefinitely,
+        because v0.2.123 folded the title into every chunk's indexed context but
+        rename never touched it."""
+        from shoin.pipeline import _chunk_context
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "古い報告書", "mem://r", "sha-r")
+            # Body deliberately omits both old and new title words.
+            texts = ["時間と空間の観測に関する記述。", "重力の幾何学的な効果の説明。"]
+            contexts = [_chunk_context(src.title, "第一章"), _chunk_context(src.title, "")]
+            s.add_chunks(src.id, texts, contexts)
+            # Sanity: old title matches pre-rename.
+            self.assertGreater(len(bm25_search(s, nb.id, "古い報告書", 5)), 0)
+
+            s.update_source_title(src.id, "新しい年次総括", src.origin)
+
+            # New title now matches; old title no longer does.
+            self.assertGreater(len(bm25_search(s, nb.id, "新しい年次総括", 5)), 0)
+            self.assertEqual(bm25_search(s, nb.id, "古い報告書", 5), [])
+            # Breadcrumb tail beyond the title prefix is preserved.
+            rows = s.conn.execute(
+                "SELECT context FROM chunks WHERE source_id=? ORDER BY seq", (src.id,)
+            ).fetchall()
+            self.assertEqual(rows[0]["context"], "新しい年次総括 > 第一章")
+            self.assertEqual(rows[1]["context"], "新しい年次総括")
+
+    def test_rename_source_leaves_contextless_chunks_untouched(self) -> None:
+        """Pre-migration-5 chunks (context='') must not be rewritten on rename —
+        there is no old-title prefix to match, so no safe rewrite exists."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "旧題", "mem://o", "sha-o")
+            s.add_chunks(src.id, ["本文のみのチャンク"])  # context defaults to ''
+            s.update_source_title(src.id, "新題", src.origin)
+            row = s.conn.execute(
+                "SELECT context FROM chunks WHERE source_id=?", (src.id,)
+            ).fetchone()
+            self.assertEqual(row["context"], "")
+
+    def test_chunk_update_trigger_keeps_fts_in_sync(self) -> None:
+        """Migration 6's chunks_au trigger: an UPDATE of context/text must be
+        mirrored into chunks_fts (delete old + insert new). Without it the
+        external-content FTS index silently desynchronizes."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            # Vocabulary chosen with NO shared trigrams between old and new
+            # values — FTS5 trigram matching is OR-joined for recall, so any
+            # shared 3-gram would legitimately keep the old query matching.
+            ids = s.add_chunks(src.id, ["りんご栽培の記録"], ["果樹園芸ノート"])
+            s.conn.execute(
+                "UPDATE chunks SET context=?, text=? WHERE id=?",
+                ("機械工学ノート", "自動車整備の記録", ids[0]),
+            )
+            s.conn.commit()
+            self.assertEqual(len(bm25_search(s, nb.id, "自動車整備", 5)), 1)
+            self.assertEqual(len(bm25_search(s, nb.id, "機械工学", 5)), 1)
+            self.assertEqual(bm25_search(s, nb.id, "りんご栽培", 5), [])
+            self.assertEqual(bm25_search(s, nb.id, "果樹園芸", 5), [])
+
+    def test_embed_batch_env_override(self) -> None:
+        """SHOIN_EMBED_BATCH overrides the batch size; invalid/unset values fall
+        back to the EMBED_BATCH module default (v0.2.124, CLAUDE.md known gap)."""
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from shoin.pipeline import _embed_chunks
+
+        class CountingEmbedLLM:
+            embedding_model = "test-model"
+
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls.append(len(texts))
+                return [[0.1, 0.2] for _ in texts]
+
+        def run(env_val: str | None) -> list[int]:
+            env = {"SHOIN_EMBED_BATCH": env_val} if env_val is not None else {}
+            with make_store() as s:
+                nb = s.create_notebook("nb")
+                src = s.add_source(nb.id, "txt", "d", "o", "sha")
+                texts = [f"chunk {i}" for i in range(10)]
+                ids = s.add_chunks(src.id, texts)
+                llm = CountingEmbedLLM()
+                with mock_patch.dict(os.environ, env, clear=False):
+                    if env_val is None and "SHOIN_EMBED_BATCH" in os.environ:
+                        del os.environ["SHOIN_EMBED_BATCH"]
+                    _embed_chunks(s, llm, ids, texts)
+                return llm.calls
+
+        self.assertEqual(run("4"), [4, 4, 2])  # override: 10 chunks in batches of 4
+        self.assertEqual(run("abc"), [10])  # invalid → default 16 → one batch
+        self.assertEqual(run("0"), [10])  # below minimum → default
+        self.assertEqual(run(None), [10])  # unset → default
+
     def test_upgrade_v4_to_v5_backfills_fts(self) -> None:
         """Applying migration 5 to a v4 database adds the context column and
         rebuilds chunks_fts with every pre-existing chunk backfilled, and the
@@ -6302,8 +6403,8 @@ class TestChunkContext(unittest.TestCase):
             finally:
                 store_mod.MIGRATIONS = original
 
-            s2 = Store(path)  # applies migration 5
-            self.assertEqual(s2.migrate(), 5)
+            s2 = Store(path)  # applies migrations 5+
+            self.assertGreaterEqual(s2.migrate(), 5)
             cols = [r[1] for r in s2.conn.execute("PRAGMA table_info(chunks)").fetchall()]
             self.assertIn("context", cols)
             hits = bm25_search(s2, nb.id, "太陽光", 5)
