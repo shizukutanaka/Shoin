@@ -311,7 +311,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.125
+## Version History: v0.1.37 → v0.2.126
+
+### v0.2.126 (2026-07-13)
+**Added**: `GET /api/health` now reports `multi_query: bool` (the current `SHOIN_MULTI_QUERY` state, v0.2.126) — a small diagnostic addition in the same spirit as CLAUDE.md's own "Debugging Aid" (`DEBUG=1` retrieval-stats) guidance: a user wondering why retrieval feels slow, or why enabling multi-query doesn't seem to change results, previously had no way to confirm the flag actually took effect without reading source or env directly. 2 regression tests added (`test_workflow`'s existing health assertion extended with the default-off case; a new `test_health_reflects_multi_query_env_toggle` covering the on case), fail-then-pass verified via `git stash` on `shoin/server.py`. `pytest tests/` now runs 642 tests. `mypy shoin/` and `ruff check shoin/server.py` remain clean.
 
 ### v0.2.125 (2026-07-13)
 **Added**: Multi-query RAG-Fusion retrieval (`SHOIN_MULTI_QUERY=1`, opt-in) — the second research-backed retrieval upgrade from this session's literature survey (after v0.2.123's contextual chunking): DMQR-RAG (arXiv 2411.13154) and the RAG-Fusion lineage report ~10% P@5 improvement from fusing ranked lists across several LLM-generated query rewrites, and Shoin's existing RRF infrastructure (v0.2.56) makes the fusion step nearly free.

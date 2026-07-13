@@ -112,6 +112,8 @@ class ServerTest(unittest.TestCase):
         status, data = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
         self.assertTrue(data["llm"])
+        self.assertIn("multi_query", data)
+        self.assertFalse(data["multi_query"])  # default OFF
         status, headers, page = self._req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("書院", page.decode())
@@ -837,6 +839,19 @@ class ServerTest(unittest.TestCase):
         status, err = self._json("POST", "/api/notebooks/999999/reindex")
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_health_reflects_multi_query_env_toggle(self) -> None:
+        """GET /api/health must surface SHOIN_MULTI_QUERY's current state so a
+        user debugging retrieval behavior doesn't have to know the env var
+        exists (v0.2.126) — same diagnostic-first spirit as CLAUDE.md's DEBUG=1
+        retrieval-stats guidance."""
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+            status, data = self._json("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["multi_query"])
 
 
 class NonStreamingLLMTest(unittest.TestCase):

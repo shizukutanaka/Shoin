@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from .citation import make_report
-from .config import MAX_QUESTION_LEN, MAX_TITLE_LEN, MAX_UPLOAD_BYTES, VERSION, db_path
+from .config import (
+    MAX_QUESTION_LEN,
+    MAX_TITLE_LEN,
+    MAX_UPLOAD_BYTES,
+    VERSION,
+    db_path,
+    multi_query_enabled,
+)
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -355,6 +362,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "llm": avail,
                 "model": model,
                 "embed_model": embed_model,
+                # Surfaces the SHOIN_MULTI_QUERY opt-in state (v0.2.126) so a user
+                # debugging "why is retrieval slow / why isn't recall improving"
+                # doesn't have to know the env var exists — same diagnostic-first
+                # spirit as CLAUDE.md's DEBUG=1 retrieval-stats guidance.
+                "multi_query": multi_query_enabled(),
             }
         )
 
