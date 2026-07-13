@@ -216,7 +216,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         if negs:
             fts_hits = _apply_neg_filter(fts_hits, negs)
         return fts_hits  # return whatever FTS5 found (possibly empty)
-    conditions = " OR ".join(f"c.text LIKE ? ESCAPE '|'" for _ in needles)
+    conditions = " OR ".join("c.text LIKE ? ESCAPE '|'" for _ in needles)
     like_params = [f"%{_esc_like(n)}%" for n in needles]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
     # score in Python, and take the top k.  Without the cap a common CJK bigram
@@ -406,21 +406,42 @@ def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit
     The legacy fuse() is kept for backward compatibility with direct callers.
     retrieve() uses rrf_fuse() as of v0.2.56.
     """
+    return rrf_fuse_lists(
+        [bm25_hits, vec_hits], k, detail_names=["rrf_bm25_rank", "rrf_vec_rank"]
+    )
+
+
+def rrf_fuse_lists(
+    lists: list[list[Hit]], k: int = 60, detail_names: list[str] | None = None
+) -> list[Hit]:
+    """Reciprocal Rank Fusion over an arbitrary number of ranked hit lists.
+
+    Generalization of rrf_fuse() for multi-query retrieval (RAG-Fusion /
+    DMQR-RAG lineage): each query's BM25 and vector result lists all contribute
+    1/(k + rank + 1) per appearance, so a chunk found by several query
+    rewrites naturally outranks one found by a single phrasing. The same RRF
+    constant and rank semantics as the two-list case apply.
+
+    detail_names labels each list's rank in Hit.detail (defaults to
+    "rrf_rank_{i}"); rrf_fuse() passes its legacy two-list names so existing
+    detail consumers are unaffected.
+    """
+    names = detail_names or [f"rrf_rank_{i}" for i in range(len(lists))]
     scores: dict[int, float] = {}
     all_hits: dict[int, Hit] = {}
 
-    for rank, h in enumerate(bm25_hits):
-        scores[h.chunk_id] = scores.get(h.chunk_id, 0.0) + 1.0 / (k + rank + 1)
-        all_hits[h.chunk_id] = h
-        h.detail["rrf_bm25_rank"] = float(rank + 1)
-
-    for rank, h in enumerate(vec_hits):
-        scores[h.chunk_id] = scores.get(h.chunk_id, 0.0) + 1.0 / (k + rank + 1)
-        if h.chunk_id not in all_hits:
-            all_hits[h.chunk_id] = h
-        else:
-            all_hits[h.chunk_id].vec = h.vec
-        all_hits[h.chunk_id].detail["rrf_vec_rank"] = float(rank + 1)
+    for li, hits in enumerate(lists):
+        for rank, h in enumerate(hits):
+            scores[h.chunk_id] = scores.get(h.chunk_id, 0.0) + 1.0 / (k + rank + 1)
+            cur = all_hits.setdefault(h.chunk_id, h)
+            if cur is not h:
+                # Merge signal fields onto the canonical Hit: a chunk seen by a
+                # vector list carries vec, by a BM25 list carries bm25 — keep both.
+                if h.vec:
+                    cur.vec = h.vec
+                if h.bm25 and not cur.bm25:
+                    cur.bm25 = h.bm25
+            cur.detail[names[li]] = float(rank + 1)
 
     for cid, rrf in scores.items():
         all_hits[cid].score = rrf
@@ -513,6 +534,54 @@ def retrieve(
     # more than the RRF signal, making the reranker effectively ignore hybrid
     # retrieval. The old fuse() emitted [0,1] scores implicitly via _minmax;
     # rrf_fuse() emits raw rank-reciprocal values and needs explicit normalization.
+    if fused:
+        normed = _minmax([h.score for h in fused])
+        for h, n in zip(fused, normed):
+            h.score = n
+    return mmr(rerank(clean, fused), k)
+
+
+def retrieve_multi(
+    store: Store,
+    notebook_id: int,
+    queries: list[str],
+    query_vecs: list[list[float] | None] | None = None,
+    k: int = TOP_K,
+) -> list[Hit]:
+    """Multi-query RAG-Fusion retrieval: fuse ranked lists from several phrasings.
+
+    queries[0] is the user's ORIGINAL query — it alone defines the negative-term
+    filter (`-word`) and the lexical-rerank reference, so LLM rewrites can never
+    weaken an explicit user exclusion or hijack the rerank signal. Rewrites are
+    stripped of any `-token` of their own (a rewrite is not a place to introduce
+    filters) and their BM25/vector lists are filtered by the original negs before
+    fusion — the same pre-fusion placement the single-query path uses (v0.2.73).
+    """
+    if not queries:
+        return []
+    pool = max(k * 3, 12)
+    primary = queries[0]
+    negs = neg_terms(primary)
+    clean = strip_neg_terms(primary) if negs else primary
+    vecs: list[list[float] | None] = list(query_vecs or [])
+    vecs += [None] * (len(queries) - len(vecs))
+
+    lists: list[list[Hit]] = []
+    for i, (q, qv) in enumerate(zip(queries, vecs)):
+        q_search = q if i == 0 else strip_neg_terms(q)
+        bm25_hits = bm25_search(store, notebook_id, q_search, pool)
+        if negs and i > 0:
+            # bm25_search() already applied the primary query's own negs (i==0);
+            # rewrite lists were searched without them and need the filter here.
+            bm25_hits = _apply_neg_filter(bm25_hits, negs)
+        lists.append(bm25_hits)
+        if qv:
+            vec_hits = vector_search(store, notebook_id, qv, pool)
+            if negs:
+                vec_hits = _apply_neg_filter(vec_hits, negs)
+            lists.append(vec_hits)
+
+    fused = rrf_fuse_lists(lists)
     if fused:
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):

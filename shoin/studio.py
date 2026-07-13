@@ -8,7 +8,6 @@ rather than query-driven retrieval. Every output carries a citation_report.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from .citation import CitationReport, looks_like_question, make_report
 from .config import ui_lang
 from .llm import LLMError
-from .qa import _t as _qa_t, ChatBackend, build_context
+from .qa import _LIST_PREFIX_RE, _t as _qa_t, ChatBackend, build_context
 from .search import Hit
 from .store import Store, StoreError
 
@@ -83,13 +82,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
 }
 
-# Matches common list-item prefixes after NFKC normalization:
-# numeric ("1.", "10)", "3、", "(2)") and bullet ("-", "*", "·" U+00B7, "•", "–", "—", "・" U+30FB).
-# "(N)" handles full-width （1）→(1) after NFKC, which is common in Japanese LLM outputs.
-# Note: NFKC does NOT convert ・ (U+30FB, katakana middle dot) to · (U+00B7), so both
-# must appear explicitly.  Using regex instead of str.lstrip so that digit-leading
-# questions like "2024年の出来事は？" are not corrupted (lstrip strips any leading digit).
-_LIST_PREFIX_RE = re.compile(r"^(?:\(\d+\)\s*|\d+[.)、]\s*|[-*·•–—・]\s*)")
+# _LIST_PREFIX_RE moved to qa.py (v0.2.125): rewrite_queries() parses the same
+# LLM list-output convention, and two independently-maintained copies of one
+# parsing rule is exactly the drift failure v0.2.80 consolidated elsewhere.
 
 STUDIO_BUDGET_TOKENS = 2800
 OVERVIEW_CHUNKS_PER_SOURCE = 3

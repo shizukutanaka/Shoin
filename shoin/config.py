@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.124"
+VERSION = "0.2.125"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -108,6 +108,18 @@ def port() -> int:
         return int(_get("SHOIN_PORT", "") or DEFAULT_PORT)
     except (ValueError, TypeError):
         return DEFAULT_PORT
+
+
+def multi_query_enabled() -> bool:
+    """Opt-in switch for multi-query RAG-Fusion retrieval (SHOIN_MULTI_QUERY).
+
+    Default OFF: rewriting the question costs one extra LLM call per ask, a
+    real multi-second latency on the 4B-class local models this project targets
+    ("Lightweight First"). Users who prefer recall over latency opt in with
+    SHOIN_MULTI_QUERY=1. When the LLM is unreachable the feature silently
+    degrades to single-query retrieval either way.
+    """
+    return _get("SHOIN_MULTI_QUERY", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def embed_batch() -> int | None:

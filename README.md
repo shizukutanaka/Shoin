@@ -48,6 +48,8 @@ Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・�
 | `SHOIN_DATA_DIR` | `~/.local/share/shoin` | SQLiteデータ保存先 |
 | `SHOIN_PORT` | `7440` | リッスンポート(127.0.0.1固定) |
 | `SHOIN_LANG` | `ja` | UI言語(ja/en) |
+| `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
+| `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
 
 `config.json` の例:
 

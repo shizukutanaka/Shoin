@@ -1331,5 +1331,118 @@ class TestCheckEmbedModelOk(unittest.TestCase):
             mock_qv.assert_not_called()
 
 
+class TestMultiQuery(unittest.TestCase):
+    """Multi-query RAG-Fusion retrieval (v0.2.125, SHOIN_MULTI_QUERY opt-in)."""
+
+    def test_rewrite_queries_parses_and_dedupes(self) -> None:
+        """List prefixes are stripped, the original question and duplicates are
+        dropped, and the result is capped at n."""
+        from shoin.qa import rewrite_queries
+
+        llm = FakeLLM(
+            reply="1. 検索の言い換えA\n- 検索の言い換えB\n書斎とは？\n検索の言い換えA\n(4) 検索の言い換えC"
+        )
+        out = rewrite_queries(llm, "書斎とは？", n=2)
+        self.assertEqual(out, ["検索の言い換えA", "検索の言い換えB"])
+
+    def test_rewrite_queries_llm_error_returns_empty(self) -> None:
+        from shoin.qa import rewrite_queries
+
+        self.assertEqual(rewrite_queries(FakeLLM(chat_error=True), "書斎とは？"), [])
+
+    def test_rrf_fuse_lists_two_list_case_matches_rrf_fuse(self) -> None:
+        """rrf_fuse() delegates to rrf_fuse_lists(); scores and legacy detail
+        keys must be unchanged for the original two-list case."""
+        from shoin.search import Hit, rrf_fuse
+
+        bm25 = [Hit(1, 1, "a", 0.0, bm25=5.0), Hit(2, 1, "b", 0.0, bm25=3.0)]
+        vec = [Hit(2, 1, "b", 0.0, vec=0.9), Hit(3, 1, "c", 0.0, vec=0.5)]
+        fused = rrf_fuse(bm25, vec)
+        by_id = {h.chunk_id: h for h in fused}
+        # Chunk 2 appears in both lists: 1/(60+2) + 1/(60+1)
+        self.assertAlmostEqual(by_id[2].score, 1 / 62 + 1 / 61)
+        self.assertAlmostEqual(by_id[1].score, 1 / 61)
+        self.assertAlmostEqual(by_id[3].score, 1 / 62)
+        self.assertEqual(by_id[2].detail["rrf_bm25_rank"], 2.0)
+        self.assertEqual(by_id[2].detail["rrf_vec_rank"], 1.0)
+        self.assertEqual(by_id[2].vec, 0.9)  # vec merged onto the canonical hit
+        self.assertEqual(fused[0].chunk_id, 2)
+
+    def test_retrieve_multi_recovers_chunk_only_matched_by_rewrite(self) -> None:
+        """The RAG-Fusion win: a chunk whose vocabulary matches a rewrite (but
+        shares no trigram with the original query) is retrieved by
+        retrieve_multi and missed by single-query retrieve."""
+        from shoin.search import retrieve_multi
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["多頭注意機構の解説がここにある。"])
+            original = "セルフアテンションの仕組み"  # no shared trigram with the chunk
+            self.assertEqual(retrieve(s, nb.id, original), [])
+            hits = retrieve_multi(s, nb.id, [original, "多頭注意機構とは"])
+            self.assertEqual(len(hits), 1)
+
+    def test_retrieve_multi_applies_original_neg_terms_to_rewrites(self) -> None:
+        """A rewrite must not resurrect chunks the user excluded with -word."""
+        from shoin.search import retrieve_multi
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(
+                src.id,
+                ["多頭注意機構の legacy 実装。", "多頭注意機構の最新実装。"],
+            )
+            hits = retrieve_multi(
+                s, nb.id, ["セルフアテンション -legacy", "多頭注意機構とは"]
+            )
+            self.assertEqual(len(hits), 1)
+            self.assertNotIn("legacy", hits[0].text)
+
+    def test_ask_default_does_not_call_rewrite(self) -> None:
+        """With SHOIN_MULTI_QUERY unset (default), ask() must issue exactly one
+        chat call (the answer) — zero extra LLM traffic."""
+        s, nb = seeded_store()
+        with s:
+            env = {k: v for k, v in os.environ.items() if k != "SHOIN_MULTI_QUERY"}
+            with patch.dict(os.environ, env, clear=True):
+                llm = FakeLLM(reply="書斎の核は引用検証[S1]。")
+                ask(s, llm, nb, "差別化は何か？", persist=False)
+            self.assertEqual(len(llm.chat_calls), 1)
+
+    def test_ask_multi_query_enabled_rewrites_then_answers(self) -> None:
+        """With SHOIN_MULTI_QUERY=1, ask() first requests rewrites, then the
+        answer — and still returns a normal grounded Answer."""
+        s, nb = seeded_store()
+        with s:
+            with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+                llm = FakeLLM(reply="書斎の核は引用検証[S1]。")
+                ans = ask(s, llm, nb, "差別化は何か？", persist=False)
+            self.assertEqual(len(llm.chat_calls), 2)
+            self.assertIn("言い換え", str(llm.chat_calls[0]))  # rewrite prompt first
+            self.assertFalse(ans.degraded)
+            self.assertEqual(ans.report["cited"], [1])
+
+    def test_ask_multi_query_rewrite_failure_degrades_to_single(self) -> None:
+        """A rewrite-call failure must not break ask(): retrieval falls back to
+        the single-query path and the ask still degrades/answers as before."""
+        s, nb = seeded_store()
+
+        class RewriteFailsLLM(FakeLLM):
+            def chat(self, messages: list[Message], temperature: float = 0.2) -> str:
+                # The rewrite call uses temperature=0.7; fail only that one.
+                if temperature > 0.5:
+                    raise LLMError("SYSTEM_LLM_TIMEOUT", "rewrite timed out")
+                return super().chat(messages, temperature)
+
+        with s:
+            with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+                llm = RewriteFailsLLM(reply="書斎の核は引用検証[S1]。")
+                ans = ask(s, llm, nb, "差別化は何か？", persist=False)
+            self.assertFalse(ans.degraded)
+            self.assertIn("引用検証", ans.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
