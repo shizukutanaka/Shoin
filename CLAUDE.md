@@ -299,7 +299,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68)
+- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -311,7 +311,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.126
+## Version History: v0.1.37 → v0.2.127
+
+### v0.2.127 (2026-07-13)
+**Added**: `shoin health` CLI subcommand — the headless equivalent of `GET /api/health` (v0.2.126), closing a genuine REQ-103 CLI/Web parity gap this session's audit found immediately after adding the Web endpoint: a user running only the CLI (SSH-only server, no browser) had no way to check LLM reachability or confirm `SHOIN_MULTI_QUERY`/`SHOIN_EMBED_BATCH` actually took effect without starting the Web server or reading source/env directly.
+
+- `cli.py`: `_cmd_health()` prints version, LLM endpoint URL, reachability (`llm.available()`, matching `server._h_health()`'s `getattr(..., "available", lambda: False)` pattern for test-double compatibility), chat model, embed model (or a "disabled — BM25 only" note when empty), the `SHOIN_MULTI_QUERY` state, the effective `SHOIN_EMBED_BATCH` (or `"{default} (default)"` when unset), and the resolved data directory. Respects `SHOIN_LANG` via the existing `_t()` i18n mechanism (new `health.*` string keys, ja/en).
+- Special-cased in `main()` above the `Store()` construction — same treatment as `serve` — so `shoin health` still works and is useful even when the data directory itself is the problem (permission error, bad `SHOIN_DATA_DIR`), rather than failing before it can report anything.
+- 2 regression tests added (`TestCLI`): default output contains version + reachability text; env-driven fields (`SHOIN_MULTI_QUERY=1`, `SHOIN_EMBED_BATCH=32`, `SHOIN_LANG=en`) are correctly reflected. Verified live in both locales and with `available()` true/false. Verified fail-then-pass via `git stash` on `shoin/cli.py`.
+
+`pytest tests/` now runs 644 tests. `mypy shoin/` and `ruff check shoin/cli.py` remain clean.
 
 ### v0.2.126 (2026-07-13)
 **Added**: `GET /api/health` now reports `multi_query: bool` (the current `SHOIN_MULTI_QUERY` state, v0.2.126) — a small diagnostic addition in the same spirit as CLAUDE.md's own "Debugging Aid" (`DEBUG=1` retrieval-stats) guidance: a user wondering why retrieval feels slow, or why enabling multi-query doesn't seem to change results, previously had no way to confirm the flag actually took effect without reading source or env directly. 2 regression tests added (`test_workflow`'s existing health assertion extended with the default-off case; a new `test_health_reflects_multi_query_env_toggle` covering the on case), fail-then-pass verified via `git stash` on `shoin/server.py`. `pytest tests/` now runs 642 tests. `mypy shoin/` and `ruff check shoin/server.py` remain clean.

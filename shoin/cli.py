@@ -12,7 +12,21 @@ import sys
 from collections.abc import Sequence
 
 from .citation import CitationReport
-from .config import MAX_QUESTION_LEN, MAX_TITLE_LEN, TOP_K, VERSION, db_path, port, ui_lang
+from .config import (
+    MAX_QUESTION_LEN,
+    MAX_TITLE_LEN,
+    TOP_K,
+    VERSION,
+    data_dir,
+    db_path,
+    embed_batch,
+    embed_model,
+    llm_model,
+    llm_url,
+    multi_query_enabled,
+    port,
+    ui_lang,
+)
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
@@ -42,6 +56,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "ソース削除完了",
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "health.version": "バージョン: {v}",
+        "health.llm_ok": "LLM到達可能: {v}",
+        "health.yes": "はい",
+        "health.no": "いいえ",
+        "health.model": "生成モデル: {v}",
+        "health.embed_model": "埋め込みモデル: {v}",
+        "health.embed_model_off": "(無効 — BM25のみ)",
+        "health.multi_query": "マルチクエリ検索(SHOIN_MULTI_QUERY): {v}",
+        "health.embed_batch": "埋め込みバッチサイズ(SHOIN_EMBED_BATCH): {v}",
+        "health.embed_batch_default": "{n} (既定)",
+        "health.data_dir": "データディレクトリ: {v}",
+        "health.llm_url": "LLMエンドポイント: {v}",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -63,6 +89,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "Source deleted",
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "health.version": "Version: {v}",
+        "health.llm_ok": "LLM reachable: {v}",
+        "health.yes": "yes",
+        "health.no": "no",
+        "health.model": "Chat model: {v}",
+        "health.embed_model": "Embed model: {v}",
+        "health.embed_model_off": "(disabled — BM25 only)",
+        "health.multi_query": "Multi-query retrieval (SHOIN_MULTI_QUERY): {v}",
+        "health.embed_batch": "Embed batch size (SHOIN_EMBED_BATCH): {v}",
+        "health.embed_batch_default": "{n} (default)",
+        "health.data_dir": "Data directory: {v}",
+        "health.llm_url": "LLM endpoint: {v}",
     },
 }
 
@@ -145,6 +183,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sv = sub.add_parser("serve", help="Web UI起動 (127.0.0.1のみ)")
     sv.add_argument("--port", type=int, default=port(), help=f"ポート(既定: {port()})")
+
+    sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
     return p
 
 
@@ -168,6 +208,31 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.uncited", n=str(len(uncited))))
         for sentence in uncited:
             print(f"  - {sentence}")
+
+
+def _cmd_health(llm: ChatBackend) -> int:
+    """Headless equivalent of GET /api/health (REQ-103 CLI parity) — a user
+    running only the CLI previously had no way to check LLM reachability or
+    confirm SHOIN_MULTI_QUERY/SHOIN_EMBED_BATCH actually took effect without
+    starting the Web server or reading source/env directly."""
+    from .pipeline import EMBED_BATCH as _default_embed_batch
+
+    avail = getattr(llm, "available", lambda: False)()
+    print(_t("health.version", v=VERSION))
+    print(_t("health.llm_url", v=llm_url()))
+    print(_t("health.llm_ok", v=_t("health.yes") if avail else _t("health.no")))
+    print(_t("health.model", v=llm_model()))
+    em = embed_model()
+    print(_t("health.embed_model", v=em if em.strip() else _t("health.embed_model_off")))
+    mq = _t("health.yes") if multi_query_enabled() else _t("health.no")
+    print(_t("health.multi_query", v=mq))
+    batch = embed_batch()
+    batch_v = str(batch) if batch is not None else _t(
+        "health.embed_batch_default", n=str(_default_embed_batch)
+    )
+    print(_t("health.embed_batch", v=batch_v))
+    print(_t("health.data_dir", v=str(data_dir())))
+    return 0
 
 
 def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
@@ -336,6 +401,11 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
             return 1
         return 0
     backend: ChatBackend = llm if llm is not None else LLMClient()
+    if str(args.command) == "health":
+        # No Store needed: health is a diagnostic of config/LLM reachability,
+        # useful precisely when the data directory itself might be the problem
+        # (mirrors `serve` being special-cased above the Store() construction).
+        return _cmd_health(backend)
     try:
         with Store(str(args.db) if args.db else db_path()) as store:
             command = str(args.command)

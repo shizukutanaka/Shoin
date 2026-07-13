@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.126")
+        self.assertEqual(VERSION, "0.2.127")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5559,6 +5559,63 @@ class TestCLI(unittest.TestCase):
         with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
             rc = main(["serve"])
         self.assertEqual(rc, 1)
+
+    def test_health_command_reports_config_without_store(self) -> None:
+        """`shoin health` (REQ-103 CLI parity with GET /api/health, v0.2.126) must
+        print config/reachability without needing a working data directory — it's
+        special-cased above the Store() construction in main(), matching `serve`."""
+        import io
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn(VERSION, text)
+        self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
+
+    def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
+        import io, os
+        from unittest.mock import patch
+        from shoin.cli import main
+        from shoin.llm import LLMError
+
+        class FakeUnavailLLM:
+            embedding_model = "nomic-embed-text"
+
+            def available(self) -> bool:
+                return False
+
+            def chat(self, messages, temperature=0.2):
+                raise LLMError("SYSTEM_SERVICE_UNAVAILABLE", "down")
+
+            def embed_one(self, text):
+                raise LLMError("SYSTEM_EMBED_DISABLED", "no embed")
+
+        out = io.StringIO()
+        env = {"SHOIN_LANG": "en", "SHOIN_MULTI_QUERY": "1", "SHOIN_EMBED_BATCH": "32"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("sys.stdout", out):
+                rc = main(["health"], llm=FakeUnavailLLM())
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("LLM reachable: no", text)
+        self.assertIn("Multi-query retrieval (SHOIN_MULTI_QUERY): yes", text)
+        self.assertIn("Embed batch size (SHOIN_EMBED_BATCH): 32", text)
 
     def test_studio_no_citations_does_not_print_separator(self) -> None:
         """_cmd_studio must suppress the '---' separator when no citations are present.

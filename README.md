@@ -32,6 +32,7 @@ shoin notebook new "研究ノート"        # CLIでも操作可
 shoin add 1 ./paper.pdf https://example.com/article
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
+shoin health                          # 設定・LLM到達性を確認(headless診断)
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
