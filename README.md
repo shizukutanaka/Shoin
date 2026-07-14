@@ -51,6 +51,7 @@ Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・�
 | `SHOIN_LANG` | `ja` | UI言語(ja/en) |
 | `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
 | `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
+| `SHOIN_DEBUG` | (無効) | `1`で検索の診断情報(BM25/vectorヒット数、RRF順位、最終スコア)を標準エラー出力に表示 |
 
 `config.json` の例:
 

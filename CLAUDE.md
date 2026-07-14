@@ -178,13 +178,11 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 **Mitigation**: The design is intentional. Shallow context encourages focused, specific questions rather than open-ended exploration. For exploratory work, Studio outputs (briefing, timeline, mindmap) pre-synthesize the sources into digests.
 
-### Embedding Batch Size Is a Fixed Constant
+### Embedding Batch Size (Closed, v0.2.124)
 
-**Correction (v0.2.112)**: This section previously claimed `ChatBackend.embed_one(text)` embeds one chunk per HTTP request and that batching was unimplemented ("Ollama and llama.cpp have different batch API signatures... A batch API would require vendor detection"). That was never true of the actual code: `LLMClient.embed(texts: list[str])` (`llm.py`) has always sent a single `POST /embeddings` with `{"model": ..., "input": texts}` — the standard OpenAI-compatible batch shape — and `_embed_chunks()` (`pipeline.py`) has always preferred it over `embed_one()`, grouping texts into batches of `EMBED_BATCH = 16` and issuing one HTTP request per batch (`pipeline.py`: `for i in range(0, len(texts), EMBED_BATCH): vectors = embed(texts[i:i+EMBED_BATCH])`). `embed_one()` exists only as a `ChatBackend` protocol convenience for single-text callers (e.g. query-time embedding in `search.py`) and as the fallback for a hypothetical backend that doesn't implement `embed()` at all — not the code path production ingest actually takes. A 100-chunk source therefore triggers `ceil(100/16) = 7` embedding requests, not 100.
+**Correction (v0.2.112)**: This section previously claimed `ChatBackend.embed_one(text)` embeds one chunk per HTTP request and that batching was unimplemented ("Ollama and llama.cpp have different batch API signatures... A batch API would require vendor detection"). That was never true of the actual code: `LLMClient.embed(texts: list[str])` (`llm.py`) has always sent a single `POST /embeddings` with `{"model": ..., "input": texts}` — the standard OpenAI-compatible batch shape — and `_embed_chunks()` (`pipeline.py`) has always preferred it over `embed_one()`, grouping texts into batches and issuing one HTTP request per batch. `embed_one()` exists only as a `ChatBackend` protocol convenience for single-text callers (e.g. query-time embedding in `search.py`) and as the fallback for a hypothetical backend that doesn't implement `embed()` at all — not the code path production ingest actually takes.
 
-**Actual remaining gap**: `EMBED_BATCH` is a hardcoded module constant in `pipeline.py`, not adaptive to endpoint capacity and not configurable via an environment variable. A user running an endpoint that comfortably handles much larger batches (or one that's memory-constrained and would prefer smaller ones) has no way to tune this without editing source.
-
-**Workaround**: Disable embeddings (leave `SHOIN_EMBED_MODEL` unset) if ingest speed still matters more than semantic search on your hardware.
+**Gap closed (v0.2.124)**: `EMBED_BATCH` (module default 16 in `pipeline.py`) is no longer the only option — `SHOIN_EMBED_BATCH` overrides it (`config.embed_batch()`, invalid/unset values fall back to the default). A 100-chunk source triggers `ceil(100/EMBED_BATCH)` embedding requests; a user running an endpoint that comfortably handles larger batches (or one that's memory-constrained and prefers smaller ones) can now tune this without editing source. See README's Configuration table.
 
 ### UI State Management Could Be More Robust
 
@@ -202,7 +200,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 **Why Not Fixed**: Shoin targets single-machine deployment. Logging would bloat the binary and add I/O overhead. Users who debug often look at Flask/Django logs; Shoin's minimal HTTP server doesn't have equivalent introspection.
 
-**Workaround**: Add `DEBUG=1` environment variable to print timing/retrieval stats to stderr.
+**Workaround**: Set `SHOIN_DEBUG=1` to print retrieval stats (BM25/vector hit counts, RRF ranks, final scores) to stderr — see "Debugging Aid" below. No request timing is captured (that part of the original "Workaround" claim was itself aspirational, not implemented); a request ID / timing log remains genuinely out of scope per "Why Not Fixed" above.
 
 ---
 
@@ -311,7 +309,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.128
+## Version History: v0.1.37 → v0.2.129
+
+### v0.2.129 (2026-07-14)
+**Fixed (docs + implementation)**: A fresh review of the "Known Weaknesses & Tech Debt" and "Testing & Debugging" sections — following the same "check a doc claim against the actual code" method that found stale claims in v0.2.75/112/113 — found two more, both in this exact vein:
+
+1. **The "Debugging Aid" (`DEBUG=1` retrieval stats) was pure fiction.** `grep`-confirmed: no code anywhere read `os.environ.get("DEBUG"...)` or any variant, despite this line existing in "Testing & Debugging" (and referenced again in the "No Distributed Tracing" section's own "Workaround") since long before this session. A user following the guide to debug a relevance problem would set `DEBUG=1`, see nothing, and have no idea the feature never existed. Implemented for real this time: `search.py`'s `retrieve()`/`retrieve_multi()` now print the query, extracted `-word` negations, BM25/vector hit counts, and per-final-hit chunk/source id + fused score + raw BM25/cosine scores + the detail dict (RRF ranks, lexical-rerank weight) to stderr — but under `SHOIN_DEBUG`, not the bare `DEBUG` the doc originally promised: `DEBUG` collides with the generic name many unrelated tools/CI systems already use for their own purposes, unlike every other Shoin setting, which is namespaced under `SHOIN_`. The doc lines were corrected to match (both the name and — since RRF replaced alpha-based fusion in v0.2.56 — dropping the now-nonexistent "fusion alpha" from the described output), including `docs/spec.md`'s matching claim.
+2. **"Embedding Batch Size Is a Fixed Constant" hadn't been updated since v0.2.124 closed the gap it describes.** The section still said `EMBED_BATCH` "not configurable via an environment variable... has no way to tune this without editing source" — but `SHOIN_EMBED_BATCH` (added three versions ago, this session) already does exactly that. Retitled to "(Closed, v0.2.124)" and rewritten to describe the actual current state instead of the pre-fix gap.
+
+4 regression tests added (`TestDebugAid`): disabled-by-default silence, `SHOIN_DEBUG=1` output content (including a "no 'alpha' in output" assertion pinning the RRF-era description), the old bare `DEBUG` name correctly NOT triggering, and `retrieve_multi()` coverage. Verified fail-then-pass via `git stash` on `shoin/search.py`.
+
+`pytest tests/` now runs 658 tests. `mypy shoin/` and `ruff check shoin/search.py` remain clean.
 
 ### v0.2.128 (2026-07-14)
 **Fixed**: An 8-agent parallel Workflow audit (find → 3-vote adversarial verify per finding) targeting this session's own new code (v0.2.123–127: contextual chunking, multi-query RAG-Fusion, CLI/Web health) plus a general frontend sweep found 8 confirmed defects, 1 of them HIGH severity. All 8 fixed with regression tests, fail-then-pass verified via `git stash`.
@@ -1371,7 +1379,7 @@ Neither `llm.py` production code needed a change — both failures were stale te
 
 **Test Suites**: `tests/test_*.py` — unit tests for store, citation, Q&A, server SSE, Studio. Run `pytest tests/`.
 
-**Debugging Aid**: Set `DEBUG=1` to see retrieval stats (BM25 scores, vector scores, fusion alpha) printed to stderr. Useful when result relevance seems off.
+**Debugging Aid** (implemented v0.2.129 — this line long documented the feature under the name `DEBUG=1` while the source never actually read any such variable; renamed to `SHOIN_DEBUG` for the same `SHOIN_`-namespace safety every other setting already has, avoiding collision with the many unrelated tools/CI systems that use the generic name `DEBUG` for their own purposes): Set `SHOIN_DEBUG=1` to print retrieval diagnostics to stderr from `search.py`'s `retrieve()`/`retrieve_multi()` — the query, extracted `-word` negations, BM25/vector hit counts, and for each of the final selected chunks: chunk/source id, fused score, raw BM25/cosine scores, and the detail dict (RRF ranks per list, the lexical-rerank weight — RRF replaced the older alpha-based fusion in v0.2.56, so there is no "fusion alpha" to print anymore). Useful when result relevance seems off.
 
 **Common Issues**:
 1. **Embeddings disappearing after model change**: Check `settings` table for `embed_model` value. If NULL or stale, run `shoin reindex <notebook_id>` to rebuild.

@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.128")
+        self.assertEqual(VERSION, "0.2.129")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2993,6 +2993,89 @@ class TestSearch(unittest.TestCase):
                 f"top hit score ({top.score:.4f}) must be > 0.5 after RRF normalization; "
                 f"unnormalized ceiling is ~0.33 (lex overwhelms raw RRF ≈ 0.016).",
             )
+
+
+class TestDebugAid(unittest.TestCase):
+    """SHOIN_DEBUG=1 retrieval diagnostics (v0.2.129).
+
+    CLAUDE.md's "Testing & Debugging" section documented this feature under
+    the bare name `DEBUG=1` since long before this session, but no code
+    anywhere ever actually read that (or any) environment variable — the
+    entire "Debugging Aid" was aspirational prose, not a real capability.
+    Implemented for real here, under `SHOIN_DEBUG` (matching every other
+    Shoin setting's namespace, avoiding collision with the generic `DEBUG`
+    name many unrelated tools/CI systems already use for their own purposes).
+    """
+
+    def test_debug_disabled_by_default_no_stderr_output(self) -> None:
+        import io
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫は液体である。"])
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                retrieve(s, nb.id, "猫")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_shoin_debug_enabled_prints_retrieval_diagnostics(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫は液体である。"])
+            err = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_DEBUG": "1"}, clear=False):
+                with patch("sys.stderr", err):
+                    hits = retrieve(s, nb.id, "猫")
+        out = err.getvalue()
+        self.assertIn("[DEBUG retrieve]", out)
+        self.assertIn("猫", out)
+        self.assertIn(f"chunk={hits[0].chunk_id}", out)
+        # RRF replaced alpha-based fusion in v0.2.56 -- no "alpha" in output.
+        self.assertNotIn("alpha", out)
+
+    def test_bare_debug_env_var_does_not_trigger(self) -> None:
+        """The old, never-actually-implemented bare `DEBUG` name must NOT
+        enable this feature — only the namespaced `SHOIN_DEBUG` does, so a
+        CI system or unrelated tool's own `DEBUG=1` can never accidentally
+        turn on Shoin's retrieval-diagnostics printing."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫は液体である。"])
+            err = io.StringIO()
+            with patch.dict(os.environ, {"DEBUG": "1"}, clear=False):
+                with patch("sys.stderr", err):
+                    retrieve(s, nb.id, "猫")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_shoin_debug_covers_retrieve_multi(self) -> None:
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫は液体である。"])
+            err = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_DEBUG": "1"}, clear=False):
+                with patch("sys.stderr", err):
+                    retrieve_multi(s, nb.id, ["猫", "液体について"])
+        out = err.getvalue()
+        self.assertIn("[DEBUG retrieve_multi(2 queries)]", out)
 
 
 class TestQA(unittest.TestCase):

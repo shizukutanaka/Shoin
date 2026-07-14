@@ -114,7 +114,7 @@ query → [BM25 (FTS5)] ─┐
 - 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
-- ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`DEBUG=1`で検索統計(BM25/vectorスコア、融合alpha)を出力。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
+- ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
 
 ## 競合差別化
 

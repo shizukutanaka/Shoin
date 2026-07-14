@@ -13,7 +13,9 @@ Design (Plan.md / Hako v0.10.2 lineage):
 from __future__ import annotations
 
 import math
+import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
@@ -520,6 +522,39 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
     return selected
 
 
+# --- debugging aid ---------------------------------------------------------
+
+
+def _debug_enabled() -> bool:
+    """SHOIN_DEBUG=1 prints retrieval diagnostics to stderr (CLAUDE.md's own
+    documented "Debugging Aid" — long claimed under the bare name `DEBUG`,
+    but until now never actually read anywhere in the source; `DEBUG` alone
+    would also collide with the many unrelated tools/CI systems that already
+    use that generic name, unlike every other Shoin setting's `SHOIN_`
+    namespace).
+
+    A raw os.environ check, not routed through config._get()'s config.json-
+    aware machinery: this is a one-off toggle for an interactive debugging
+    session, not a persistent user preference like SHOIN_MULTI_QUERY/
+    SHOIN_EMBED_BATCH, so it has no config.json equivalent.
+    """
+    return os.environ.get("SHOIN_DEBUG", "").strip().lower() not in ("", "0", "false")
+
+
+def _debug_print(label: str, query: str, negs: list[str], bm25_n: int, vec_n: int, final: list[Hit]) -> None:
+    print(
+        f"[DEBUG {label}] query={query!r} negs={negs} bm25_hits={bm25_n}"
+        f" vec_hits={vec_n} final={len(final)}",
+        file=sys.stderr,
+    )
+    for i, h in enumerate(final, start=1):
+        print(
+            f"[DEBUG {label}]   #{i} chunk={h.chunk_id} source={h.source_id}"
+            f" score={h.score:.4f} bm25={h.bm25:.4f} vec={h.vec:.4f} detail={h.detail}",
+            file=sys.stderr,
+        )
+
+
 # --- top-level ------------------------------------------------------------
 
 
@@ -555,7 +590,10 @@ def retrieve(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    return mmr(rerank(clean, fused), k)
+    result = mmr(rerank(clean, fused), k)
+    if _debug_enabled():
+        _debug_print("retrieve", query, negs, len(bm25_hits), len(vec_hits), result)
+    return result
 
 
 def retrieve_multi(
@@ -584,6 +622,8 @@ def retrieve_multi(
     vecs += [None] * (len(queries) - len(vecs))
 
     lists: list[list[Hit]] = []
+    total_bm25 = 0
+    total_vec = 0
     for i, (q, qv) in enumerate(zip(queries, vecs)):
         q_search = q if i == 0 else strip_neg_terms(q)
         bm25_hits = bm25_search(store, notebook_id, q_search, pool)
@@ -592,15 +632,20 @@ def retrieve_multi(
             # rewrite lists were searched without them and need the filter here.
             bm25_hits = _apply_neg_filter(bm25_hits, negs)
         lists.append(bm25_hits)
+        total_bm25 += len(bm25_hits)
         if qv:
             vec_hits = vector_search(store, notebook_id, qv, pool)
             if negs:
                 vec_hits = _apply_neg_filter(vec_hits, negs)
             lists.append(vec_hits)
+            total_vec += len(vec_hits)
 
     fused = rrf_fuse_lists(lists)
     if fused:
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    return mmr(rerank(clean, fused), k)
+    result = mmr(rerank(clean, fused), k)
+    if _debug_enabled():
+        _debug_print(f"retrieve_multi({len(queries)} queries)", primary, negs, total_bm25, total_vec, result)
+    return result
