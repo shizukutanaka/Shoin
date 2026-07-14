@@ -99,8 +99,16 @@ class LLMClient:
 
     def available(self) -> bool:
         """Cheap health check against /models."""
-        req = urllib.request.Request(f"{self.base_url}/models")
         try:
+            # Request() construction itself can raise ValueError for a malformed
+            # base_url (e.g. an unclosed IPv6 bracket, "http://[::1:11434/v1" —
+            # a plausible typo) via urllib.parse.urlsplit(). This MUST be inside
+            # the try: it was previously built before the try block began, so
+            # this exact ValueError escaped uncaught, despite the except clause
+            # below already listing "ValueError: unknown URL scheme" as a case
+            # it exists to catch — ADDRESS/SCHEME parsing errors happen at
+            # Request() construction time, not just at urlopen() time.
+            req = urllib.request.Request(f"{self.base_url}/models")
             with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC) as resp:
                 # Check Content-Type to distinguish LLM API servers (application/json)
                 # from plain HTTP servers (text/html) that also return HTTP 200 on any

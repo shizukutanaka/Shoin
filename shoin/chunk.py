@@ -33,6 +33,14 @@ _CJK_RANGES = (
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])|(?<=\.)(?=\s)")
+# A genuine ATX heading closing sequence per CommonMark: one or more '#'
+# preceded by at least one space, with optional trailing spaces only
+# (e.g. "## Heading ##" -> the " ##" suffix). Requiring the preceding space
+# is what distinguishes a real closing sequence from a title that legitimately
+# ends in '#' with no space before it (language names like "C#"/"F#") — a
+# bare rstrip("#") cannot make that distinction and silently deletes the
+# character from such titles regardless of context.
+_ATX_CLOSING_RE = re.compile(r"\s+#+\s*$")
 
 # Upper bound on a chunk's contextual breadcrumb (heading path joined with " > ").
 # The breadcrumb is prepended to the chunk only for RETRIEVAL (FTS5 + embedding),
@@ -237,7 +245,7 @@ def _context_blocks(text: str) -> list[tuple[str, str]]:
             # A heading closes every open section at the same or deeper level.
             while stack and stack[-1][0] >= lvl:
                 stack.pop()
-            title = first[lvl:].strip().rstrip("#").strip()
+            title = _ATX_CLOSING_RE.sub("", first[lvl:].strip()).strip()
             if title:
                 stack.append((lvl, title))
         out.append((" > ".join(t for _, t in stack), block))

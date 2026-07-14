@@ -12,7 +12,6 @@ import json
 import re
 import sqlite3
 import unicodedata
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -437,20 +436,30 @@ def retrieve_for_question(
     retrieval_q: str,
     qvec: list[float] | None,
     k: int = TOP_K,
-    lock: AbstractContextManager[object] | None = None,
 ) -> list[Hit]:
     """Retrieval entry point for ask(): single-query, or RAG-Fusion when opted in.
 
     With SHOIN_MULTI_QUERY unset (the default) this is exactly retrieve() —
     byte-identical behavior and zero extra LLM traffic. When enabled, the LLM
     proposes MULTI_QUERY_REWRITES alternate phrasings and all ranked lists are
-    RRF-fused (retrieve_multi). *lock* serializes the rewrite LLM call for
-    callers that hold a generation lock (server.py); CLI callers pass None.
+    RRF-fused (retrieve_multi).
+
+    The rewrite call is deliberately NOT serialized under server.py's
+    generation_lock (the v0.2.70 single-concurrent-generation DoS control),
+    matching how _query_vector()'s embedding calls a few lines above in every
+    caller are already unlocked: a short 2-phrasing rewrite is comparable
+    LLM-endpoint load to an embedding call, not the long, context-heavy,
+    fully streamed answer generation the lock exists to serialize. An earlier
+    version of this function accepted the lock and held it here, which made a
+    single /ask acquire generation_lock TWICE (rewrite, then answer), up to
+    doubling the worst-case time other concurrent requests could be blocked —
+    and, since this call happens before server.py sends any SSE headers, that
+    lock hold could be spent on a request whose client had already
+    disconnected. Skipping serialization here removes both problems.
     """
     if not multi_query_enabled():
         return retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
-    with lock if lock is not None else nullcontext():
-        rewrites = rewrite_queries(llm, retrieval_q)
+    rewrites = rewrite_queries(llm, retrieval_q)
     if not rewrites:
         return retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
     queries = [retrieval_q, *rewrites]

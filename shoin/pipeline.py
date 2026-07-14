@@ -261,8 +261,17 @@ def refresh_source(
     # `title or src.title` fallback keep whatever title is currently set.
     # src.title (not extracted.title) is used for the breadcrumb prefix: refresh
     # deliberately keeps the existing title (see the title-omission note above), so
-    # the chunk context must reflect the title actually on the source row.
-    full_contexts = [_chunk_context(src.title, c) for c in contexts]
+    # the chunk context must reflect the title actually on the source row. `src`
+    # was read at the TOP of this function, before extract_url()'s network
+    # round-trip (up to URL_TIMEOUT_SEC=15s) — a rename that commits during that
+    # fetch would otherwise be silently baked into every new chunk's context as
+    # the STALE pre-fetch title, permanently (no later rename ever revisits these
+    # rows, since store._rewrite_chunk_context_titles() only rewrites chunks whose
+    # context still starts with the title that was actually current at rename
+    # time). Re-reading the title here, immediately before use, shrinks that
+    # window from the full fetch duration down to this single DB round-trip.
+    current_title = store.get_source(source_id).title
+    full_contexts = [_chunk_context(current_title, c) for c in contexts]
     chunk_ids = store.replace_chunks_for_source(
         source_id, texts, sha256=extracted.sha256, contexts=full_contexts
     )

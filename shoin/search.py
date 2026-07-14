@@ -28,7 +28,24 @@ _DIGIT_RE = re.compile(r"\d")
 # ideographs, silently failing (and inverting into a positive match) for
 # Hangul, Thai, Lao, Myanmar, Khmer, CJK ext A-H, and fullwidth digits/letters.
 _CJK_NEG_CLASS = "".join(f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES)
-_NEG_RE = re.compile(rf"(?<![A-Za-z0-9_])-([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)")
+# Lookbehind class for "this hyphen is attached to a preceding word, so it's an
+# ordinary hyphen, not negation syntax" (e.g. "state-of-the-art"). This must
+# exclude CJK Symbols and Punctuation (U+3000-U+303F, \u3002\u3001\u3000 etc.) the same way
+# _is_cjk_word() does below \u2014 those are word BOUNDARIES, not word characters,
+# so a hyphen right after one (e.g. a full-width space) should still be able to
+# introduce negation. v0.2.118 extended the POSITIVE match side (_CJK_NEG_CLASS,
+# what CAN be negated) to cover every _CJK_RANGES script, but never extended
+# this lookbehind (what precedes a hyphen that DISQUALIFIES it from being
+# negation) to match \u2014 so a hyphen tightly glued to a preceding CJK word
+# character (e.g. "\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0\u306E-\u6700\u9069\u5316", hiragana \u306E directly before the
+# hyphen) was misparsed as `-\u6700\u9069\u5316` negation syntax instead of an ordinary
+# in-sentence hyphen, silently discarding real query content.
+_CJK_WORD_NEG_CLASS = "".join(
+    f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES if (lo, hi) != (0x3000, 0x303F)
+)
+_NEG_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?<![{_CJK_WORD_NEG_CLASS}])-([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)"
+)
 
 
 def _esc_like(s: str) -> str:

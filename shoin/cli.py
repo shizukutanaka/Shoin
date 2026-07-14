@@ -17,7 +17,6 @@ from .config import (
     MAX_TITLE_LEN,
     TOP_K,
     VERSION,
-    data_dir,
     db_path,
     embed_batch,
     embed_model,
@@ -66,7 +65,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.multi_query": "マルチクエリ検索(SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "埋め込みバッチサイズ(SHOIN_EMBED_BATCH): {v}",
         "health.embed_batch_default": "{n} (既定)",
-        "health.data_dir": "データディレクトリ: {v}",
+        "health.data_dir": "データベースファイル: {v}",
         "health.llm_url": "LLMエンドポイント: {v}",
     },
     "en": {
@@ -99,7 +98,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.multi_query": "Multi-query retrieval (SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "Embed batch size (SHOIN_EMBED_BATCH): {v}",
         "health.embed_batch_default": "{n} (default)",
-        "health.data_dir": "Data directory: {v}",
+        "health.data_dir": "Database file: {v}",
         "health.llm_url": "LLM endpoint: {v}",
     },
 }
@@ -210,11 +209,18 @@ def _print_report(report: CitationReport) -> None:
             print(f"  - {sentence}")
 
 
-def _cmd_health(llm: ChatBackend) -> int:
+def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     """Headless equivalent of GET /api/health (REQ-103 CLI parity) — a user
     running only the CLI previously had no way to check LLM reachability or
     confirm SHOIN_MULTI_QUERY/SHOIN_EMBED_BATCH actually took effect without
-    starting the Web server or reading source/env directly."""
+    starting the Web server or reading source/env directly.
+
+    *db* is the top-level --db override, the same value main() passes to
+    Store() for every other subcommand — health must report the SAME
+    effective database path this invocation would actually use, not always
+    the config-derived default, or a user diagnosing "why isn't my custom
+    --db setup working" is told about a path this invocation never touches.
+    """
     from .pipeline import EMBED_BATCH as _default_embed_batch
 
     avail = getattr(llm, "available", lambda: False)()
@@ -231,7 +237,7 @@ def _cmd_health(llm: ChatBackend) -> int:
         "health.embed_batch_default", n=str(_default_embed_batch)
     )
     print(_t("health.embed_batch", v=batch_v))
-    print(_t("health.data_dir", v=str(data_dir())))
+    print(_t("health.data_dir", v=db if db else str(db_path())))
     return 0
 
 
@@ -404,8 +410,19 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     if str(args.command) == "health":
         # No Store needed: health is a diagnostic of config/LLM reachability,
         # useful precisely when the data directory itself might be the problem
-        # (mirrors `serve` being special-cased above the Store() construction).
-        return _cmd_health(backend)
+        # (mirrors `serve` being special-cased above the Store() construction,
+        # hence its own try/except rather than sharing the Store()-dependent
+        # commands' try block below). A broad except here (unlike the specific
+        # StoreError/IngestError/LLMError taxonomy below) is appropriate: this
+        # command has no state-mutating side effects and no well-defined
+        # exception type of its own — the goal is simply that a diagnostic
+        # command never crashes with a raw traceback instead of a clean
+        # err.prefix message, matching every other subcommand's guarantee.
+        try:
+            return _cmd_health(backend, str(args.db) if args.db else None)
+        except Exception as exc:  # noqa: BLE001 - see comment above
+            print(_t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=str(exc)), file=sys.stderr)
+            return 1
     try:
         with Store(str(args.db) if args.db else db_path()) as store:
             command = str(args.command)

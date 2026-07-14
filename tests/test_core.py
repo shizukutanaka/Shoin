@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.127")
+        self.assertEqual(VERSION, "0.2.128")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -778,6 +778,85 @@ class TestStore(unittest.TestCase):
                 t.join()
 
         self.assertEqual(errors, [], f"concurrent migrate() on shared file raised: {errors}")
+
+    def test_migrate_duplicate_column_race_recovered_when_winner_committed(self) -> None:
+        """Deterministic unit test for the v0.2.128 fix to the migration-5 ALTER
+        TABLE race the threaded test above only catches probabilistically
+        (~50% failure rate pre-fix, confirmed via 40+ consecutive runs).
+
+        SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so migration 5
+        (unlike every other migration here) is NOT naturally idempotent.
+        server.py opens a fresh Store() per HTTP request under
+        ThreadingHTTPServer, so two concurrent requests against a shared file
+        still on schema v4 can both read current=4 and both attempt migration
+        5; SQLite allows only one writer, so the loser's own BEGIN blocks until
+        the winner commits, then the loser's ALTER TABLE immediately fails with
+        'duplicate column name' -- a genuine constraint violation, not lock
+        contention, so it does NOT contain "locked" and _retry_on_lock's
+        blanket substring check never retries it. By the time the loser's
+        exception fires, SQLite's write-serialization guarantees the winner's
+        commit is already visible -- this test forces exactly that ordering by
+        making _migrate_once()'s FIRST schema_migrations read report the stale
+        pre-race value (4) while a SECOND, later read (inside the exception
+        handler) sees the real, already-migrated state (6).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            db_path = str(Path(d) / "race.db")
+            with Store(db_path):
+                pass  # fully migrated: schema_migrations already has 1..6
+
+            loser = Store(db_path)
+            real_conn = loser.conn
+            calls = {"n": 0}
+
+            class _StaleFirstReadConn:
+                """Proxy standing in for a connection whose first
+                schema_migrations read raced ahead of a concurrent winner's
+                commit. sqlite3.Connection's `execute` is a read-only C-level
+                attribute (cannot be patched via unittest.mock.patch.object
+                directly), so this wraps the real connection instead."""
+
+                def execute(self, sql, *params):
+                    if sql.strip().startswith("SELECT MAX(version)"):
+                        calls["n"] += 1
+                        if calls["n"] == 1:
+                            return real_conn.execute("SELECT 4 AS v")
+                        return real_conn.execute(sql, *params)
+                    return real_conn.execute(sql, *params)
+
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+            loser.conn = _StaleFirstReadConn()
+            result = loser._migrate_once()
+            self.assertEqual(result, 6, "must recover and reach the latest version, not raise")
+
+    def test_migrate_duplicate_column_reraises_when_not_actually_won(self) -> None:
+        """The exception handler must NOT silently swallow a duplicate-column
+        error when schema_migrations does NOT show the migration as already
+        applied -- that would mask a genuine, unexpected schema conflict
+        instead of the benign concurrent-winner race it's designed to recover
+        from."""
+        import shoin.store as store_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            db_path = str(Path(d) / "anomaly.db")
+            original = store_mod.MIGRATIONS[:]
+            try:
+                store_mod.MIGRATIONS = [m for m in original if m[0] <= 4]
+                s = Store(db_path)
+                # Add the column OUTSIDE of any migration bookkeeping --
+                # schema_migrations stays at 4, simulating a genuinely
+                # anomalous DB state rather than a legitimate concurrent
+                # winner having already applied migration 5.
+                s.conn.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+                s.conn.commit()
+                s.close()
+            finally:
+                store_mod.MIGRATIONS = original
+
+            with self.assertRaises(sqlite3.OperationalError):
+                Store(db_path)  # schema_migrations still says 4; must not skip silently
 
     def test_add_chunks_with_deleted_source_raises_source_not_found(self) -> None:
         """add_chunks() must raise StoreError(SOURCE_NOT_FOUND) — not a bare
@@ -4546,6 +4625,60 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(result.source.title, "My Custom Curated Name")
         self.assertEqual(result.source.sha256, "sha-b")
 
+    def test_refresh_source_concurrent_rename_during_fetch_not_baked_into_context(self) -> None:
+        """A rename that commits WHILE refresh_source()'s extract_url() network
+        fetch is in flight must not permanently bake the stale pre-fetch title
+        into the new chunks' context breadcrumb (v0.2.128).
+
+        Before the fix, refresh_source() read `src.title` once at the very top
+        of the function (before the network round-trip, up to
+        URL_TIMEOUT_SEC=15s) and used that stale snapshot to build every new
+        chunk's context. Since no later rename ever revisits chunks that never
+        had the OLD title as their context prefix (store._rewrite_chunk_context_titles
+        only rewrites rows whose context still starts with the title that was
+        actually current at rename time), the mismatch was permanent: the
+        chunks kept matching FTS queries for a title the user no longer sees
+        anywhere, and never matched the real current title.
+        """
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        original = Extracted(
+            kind="url", title="Original Title", origin="http://race-refresh.test",
+            sha256="sha-orig", text="original content here",
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("race-refresh-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://race-refresh.test")
+            source_id = res0.source.id
+
+            refreshed = Extracted(
+                kind="url", title="ignored (title mgmt is not refresh's job)",
+                origin="http://race-refresh.test", sha256="sha-new",
+                text="freshly fetched content after the race",
+            )
+
+            def fetch_that_races_a_rename(url: str) -> Extracted:
+                # Simulate a PATCH /api/sources/{id} rename committing WHILE
+                # this network fetch is still in flight.
+                s.update_source_title(source_id, "Renamed During Fetch", url)
+                return refreshed
+
+            with patch("shoin.pipeline.extract_url", side_effect=fetch_that_races_a_rename):
+                refresh_source(s, source_id)
+
+            row = s.conn.execute(
+                "SELECT context FROM chunks WHERE source_id=? LIMIT 1", (source_id,)
+            ).fetchone()
+            self.assertTrue(
+                row["context"].startswith("Renamed During Fetch"),
+                f"chunk context must reflect the CURRENT title, got: {row['context']!r}",
+            )
+            self.assertNotIn("Original Title", row["context"])
+
     def test_refresh_source_nonurl_raises(self) -> None:
         """refresh_source on a file source must raise INGEST_REFRESH_NOT_URL."""
         from shoin.ingest import IngestError
@@ -5275,6 +5408,43 @@ class TestNegTerms(unittest.TestCase):
         """Hyphen inside a word like 'state-of-the-art' must not be treated as negation."""
         self.assertEqual(neg_terms("state-of-the-art"), [])
 
+    def test_neg_terms_hyphen_glued_to_cjk_word_not_matched(self) -> None:
+        """A hyphen tightly attached to a preceding CJK word character (no
+        space) must be treated as an ordinary in-sentence hyphen, not
+        negation syntax — the CJK analogue of the ASCII
+        'state-of-the-art' guard above (v0.2.128).
+
+        Before the fix, _NEG_RE's lookbehind only excluded ASCII word
+        characters ([A-Za-z0-9_]); v0.2.118 extended the POSITIVE match side
+        (what CAN be negated) to cover every chunk._CJK_RANGES script but
+        never extended this lookbehind (what DISQUALIFIES a hyphen from being
+        negation) to match, so 'の-最適化' (hiragana の directly before the
+        hyphen) was misparsed as `-最適化` negation, silently discarding real
+        query content instead of treating it as ordinary prose punctuation.
+        """
+        self.assertEqual(neg_terms("アルゴリズムの-最適化について"), [])
+        self.assertEqual(strip_neg_terms("アルゴリズムの-最適化について"), "アルゴリズムの-最適化について")
+        # A hyphen preceded by CJK PUNCTUATION (a word boundary, not a word
+        # character) must still correctly introduce negation.
+        self.assertEqual(neg_terms("書院。-legacy"), ["legacy"])
+        # Existing space-preceded / string-start CJK negation must be unaffected.
+        self.assertEqual(neg_terms("Python -日本語"), ["日本語"])
+
+    def test_retrieve_multi_neg_false_positive_does_not_suppress_rewrite_hits(self) -> None:
+        """End-to-end: the CJK hyphen-glued false-positive negation must not
+        cause retrieve_multi() to silently zero out results a rewrite would
+        otherwise have found (v0.2.128)."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["最適化についての説明がここにある。"])
+            query = "アルゴリズムの-最適化について"
+            self.assertEqual(len(retrieve(s, nb.id, query)), 1)
+            hits = retrieve_multi(s, nb.id, [query, "最適化の手法とは"])
+            self.assertEqual(len(hits), 1)
+
     def test_strip_neg_terms(self) -> None:
         # Regex matches word-char runs; the dot in "2.7" breaks the match so only "-2" is stripped.
         self.assertEqual(strip_neg_terms("Python -2 django"), "Python  django")
@@ -5589,7 +5759,8 @@ class TestCLI(unittest.TestCase):
         self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
 
     def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
-        import io, os
+        import io
+        import os
         from unittest.mock import patch
         from shoin.cli import main
         from shoin.llm import LLMError
@@ -5616,6 +5787,68 @@ class TestCLI(unittest.TestCase):
         self.assertIn("LLM reachable: no", text)
         self.assertIn("Multi-query retrieval (SHOIN_MULTI_QUERY): yes", text)
         self.assertIn("Embed batch size (SHOIN_EMBED_BATCH): 32", text)
+
+    def test_health_command_prints_clean_error_instead_of_raw_traceback(self) -> None:
+        """`shoin health` must never crash with a raw Python traceback — the
+        whole point of a diagnostic command is to report cleanly even when
+        the environment is broken (v0.2.128). Unlike every other subcommand
+        (StoreError/IngestError/LLMError -> err.prefix), health is invoked
+        BEFORE main()'s Store()-dependent try block (deliberately, so it
+        still works when the data directory itself is broken — see the
+        comment at its call site), so it needs its own defense-in-depth catch
+        rather than falling through to that shared try block."""
+        import io
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        class ExplodingLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                raise RuntimeError("simulated unexpected failure")
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = main(["health"], llm=ExplodingLLM())
+        self.assertEqual(rc, 1)
+        self.assertIn("simulated unexpected failure", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_health_command_reflects_db_override(self) -> None:
+        """`shoin --db <path> health` must report the SAME effective database
+        path this invocation would actually use, not always the config-
+        derived default (v0.2.128) — every other subcommand honors --db via
+        main()'s `Store(str(args.db) if args.db else db_path())`, but
+        _cmd_health() took no args parameter at all and unconditionally
+        printed the bare config default, misleading a user diagnosing
+        exactly the scenario --db exists for (a custom database location)."""
+        import io
+        from unittest.mock import patch
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            rc = main(["--db", "/tmp/custom-health-test.sqlite3", "health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("/tmp/custom-health-test.sqlite3", out.getvalue())
 
     def test_studio_no_citations_does_not_print_separator(self) -> None:
         """_cmd_studio must suppress the '---' separator when no citations are present.
@@ -6263,6 +6496,32 @@ class TestChunkContext(unittest.TestCase):
         self.assertEqual(ctx_by_text["### 孫"], "トップ > 子1 > 孫")
         # 子2 (level 2) pops 孫 (level 3) AND 子1 (level 2) back to トップ.
         self.assertEqual(ctx_by_text["## 子2"], "トップ > 子2")
+
+    def test_breadcrumb_preserves_title_ending_in_hash(self) -> None:
+        """A heading title that legitimately ends in '#' (e.g. language names
+        C#/F#) must not have that character silently deleted -- only a
+        genuine CommonMark ATX closing sequence (one or more '#' PRECEDED BY
+        A SPACE, e.g. '## Heading ##') should be stripped (v0.2.128).
+
+        Before the fix, `.rstrip("#")` unconditionally deleted any trailing
+        '#' characters regardless of whether they were preceded by whitespace,
+        so a title ending in '#' with no space before it lost that character
+        from the retrieval breadcrumb -- defeating the exact heading-term-
+        recall case v0.2.123's contextual chunking was built to provide, for
+        any section about C#, F#, or similarly named topics.
+        """
+        from shoin.chunk import _context_blocks
+
+        pairs = _context_blocks("## Learning C#\nThis section is about the C# language.")
+        self.assertEqual(pairs[0][0], "Learning C#")
+
+        pairs = _context_blocks("# F#\nBody about F#.")
+        self.assertEqual(pairs[0][0], "F#")
+
+        # A genuine ATX closing sequence (space before the '#' run) must
+        # still be stripped, per CommonMark.
+        pairs = _context_blocks("## Heading ##\nBody.")
+        self.assertEqual(pairs[0][0], "Heading")
 
     def test_context_capped(self) -> None:
         """A pathologically deep/long heading path is capped so it can't bloat

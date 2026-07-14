@@ -905,6 +905,24 @@ class TestLLMClient(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=mock_resp):
             self.assertTrue(client.available())
 
+    def test_available_returns_false_not_raises_for_malformed_ipv6_url(self) -> None:
+        """available() must return False (its documented -> bool contract), not
+        raise, when base_url is a malformed IPv6-bracket URL (v0.2.128).
+
+        urllib.request.Request() construction itself — not just urlopen() —
+        can raise ValueError via urllib.parse.urlsplit() for a URL like
+        'http://[::1:11434/v1' (an unclosed IPv6 literal bracket, a plausible
+        typo). This Request() call used to happen BEFORE available()'s own
+        try/except block, so the ValueError escaped uncaught even though the
+        except clause already listed 'ValueError: unknown URL scheme' as a
+        case it exists to catch — every OTHER malformed-URL case (bad port,
+        embedded space, missing scheme) was already correctly caught.
+        """
+        from shoin.llm import LLMClient
+
+        client = LLMClient(base_url="http://[::1:11434/v1")
+        self.assertFalse(client.available())  # must not raise
+
     def test_chat_returns_content_string(self) -> None:
         """chat() with a valid response must return the content as a string."""
         from unittest.mock import patch

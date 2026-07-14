@@ -2049,6 +2049,149 @@ class GenerationSerializationTest(unittest.TestCase):
             "concurrent /ask requests",
         )
 
+    def test_multi_query_rewrite_call_not_serialized_against_other_requests_generation(
+        self,
+    ) -> None:
+        """v0.2.128: with SHOIN_MULTI_QUERY=1, one request's rewrite call
+        (chat(), temperature=0.7) must NOT be blocked behind another
+        concurrent request's answer-generation call (chat_stream()) — only
+        chat_stream-vs-chat_stream is still serialized by generation_lock.
+
+        Before the fix, retrieve_for_question() held generation_lock for the
+        rewrite call too, so a single /ask could acquire the shared lock
+        TWICE (rewrite, then generation), up to doubling the worst-case time
+        other concurrent requests could be blocked waiting on it.
+        """
+        import os
+        from unittest.mock import patch
+
+        class _TimingLLM:
+            embedding_model = ""
+            model = "fake-4b"
+
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+                self.rewrite_intervals: list[tuple[float, float]] = []
+                self.stream_intervals: list[tuple[float, float]] = []
+                self.chat_stream_violations = 0
+                self._stream_active = False
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                if temperature > 0.5:  # the rewrite_queries() call
+                    start = time.monotonic()
+                    time.sleep(0.2)
+                    with self._lock:
+                        self.rewrite_intervals.append((start, time.monotonic()))
+                    return "書院の仕組みとは\n書院についての説明"
+                return "これは何ですか？ [S1]。"
+
+            def chat_stream(
+                self, messages: list[dict[str, str]], temperature: float = 0.2
+            ) -> Iterator[str]:
+                with self._lock:
+                    if self._stream_active:
+                        self.chat_stream_violations += 1
+                    self._stream_active = True
+                start = time.monotonic()
+                try:
+                    time.sleep(0.2)
+                    yield "回答"
+                    yield "[S1]。"
+                finally:
+                    end = time.monotonic()
+                    with self._lock:
+                        self._stream_active = False
+                        self.stream_intervals.append((start, end))
+
+            def embed_one(self, text: str) -> list[float]:
+                return [1.0, 0.0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = _TimingLLM()
+            server = make_server(port=0, db=str(Path(tmp) / "mq.db"), llm=llm)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def url(path: str) -> str:
+                    return f"http://127.0.0.1:{port}{path}"
+
+                req = urllib.request.Request(
+                    url("/api/notebooks"),
+                    data=json.dumps({"name": "mq-test"}).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req) as resp:
+                    nb_id = json.loads(resp.read())["id"]
+                upload_body = ("マルチクエリ並行テスト用文書。" * 20).encode("utf-8")
+                req = urllib.request.Request(
+                    url(f"/api/notebooks/{nb_id}/upload"),
+                    data=upload_body,
+                    method="POST",
+                    headers={"X-Filename": urllib.parse.quote("doc.txt")},
+                )
+                with urllib.request.urlopen(req):
+                    pass
+
+                errors: list[Exception] = []
+
+                def fire() -> None:
+                    try:
+                        req = urllib.request.Request(
+                            url(f"/api/notebooks/{nb_id}/ask"),
+                            data=json.dumps({"question": "テストです"}).encode(),
+                            method="POST",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            resp.read()
+                    except Exception as exc:  # pragma: no cover
+                        errors.append(exc)
+
+                with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+                    # Stagger the two requests: without this, both unlocked
+                    # rewrite calls start at ~the same instant, run
+                    # concurrently with EACH OTHER, and finish at ~the same
+                    # instant too -- leaving no natural window where one
+                    # request is generating while the other is still
+                    # rewriting. Starting the second request partway through
+                    # the first's rewrite call (0.2s) lands its rewrite call
+                    # squarely inside the first request's generation window.
+                    threads = [threading.Thread(target=fire)]
+                    threads[0].start()
+                    time.sleep(0.1)
+                    threads.append(threading.Thread(target=fire))
+                    threads[1].start()
+                    for t in threads:
+                        t.join(timeout=15)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            llm.chat_stream_violations,
+            0,
+            "chat_stream-to-chat_stream must still be serialized by generation_lock",
+        )
+
+        def overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
+            return a[0] < b[1] and b[0] < a[1]
+
+        found_overlap = any(
+            overlaps(r, s) for r in llm.rewrite_intervals for s in llm.stream_intervals
+        )
+        self.assertTrue(
+            found_overlap,
+            "a rewrite call (chat()) must be able to run concurrently with a "
+            "DIFFERENT request's answer-generation call (chat_stream()) — "
+            f"rewrite_intervals={llm.rewrite_intervals} stream_intervals={llm.stream_intervals}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

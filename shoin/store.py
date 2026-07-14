@@ -320,11 +320,42 @@ class Store:
             # second thread's DDL (all IF NOT EXISTS, including the FTS5 virtual
             # table in migration 1) is a no-op and the duplicate INSERT is
             # silently ignored rather than crashing.
-            self.conn.executescript(
-                f"BEGIN;\n{sql.strip()}\n"
-                f"INSERT OR IGNORE INTO schema_migrations(version) VALUES ({int(version)});\n"
-                "COMMIT;"
-            )
+            #
+            # EXCEPTION: `ALTER TABLE ... ADD COLUMN` (migration 5) has no
+            # `IF NOT EXISTS` form in SQLite, so it is NOT naturally idempotent
+            # like every other statement here. server.py opens a fresh Store()
+            # per HTTP request under ThreadingHTTPServer, so two concurrent
+            # requests against a shared file still on the old schema can both
+            # read the same `current` and both attempt this migration. SQLite
+            # allows only one writer: the loser's own `BEGIN` blocks (governed
+            # by busy_timeout) until the winner commits, then the loser's ALTER
+            # TABLE statement executes immediately after and fails with
+            # "duplicate column name" — a genuine constraint violation, not lock
+            # contention, so it does NOT contain "locked" and _retry_on_lock's
+            # blanket substring check never retries it.
+            try:
+                self.conn.executescript(
+                    f"BEGIN;\n{sql.strip()}\n"
+                    f"INSERT OR IGNORE INTO schema_migrations(version) VALUES ({int(version)});\n"
+                    "COMMIT;"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+                # The failing ALTER TABLE aborted this script before COMMIT,
+                # leaving this connection's own transaction open with nothing
+                # applied (the ALTER never took effect) — roll it back before
+                # reusing the connection. Then check whether a concurrent
+                # winner already fully committed this exact version: if so,
+                # this migration's effect already exists in the DB and it's
+                # safe to skip; otherwise it's a genuine, unexpected schema
+                # conflict (not this migration's own column) and must propagate.
+                self.conn.rollback()
+                winner = self.conn.execute(
+                    "SELECT MAX(version) AS v FROM schema_migrations"
+                ).fetchone()
+                if int(winner["v"] or 0) < version:
+                    raise
             current = version
         return current
 

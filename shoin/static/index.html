@@ -364,6 +364,13 @@ const jpost = (path, body) => api(path, {method:"POST", headers:{"Content-Type":
 
 /* ---------- state ---------- */
 let notebooks = [], cur = null, srcIndex = new Map(); // source_id -> {s, title}
+// Stashes an uncommitted rename that's about to be torn down by a rebuild
+// the user themselves triggered from the SAME row (clicking refresh while
+// mid-rename) -- renderNotebook()'s own document.activeElement-based
+// preservation can't see this case, because clicking a sibling button moves
+// focus OFF the rename input before the rebuild ever runs. See the refresh
+// button's onclick handler and renderNotebook()'s pendingRename logic.
+let externalPendingRename = null;
 
 /* ---------- notebooks & sources ---------- */
 async function loadNotebooks(){
@@ -488,7 +495,15 @@ function renderNotebook(){
     // is being replaced by a fresh one below with fresh handlers regardless.
     activeRename.onblur = null;
     activeRename.onkeydown = null;
+  } else if (externalPendingRename) {
+    // A sibling control in the same row (e.g. the refresh button) was
+    // clicked while a rename was in progress, moving focus off the input
+    // before this rebuild ran -- document.activeElement can't see it, but
+    // the click handler stashed it here. See externalPendingRename's own
+    // comment and the refresh button's onclick handler.
+    pendingRename = externalPendingRename;
   }
+  externalPendingRename = null;  // consume: a stash is only ever restored once
   list.replaceChildren();
   srcIndex.clear();
   if (cur){
@@ -506,6 +521,32 @@ function renderNotebook(){
         const ref = el("button","src-act","↻"); ref.setAttribute("aria-label", t("src.refresh"));
         ref.setAttribute("title", t("src.refresh"));
         ref.onclick = async ev => { ev.stopPropagation();
+          // Clicking this button moves focus off any in-progress rename
+          // input in the SAME row before openNotebook()'s rebuild runs, so
+          // renderNotebook()'s document.activeElement-based preservation
+          // never sees it -- unlike unrelated background rebuilds (note
+          // add/delete, upload, ...), this one is triggered by a sibling
+          // control the user just clicked, silently discarding whatever
+          // they were mid-typing with no commit, no restore, no toast. The
+          // source isn't going away (unlike the delete button, where
+          // discarding a pending rename is correct since it'd be moot) --
+          // stash the uncommitted value so renderNotebook() can restore it
+          // after the refresh completes, same as it does for those other
+          // rebuilds.
+          const renameInput = tt.querySelector("input.src-rename");
+          if (renameInput) {
+            const v = renameInput.value.trim();
+            if (v && v !== s.title) {
+              externalPendingRename = {
+                srcId: s.id, value: renameInput.value,
+                selStart: renameInput.selectionStart, selEnd: renameInput.selectionEnd,
+              };
+            }
+            // Detach handlers: this input is about to be torn down by the
+            // rebuild below regardless: no stale commit()/blur() should
+            // fire on it afterward.
+            renameInput.onblur = null; renameInput.onkeydown = null;
+          }
           ref.disabled = true; ref.textContent = "…";
           try { await api(`/api/sources/${s.id}/refresh`,{method:"POST"}); toast(t("src.refresh.ok")); openNotebook(cur.id); }
           catch(e){ toast(e.message); ref.disabled=false; ref.textContent="↻"; } };

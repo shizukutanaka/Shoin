@@ -635,13 +635,12 @@ class _Handler(BaseHTTPRequestHandler):
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
             qvec = _query_vector(self.llm, retrieval_q) if _check_embed_model_ok(store, self.llm) else None
-            # Single-query retrieve() unless SHOIN_MULTI_QUERY opts in; the
-            # rewrite LLM call (when enabled) is serialized under the same
-            # generation_lock as token generation (spec.md single-generation
-            # DoS control) — retrieval itself stays unserialized as before.
-            hits = retrieve_for_question(
-                store, self.llm, nb_id, retrieval_q, qvec, lock=self.generation_lock
-            )
+            # Single-query retrieve() unless SHOIN_MULTI_QUERY opts in. Neither
+            # this call's rewrite LLM request nor the qvec embedding call above
+            # it is serialized under generation_lock (spec.md single-generation
+            # DoS control) — only the actual answer-generation streaming call
+            # below is. See retrieve_for_question()'s own docstring for why.
+            hits = retrieve_for_question(store, self.llm, nb_id, retrieval_q, qvec)
             store.add_message(nb_id, "user", question, "{}")
 
             try:
