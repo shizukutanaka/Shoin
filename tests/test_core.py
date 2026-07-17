@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.129")
+        self.assertEqual(VERSION, "0.2.130")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2414,6 +2414,25 @@ class TestIngest(unittest.TestCase):
 
 
 class TestSearch(unittest.TestCase):
+    def test_bm25_and_vector_search_populate_hit_context(self) -> None:
+        """bm25_search()/vector_search() must load each chunk's stored context
+        onto the Hit so build_context() can surface the section (v0.2.130)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src = s.add_source(nb, "txt", "doc", "o", "sha")
+            s.add_chunks(src.id, ["光合成の詳細な説明がここに続く長い記述の文章。"], ["生物 > 光合成"])
+            bm = bm25_search(s, nb, "光合成", k=5)
+            self.assertTrue(bm)
+            self.assertEqual(bm[0].context, "生物 > 光合成")
+
+            # vector_search: give the chunk an embedding, query with a vector.
+            chunk = s.chunks_for_notebook(nb)[0]
+            s.set_embedding(chunk.id, [1.0, 0.0])
+            from shoin.search import vector_search
+            vh = vector_search(s, nb, [1.0, 0.0], k=5)
+            self.assertTrue(vh)
+            self.assertEqual(vh[0].context, "生物 > 光合成")
+
     def test_fts_query_quoting(self) -> None:
         self.assertEqual(fts_query('weather "quote'), '"weather" OR "quote"')
         expr = fts_query("書院は知の書斎")

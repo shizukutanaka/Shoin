@@ -301,6 +301,32 @@ class TestAsk(unittest.TestCase):
             ans = ask(s, FakeLLM(reply="根拠[S1]と捏造[S9]。"), nb, "書斎とは？")
             self.assertEqual(ans.report["invalid"], [9])
 
+    def test_ask_report_includes_source_contexts(self) -> None:
+        """End-to-end: an answer over contextual chunks carries the section
+        breadcrumb through to the persisted citation_report (v0.2.130)."""
+        import tempfile
+
+        from shoin.pipeline import index_source
+
+        doc = (
+            "# 生物ノート\n序文の記述。\n\n"
+            "## 光合成\n植物が光からエネルギーを作る反応の詳細な説明がここに続く。\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+            f.write(doc)
+            path = f.name
+        try:
+            with Store(":memory:") as s:
+                nb = s.create_notebook("bio").id
+                index_source(s, nb, path)
+                ans = ask(s, FakeLLM(reply="光合成の説明[S1]。"), nb, "光合成とは？")
+                self.assertIn("source_contexts", ans.report)
+                self.assertIn("S1", ans.report["source_contexts"])
+                # Title prefix stripped -> starts with the heading, not the title.
+                self.assertFalse(ans.report["source_contexts"]["S1"].startswith("生物ノート >"))
+        finally:
+            os.unlink(path)
+
     def test_no_hit_skips_llm(self) -> None:
         s, nb = seeded_store()
         with s:
@@ -555,6 +581,49 @@ class TestCitationSourceIds(unittest.TestCase):
             self.assertEqual(len(ctx.source_ids), len(ctx.source_titles))
             for sid in ctx.source_ids:
                 self.assertIsInstance(sid, int)
+
+    def test_build_context_source_contexts_strips_title_prefix(self) -> None:
+        """build_context() must surface each source's section breadcrumb with
+        the title prefix stripped (v0.2.130), taken from the source's TOP hit."""
+        import tempfile
+
+        from shoin.pipeline import index_source
+
+        doc = (
+            "# 光合成のしくみ\n序文の説明がここにある。\n\n"
+            "## 明反応\nチラコイド膜で起きる反応。ATPとNADPHを生成する詳細な説明。\n\n"
+            "## 暗反応\nストロマで起きる反応。カルビン回路でCO2を固定する説明の記述。\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+            f.write(doc)
+            path = f.name
+        try:
+            with Store(":memory:") as s:
+                nb = s.create_notebook("bio").id
+                src = index_source(s, nb, path).source
+                hits = retrieve(s, nb, "光合成")
+                ctx = build_context(s, hits)
+                self.assertEqual(len(ctx.source_contexts), len(ctx.source_titles))
+                sec = ctx.source_contexts[0]
+                # Title prefix ("<title> > ") is stripped; the breadcrumb never
+                # starts with the source title itself.
+                self.assertFalse(sec.startswith(src.title))
+                # The retrieved chunk begins under the top heading, so its
+                # section breadcrumb starts there.
+                self.assertTrue(sec == "" or sec.startswith("光合成のしくみ"))
+        finally:
+            os.unlink(path)
+
+    def test_build_context_source_contexts_empty_for_contextless_chunks(self) -> None:
+        """A source whose chunks were added with no context (pre-v0.2.123
+        backfill / plain add_chunks) yields an empty section string, not a crash."""
+        with Store(":memory:") as s:
+            nb = s.create_notebook("nb").id
+            src = s.add_source(nb, "txt", "doc", "o", "sha")
+            s.add_chunks(src.id, ["猫は液体である説の詳細な説明がここに続く記述。"])
+            hits = retrieve(s, nb, "猫")
+            ctx = build_context(s, hits)
+            self.assertEqual(ctx.source_contexts, [""])
 
 
 class TestGrounding(unittest.TestCase):
@@ -1128,6 +1197,29 @@ class TestValidateCitationsEdgeCases(unittest.TestCase):
         """source_ids length != source_titles length must raise ValueError."""
         with self.assertRaises(ValueError):
             make_report("根拠[S1]。", ["論文A", "論文B"], source_ids=[1])
+
+    def test_make_report_source_contexts_mapping_and_omits_empty(self) -> None:
+        """source_contexts maps S-numbers to section breadcrumbs, and an empty
+        section string is dropped so consumers only see real sections (v0.2.130)."""
+        rep = make_report(
+            "根拠[S1]と[S2]。",
+            ["論文A", "論文B"],
+            source_ids=[10, 20],
+            source_bodies=["本文A", "本文B"],
+            source_contexts=["第1章 > 序論", ""],
+        )
+        self.assertEqual(rep.get("source_contexts"), {"S1": "第1章 > 序論"})
+
+    def test_make_report_source_contexts_all_empty_omits_key(self) -> None:
+        rep = make_report(
+            "根拠[S1]。", ["論文A"], source_ids=[1], source_bodies=["本文"],
+            source_contexts=[""],
+        )
+        self.assertNotIn("source_contexts", rep)
+
+    def test_make_report_source_contexts_length_mismatch_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            make_report("根拠[S1]。", ["論文A", "論文B"], source_contexts=["x"])
 
 
 class TestI18n(unittest.TestCase):

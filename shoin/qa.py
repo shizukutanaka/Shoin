@@ -154,6 +154,11 @@ class GroundedContext:
     snumber_by_source: dict[int, int] = field(default_factory=dict)
     source_ids: list[int] = field(default_factory=list)  # ordered: source_ids[0] == S1
     source_bodies: list[str] = field(default_factory=list)  # grounded text shown for S1..Sn
+    # Section breadcrumb per source (S1..Sn order), title-prefix stripped so it's
+    # just the heading path (e.g. "光合成のしくみ > 明反応") — shown in the UI so a
+    # user can see which SECTION a citation came from, not only its excerpt. Empty
+    # string for a source whose top hit has no context (pre-v0.2.123 chunks).
+    source_contexts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -193,6 +198,26 @@ def _truncate_tokens(text: str, limit: int) -> str:
     return text
 
 
+def _section_from_context(context: str, title: str) -> str:
+    """Strip the source-title prefix from a chunk's stored context breadcrumb.
+
+    pipeline._chunk_context() stores context as "title > heading > …" (title
+    folded in for retrieval). For UI display we want just the heading path, so
+    drop the title prefix: exact-title-only → "" (chunk is the source root, no
+    section), "title > rest" → "rest". A context that doesn't start with the
+    current title (pre-v0.2.123 backfill with context="", or a title changed
+    since indexing) yields "" — no safe section to show.
+    """
+    if not context:
+        return ""
+    if context == title:
+        return ""
+    prefix = f"{title} > "
+    if context.startswith(prefix):
+        return context[len(prefix):]
+    return ""
+
+
 def build_context(
     store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
 ) -> GroundedContext:
@@ -226,6 +251,7 @@ def build_context(
 
     titles: list[str] = []
     bodies: list[str] = []
+    contexts: list[str] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
     per_source = max(budget_tokens // max(len(order), 1), MIN_PER_SOURCE_TOKENS)
@@ -235,6 +261,9 @@ def build_context(
         except StoreError:
             title = f"source-{source_id}"
         titles.append(title)
+        # Section breadcrumb from this source's TOP (most-relevant) hit — grouped[]
+        # preserves the relevance order hits arrived in, so [0] is the best match.
+        contexts.append(_section_from_context(grouped[source_id][0].context, title))
         snums[source_id] = idx
         used = 0
         texts: list[str] = []
@@ -265,7 +294,9 @@ def build_context(
         bodies.append(body)
         parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
-    return GroundedContext(titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies)
+    return GroundedContext(
+        titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts
+    )
 
 
 def history_messages(
@@ -518,7 +549,13 @@ def ask(
             answer = Answer(
                 text,
                 hits,
-                make_report(text, context.source_titles, context.source_ids, context.source_bodies),
+                make_report(
+                    text,
+                    context.source_titles,
+                    context.source_ids,
+                    context.source_bodies,
+                    context.source_contexts,
+                ),
             )
         except LLMError:
             text = _degraded_text(hits)
@@ -527,6 +564,7 @@ def ask(
                 context.source_titles,
                 context.source_ids,
                 context.source_bodies,
+                context.source_contexts,
                 check_uncited=False,
             )
             report["degraded"] = True

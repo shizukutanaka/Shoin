@@ -130,7 +130,7 @@ def overview_hits(
         max_seq: int = sr["max_seq"]
         if max_seq + 1 <= per_source:
             rows = store.conn.execute(
-                "SELECT id, source_id, text FROM chunks WHERE source_id=? ORDER BY seq",
+                "SELECT id, source_id, text, context FROM chunks WHERE source_id=? ORDER BY seq",
                 (src_id,),
             ).fetchall()
         else:
@@ -142,11 +142,14 @@ def overview_hits(
                 )
             ph = ",".join("?" * len(target_seqs))
             rows = store.conn.execute(
-                f"SELECT id, source_id, text FROM chunks"
+                f"SELECT id, source_id, text, context FROM chunks"
                 f" WHERE source_id=? AND seq IN ({ph}) ORDER BY seq",
                 (src_id, *target_seqs),
             ).fetchall()
-        hits.extend(Hit(r["id"], r["source_id"], r["text"], score=1.0) for r in rows)
+        hits.extend(
+            Hit(r["id"], r["source_id"], r["text"], score=1.0, context=str(r["context"] or ""))
+            for r in rows
+        )
     return hits
 
 
@@ -182,7 +185,10 @@ def generate(
     )
     if not body or not body.strip():
         raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "empty response from LLM")
-    report = make_report(body, context.source_titles, context.source_ids, context.source_bodies)
+    report = make_report(
+        body, context.source_titles, context.source_ids, context.source_bodies,
+        context.source_contexts,
+    )
     if persist:
         store.add_studio_output(notebook_id, kind, body, json.dumps(report))
     return StudioResult(kind, body, report)

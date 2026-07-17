@@ -149,6 +149,8 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 #viewer .sheet .tx{overflow-y:auto;padding:14px 16px;font-size:13.5px}
 #viewer .sheet .ft{padding:10px 16px;border-top:1px solid var(--border);text-align:right}
 .excerpt-label{font-size:11px;letter-spacing:.06em;color:var(--sumi-soft);margin-bottom:5px}
+.section-label{font-size:12px;color:var(--seiji-ink);font-family:var(--serif);margin-bottom:8px;
+  word-break:break-word}
 .excerpt{background:var(--washi);border-left:3px solid var(--seiji);padding:8px 12px;
   white-space:pre-wrap;word-break:break-word;font-size:13px;margin-bottom:8px}
 details.full-src{margin-top:4px}
@@ -289,7 +291,7 @@ const I18N = {
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
     "reindex.ok":"{n}/{total} チャンクを再埋め込みしました",
-    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示",
+    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
@@ -322,7 +324,7 @@ const I18N = {
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
     "reindex.ok":"Re-embedded {n}/{total} chunks",
-    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source",
+    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
@@ -605,6 +607,7 @@ function renderWithSeals(container, text, report){
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
   const excerpts = (report && report.source_excerpts) || {};
+  const contexts = (report && report.source_contexts) || {};
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -618,25 +621,28 @@ function renderWithSeals(container, text, report){
       const chip = el("button","seal" + cls, `S${n}`);
       chip.type="button";
       const name = srcMap[`S${n}`] || "";
+      const section = contexts[`S${n}`] || "";
+      const nameSec = name + (section ? " › " + section : "");
       chip.title = invalid.has(n) ? t("chat.invalid")
-        : misattr.has(n) ? t("chat.misattr") + (name ? " — " + name : "")
-        : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + name : "")
-        : name;
-      chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + name : ""));
-      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts);
+        : misattr.has(n) ? t("chat.misattr") + (name ? " — " + nameSec : "")
+        : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
+        : nameSec;
+      chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
+      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap, excerpts){
+function openSeal(n, srcMap, idMap, excerpts, contexts){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
   const excerpt = (excerpts && excerpts[`S${n}`]) || null;
-  if (sid){ showSource(sid, title || `S${n}`, excerpt); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt); return; } }
+  const section = (contexts && contexts[`S${n}`]) || null;
+  if (sid){ showSource(sid, title || `S${n}`, excerpt, section); return; }
+  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section); return; } }
   if (title) toast(title);
 }
 let _srcAbort = null, _viewerOpener = null;
@@ -644,7 +650,7 @@ function closeViewer(){
   $("#viewer").classList.remove("open");
   if (_viewerOpener) { _viewerOpener.focus(); _viewerOpener = null; }
 }
-async function showSource(id, title, excerpt){
+async function showSource(id, title, excerpt, section){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
   const sig = _srcAbort.signal;
@@ -652,6 +658,12 @@ async function showSource(id, title, excerpt){
   $("#viewerTitle").textContent = title;
   const vt = $("#viewerText");
   vt.replaceChildren();
+  // Section breadcrumb (v0.2.130): shows WHICH section of the source the cited
+  // passage came from. Rendered above the excerpt when present; absent for old
+  // persisted reports or sources with no heading structure.
+  if (section){
+    vt.append(el("div","section-label", t("viewer.section") + " " + section));
+  }
   if (excerpt){
     // Show the retrieved passage immediately — no network round-trip needed.
     vt.append(el("div","excerpt-label", t("viewer.excerpt")));

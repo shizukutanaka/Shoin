@@ -738,6 +738,7 @@ class _Handler(BaseHTTPRequestHandler):
                 context.source_titles,
                 context.source_ids,
                 context.source_bodies,
+                context.source_contexts,
                 check_uncited=not degraded,
             )
             if degraded:

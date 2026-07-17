@@ -309,7 +309,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.129
+## Version History: v0.1.37 → v0.2.130
+
+### v0.2.130 (2026-07-14)
+**Added**: Section breadcrumb surfaced in the citation UI — the natural completion of v0.2.123's contextual chunking, which until now used the `chunks.context` breadcrumb ("title > heading > …") for *retrieval only*, invisible to the user. Clicking a `[S1]` seal now shows **which section** of the source the cited passage came from, so the reader can see a citation is grounded in "光合成のしくみ > 明反応", not just somewhere in the document. Purely additive: the LLM prompt and the four-stage citation verifier are untouched (`source_bodies` stays pure text), and old persisted reports without the field degrade silently via the existing `.get()` guard convention.
+
+- `search.py`: `Hit` gained a `context: str = ""` field (default keeps every existing positional `Hit(...)` in tests valid); `bm25_search()` (both FTS and LIKE paths), `vector_search()`, and `studio.overview_hits()` now `SELECT c.context` and load it onto each Hit.
+- `qa.py`: `GroundedContext` gained `source_contexts: list[str]` (S1..Sn order). `build_context()` takes each source's TOP hit's context, strips the title prefix via the new `_section_from_context(context, title)` helper (`context == title` → `""`, `"title > rest"` → `"rest"`, no-match → `""`), and stores the heading path.
+- `citation.py`: `make_report(..., source_contexts=None)` maps non-empty sections to `report["source_contexts"]` (`{"S1": "…"}`); `CitationReport` gained `source_contexts: NotRequired[dict[str, str]]`. Length-validated like `source_ids`/`source_bodies`. All three production callers (`qa.ask()` normal + degraded, `server._h_ask_sse()`, `studio.generate()`) pass `context.source_contexts` through.
+- `index.html`: `renderWithSeals()`/`openSeal()`/`showSource()` thread `source_contexts` from the report; the seal's hover tooltip appends `› section`, and the source viewer shows a `節: …` / `Section: …` label above the excerpt (new `viewer.section` i18n key ja/en, new `.section-label` style). Absent-section case guarded by `if(section)`.
+
+7 backend regression tests added (Hit.context loaded by bm25/vector search; build_context title-prefix stripping + empty-for-contextless; make_report mapping/omit-empty/length-mismatch; ask() end-to-end report carries source_contexts), fail-then-pass verified via `git stash`. **UI live-verified in a real browser** (Playwright, Chromium, real server + contextual content): asked a question, clicked the seal → viewer showed `Section: 生物ノート` and the tooltip read `grounding confirmed — bio.md › 生物ノート`, zero console/page errors.
+
+`pytest tests/` now runs 665 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
 
 ### v0.2.129 (2026-07-14)
 **Fixed (docs + implementation)**: A fresh review of the "Known Weaknesses & Tech Debt" and "Testing & Debugging" sections — following the same "check a doc claim against the actual code" method that found stale claims in v0.2.75/112/113 — found two more, both in this exact vein:

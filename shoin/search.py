@@ -80,6 +80,11 @@ class Hit:
     bm25: float = 0.0
     vec: float = 0.0
     detail: dict[str, float] = field(default_factory=dict)
+    # The chunk's indexed context breadcrumb ("title > heading > …", v0.2.123).
+    # Retrieval-only until now; carried on the Hit so build_context() can surface
+    # the section a citation came from in the UI. Defaults to "" so every existing
+    # positional Hit(...) construction in tests stays valid.
+    context: str = ""
 
 
 # --- query helpers --------------------------------------------------------
@@ -209,7 +214,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
-            "SELECT c.id, c.source_id, c.text, bm25(chunks_fts) AS rank"
+            "SELECT c.id, c.source_id, c.text, c.context, bm25(chunks_fts) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
@@ -217,7 +222,12 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             (expr, notebook_id, k),
         ).fetchall()
         for r in rows:
-            fts_hits.append(Hit(r["id"], r["source_id"], r["text"], 0.0, bm25=-float(r["rank"])))
+            fts_hits.append(
+                Hit(
+                    r["id"], r["source_id"], r["text"], 0.0,
+                    bm25=-float(r["rank"]), context=str(r["context"] or ""),
+                )
+            )
         # Return early only when fts_query covered every query term (no terms with
         # len < 3 were silently skipped).  Short terms still need the LIKE path.
         if fts_hits and all(len(t) >= 3 for t in query_terms(clean_query)):
@@ -242,7 +252,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # on a large notebook can pull tens of thousands of rows into memory.
     like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
-        f"SELECT c.id, c.source_id, c.text FROM chunks c"
+        f"SELECT c.id, c.source_id, c.text, c.context FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
         f" LIMIT ?",
@@ -254,7 +264,9 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         low = text.lower()
         score = float(sum(low.count(n.lower()) for n in needles))
         if score > 0:
-            like_hits.append(Hit(r["id"], r["source_id"], text, 0.0, bm25=score))
+            like_hits.append(
+                Hit(r["id"], r["source_id"], text, 0.0, bm25=score, context=str(r["context"] or ""))
+            )
     like_hits.sort(key=lambda h: h.bm25, reverse=True)
     if fts_hits:
         # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
@@ -305,7 +317,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
     if not query_vec:
         return []
     rows = store.conn.execute(
-        "SELECT c.id, c.source_id, c.text, c.embedding FROM chunks c"
+        "SELECT c.id, c.source_id, c.text, c.context, c.embedding FROM chunks c"
         " JOIN sources s ON s.id = c.source_id"
         " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
         (notebook_id,),
@@ -317,6 +329,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
             r["text"],
             0.0,
             vec=cosine(query_vec, unpack_vector(r["embedding"])),
+            context=str(r["context"] or ""),
         )
         for r in rows
     ]

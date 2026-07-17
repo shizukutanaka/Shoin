@@ -122,6 +122,11 @@ class CitationReport(TypedDict):
     # Allows the UI to show the supporting passage immediately on seal-click without
     # an extra HTTP fetch. Absent on old persisted reports — consumers must guard.
     source_excerpts: NotRequired[dict[str, str]]
+    # Maps "S1" -> section breadcrumb (heading path, title-prefix stripped) the
+    # excerpt came from, e.g. "光合成のしくみ > 明反応". Lets the UI show WHICH section
+    # a citation is grounded in, not just its text. Only present for S-numbers with
+    # a non-empty section. Absent on old persisted reports — consumers must guard.
+    source_contexts: NotRequired[dict[str, str]]
     # Sentences that assert content with zero [S#] citations anywhere in them —
     # invisible to verify_grounding(), which only checks already-cited sentences.
     # Present only when n_sources > 0 (nothing to cite against otherwise).
@@ -302,6 +307,7 @@ def make_report(
     source_titles: list[str],
     source_ids: list[int] | None = None,
     source_bodies: list[str] | None = None,
+    source_contexts: list[str] | None = None,
     *,
     check_uncited: bool = True,
 ) -> CitationReport:
@@ -311,6 +317,9 @@ def make_report(
     (qa._degraded_text), which prepends a system meta-message ("LLM endpoint
     unreachable...") that carries no citation but is not a content claim about
     the sources; flagging it as an unsupported assertion would be a false positive.
+
+    source_contexts (S1..Sn order, "" where a source has no section) surfaces the
+    heading path each citation is grounded in; only non-empty entries are stored.
     """
     n = len(source_titles)
     valid, invalid = validate_citations(text, n)
@@ -340,6 +349,15 @@ def make_report(
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
+    if source_contexts is not None:
+        if len(source_contexts) != n:
+            raise ValueError(
+                f"source_contexts length {len(source_contexts)} must match"
+                f" source_titles length {n}"
+            )
+        sc = {f"S{i + 1}": ctx for i, ctx in enumerate(source_contexts) if ctx}
+        if sc:
+            report["source_contexts"] = sc
     if n and check_uncited:
         uncited = uncited_sentences(text)
         if uncited:
