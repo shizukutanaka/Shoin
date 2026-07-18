@@ -193,15 +193,23 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.invalid", bad=bad))
     confirmed: set[int] = set(report.get("confirmed") or [])
     misattr: set[int] = set(report.get("misattributed") or [])
+    # Section breadcrumb per cited source (v0.2.131) — completes v0.2.130's
+    # in-app seal viewer and the Markdown export on the CLI surface too, so a
+    # headless `shoin ask` user sees WHICH section each citation is grounded in
+    # (REQ-103 CLI/Web parity). Absent on old reports/no-heading sources.
+    raw_ctx = report.get("source_contexts")
+    section_map: dict[str, str] = raw_ctx if isinstance(raw_ctx, dict) else {}
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
+        section = section_map.get(f"S{c}", "")
+        sec = f" (§ {section})" if section else ""
         if c in confirmed:
             marker = _t("cite.confirmed")
         elif c in misattr:
             marker = _t("cite.misattr")
         else:
             marker = ""
-        print(f"  [S{c}] {title}{marker}")
+        print(f"  [S{c}] {title}{sec}{marker}")
     uncited = report.get("uncited") or []
     if uncited:
         print(_t("cite.uncited", n=str(len(uncited))))

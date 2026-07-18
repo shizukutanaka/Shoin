@@ -309,7 +309,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.131
+## Version History: v0.1.37 → v0.2.132
+
+### v0.2.132 (2026-07-14)
+**Added**: Section breadcrumb in the CLI's citation report — the third and final surface for v0.2.130's contextual-retrieval provenance (after the in-app seal viewer, v0.2.130, and the Markdown export legend, v0.2.131). `cli._print_report()`'s per-cited-source line now appends `(§ …)` when the report carries `source_contexts`: `[S1] 生物ノート (§ 光合成のしくみ > 明反応) ✓根拠確認済み`, so a headless `shoin ask` user sees WHICH section each citation is grounded in (REQ-103 CLI/Web parity — the same principle that drove `shoin health` in v0.2.127). Reads `report.get("source_contexts")` with an `isinstance(..., dict)` guard; absent (old reports, no-heading sources) → plain line, no stray `§`. 1 regression test added (`test_print_report_shows_section_breadcrumb`: section shown for S1, and S2 without a section gets no `§`), fail-then-pass verified via `git stash` on `shoin/cli.py`, plus live-verified end-to-end through `shoin ask`. `pytest tests/` now runs 668 tests. `mypy shoin/` and `ruff check shoin/cli.py` remain clean.
 
 ### v0.2.131 (2026-07-14)
 **Added**: Section breadcrumb in the Markdown export's chat legend — the export-surface completion of v0.2.130. `export_markdown()`'s per-assistant-message source legend (`S1=論文A, S2=論文B`) now appends the section when the persisted `citation_report` carries `source_contexts`: `S1=生物ノート (§ 光合成のしくみ > 明反応)`. So an answer archived or shared outside the app keeps the same "which section is this grounded in" provenance the seal viewer surfaces in-app — mirroring how v0.2.66 brought the citation-verification *status* into the export. Reads `report.get("source_contexts")` with the same `isinstance(..., dict)` guard the existing `source_map` read uses; absent (old messages, no-heading sources) → plain legend, no stray `§`. 2 regression tests added (section present → `(§ …)` in legend; absent → no `§`), fail-then-pass verified via `git stash` on `shoin/export.py`. `pytest tests/` now runs 667 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.

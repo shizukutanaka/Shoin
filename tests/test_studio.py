@@ -904,6 +904,30 @@ class CliTest(unittest.TestCase):
         from shoin.cli import _t
         self.assertIn(_t("cite.misattr"), output)
 
+    def test_print_report_shows_section_breadcrumb(self) -> None:
+        """CLI _print_report must surface the cited source's section breadcrumb
+        when the report carries source_contexts (v0.2.131) — CLI parity with the
+        seal viewer and Markdown export."""
+        import io as _io, contextlib as _cl, shoin.cli as _cli
+
+        report = {
+            "cited": [1, 2],
+            "invalid": [],
+            "confirmed": [1],
+            "misattributed": [],
+            "source_map": {"S1": "生物ノート", "S2": "物理ノート"},
+            "source_contexts": {"S1": "光合成のしくみ > 明反応"},  # S2 has none
+            "coverage": 0.0,
+        }
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            _cli._print_report(report)
+        output = buf.getvalue()
+        self.assertIn("(§ 光合成のしくみ > 明反応)", output)
+        # S2 has no section → no stray marker on its line.
+        s2_line = next(ln for ln in output.splitlines() if "[S2]" in ln)
+        self.assertNotIn("§", s2_line)
+
     def test_unknown_lang_falls_back_to_english(self) -> None:
         """SHOIN_LANG set to an unknown code must fall back to English, not raise KeyError."""
         import os
