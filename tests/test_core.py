@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.132")
+        self.assertEqual(VERSION, "0.2.133")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5110,6 +5110,25 @@ class TestExport(unittest.TestCase):
             s.conn.commit()
             bib = export_bibtex(s, nb.id)
         self.assertIn("added unknown", bib)
+        # Malformed added_at -> no structured year field (only emit when real).
+        self.assertNotIn("year =", bib)
+
+    def test_bibtex_emits_structured_year_field(self) -> None:
+        """export_bibtex must emit a `year = {YYYY}` field from added_at so
+        reference managers can render author-year citations and sort by year,
+        rather than burying the date only in the free-text note (v0.2.133)."""
+        from shoin.export import export_bibtex
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "論文", "https://x.test", "sha-y")
+            s.conn.execute(
+                "UPDATE sources SET added_at='2021-03-09T12:00:00' WHERE id=?", (src.id,)
+            )
+            s.conn.commit()
+            bib = export_bibtex(s, nb.id)
+        self.assertIn("year = {2021},", bib)
+        # The year line sits before the note, inside the entry.
+        self.assertLess(bib.index("year ="), bib.index("note ="))
 
     def test_ris_er_no_trailing_space(self) -> None:
         """RIS ER  - terminator must not have a trailing space (spec compliance)."""

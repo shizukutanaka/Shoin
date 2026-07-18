@@ -178,10 +178,18 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
     for src in store.sources_for_notebook(notebook_id):
         key = f"shoin{src.id}"
         date = (src.added_at or "")[:10] or "unknown"
+        # Emit a structured `year` field (not just the free-text note) so
+        # reference managers can render author-year citations and sort by year —
+        # the note field is opaque free text they don't parse. added_at is an
+        # ISO timestamp ("2026-07-14T…"); a 4-digit leading year is the only
+        # thing worth trusting, so emit the field only when it's actually there.
+        year = (src.added_at or "")[:4]
+        year_line = f"  year = {{{year}}},\n" if year.isdigit() and len(year) == 4 else ""
         entries.append(
             "@misc{" + key + ",\n"
             f"  title = {{{_bib_escape(src.title)}}},\n"
             f"  howpublished = {{{_bib_escape(src.origin)}}},\n"
+            f"{year_line}"
             f"  note = {{Shoin source, added {date}}}\n"
             "}"
         )
