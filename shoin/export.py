@@ -108,9 +108,20 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                     if isinstance(raw_map, dict)
                     else {}
                 )
+                # Section breadcrumb per S-number (v0.2.130), so the exported
+                # legend shows WHICH section each citation is grounded in — the
+                # same provenance the app's seal viewer now surfaces, preserved
+                # once the answer leaves the app (mirrors v0.2.66 bringing the
+                # citation-verification status into the export).
+                raw_ctx = report.get("source_contexts")
+                section_map: dict[str, str] = (
+                    {k: str(v) for k, v in raw_ctx.items()}
+                    if isinstance(raw_ctx, dict)
+                    else {}
+                )
                 if source_map:
                     legend = ", ".join(
-                        f"{k}={v}"
+                        f"{k}={v}" + (f" (§ {section_map[k]})" if section_map.get(k) else "")
                         for k, v in sorted(
                             source_map.items(),
                             key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,

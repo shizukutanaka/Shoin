@@ -309,7 +309,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.130
+## Version History: v0.1.37 → v0.2.131
+
+### v0.2.131 (2026-07-14)
+**Added**: Section breadcrumb in the Markdown export's chat legend — the export-surface completion of v0.2.130. `export_markdown()`'s per-assistant-message source legend (`S1=論文A, S2=論文B`) now appends the section when the persisted `citation_report` carries `source_contexts`: `S1=生物ノート (§ 光合成のしくみ > 明反応)`. So an answer archived or shared outside the app keeps the same "which section is this grounded in" provenance the seal viewer surfaces in-app — mirroring how v0.2.66 brought the citation-verification *status* into the export. Reads `report.get("source_contexts")` with the same `isinstance(..., dict)` guard the existing `source_map` read uses; absent (old messages, no-heading sources) → plain legend, no stray `§`. 2 regression tests added (section present → `(§ …)` in legend; absent → no `§`), fail-then-pass verified via `git stash` on `shoin/export.py`. `pytest tests/` now runs 667 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.
 
 ### v0.2.130 (2026-07-14)
 **Added**: Section breadcrumb surfaced in the citation UI — the natural completion of v0.2.123's contextual chunking, which until now used the `chunks.context` breadcrumb ("title > heading > …") for *retrieval only*, invisible to the user. Clicking a `[S1]` seal now shows **which section** of the source the cited passage came from, so the reader can see a citation is grounded in "光合成のしくみ > 明反応", not just somewhere in the document. Purely additive: the LLM prompt and the four-stage citation verifier are untouched (`source_bodies` stays pure text), and old persisted reports without the field degrade silently via the existing `.get()` guard convention.

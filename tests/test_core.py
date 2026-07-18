@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.130")
+        self.assertEqual(VERSION, "0.2.131")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5213,6 +5213,53 @@ class TestExport(unittest.TestCase):
             any("根拠確認済み" in ln for ln in md.splitlines()),
             f"exported markdown must surface confirmed status: {md!r}",
         )
+
+    def test_export_markdown_legend_shows_section_breadcrumb(self) -> None:
+        """The exported chat legend must show each citation's section
+        breadcrumb when the report carries source_contexts (v0.2.130), so the
+        provenance the seal viewer surfaces survives export."""
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-section-test")
+            src = s.add_source(nb.id, "txt", "生物ノート", "mem://d", "sha-d")
+            s.add_chunks(src.id, ["光合成の説明である。"])
+            report = make_report(
+                "光合成の説明である[S1]。",
+                ["生物ノート"],
+                [src.id],
+                ["光合成の説明である。"],
+                ["光合成のしくみ > 明反応"],
+            )
+            s.add_message(nb.id, "user", "光合成とは", "{}")
+            s.add_message(nb.id, "assistant", "光合成の説明である[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertIn("(§ 光合成のしくみ > 明反応)", md)
+
+    def test_export_markdown_legend_omits_section_when_absent(self) -> None:
+        """A report without source_contexts (old message / no heading) must
+        produce a plain legend with no stray '§' marker."""
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-nosection-test")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_chunks(src.id, ["書院はローカルツールである。"])
+            report = make_report(
+                "書院はローカルツールである[S1]。", ["doc"], [src.id],
+                ["書院はローカルツールである。"],
+            )
+            s.add_message(nb.id, "user", "書院とは", "{}")
+            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertIn("S1=doc", md)
+        self.assertNotIn("§", md)
 
     def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
         import json
