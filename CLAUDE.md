@@ -309,7 +309,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.133
+## Version History: v0.1.37 → v0.2.134
+
+### v0.2.134 (2026-07-18)
+**Added (docs)**: Model-tier agent instruction documents + full refresh of the product review.
+
+1. **`docs/product-review.md` を v0.1.0 時点(2026-06-13)の内容から v0.2.133 時点へ全面更新** — 旧版は 11 バージョン帯 ×130 リリース分陳腐化していた（初版の指摘→修正の往復記録は CLAUDE.md Version History / CHANGELOG.md にバグ単位で残っているため要約参照に置換）。新版は現在の長所8点（節文脈の3面表示・研究裏付き検索改善・診断可能性・fail-then-pass 文化まで含む）、現存する弱点7点（CI 未稼働、`ruff format` 不整合、CHANGELOG 停止、PyPI 未発行、改名後の埋め込み陳腐化、トークン予算、デフォルトブランチ）、優先度・難易度・担当推奨・エントリポイント付きの改善案バックログ10項目で構成。全主張はコード実挙動と突合済み（テスト669件・14モジュール・CHANGELOG の v0.1.55 停止点・Studio エクスポートに凡例が無いこと等を個別確認 — v0.2.75/112/129 の「文書だけの空約束」教訓に従う）。
+2. **`docs/agents/opus.md` / `docs/agents/sonnet.md` 新設** — モデル能力帯別のエージェント作業指示書。共通の儀式（バージョンbump三点セット+Version History 追記、`git stash` による fail-then-pass、UI 変更の実ブラウザ検証、`ruff format` 禁止、全スイート緑、main 追従 push）を両書に独立記載した上で、Opus 版は高リスク領域（migration/検索スコアリング/引用検証セマンティクス/プロンプト/並行性設計/マルチエージェント監査）を開放、Sonnet 版は加算的タスクに限定し同領域を明示的に禁止、確信の持てない発見は修正せず `**Noted (not actioned)**:` 書式（v0.2.72/133 前例）で記録するエスカレーション手順を規定。
+3. CLAUDE.md「Contributing & Philosophy」冒頭に `docs/agents/` への導線を追加。
+
+コード変更なし。`pytest tests/` は 669 件のまま全緑、`mypy shoin/`・`ruff check` 影響なし。
 
 ### v0.2.133 (2026-07-18)
 **Added**: Structured `year` field in the BibTeX export. `export_bibtex()`'s `@misc` entries previously carried the date only inside the free-text `note` field (`note = {Shoin source, added 2026-07-14}`), which reference managers (Zotero, Mendeley, BibLaTeX) do not parse — so an exported source could not be cited author-year or sorted by year. Now emits `year = {YYYY}` (extracted from `added_at`'s 4-digit leading year) before the note, only when a genuine 4-digit year is present (`year.isdigit() and len(year)==4`), so a malformed/empty `added_at` produces no stray `year = {}` field. 1 regression test added (`test_bibtex_emits_structured_year_field`; the existing empty-`added_at` test extended to assert no `year =` line appears), fail-then-pass verified via `git stash` on `shoin/export.py`. `pytest tests/` now runs 669 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.
@@ -1433,6 +1442,8 @@ Neither `llm.py` production code needed a change — both failures were stale te
 ---
 
 ## Contributing & Philosophy
+
+**AI エージェント向け作業指示書**: このリポジトリで作業するエージェントセッションは、モデルの能力帯に応じた指示書を最初に読むこと — `docs/agents/opus.md`（Opus級: migration/検索スコアリング/引用検証セマンティクス等の高リスク領域まで自律作業可）/ `docs/agents/sonnet.md`（Sonnet級: 加算的タスクに限定、禁止領域と「Noted (not actioned)」エスカレーション手順を規定）。着手候補の台帳は `docs/product-review.md` の改善案バックログ。
 
 **Design Principles**:
 1. **Zero External Dependencies**: urllib only. No requests, no numpy, no PyTorch. Slim binary, easy to audit.
