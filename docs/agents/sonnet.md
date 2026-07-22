@@ -59,7 +59,65 @@
   積み重ねを一手で壊しうる）
 - 新しい pip 依存の追加、`ruff format` の適用、shipped migration の編集
 
-## 4. エスカレーション手順
+## 4. タスクレシピ（頻出3種の完全手順）
+
+### レシピ A: 環境変数設定の追加（参照実装: `SHOIN_EMBED_BATCH`, v0.2.124）
+
+1. `shoin/config.py` にアクセサ関数を追加（`_get()` 経由 — env → config.json → 既定の
+   優先順が自動で付く）。不正値・未設定は既定へフォールバック（`embed_batch()` を模倣）。
+2. 使用箇所を配線（モジュール定数が既にあるなら `env値 or 既定定数` の形にし、
+   定数を patch する既存テストを壊さない）。
+3. `README.md` の Configuration 表に行を追加（ja）。
+4. `shoin/cli.py` の `_cmd_health()` と `server.py` の `_h_health()` に表示を追加
+   （設定が「効いているか」をコードを読まずに確認できるのがこのプロジェクトの診断方針）。
+5. テスト: 有効値・不正値→既定・未設定→既定 の3ケース
+   （`patch.dict(os.environ, ...)` 使用。参照: `test_embed_batch_env_override`）。
+6. 儀式（§1）を完走。
+
+### レシピ B: バグ修正の完全手順（順序厳守）
+
+```
+1. 再現スクリプトを書き、現行コードでバグを実際に観測する（再現できなければ直さない）
+2. 回帰テストを書く（この時点では落ちるはず）
+3. python -m unittest <新テスト> で「落ちる」ことを確認
+4. 修正を実装
+5. python -m unittest <新テスト> で「通る」ことを確認
+6. git stash push shoin/<修正ファイル> → 新テスト再実行 → 落ちることを確認 → git stash pop
+7. バージョンbump三点（config.py / pyproject.toml / test_version）
+8. CLAUDE.md Version History 先頭にエントリ追記（§5のテンプレート）
+9. python -m unittest discover -s tests   # 全緑が完了条件
+10. python -m ruff check shoin/<変更ファイル> && python -m mypy shoin/
+11. commit → push 指定ブランチ → git push origin HEAD:main
+```
+
+### レシピ C: i18n 文字列の追加
+
+1. 該当モジュールの `_STRINGS` に **ja と en の両方**を追加（片方だけは不可）。
+2. プレースホルダ名（`{v}`, `{n}` 等）が、呼び出し側 `_t(key, v=...)` の kwargs と
+   **両ロケールで**一致していることを目視確認（片ロケールだけ typo があると、
+   そのロケールでのみ実行時 KeyError になる）。
+3. UI（index.html）の場合は `I18N` 辞書 + `data-i18n` / `data-i18n-title` /
+   `data-i18n-aria` の既存属性パターンに従う。
+4. テストは `SHOIN_LANG` を patch して両ロケールの出力を1回ずつ通す。
+
+## 5. Version History エントリのテンプレート
+
+```markdown
+### v0.2.NNN (YYYY-MM-DD)
+**Fixed**: <1文で欠陥を要約 — 何が・どの入力で・どう誤動作したか>。
+
+- <再現: 具体的な入力/操作 → 観測された誤出力。「ライブ再現済み」なら手段も>
+- Fix: <何をどう変えたか。なぜその形か（既存パターンの踏襲先があれば挙げる)>
+- N regression test(s) added (`test_...`), fail-then-pass verified via `git stash`
+  on `shoin/<file>`.
+
+`pytest tests/` now runs NNN tests. `mypy shoin/` and `ruff check <files>` remain clean.
+```
+
+（機能追加は `**Fixed**` を `**Added**` に。見出し行
+`## Version History: v0.1.37 → v0.2.NNN` の終端更新を忘れない。）
+
+## 6. エスカレーション手順
 
 禁止領域や確信の持てない箇所で問題を**発見**したら、修正せずに記録する:
 

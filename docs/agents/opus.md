@@ -72,3 +72,48 @@
 
 `docs/product-review.md` の改善案バックログから「担当推奨: Opus」の項目、
 または新規監査ラウンド。ユーザーから明示の指示があればそれを最優先。
+
+## 5. 監査ラウンドの雛形（find → 敵対的検証 → 修正）
+
+v0.2.128 で 8 件（うち HIGH 1 件）を検出・修正した実績パターン:
+
+1. **find（発見）** — 領域別に並列で探索。直近セッションで追加したコードを最優先
+   対象にする（新規コードにバグが集中する）。フロントエンドは静的解析が無いので
+   別枠で必ず1本回す。
+2. **発見の採用基準** — 「具体的な入力/状態 → 具体的な誤った観測可能出力（または
+   クラッシュ）」を提示できるものだけ。"could theoretically..." は却下。
+   スタイル・型ヒント欠落・現実の trigger が無いスケール懸念は対象外。
+3. **verify（敵対的検証）** — 発見ごとに独立した検証者（3票推奨）に**反証を試みさせる**。
+   よくある却下理由: 同一関数内で既にガード済み / 実呼び出し経路から到達不能 /
+   CLAUDE.md で意図的設計と明記済み / 追跡すると再現しない。過半数が反証したら棄却。
+   検証者は判断に迷ったら `refuted=true`（懐疑側にデフォルト）。
+4. **fix** — 生き残った発見を severity 順に修正。各修正に §1 の儀式をフルで適用
+   （回帰テスト + fail-then-pass、HIGH なら並行テストを数十回連続実行して確認）。
+5. **記録** — Version History に検出数・確定数・各修正を1エントリで残す。
+
+Workflow ツールが使える場合は pipeline（find→verify を item 毎に流す）で実装できるが、
+明示的な opt-in（ultracode / ユーザー依頼）が無ければ Agent ツールの個別 subagent か
+手動監査で足りる。
+
+## 6. 危険地図（ファイル別・触る前に読むべき History）
+
+- **`store.py`** — migration の並行冪等性が生命線。`ThreadingHTTPServer` がリクエスト毎に
+  `Store()` を開くため同一 migration が並行実行される。`ALTER TABLE ADD COLUMN` は
+  `IF NOT EXISTS` が無く duplicate-column リカバリが必要（v0.2.128）。`_retry_on_lock` は
+  `"locked" not in str(exc)` の**部分一致**で判定するため、"locked" を含まない
+  OperationalError（duplicate column 等）はリトライされない — この境界を意識せよ。
+- **`server.py`** — `_h_ask_sse` の SSE 切断ガードは層状に積まれている
+  （headers 送信前 / meta 送信 / delta ストリーム / done / 0トークン応答、
+  v0.2.39/49/55/116）。1つ触ると孤立ユーザーターンが再発する。`generation_lock` は
+  非再入で、1リクエストが二重取得しない設計（v0.2.128 でrewrite呼び出しをロック外へ）。
+  例外ハンドラ内の二重フォルト対策は `_safe_error`（v0.2.89/90）。
+- **`chunk.py`** — `estimate_tokens()` / `_truncate_tokens()`(qa.py) / `_tail()` の3関数は
+  トークン計数で**同期義務**がある（`_LONG_RUN_THRESHOLD`・`_is_word_char` を共有、
+  v0.2.114/115/119）。1つ変えたら3つ揃える。`_CJK_RANGES` は `is_cjk`/`query_terms`/
+  `fts_query`/`_NEG_RE` が共有する単一の真実（v0.2.107/118）。
+- **`search.py`** — `_NEG_RE` の lookbehind は ASCII と CJK の両方を除外する必要がある
+  （CJK直後のハイフンを否定構文と誤認しない、v0.2.128）。RRF スコアは lexical rerank 前に
+  `_minmax` で [0,1] 正規化必須（v0.2.60）。`rrf_fuse_lists` の Hit マージは list 順序に
+  依存しない（v0.2.125）。
+- **`citation.py`** — 「確信できる時のみ主張、判定不能なら沈黙」が設計原則（v0.1.4/1.5）。
+  集約スコアを足したくなっても不可。`CONFIRM_MIN=0.30` は CJK 較正値。

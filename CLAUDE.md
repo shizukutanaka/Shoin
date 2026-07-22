@@ -309,7 +309,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.134
+## Version History: v0.1.37 → v0.2.135
+
+### v0.2.135 (2026-07-18)
+**Added (docs)**: Second-pass deepening of the v0.2.134 agent instruction set + product review — following the project's own "re-scrutinize the previous round's deliverable" discipline (v0.1.4/0.1.5 lineage).
+
+1. **`docs/agents/sonnet.md` にタスクレシピ集(§4)とエントリテンプレート(§5)を追補** — 初版は原則の列挙に留まり、手を動かすための具体的手順が無かった。頻出3タスク（環境変数追加 / バグ修正の11段手順 / i18n）を実コマンド・参照実装付きで段階列挙し、Version History エントリの骨組みテンプレートを追加。Sonnet 級には抽象原則より手順書が効くという判断。
+2. **`docs/agents/opus.md` に監査ワークフロー雛形(§5)と危険地図(§6)を追補** — find→敵対的検証→修正の回し方と発見の採用基準（「具体的入力→具体的誤出力」のみ）、および store/server/chunk/search/citation のファイル別「触る前に読むべき History エントリ」一覧（migration 並行冪等・`_retry_on_lock` の substring 限界・SSE 切断ガードの層構造・トークン計数3関数の同期義務・`_NEG_RE` lookbehind・沈黙原則）。
+3. **`docs/product-review.md` の追補** — 長所に XSS 安全 UI(`textContent`のみ, `innerHTML` 不使用を確認)+ aria-label i18n(`data-i18n-aria`)を、短所にブラウザ自動化テストの恒久スイート不在(`grep -ri playwright tests/` が空を確認)を、バックログに Playwright スモークの CI 追加(#11)を追加。
+
+コード変更なし。`pytest tests/` は 669 件のまま全緑、`mypy shoin/`・`ruff check` 影響なし。全追補主張はコード実挙動と突合済み。
 
 ### v0.2.134 (2026-07-18)
 **Added (docs)**: Model-tier agent instruction documents + full refresh of the product review.
