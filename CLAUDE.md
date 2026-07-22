@@ -309,7 +309,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.135
+## Version History: v0.1.37 → v0.2.136
+
+### v0.2.136 (2026-07-18)
+**Added**: Structured `PY` (publication year) field in the RIS export — the RIS parallel of the BibTeX `year` field (v0.2.133), closing an asymmetry that v0.2.133 itself introduced (BibTeX gained a structured year, RIS did not). Reference managers (Zotero, Mendeley, EndNote) use RIS `PY` as the canonical year field for author-year citation and sorting; the generic `DA` (date) field is not reliably parsed into a year by all of them, so a RIS export could not be cited/sorted author-year despite carrying the date. `export_ris()` now emits `PY  - YYYY` (before the existing `DA` line) using the same guarded 4-digit leading-year extraction as BibTeX (`year.isdigit() and len(year)==4`), so a malformed/empty `added_at` produces no stray `PY` line. 1 regression test added (`test_ris_emits_structured_py_year_field`; the existing empty-`added_at` test extended to assert no `PY  -` line appears), fail-then-pass verified via `git stash` on `shoin/export.py`. `pytest tests/` now runs 670 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.
 
 ### v0.2.135 (2026-07-18)
 **Added (docs)**: Second-pass deepening of the v0.2.134 agent instruction set + product review — following the project's own "re-scrutinize the previous round's deliverable" discipline (v0.1.4/0.1.5 lineage).

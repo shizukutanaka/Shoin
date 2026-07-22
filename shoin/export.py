@@ -201,13 +201,17 @@ def export_ris(store: Store, notebook_id: int) -> str:
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
         date = ((src.added_at or "")[:10].replace("-", "/")) or "unknown"
-        lines = [
-            "TY  - GEN",
-            f"TI  - {_ris_escape(src.title)}",
-            f"UR  - {_ris_escape(src.origin)}",
-            f"DA  - {date}",
-            "ER  -",
-        ]
+        lines = ["TY  - GEN", f"TI  - {_ris_escape(src.title)}", f"UR  - {_ris_escape(src.origin)}"]
+        # PY (publication year) is the canonical year field reference managers
+        # (Zotero, Mendeley) use for author-year citation and sorting — DA is a
+        # generic date they don't reliably derive the year from. Emit it only for
+        # a genuine 4-digit leading year, mirroring the BibTeX `year` field
+        # (v0.2.133); a malformed/empty added_at produces no stray PY line.
+        year = (src.added_at or "")[:4]
+        if year.isdigit() and len(year) == 4:
+            lines.append(f"PY  - {year}")
+        lines.append(f"DA  - {date}")
+        lines.append("ER  -")
         entries.append("\n".join(lines))
     return "\n\n".join(entries) + ("\n" if entries else "")
 

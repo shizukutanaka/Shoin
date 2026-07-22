@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.135")
+        self.assertEqual(VERSION, "0.2.136")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5160,6 +5160,24 @@ class TestExport(unittest.TestCase):
         da_lines = [l for l in ris.splitlines() if l.startswith("DA  -")]
         self.assertEqual(len(da_lines), 1)
         self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
+        # No structured PY (year) line for a malformed/empty added_at (v0.2.136).
+        self.assertNotIn("PY  -", ris)
+
+    def test_ris_emits_structured_py_year_field(self) -> None:
+        """export_ris must emit a `PY  - YYYY` field from added_at's leading
+        year — the RIS parallel of the BibTeX `year` field (v0.2.133) — so
+        reference managers can cite/sort author-year. PY precedes DA (v0.2.136)."""
+        from shoin.export import export_ris
+        with make_store() as s:
+            nb = s.create_notebook("nb-ris-py")
+            src = s.add_source(nb.id, "url", "論文", "https://x.test", "sha-py")
+            s.conn.execute(
+                "UPDATE sources SET added_at='2017-06-12T00:00:00' WHERE id=?", (src.id,)
+            )
+            s.conn.commit()
+            ris = export_ris(s, nb.id)
+        self.assertIn("PY  - 2017", ris)
+        self.assertLess(ris.index("PY  - "), ris.index("DA  - "))
 
     def test_export_markdown_multiline_user_question_stays_on_one_label_line(self) -> None:
         """A user question with an embedded newline must not break the **User**: label.
