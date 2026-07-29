@@ -196,12 +196,20 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
     return "\n\n".join(entries) + ("\n" if entries else "")
 
 
+# RIS reference type per Shoin source kind. Shoin is primarily a URL-ingesting
+# tool, so most sources are web resources — RIS `ELEC` (electronic/web) lets
+# reference managers categorize and render them as such instead of the opaque
+# `GEN` (generic). File-based kinds have no better standard RIS type, so GEN.
+_RIS_TYPE = {"url": "ELEC", "html": "ELEC"}
+
+
 def export_ris(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
         date = ((src.added_at or "")[:10].replace("-", "/")) or "unknown"
-        lines = ["TY  - GEN", f"TI  - {_ris_escape(src.title)}", f"UR  - {_ris_escape(src.origin)}"]
+        ty = _RIS_TYPE.get(src.kind, "GEN")
+        lines = [f"TY  - {ty}", f"TI  - {_ris_escape(src.title)}", f"UR  - {_ris_escape(src.origin)}"]
         # PY (publication year) is the canonical year field reference managers
         # (Zotero, Mendeley) use for author-year citation and sorting — DA is a
         # generic date they don't reliably derive the year from. Emit it only for

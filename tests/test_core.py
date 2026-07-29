@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.136")
+        self.assertEqual(VERSION, "0.2.137")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5178,6 +5178,20 @@ class TestExport(unittest.TestCase):
             ris = export_ris(s, nb.id)
         self.assertIn("PY  - 2017", ris)
         self.assertLess(ris.index("PY  - "), ris.index("DA  - "))
+
+    def test_ris_type_reflects_source_kind(self) -> None:
+        """RIS TY must be ELEC for web sources (Shoin's primary kind) so
+        reference managers categorize them as electronic resources, and GEN
+        for file-based kinds that have no better standard type (v0.2.137)."""
+        from shoin.export import export_ris
+        with make_store() as s:
+            nb = s.create_notebook("nb-ris-ty")
+            s.add_source(nb.id, "url", "Web記事", "https://example.test/a", "sha-u")
+            s.add_source(nb.id, "pdf", "論文.pdf", "/tmp/p.pdf", "sha-p")
+            s.add_source(nb.id, "html", "ページ", "/tmp/p.html", "sha-h")
+            ris = export_ris(s, nb.id)
+        ty_lines = [ln for ln in ris.splitlines() if ln.startswith("TY  -")]
+        self.assertEqual(ty_lines, ["TY  - ELEC", "TY  - GEN", "TY  - ELEC"])
 
     def test_export_markdown_multiline_user_question_stays_on_one_label_line(self) -> None:
         """A user question with an embedded newline must not break the **User**: label.

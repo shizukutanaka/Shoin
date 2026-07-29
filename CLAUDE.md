@@ -309,7 +309,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.136
+## Version History: v0.1.37 → v0.2.137
+
+### v0.2.137 (2026-07-18)
+**Added**: RIS reference type now reflects the source kind. `export_ris()` hardcoded `TY  - GEN` (generic) for every entry regardless of what the source actually is — but Shoin is primarily a URL-ingesting tool, and RIS defines `ELEC` (electronic/web resource) exactly for that case. Reference managers use `TY` to categorize entries and choose how to render them (a web article vs. an unspecified generic item), so every exported web source was mis-typed. New `_RIS_TYPE` map: `url`/`html` → `ELEC`, everything else → `GEN` (file-based kinds have no better standard RIS type, so the previous behavior is preserved for them). 1 regression test added (`test_ris_type_reflects_source_kind`, asserting the exact TY sequence for url/pdf/html sources), fail-then-pass verified via `git stash` on `shoin/export.py`. **Not changed**: BibTeX's `@misc` — `@online` is BibLaTeX-only and would break plain-BibTeX consumers, so `@misc` remains correct there. `pytest tests/` now runs 671 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.
 
 ### v0.2.136 (2026-07-18)
 **Added**: Structured `PY` (publication year) field in the RIS export — the RIS parallel of the BibTeX `year` field (v0.2.133), closing an asymmetry that v0.2.133 itself introduced (BibTeX gained a structured year, RIS did not). Reference managers (Zotero, Mendeley, EndNote) use RIS `PY` as the canonical year field for author-year citation and sorting; the generic `DA` (date) field is not reliably parsed into a year by all of them, so a RIS export could not be cited/sorted author-year despite carrying the date. `export_ris()` now emits `PY  - YYYY` (before the existing `DA` line) using the same guarded 4-digit leading-year extraction as BibTeX (`year.isdigit() and len(year)==4`), so a malformed/empty `added_at` produces no stray `PY` line. 1 regression test added (`test_ris_emits_structured_py_year_field`; the existing empty-`added_at` test extended to assert no `PY  -` line appears), fail-then-pass verified via `git stash` on `shoin/export.py`. `pytest tests/` now runs 670 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.
