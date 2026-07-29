@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.137")
+        self.assertEqual(VERSION, "0.2.138")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5178,6 +5178,46 @@ class TestExport(unittest.TestCase):
             ris = export_ris(s, nb.id)
         self.assertIn("PY  - 2017", ris)
         self.assertLess(ris.index("PY  - "), ris.index("DA  - "))
+
+    def test_export_status_line_warns_on_low_coverage(self) -> None:
+        """An answer citing only a small share of its sources may be ignoring
+        retrieved evidence. The Web UI has always warned; exports dropped the
+        signal silently until v0.2.138 — an archived answer must carry the same
+        caveat the reader saw in-app."""
+        from shoin.export import _status_line
+
+        low = {"cited": [1], "invalid": [], "coverage": 0.25, "n_sources": 4}
+        self.assertIn("(1/4)", _status_line(low))
+        # Good coverage → no warning.
+        high = {"cited": [1, 2, 3], "invalid": [], "coverage": 0.75, "n_sources": 4}
+        self.assertNotIn("被覆", _status_line(high))
+        # No citations at all → coverage is not the story (uncited/invalid are).
+        none_cited = {"cited": [], "invalid": [], "coverage": 0.0, "n_sources": 4}
+        self.assertNotIn("被覆", _status_line(none_cited))
+
+    def test_print_report_warns_on_low_coverage(self) -> None:
+        """CLI parity for the same low-coverage signal (v0.2.138)."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1], "invalid": [], "coverage": 0.25, "n_sources": 4,
+                "source_map": {"S1": "doc0"}, "confirmed": [], "misattributed": [],
+            })
+        self.assertIn("1/4", buf.getvalue())
+
+        buf2 = _io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            _cli._print_report({
+                "cited": [1, 2, 3], "invalid": [], "coverage": 0.75, "n_sources": 4,
+                "source_map": {"S1": "a", "S2": "b", "S3": "c"},
+                "confirmed": [], "misattributed": [],
+            })
+        self.assertNotIn("被覆", buf2.getvalue())
 
     def test_ris_type_reflects_source_kind(self) -> None:
         """RIS TY must be ELEC for web sources (Shoin's primary kind) so

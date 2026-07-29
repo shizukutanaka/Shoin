@@ -309,7 +309,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.137
+## Version History: v0.1.37 → v0.2.138
+
+### v0.2.138 (2026-07-18)
+**Added**: Low-citation-coverage warning on the CLI and in the Markdown export, plus a single shared threshold constant. Found by a First-Principles pass over the product: if the core promise is "answers grounded in *your* sources, verifiably", then "this answer cited only 1 of the 4 sources it was given" is a first-class signal the reader needs — it says the answer may be ignoring retrieved evidence. `coverage` has always been computed in `make_report()` and warned about in the Web UI (`chat.coverage.low` badge), but **both the CLI report and the Markdown export silently dropped it** — the same three-surface parity gap that the section breadcrumb had (v0.2.130/131/132), on a signal that predates all of them.
+
+- `citation.py`: new `COVERAGE_LOW = 0.5` constant with a docstring explaining the semantic. Previously the threshold was a bare `0.5` literal repeated in **three** places in `index.html` and nowhere else — no single source of truth, and nothing stopping the surfaces from drifting apart on what counts as "low".
+- `cli.py` `_print_report()`: prints `⚠ 引用被覆 低: {n}/{total} ソースのみ引用…` / `⚠ Low citation coverage: only {n}/{total} sources cited…` (new `cite.coverage_low` key, ja/en) when the answer has citations but coverage is below the threshold.
+- `export.py` `_status_line()`: appends `⚠引用被覆 低 (1/4)` / `⚠ low citation coverage (1/4)` to the existing status line (new `status_coverage_low` key, ja/en).
+- `index.html`: the three hardcoded `0.5` literals now reference one `COVERAGE_LOW` JS constant documented as mirroring the Python one.
+- Guard semantics on all surfaces: only warn when the answer actually **has** citations (`cited` non-empty) — a zero-citation answer's story is told by `uncited`/`invalid`, not by coverage.
+
+2 regression tests added (export status line: low warns with `(1/4)` / high doesn't / no-citations doesn't; CLI report: same low-vs-high pair), fail-then-pass verified via `git stash` on `shoin/export.py`+`shoin/cli.py`. Live-verified end-to-end through `shoin ask` (4 sources, 1 cited → warning printed) and `export_markdown()`. `pytest tests/` now runs 673 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
 
 ### v0.2.137 (2026-07-18)
 **Added**: RIS reference type now reflects the source kind. `export_ris()` hardcoded `TY  - GEN` (generic) for every entry regardless of what the source actually is — but Shoin is primarily a URL-ingesting tool, and RIS defines `ELEC` (electronic/web resource) exactly for that case. Reference managers use `TY` to categorize entries and choose how to render them (a web article vs. an unspecified generic item), so every exported web source was mis-typed. New `_RIS_TYPE` map: `url`/`html` → `ELEC`, everything else → `GEN` (file-based kinds have no better standard RIS type, so the previous behavior is preserved for them). 1 regression test added (`test_ris_type_reflects_source_kind`, asserting the exact TY sequence for url/pdf/html sources), fail-then-pass verified via `git stash` on `shoin/export.py`. **Not changed**: BibTeX's `@misc` — `@online` is BibLaTeX-only and would break plain-BibTeX consumers, so `@misc` remains correct there. `pytest tests/` now runs 671 tests. `mypy shoin/` and `ruff check shoin/export.py` remain clean.

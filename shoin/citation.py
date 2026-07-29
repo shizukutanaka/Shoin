@@ -52,6 +52,12 @@ CONFIRM_MIN = 0.30
 # cited one by at least this margin — a deliberately wide gap so synonym
 # paraphrase (which matches nothing strongly) is never mistaken for a wrong number.
 MISMATCH_GAP = 0.20
+# An answer citing fewer than this fraction of the sources it was given may be
+# ignoring retrieved evidence — a signal the reader should know about, since the
+# product's promise is that answers are grounded in *the user's* sources. Shared
+# by every surface that reports coverage (Web UI badge, CLI report, Markdown
+# export) so the three cannot drift apart on what counts as "low".
+COVERAGE_LOW = 0.5
 
 # Phrases the system prompt (qa.py SYSTEM_PROMPT rule 3) instructs the model to use
 # when a fact is not in the sources ("state explicitly that it's not in the source,

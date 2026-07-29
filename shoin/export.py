@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from .citation import COVERAGE_LOW
 from .config import ui_lang
 from .store import Store
 
@@ -18,6 +19,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
+    "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
 }
 
 
@@ -52,6 +54,22 @@ def _status_line(report: dict[str, object]) -> str:
     uncited = report.get("uncited")
     if isinstance(uncited, list) and uncited:
         bits.append(f"{_t('status_uncited')} ({len(uncited)})")
+    # Low coverage = the answer cited only a small share of the sources it was
+    # given, i.e. it may be ignoring retrieved evidence. Warned in the Web UI
+    # since early on but silently dropped from exports until v0.2.138 — an
+    # archived answer should carry the same caveat the app showed the reader.
+    cov = report.get("coverage")
+    cited = report.get("cited")
+    n_sources = report.get("n_sources")
+    if (
+        isinstance(cov, (int, float))
+        and isinstance(cited, list)
+        and cited
+        and isinstance(n_sources, int)
+        and n_sources
+        and cov < COVERAGE_LOW
+    ):
+        bits.append(f"{_t('status_coverage_low')} ({len(set(cited))}/{n_sources})")
     return " / ".join(bits)
 
 

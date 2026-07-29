@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 
-from .citation import CitationReport
+from .citation import COVERAGE_LOW, CitationReport
 from .config import (
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
@@ -46,6 +46,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
+        "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -79,6 +80,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
+        "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -215,6 +217,14 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.uncited", n=str(len(uncited))))
         for sentence in uncited:
             print(f"  - {sentence}")
+    # Low coverage = the answer cited only a small share of the sources it was
+    # given, i.e. it may be ignoring retrieved evidence. The Web UI has warned
+    # about this since early on; the CLI silently dropped it despite REQ-103
+    # CLI/Web parity (v0.2.138).
+    cov = report.get("coverage")
+    n_sources = report.get("n_sources") or 0
+    if isinstance(cov, (int, float)) and report["cited"] and n_sources and cov < COVERAGE_LOW:
+        print(_t("cite.coverage_low", n=str(len(set(report["cited"]))), total=str(n_sources)))
 
 
 def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
