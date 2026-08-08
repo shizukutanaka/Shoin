@@ -652,6 +652,52 @@ class TestGrounding(unittest.TestCase):
         2: "和紙は楮の繊維を漉いて作られる伝統的な紙である。",
     }
 
+    def test_multi_citation_sentence_does_not_falsely_accuse(self) -> None:
+        """Two correctly-cited claims joined into ONE sentence must not produce a
+        false 'wrong source number' accusation (v0.2.140).
+
+        Before sub-sentence attribution, the whole sentence's bigrams were
+        compared against EACH cited source, so a long second clause diluted the
+        first citation's overlap below CONFIRM_MIN while the co-cited source
+        cleared it by more than MISMATCH_GAP — flagging a correct citation as
+        misattributed. Ordinary Japanese clause joining ("…であり、…") triggers it.
+        """
+        sources = {
+            1: "和紙は楮の繊維から作られる。",
+            2: (
+                "活版印刷は金属活字を組んで版を作り、インクを塗って紙に転写する複製技術"
+                "であり、書物の大量生産を可能にした重要な発明である。"
+            ),
+        }
+        short = "和紙は楮から作られる"
+        long_ = (
+            "活版印刷は金属活字を組んで版を作り、インクを塗って紙に転写する複製技術"
+            "であり、書物の大量生産を可能にした重要な発明である"
+        )
+        # Split across two sentences: both confirmed (the reference behavior).
+        self.assertEqual(
+            verify_grounding(f"{short}[S1]。{long_}[S2]。", sources), ([1, 2], [])
+        )
+        # The SAME claims in one sentence must reach the same verdict.
+        self.assertEqual(
+            verify_grounding(f"{short}であり[S1]、{long_}[S2]。", sources), ([1, 2], [])
+        )
+
+    def test_multi_citation_sentence_still_detects_real_misattribution(self) -> None:
+        """Sub-sentence attribution must not blunt the check: a clause citing a
+        source that clearly belongs to the OTHER clause is still flagged."""
+        sources = {
+            1: "和紙は楮の繊維から作られる伝統的な紙である。",
+            2: "活版印刷は金属活字を組んで版を作る技術である。",
+        }
+        # Clause 1 (about 和紙) cites S2, clause 2 (about 活版印刷) cites S1 — swapped.
+        confirmed, misattr = verify_grounding(
+            "和紙は楮の繊維から作られる紙であり[S2]、活版印刷は金属活字を組む技術である[S1]。",
+            sources,
+        )
+        self.assertEqual(confirmed, [])
+        self.assertEqual(misattr, [1, 2])
+
     def test_confirmed_when_wording_overlaps(self) -> None:
         confirmed, misattr = verify_grounding("書院は引用付きで検索する[S1]。", self.SOURCES)
         self.assertEqual(confirmed, [1])

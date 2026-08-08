@@ -309,7 +309,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.139
+## Version History: v0.1.37 → v0.2.140
+
+### v0.2.140 (2026-07-18)
+**Fixed**: `verify_grounding()` falsely accused a **correctly cited** source of being the wrong source number when two claims were joined into one sentence — the exact failure mode this module's design forbids ("never accuse a correct answer", v0.1.4). Found by following recent citation-attribution research (sub-sentence granularity: [arXiv:2509.20859](https://arxiv.org/html/2509.20859v1), [NAACL 2025 positional fine-grained citation](https://aclanthology.org/2025.naacl-long.23.pdf)) back into Shoin's own lexical checker.
+
+- **Reproduced**: sources `S1=和紙は楮の繊維から作られる。` / `S2=活版印刷は…重要な発明である。` (long). As two sentences — `和紙は楮から作られる[S1]。活版印刷は…である[S2]。` → `([1,2], [])`, both confirmed, correct. The **same claims joined with ordinary Japanese 連用中止形** — `和紙は楮から作られであり[S1]、活版印刷は…である[S2]。` → `([2], [1])`: **S1 flagged misattributed**. Root cause: the whole sentence's bigrams were compared against *each* cited source, so the long second clause diluted S1's overlap from 0.889 to 0.118 (below `CONFIRM_MIN`) while co-cited S2 cleared it by more than `MISMATCH_GAP` — manufacturing a "wrong source number" verdict out of prose style alone. JA-first users hit this constantly.
+- **Fix** — sub-sentence attribution, dependency-free: the citation markers *are* the clause delimiters, so no NLI model or LLM is needed. New `_segment_claims()` maps each citation to the text since the previous marker; `verify_grounding()` uses that clause for both the confirm test and the `MISMATCH_GAP` rival comparison (both sides must be measured on the same unit). Deliberately conservative: it returns `{}` — leaving whole-sentence behavior completely untouched — when the sentence has fewer than two citation positions, and falls back per-citation when a segment is empty (adjacent markers like `[S1][S2]`).
+- **Not blunted**: a clause citing a source that plainly belongs to the *other* clause is still flagged (regression test asserts a swapped-citation sentence yields `misattributed == [1, 2]`).
+
+2 regression tests added, fail-then-pass verified via `git stash` on `shoin/citation.py`. `pytest tests/` now runs 678 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
 
 ### v0.2.139 (2026-07-18)
 **Added**: Cited passages are now marked inside the full-source viewer — the last mile of "verifiable citation". A First-Principles pass asked what a *human* needs to verify a citation: (a) which source (b) which section (c) the supporting text (d) **that the text really sits in the document, in context**. (a)–(c) shipped in v0.2.130–132 + `source_excerpts`; (d) did not: the viewer showed the excerpt and, separately, the whole source as one concatenated blob, leaving the reader to eyeball-scan a long document for the passage. Recent work on visual source attribution (VISA, arXiv:2412.14457) and RAG-trust UI practice both point at highlight-based attribution as the mechanism that closes this.

@@ -199,6 +199,44 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
     src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
     confirmed: set[int] = set()
     misattributed: set[int] = set()
+
+    def _segment_claims(norm: str, valid: list[int]) -> dict[int, set[str]]:
+        """Attribute each citation to the clause that precedes it.
+
+        A sentence carrying several citations makes several claims; comparing the
+        WHOLE sentence against each cited source dilutes every one of them with
+        the other clauses' wording. With ordinary Japanese clause joining
+        ("…であり、…") that dilution is severe enough to push a correctly-cited
+        source below CONFIRM_MIN *and* let a different co-cited source win by the
+        MISMATCH_GAP margin — a false "wrong source number" accusation, which is
+        exactly what this module's design forbids (v0.1.4: never accuse a correct
+        answer). The citation markers are themselves the clause delimiters, so the
+        split needs no NLI model or LLM: the text since the previous marker is what
+        this marker cites. Sub-sentence attribution is where citation research is
+        heading (arXiv:2509.20859); this is its dependency-free special case.
+
+        Returns {} when the sentence has fewer than two citation positions — the
+        whole-sentence comparison is already correct there and stays untouched.
+        """
+        spans = list(_BRACKET_RE.finditer(norm))
+        cited_spans = [
+            (m, [int(x) for x in _SNUM_RE.findall(m.group(1)) if int(x) in valid])
+            for m in spans
+        ]
+        cited_spans = [(m, ns) for m, ns in cited_spans if ns]
+        if len(cited_spans) < 2:
+            return {}
+        out: dict[int, set[str]] = {}
+        prev_end = 0
+        for m, ns in cited_spans:
+            seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
+            prev_end = m.end()
+            bg = _bigrams(seg)
+            if not bg:
+                continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
+            for n in ns:
+                out[n] = bg
+        return out
     # Carry the most recent non-empty claim bigrams so that citation-only fragments
     # (produced by the (?<=\.)(?=\s) split, e.g. "Sentence. [S1]" → " [S1]") can
     # still be verified against the sentence they annotate.
@@ -229,16 +267,23 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
             prev_claim = claim
         if not claim:
             continue
+        # Sub-sentence attribution: when this sentence carries several citations,
+        # each is judged against the clause it annotates rather than the whole
+        # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            overlap_n = _overlap(claim, src_bg[n])
+            claim_n = segments.get(n, claim)
+            overlap_n = _overlap(claim_n, src_bg[n])
             if overlap_n >= CONFIRM_MIN:
                 confirmed.add(n)
             else:
                 # A different source — including co-cited ones — may match far better,
                 # indicating this specific S-number is wrong even if others in the same
                 # sentence are correctly cited.
+                # Compare rivals against the SAME clause, or the two sides of the
+                # MISMATCH_GAP comparison would be measured on different units.
                 best_other = max(
-                    (_overlap(claim, src_bg[k]) for k in src_bg if k != n), default=0.0
+                    (_overlap(claim_n, src_bg[k]) for k in src_bg if k != n), default=0.0
                 )
                 if best_other >= CONFIRM_MIN and best_other - overlap_n >= MISMATCH_GAP:
                     misattributed.add(n)
