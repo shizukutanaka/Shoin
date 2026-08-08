@@ -614,6 +614,26 @@ class TestCitationSourceIds(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_build_context_chunk_ids_only_include_chunks_in_prompt(self) -> None:
+        """source_chunk_ids must list exactly the chunks whose text reached the
+        prompt — a chunk dropped by the per-source token budget must NOT be
+        marked as cited in the viewer (v0.2.139)."""
+        from shoin.search import Hit
+
+        with Store(":memory:") as s:
+            nb = s.create_notebook("nb").id
+            src = s.add_source(nb, "txt", "doc", "o", "sha")
+            long_text = "あ" * 400  # ~400 tokens each, so a small budget admits few
+            ids = s.add_chunks(src.id, [long_text, long_text, long_text])
+            hits = [Hit(cid, src.id, long_text, 1.0) for cid in ids]
+            ctx = build_context(s, hits, budget_tokens=500)
+            self.assertEqual(len(ctx.source_chunk_ids), 1)
+            got = ctx.source_chunk_ids[0]
+            # Budget admits fewer than all three; every id reported must be real
+            # and appear in relevance order, with no un-included chunk listed.
+            self.assertLess(len(got), len(ids))
+            self.assertEqual(got, ids[: len(got)])
+
     def test_build_context_source_contexts_empty_for_contextless_chunks(self) -> None:
         """A source whose chunks were added with no context (pre-v0.2.123
         backfill / plain add_chunks) yields an empty section string, not a crash."""
@@ -1220,6 +1240,24 @@ class TestValidateCitationsEdgeCases(unittest.TestCase):
     def test_make_report_source_contexts_length_mismatch_raises(self) -> None:
         with self.assertRaises(ValueError):
             make_report("根拠[S1]。", ["論文A", "論文B"], source_contexts=["x"])
+
+    def test_make_report_source_chunk_ids_mapping_and_omits_empty(self) -> None:
+        """source_chunk_ids maps S-numbers to the chunk ids actually placed in
+        the prompt, so the UI can mark those exact passages in the full source
+        (v0.2.139). A source contributing no chunk is omitted."""
+        rep = make_report(
+            "根拠[S1]と[S2]。",
+            ["論文A", "論文B"],
+            source_ids=[10, 20],
+            source_bodies=["本文A", "本文B"],
+            source_contexts=["", ""],
+            source_chunk_ids=[[7, 8], []],
+        )
+        self.assertEqual(rep.get("source_chunk_ids"), {"S1": [7, 8]})
+
+    def test_make_report_source_chunk_ids_length_mismatch_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            make_report("根拠[S1]。", ["論文A", "論文B"], source_chunk_ids=[[1]])
 
 
 class TestI18n(unittest.TestCase):

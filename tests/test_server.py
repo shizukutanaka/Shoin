@@ -154,6 +154,9 @@ class ServerTest(unittest.TestCase):
         status, chunks = self._json("GET", f"/api/sources/{src_id}/text")
         self.assertEqual(status, 200)
         self.assertIn("和紙", str(chunks["chunks"][0]["text"]))
+        # `id` lets the viewer mark which chunks the answer cited (v0.2.139).
+        self.assertIsInstance(chunks["chunks"][0]["id"], int)
+        self.assertIn("seq", chunks["chunks"][0])
 
         # SSE ask: meta -> delta -> done, message persisted with report
         status, _, raw = self._req(

@@ -309,7 +309,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.138
+## Version History: v0.1.37 → v0.2.139
+
+### v0.2.139 (2026-07-18)
+**Added**: Cited passages are now marked inside the full-source viewer — the last mile of "verifiable citation". A First-Principles pass asked what a *human* needs to verify a citation: (a) which source (b) which section (c) the supporting text (d) **that the text really sits in the document, in context**. (a)–(c) shipped in v0.2.130–132 + `source_excerpts`; (d) did not: the viewer showed the excerpt and, separately, the whole source as one concatenated blob, leaving the reader to eyeball-scan a long document for the passage. Recent work on visual source attribution (VISA, arXiv:2412.14457) and RAG-trust UI practice both point at highlight-based attribution as the mechanism that closes this.
+
+Solved **exactly**, not heuristically, by carrying the chunk ids that were actually placed in the prompt:
+- `qa.py`: `GroundedContext.source_chunk_ids: list[list[int]]` (S1..Sn). `build_context()` collects `h.chunk_id` in lock-step with `texts`, so a chunk dropped by the per-source token budget is never marked — and a chunk *truncated* to fit still is, because its text did reach the prompt.
+- `citation.py`: `make_report(..., source_chunk_ids=None)` → `report["source_chunk_ids"] = {"S1": [7, 8]}`; `CitationReport` gained `NotRequired[dict[str, list[int]]]`. Length-validated and empty-omitting like `source_contexts`. All three callers (`qa.ask()` normal+degraded, `server._h_ask_sse()`, `studio.generate()`) wired.
+- `store.py`/`server.py`: new `id_seq_text_chunks_for_source()`; `GET /api/sources/{id}/text` now returns `id` alongside `seq`/`text` (additive — the older `text_chunks_for_source()` is untouched since other callers depend on its shape).
+- `index.html`: new `renderFullSource()` renders the full text chunk-by-chunk instead of one joined string, adds `.cited-chunk` styling + a `引用箇所`/`cited here` label to the marked chunks, and `scrollIntoView()`s the first one. `citedIds` threads through `renderWithSeals` → `openSeal` → `showSource`, the same path as `source_contexts`. Absent (old persisted reports, Studio outputs) → unmarked plain rendering, no scroll.
+
+4 regression tests added (build_context lists only in-prompt chunks; make_report mapping/omit-empty/length-mismatch; `/text` returns `id`), fail-then-pass verified via `git stash`. **UI live-verified in a real browser** (Playwright, Chromium, real server, 4-chunk document): asking a question and expanding "view full source" rendered 4 chunks with **exactly 1** marked `cited here` and scrolled to it — confirming cited/uncited discrimination, not blanket highlighting. Zero console/page errors.
+
+`pytest tests/` now runs 676 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
 
 ### v0.2.138 (2026-07-18)
 **Added**: Low-citation-coverage warning on the CLI and in the Markdown export, plus a single shared threshold constant. Found by a First-Principles pass over the product: if the core promise is "answers grounded in *your* sources, verifiably", then "this answer cited only 1 of the 4 sources it was given" is a first-class signal the reader needs — it says the answer may be ignoring retrieved evidence. `coverage` has always been computed in `make_report()` and warned about in the Web UI (`chat.coverage.low` badge), but **both the CLI report and the Markdown export silently dropped it** — the same three-surface parity gap that the section breadcrumb had (v0.2.130/131/132), on a signal that predates all of them.

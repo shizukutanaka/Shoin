@@ -159,6 +159,11 @@ class GroundedContext:
     # user can see which SECTION a citation came from, not only its excerpt. Empty
     # string for a source whose top hit has no context (pre-v0.2.123 chunks).
     source_contexts: list[str] = field(default_factory=list)
+    # Chunk ids actually placed in the prompt, per source (S1..Sn order). Lets the
+    # UI mark exactly which passages of the full source text the answer was
+    # grounded in — the last mile of "verifiable citation": the reader can see the
+    # cited text in its original position, not just as a detached excerpt.
+    source_chunk_ids: list[list[int]] = field(default_factory=list)
 
 
 @dataclass
@@ -252,6 +257,7 @@ def build_context(
     titles: list[str] = []
     bodies: list[str] = []
     contexts: list[str] = []
+    chunk_id_lists: list[list[int]] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
     per_source = max(budget_tokens // max(len(order), 1), MIN_PER_SOURCE_TOKENS)
@@ -267,6 +273,12 @@ def build_context(
         snums[source_id] = idx
         used = 0
         texts: list[str] = []
+        # Chunk ids actually placed in the prompt for this source (not merely
+        # retrieved) — lets the UI mark the exact passages in the full-source
+        # view so a reader can confirm the cited text really is in the document
+        # (visual source attribution, cf. VISA arXiv:2412.14457). Collected in
+        # lock-step with `texts` so a chunk dropped by the budget is never marked.
+        chunk_ids: list[int] = []
         for h in grouped[source_id]:
             cost = estimate_tokens(h.text)
             # Zero-token text (Arabic, Cyrillic, Hebrew, pure punctuation — scripts
@@ -287,15 +299,20 @@ def build_context(
                         # Zero-token text: _truncate_tokens may also return the full
                         # text (same 0-count problem). Use char window as fallback.
                         texts.append(h.text[: remaining * 5])
+                    # A truncated chunk IS in the prompt, so it counts as cited.
+                    chunk_ids.append(h.chunk_id)
                 break
             texts.append(h.text)
+            chunk_ids.append(h.chunk_id)
             used += effective_cost
         body = "\n…\n".join(texts)
         bodies.append(body)
+        chunk_id_lists.append(chunk_ids)
         parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
     return GroundedContext(
-        titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts
+        titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts,
+        chunk_id_lists,
     )
 
 
@@ -555,6 +572,7 @@ def ask(
                     context.source_ids,
                     context.source_bodies,
                     context.source_contexts,
+                    context.source_chunk_ids,
                 ),
             )
         except LLMError:
@@ -565,6 +583,7 @@ def ask(
                 context.source_ids,
                 context.source_bodies,
                 context.source_contexts,
+                    context.source_chunk_ids,
                 check_uncited=False,
             )
             report["degraded"] = True

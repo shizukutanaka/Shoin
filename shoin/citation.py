@@ -133,6 +133,12 @@ class CitationReport(TypedDict):
     # a citation is grounded in, not just its text. Only present for S-numbers with
     # a non-empty section. Absent on old persisted reports — consumers must guard.
     source_contexts: NotRequired[dict[str, str]]
+    # Maps "S1" -> the chunk ids whose text was actually placed in the prompt for
+    # that source. Lets the UI mark those exact passages inside the full source
+    # text, so a reader can verify the cited wording in its original position
+    # instead of trusting a detached excerpt (visual source attribution).
+    # Absent on old persisted reports — consumers must guard.
+    source_chunk_ids: NotRequired[dict[str, list[int]]]
     # Sentences that assert content with zero [S#] citations anywhere in them —
     # invisible to verify_grounding(), which only checks already-cited sentences.
     # Present only when n_sources > 0 (nothing to cite against otherwise).
@@ -314,6 +320,7 @@ def make_report(
     source_ids: list[int] | None = None,
     source_bodies: list[str] | None = None,
     source_contexts: list[str] | None = None,
+    source_chunk_ids: list[list[int]] | None = None,
     *,
     check_uncited: bool = True,
 ) -> CitationReport:
@@ -364,6 +371,15 @@ def make_report(
         sc = {f"S{i + 1}": ctx for i, ctx in enumerate(source_contexts) if ctx}
         if sc:
             report["source_contexts"] = sc
+    if source_chunk_ids is not None:
+        if len(source_chunk_ids) != n:
+            raise ValueError(
+                f"source_chunk_ids length {len(source_chunk_ids)} must match"
+                f" source_titles length {n}"
+            )
+        sci = {f"S{i + 1}": ids for i, ids in enumerate(source_chunk_ids) if ids}
+        if sci:
+            report["source_chunk_ids"] = sci
     if n and check_uncited:
         uncited = uncited_sentences(text)
         if uncited:

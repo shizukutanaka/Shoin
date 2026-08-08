@@ -151,6 +151,11 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .excerpt-label{font-size:11px;letter-spacing:.06em;color:var(--sumi-soft);margin-bottom:5px}
 .section-label{font-size:12px;color:var(--seiji-ink);font-family:var(--serif);margin-bottom:8px;
   word-break:break-word}
+.src-chunk{white-space:pre-wrap;word-break:break-word}
+.cited-chunk{background:var(--washi);border-left:3px solid var(--seiji);padding:6px 10px;
+  margin:2px 0}
+.cited-label{font-size:10.5px;letter-spacing:.08em;color:var(--seiji-ink);margin-bottom:4px}
+.chunk-sep{color:var(--sumi-soft);text-align:center;margin:6px 0}
 .excerpt{background:var(--washi);border-left:3px solid var(--seiji);padding:8px 12px;
   white-space:pre-wrap;word-break:break-word;font-size:13px;margin-bottom:8px}
 details.full-src{margin-top:4px}
@@ -291,7 +296,7 @@ const I18N = {
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
     "reindex.ok":"{n}/{total} チャンクを再埋め込みしました",
-    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:",
+    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
@@ -324,7 +329,7 @@ const I18N = {
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
     "reindex.ok":"Re-embedded {n}/{total} chunks",
-    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:",
+    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
@@ -614,6 +619,7 @@ function renderWithSeals(container, text, report){
   const idMap = (report && report.source_id_map) || null;
   const excerpts = (report && report.source_excerpts) || {};
   const contexts = (report && report.source_contexts) || {};
+  const chunkIds = (report && report.source_chunk_ids) || {};
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -634,21 +640,22 @@ function renderWithSeals(container, text, report){
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
         : nameSec;
       chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
-      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts);
+      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap, excerpts, contexts){
+function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
   const excerpt = (excerpts && excerpts[`S${n}`]) || null;
   const section = (contexts && contexts[`S${n}`]) || null;
-  if (sid){ showSource(sid, title || `S${n}`, excerpt, section); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section); return; } }
+  const cited = (chunkIds && chunkIds[`S${n}`]) || null;
+  if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited); return; }
+  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section, cited); return; } }
   if (title) toast(title);
 }
 let _srcAbort = null, _viewerOpener = null;
@@ -656,7 +663,30 @@ function closeViewer(){
   $("#viewer").classList.remove("open");
   if (_viewerOpener) { _viewerOpener.focus(); _viewerOpener = null; }
 }
-async function showSource(id, title, excerpt, section){
+// Render a source's full text chunk-by-chunk, marking the chunks the answer was
+// actually grounded in (citation_report.source_chunk_ids, v0.2.139) and scrolling
+// to the first one. This is the last mile of "verifiable citation": the reader
+// sees the cited wording in its original position, not just a detached excerpt.
+// citedIds absent (old persisted report / Studio output) → plain text, unmarked.
+function renderFullSource(container, chunks, citedIds){
+  container.replaceChildren();
+  const marked = new Set(citedIds || []);
+  let first = null;
+  chunks.forEach((c, i) => {
+    if (i) container.append(el("div","chunk-sep","⋯"));
+    const isCited = marked.has(c.id);
+    const block = el("div", isCited ? "src-chunk cited-chunk" : "src-chunk", c.text);
+    if (isCited){
+      block.prepend(el("div","cited-label", t("viewer.cited_chunk")));
+      if (!first) first = block;
+    }
+    container.append(block);
+  });
+  // Bring the first cited passage into view so a long document doesn't require
+  // manual scanning. Guarded: no cited chunks (or an old report) → no scroll.
+  if (first) first.scrollIntoView({block:"nearest"});
+}
+async function showSource(id, title, excerpt, section, citedIds){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
   const sig = _srcAbort.signal;
@@ -686,7 +716,7 @@ async function showSource(id, title, excerpt, section){
       try{
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
-        body.textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+        renderFullSource(body, j.chunks, citedIds);
       }catch(e){ if (!sig.aborted) body.textContent = e.message; }
     });
     vt.append(det);
@@ -697,7 +727,7 @@ async function showSource(id, title, excerpt, section){
     try{
       const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
       if (sig.aborted) return;
-      vt.textContent = j.chunks.map(c=>c.text).join("\n\n⋯\n\n");
+      renderFullSource(vt, j.chunks, citedIds);
       $("#viewer").classList.add("open");
       $("#viewerClose").focus();
     }catch(e){ if (!sig.aborted) toast(e.message); }

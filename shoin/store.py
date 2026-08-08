@@ -725,6 +725,19 @@ class Store:
         ).fetchall()
         return [(int(r["id"]), str(r["text"])) for r in rows]
 
+    def id_seq_text_chunks_for_source(self, source_id: int) -> list[tuple[int, int, str]]:
+        """Return (chunk_id, seq, text) triples for a source, ordered by seq.
+
+        The chunk id lets the source viewer mark exactly which passages an
+        answer was grounded in (citation_report's source_chunk_ids). The older
+        text_chunks_for_source() returns only (seq, text) and is kept as-is
+        because other callers depend on that shape.
+        """
+        rows = self.conn.execute(
+            "SELECT id, seq, text FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
+        ).fetchall()
+        return [(int(r["id"]), int(r["seq"]), str(r["text"])) for r in rows]
+
     def id_context_text_chunks_for_notebook(
         self, notebook_id: int
     ) -> list[tuple[int, str, str]]:

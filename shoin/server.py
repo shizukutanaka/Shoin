@@ -529,8 +529,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:
             store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
-            pairs = store.text_chunks_for_source(src_id)
-            self._json({"chunks": [{"seq": seq, "text": text} for seq, text in pairs]})
+            # `id` lets the viewer mark which chunks an answer actually cited
+            # (citation_report.source_chunk_ids, v0.2.139). Additive field.
+            rows = store.id_seq_text_chunks_for_source(src_id)
+            self._json(
+                {"chunks": [{"id": cid, "seq": seq, "text": text} for cid, seq, text in rows]}
+            )
 
     def _h_studio(self, nb_id: int) -> None:
         kind = self._require(self._read_json(), "kind")
@@ -739,6 +743,7 @@ class _Handler(BaseHTTPRequestHandler):
                 context.source_ids,
                 context.source_bodies,
                 context.source_contexts,
+                context.source_chunk_ids,
                 check_uncited=not degraded,
             )
             if degraded:
