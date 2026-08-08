@@ -33,6 +33,7 @@ shoin add 1 ./paper.pdf https://example.com/article
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
+shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
@@ -52,6 +53,16 @@ Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・�
 | `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
 | `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
 | `SHOIN_DEBUG` | (無効) | `1`で検索の診断情報(BM25/vectorヒット数、RRF順位、最終スコア)を標準エラー出力に表示 |
+
+`shoin eval` の cases.json 例 — 設定変更(例: `SHOIN_MULTI_QUERY=1`)の前後で実行すれば、
+文献の数値ではなく**自分の文書での効果**を比較できる:
+
+```json
+[
+  {"q": "和紙はどう作られるか", "sources": [1]},
+  {"q": "活版印刷の仕組みは", "sources": [2, 3]}
+]
+```
 
 `config.json` の例:
 

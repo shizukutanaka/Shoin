@@ -10,6 +10,7 @@ import argparse
 import sqlite3
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from .citation import COVERAGE_LOW, CitationReport
 from .config import (
@@ -47,6 +48,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.misattr": " ⚠番号取り違えの可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
+        "eval.header": "検索精度 (k={k}, {n}件のケース)",
+        "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
+        "eval.mrr": "  MRR     : {v}  (最初に当たった期待ソースの順位の逆数)",
+        "eval.case_ok": "  ✓ {q}",
+        "eval.case_ng": "  ✗ {q}",
+        "eval.case_detail": "      期待={exp} 取得={got}",
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -81,6 +88,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.misattr": " ⚠ possible wrong source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
+        "eval.header": "Retrieval quality (k={k}, {n} cases)",
+        "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
+        "eval.mrr": "  MRR     : {v}  (reciprocal rank of the first expected source)",
+        "eval.case_ok": "  ✓ {q}",
+        "eval.case_ng": "  ✗ {q}",
+        "eval.case_detail": "      expected={exp} retrieved={got}",
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -178,6 +191,11 @@ def _build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("questions", help="推奨質問の提案")
     q.add_argument("notebook_id", type=int)
 
+    ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
+    ev.add_argument("notebook_id", type=int)
+    ev.add_argument("cases", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]')
+    ev.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+
     ex = sub.add_parser("export", help="エクスポート")
     ex.add_argument("notebook_id", type=int)
     ex.add_argument("--format", choices=FORMATS, default="md")
@@ -256,6 +274,40 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     )
     print(_t("health.embed_batch", v=batch_v))
     print(_t("health.data_dir", v=db if db else str(db_path())))
+    return 0
+
+
+def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
+    """Measure retrieval quality on user-authored cases.
+
+    Runs the SAME retrieval path ask() uses, so toggling SHOIN_MULTI_QUERY (or
+    any other setting) and re-running compares what the user will really get —
+    turning "the literature says X helps" into "it helps on MY notebook, or it
+    doesn't". See shoin/evaluate.py for why this exists.
+    """
+    import json as _json
+
+    from .evaluate import evaluate, parse_cases
+
+    try:
+        raw = _json.loads(Path(str(args.cases)).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
+    except _json.JSONDecodeError as exc:
+        raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"cases file is not valid JSON: {exc}") from exc
+    try:
+        cases = parse_cases(raw)
+    except ValueError as exc:
+        raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", str(exc)) from exc
+    rep = evaluate(store, llm, int(args.notebook_id), cases, k=int(args.k))
+    print(_t("eval.header", k=str(args.k), n=str(len(rep.cases))))
+    print(_t("eval.recall", v=f"{rep.recall:.3f}"))
+    print(_t("eval.mrr", v=f"{rep.mrr:.3f}"))
+    for c in rep.cases:
+        ok = c.recall >= 1.0
+        print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
+        if not ok:
+            print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
     return 0
 
 
@@ -454,6 +506,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_studio(store, backend, args)
             if command == "questions":
                 return _cmd_questions(store, backend, args)
+            if command == "eval":
+                return _cmd_eval(store, backend, args)
             if command == "messages":
                 return _cmd_messages(store, args)
             if command == "reindex":

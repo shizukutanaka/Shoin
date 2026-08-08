@@ -309,7 +309,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.140
+## Version History: v0.1.37 → v0.2.141
+
+### v0.2.141 (2026-07-18)
+**Added**: `shoin eval <notebook_id> <cases.json>` — retrieval measurement on the user's own corpus (`shoin/evaluate.py`, new module).
+
+**Why**: every retrieval decision in this project — RRF (v0.2.56), contextual chunking (v0.2.123), multi-query RAG-Fusion (v0.2.125), the `CHUNK_OVERLAP=64` default — was justified *from the literature and never measured on Shoin's own data*. The same literature consistently ends with "and measure", because reported effect sizes are corpus- and retriever-specific. Concretely: a [2026 systematic analysis](https://www.digitalapplied.com/blog/rag-chunking-strategies-2026-retrieval-quality-playbook) found chunk overlap gave **no** measurable benefit (SPLADE + Mistral-8B on Natural Questions), the opposite of the usual 10–20% recommendation — and a Shoin-specific measurement showed overlap raises adjacent-chunk similarity from 0.598 to 0.692, i.e. it actively feeds the redundancy term MMR penalizes. Whether that *helps or hurts here* was unanswerable, because Shoin had no way to measure retrieval at all. Rather than change a default on someone else's benchmark, this ships the missing capability.
+
+- `evaluate.py`: `parse_cases()` (strict — a silently-skipped malformed case would inflate the score, so it raises with a concrete per-case message) and `evaluate()` returning recall (share of expected sources in top-k) and MRR (1/rank of the first expected source). No invented aggregate "quality score" — same principle as `citation.py`: report only what is directly measurable.
+- Runs through `retrieve_for_question()`, the *same* path `ask()` uses, so toggling `SHOIN_MULTI_QUERY` (or any setting) and re-running compares what the user will really experience. Ranking is by **source**, not chunk: a source found via its 3rd chunk is still found.
+- `cli.py`: `_cmd_eval()` + `eval` subparser + `eval.*` i18n keys (ja/en). Malformed/unreadable cases files map to `VALIDATION_FIELD_FORMAT_INVALID` / `SYSTEM_IO_ERROR` with exit 1, never a traceback.
+- README documents the command and the cases.json shape, framed as "run it before and after a setting change".
+
+4 regression tests added (`EvalTest`): hit/miss scoring with correct recall+MRR, strict parse rejection of six malformed shapes, valid-parse trimming, and a CLI end-to-end asserting the metrics are printed. Live-verified end-to-end in both locales and on all three error paths. `pytest tests/` now runs 682 tests. `mypy shoin/` and `ruff check shoin/` remain clean.
 
 ### v0.2.140 (2026-07-18)
 **Fixed**: `verify_grounding()` falsely accused a **correctly cited** source of being the wrong source number when two claims were joined into one sentence — the exact failure mode this module's design forbids ("never accuse a correct answer", v0.1.4). Found by following recent citation-attribution research (sub-sentence granularity: [arXiv:2509.20859](https://arxiv.org/html/2509.20859v1), [NAACL 2025 positional fine-grained citation](https://aclanthology.org/2025.naacl-long.23.pdf)) back into Shoin's own lexical checker.

@@ -1010,5 +1010,90 @@ class CliTest(unittest.TestCase):
         self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
 
 
+class EvalTest(unittest.TestCase):
+    """Retrieval evaluation (v0.2.141): lets a user measure whether a setting
+    actually helps THEIR corpus instead of trusting published effect sizes."""
+
+    def _seeded(self):
+        from shoin.pipeline import index_source
+        from shoin.store import Store
+
+        d = tempfile.mkdtemp()
+        s = Store(str(Path(d) / "t.db"))
+        nb = s.create_notebook("研究")
+        for name, body in [
+            ("和紙", "和紙は楮の繊維を漉いて作られる伝統的な紙である。産地により特徴が異なる。"),
+            ("活版印刷", "活版印刷は金属活字を組んで版を作る複製技術である。書物の大量生産を可能にした。"),
+        ]:
+            p = Path(d) / f"{name}.md"
+            p.write_text(f"# {name}\n{body}\n", encoding="utf-8")
+            index_source(s, nb.id, str(p))
+        return s, nb.id
+
+    def test_evaluate_scores_hits_and_misses(self) -> None:
+        from shoin.evaluate import EvalCase, evaluate
+
+        s, nb = self._seeded()
+        with s:
+            cases = [
+                EvalCase("和紙はどう作られるか", [1]),      # should hit
+                EvalCase("存在しない話題ZZZQQQ", [1]),      # should miss
+            ]
+            rep = evaluate(s, FakeLLM(), nb, cases)
+        self.assertEqual(len(rep.cases), 2)
+        self.assertEqual(rep.cases[0].recall, 1.0)
+        self.assertGreater(rep.cases[0].reciprocal_rank, 0.0)
+        self.assertEqual(rep.cases[1].recall, 0.0)
+        self.assertEqual(rep.cases[1].reciprocal_rank, 0.0)
+        self.assertAlmostEqual(rep.recall, 0.5)
+
+    def test_parse_cases_rejects_malformed_input(self) -> None:
+        """A silently-skipped bad case would inflate the score, so parsing
+        refuses rather than degrades."""
+        from shoin.evaluate import parse_cases
+
+        for bad in (
+            {"not": "a list"},
+            [{"q": "", "sources": [1]}],
+            [{"q": "ok", "sources": []}],
+            [{"q": "ok", "sources": ["1"]}],
+            [{"q": "ok"}],
+            [],
+        ):
+            with self.assertRaises(ValueError):
+                parse_cases(bad)
+
+    def test_parse_cases_accepts_valid_input(self) -> None:
+        from shoin.evaluate import parse_cases
+
+        cases = parse_cases([{"q": " 質問 ", "sources": [1, 2]}])
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0].question, "質問")
+        self.assertEqual(cases[0].expected_source_ids, [1, 2])
+
+    def test_eval_cli_reports_metrics(self) -> None:
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1]}]), encoding="utf-8"
+        )
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(["--db", db, "eval", str(nb), str(cases)], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("recall", out)
+        self.assertIn("MRR", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=0)
