@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.141")
+        self.assertEqual(VERSION, "0.2.142")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -6969,6 +6969,84 @@ class TestChunkContext(unittest.TestCase):
             n_fts = s2.conn.execute("SELECT COUNT(*) AS n FROM chunks_fts").fetchone()["n"]
             self.assertEqual(int(n_fts), 0)  # delete trigger consistent post-rebuild
             s2.close()
+
+
+class TestLikeFallbackContext(unittest.TestCase):
+    """The LIKE-scan fallback must search the contextual breadcrumb, exactly as a
+    bare-term FTS5 MATCH already does across every chunks_fts column.
+
+    The trigram tokeniser needs >= 3 characters, so every two-character Japanese
+    compound (総説, 経済, 免疫 …) — the most common query shape in Japanese —
+    skips FTS5 entirely and lands on the LIKE path.  While that path looked only
+    at c.text, contextual retrieval's recall win was silently absent for exactly
+    those queries: '猫の飼育' found a title-only match and '猫' did not.
+    """
+
+    def _seeded_store(self) -> tuple[Store, int, int, int, int]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        # Body text deliberately never repeats the title/heading terms — the
+        # breadcrumb is the only place they appear, which is precisely the case
+        # contextual chunking exists to make retrievable.
+        cat = st.add_source(nb.id, "md", "猫の飼育ガイド", "cat.md", "h1")
+        st.add_chunks(
+            cat.id,
+            ["この動物は一日のほとんどを睡眠に費やす。", "食事は一日二回が目安である。"],
+            contexts=["猫の飼育ガイド > 生態", "猫の飼育ガイド > 食事"],
+        )
+        ai = st.add_source(nb.id, "md", "AI 総説", "ai.md", "h2")
+        st.add_chunks(ai.id, ["機械学習の歴史について述べる。"], contexts=["AI 総説 > 歴史"])
+        other = st.add_source(nb.id, "md", "無関係", "x.md", "h3")
+        st.add_chunks(other.id, ["天気の話をする。"], contexts=["無関係 > 雑談"])
+        return st, nb.id, cat.id, ai.id, other.id
+
+    def test_short_terms_match_context_breadcrumb(self) -> None:
+        st, nb_id, cat_id, ai_id, _other = self._seeded_store()
+        try:
+            for query, expected in (
+                ("猫", cat_id),        # 1-char CJK: below the trigram minimum
+                ("総説", ai_id),        # 2-char CJK compound: the common JA shape
+                ("AI", ai_id),         # 2-char ASCII: also skipped by fts_query
+                ("AI 総説", ai_id),     # every term short -> fts_query returns ""
+            ):
+                hits = bm25_search(st, nb_id, query, 5)
+                self.assertTrue(hits, f"{query!r} found nothing via the context breadcrumb")
+                self.assertEqual({h.source_id for h in hits}, {expected}, query)
+        finally:
+            st.close()
+
+    def test_short_term_does_not_match_unrelated_sources(self) -> None:
+        """The context scan must stay selective — a needle absent from both fields
+        still returns nothing, so this widens recall without flooding results."""
+        st, nb_id, _cat, _ai, other_id = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in bm25_search(st, nb_id, "天気", 5)}, {other_id}
+            )
+            self.assertEqual(bm25_search(st, nb_id, "量子", 5), [])
+        finally:
+            st.close()
+
+    def test_neg_term_excludes_on_context_match(self) -> None:
+        """`-term` must suppress a chunk whose only mention is in its breadcrumb;
+        otherwise the filter is blind to the very signal that produced the hit."""
+        st, nb_id, _cat, _ai, _other = self._seeded_store()
+        try:
+            # Both 猫 chunks match "一日" in their text but belong to 猫の飼育ガイド.
+            self.assertTrue(bm25_search(st, nb_id, "一日", 5))
+            self.assertEqual(bm25_search(st, nb_id, "一日 -猫", 5), [])
+        finally:
+            st.close()
+
+    def test_retrieve_surfaces_context_only_match_end_to_end(self) -> None:
+        """The win must survive fusion + rerank + MMR, not just bm25_search()."""
+        st, nb_id, _cat, ai_id, _other = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in retrieve(st, nb_id, "総説", k=5)}, {ai_id}
+            )
+        finally:
+            st.close()
 
 
 if __name__ == "__main__":

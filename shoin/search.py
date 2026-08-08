@@ -240,13 +240,26 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # added sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
     # (correct in both cases since CJK has no case).  Special LIKE characters in
     # the needle ('|', '%', '_') are escaped with '|' as the sentinel.
+    #
+    # The scan covers c.context as well as c.text.  A bare-term FTS5 MATCH searches
+    # every column of chunks_fts, so the FTS path has matched the contextual
+    # breadcrumb (source title > heading path, v0.2.123) since that column existed —
+    # but this path only ever looked at c.text, so the same term found a
+    # heading-only match through one branch and nothing through the other, purely
+    # by term length.  That is not a corner case for a JA-first tool: the trigram
+    # tokeniser needs >= 3 characters, so EVERY two-character Japanese compound
+    # (総説, 経済, 免疫 …) — the most common query shape in Japanese — skips FTS5
+    # entirely and lands here, which meant contextual retrieval's headline recall
+    # win was silently absent for exactly those queries.
     needles = _fallback_needles(clean_query)
     if not needles:
         if negs:
             fts_hits = _apply_neg_filter(fts_hits, negs)
         return fts_hits  # return whatever FTS5 found (possibly empty)
-    conditions = " OR ".join("c.text LIKE ? ESCAPE '|'" for _ in needles)
-    like_params = [f"%{_esc_like(n)}%" for n in needles]
+    conditions = " OR ".join(
+        "(c.text LIKE ? ESCAPE '|' OR c.context LIKE ? ESCAPE '|')" for _ in needles
+    )
+    like_params = [p for n in needles for p in (f"%{_esc_like(n)}%",) * 2]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
     # score in Python, and take the top k.  Without the cap a common CJK bigram
     # on a large notebook can pull tens of thousands of rows into memory.
@@ -261,8 +274,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     like_hits: list[Hit] = []
     for r in rows:
         text = str(r["text"])
-        low = text.lower()
-        score = float(sum(low.count(n.lower()) for n in needles))
+        score = _needle_score(text, str(r["context"] or ""), needles)
         if score > 0:
             like_hits.append(
                 Hit(r["id"], r["source_id"], text, 0.0, bm25=score, context=str(r["context"] or ""))
@@ -276,8 +288,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # dominate even when the FTS5 hit matches more query terms.
         fts_ids = {h.chunk_id for h in fts_hits}
         for h in fts_hits:
-            low = h.text.lower()
-            h.bm25 += float(sum(low.count(n.lower()) for n in needles))
+            h.bm25 += _needle_score(h.text, h.context, needles)
         fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
         # Re-sort the combined list after extending with LIKE-only hits.  The
         # previous sort ran before the extend, leaving LIKE-only hits appended
@@ -296,9 +307,37 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     return result
 
 
+def _needle_score(text: str, context: str, needles: list[str]) -> float:
+    """Count LIKE-fallback needle occurrences across a chunk's text and context.
+
+    Both fields count at weight 1.0, which is deliberately the same weighting the
+    FTS path gets: SQLite's bm25(chunks_fts) defaults every column to 1.0, and the
+    point of scoring context here is to remove the divergence between the two
+    branches, not to introduce a new tuning knob on one of them.  A section's
+    breadcrumb is identical across all of that section's chunks, so a context match
+    lifts the whole section uniformly and never reorders chunks within it.
+    """
+    low_text = text.lower()
+    low_ctx = context.lower()
+    return float(
+        sum(low_text.count(n.lower()) + low_ctx.count(n.lower()) for n in needles)
+    )
+
+
 def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
-    """Remove hits whose text contains any negated term (case-insensitive)."""
-    return [h for h in hits if not any(n in h.text.lower() for n in negs)]
+    """Remove hits whose text or context contains any negated term (case-insensitive).
+
+    Context is checked for the same reason it is now searched and scored: a chunk
+    can be retrieved *because of* its breadcrumb, so `-term` must be able to
+    exclude it on that same basis.  Otherwise `legacy` surfaces a source whose only
+    mention of it is in its title while `-legacy` cannot suppress it — the filter
+    would be blind to exactly the signal that produced the hit.
+    """
+    return [
+        h
+        for h in hits
+        if not any(n in h.text.lower() or n in h.context.lower() for n in negs)
+    ]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
