@@ -56,7 +56,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.142")
+        self.assertEqual(VERSION, "0.2.143")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -7045,6 +7045,97 @@ class TestLikeFallbackContext(unittest.TestCase):
             self.assertEqual(
                 {h.source_id for h in retrieve(st, nb_id, "総説", k=5)}, {ai_id}
             )
+        finally:
+            st.close()
+
+
+class TestRerankContext(unittest.TestCase):
+    """rerank()'s lexical signal must read the context breadcrumb too.
+
+    Every field retrieval can *find* a chunk by has to be visible to the stage
+    that re-scores it. Scoring text only handed a breadcrumb-retrieved chunk
+    lex=0.0 and then pushed it back down by 0.3 * (1 - 0) relative to any chunk
+    naming the term in its body — so a document whose title is the topic lost to
+    one that merely name-drops it in passing.
+    """
+
+    def test_lex_reads_context_breadcrumb(self) -> None:
+        from shoin.search import rerank
+
+        hit = Hit(1, 1, "体内の防御機構が働く仕組みを説明する。", 1.0, context="免疫レポート > 概要")
+        rerank("免疫", [hit])
+        self.assertGreater(hit.detail["lex"], 0.0)
+
+    def test_contextless_hit_scored_exactly_as_before(self) -> None:
+        """No-regression control: with no breadcrumb, lex is unchanged."""
+        from shoin.search import rerank
+
+        text = "免疫の研究は進展した。免疫は複雑である。"
+        hit = Hit(1, 1, text, 1.0)  # context defaults to ""
+        rerank("免疫", [hit])
+        self.assertEqual(hit.detail["lex"], lexical_overlap("免疫", text))
+
+    def _build(self, order: list[str]) -> tuple[Store, int, dict[str, int]]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        ids: dict[str, int] = {}
+        for name in order:
+            if name == "A":  # the document ABOUT the topic: term only in its breadcrumb
+                s = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
+                st.add_chunks(
+                    s.id,
+                    ["体内の防御機構が働く仕組みを説明する。観察結果は再現性が高い。"],
+                    contexts=["免疫レポート > 概要"],
+                )
+            else:  # off-topic minutes that merely name-drop the term once
+                s = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
+                st.add_chunks(
+                    s.id,
+                    ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"],
+                    contexts=["経営会議メモ > 議事"],
+                )
+            ids[name] = s.id
+        return st, nb.id, ids
+
+    def test_breadcrumb_match_not_zeroed_against_incidental_body_mention(self) -> None:
+        """Both documents carry exactly one occurrence of the term — A's in its
+        breadcrumb, C's in its body — so neither may be scored to nothing, in
+        either insertion order."""
+        for order in (["A", "C"], ["C", "A"]):
+            st, nb_id, ids = self._build(order)
+            try:
+                scores = {h.source_id: h for h in retrieve(st, nb_id, "免疫", k=5)}
+                self.assertIn(ids["A"], scores, f"order={order}")
+                self.assertGreater(scores[ids["A"]].score, 0.0, f"order={order}")
+                self.assertEqual(
+                    scores[ids["A"]].detail["lex"], scores[ids["C"]].detail["lex"],
+                    f"equal lexical evidence must score equally (order={order})",
+                )
+            finally:
+                st.close()
+
+    def test_title_named_topic_outranks_incidental_mention(self) -> None:
+        """With a stronger breadcrumb (title AND heading) A must beat the
+        name-drop, while a genuinely on-topic body still ranks first."""
+        st = Store(":memory:")
+        try:
+            nb = st.create_notebook("N")
+            a = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
+            st.add_chunks(
+                a.id, ["体内の防御機構が働く仕組みを説明する。"], contexts=["免疫レポート > 免疫の基礎"]
+            )
+            b = st.add_source(nb.id, "md", "研究総括", "b.md", "hb")
+            st.add_chunks(
+                b.id, ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"], contexts=["研究総括 > 本文"]
+            )
+            c = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
+            st.add_chunks(
+                c.id, ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"], contexts=["経営会議メモ > 議事"]
+            )
+            ranking = [h.source_id for h in retrieve(st, nb.id, "免疫", k=5)]
+            self.assertEqual(ranking, [b.id, a.id, c.id])
+            # Control: a term absent from every breadcrumb is unaffected.
+            self.assertEqual([h.source_id for h in retrieve(st, nb.id, "予算", k=5)], [c.id])
         finally:
             st.close()
 

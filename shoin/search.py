@@ -544,9 +544,24 @@ def lexical_overlap(query: str, text: str) -> float:
 
 
 def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
-    """Blend retrieval score with a zero-dependency lexical signal."""
+    """Blend retrieval score with a zero-dependency lexical signal.
+
+    The lexical signal reads the chunk's context breadcrumb alongside its text,
+    for the same reason bm25_search() scores both and _apply_neg_filter() excludes
+    on both: every field retrieval can *find* a chunk by must also be visible to
+    the stage that re-scores it.  Scoring text only meant a chunk retrieved via its
+    breadcrumb was handed lex=0.0 and then actively pushed back down by the very
+    reranker that ran on it — so a document whose title names the topic lost to one
+    that merely name-drops it in passing.
+
+    Concatenating (rather than max-ing) the two fields keeps the equal 1.0
+    weighting _needle_score() and SQLite's bm25(chunks_fts) already use, and
+    lexical_overlap()'s per-term tf/(tf+1) saturation bounds what the breadcrumb
+    can contribute.  A breadcrumb is identical across all chunks of a section, so
+    this lifts a section uniformly and never reorders chunks within it.
+    """
     for h in hits:
-        lex = lexical_overlap(query, h.text)
+        lex = lexical_overlap(query, f"{h.text}\n{h.context}" if h.context else h.text)
         h.detail["lex"] = lex
         h.score = (1 - weight) * h.score + weight * lex
     return sorted(hits, key=lambda h: h.score, reverse=True)
