@@ -33,8 +33,9 @@ from shoin.search import (
     retrieve,
     rrf_fuse,
     strip_neg_terms,
+    term_variants,
 )
-from shoin.search import Hit, _char_bigrams
+from shoin.search import Hit, _char_bigrams, _fallback_needles
 from shoin.store import Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -56,7 +57,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.143")
+        self.assertEqual(VERSION, "0.2.144")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2434,7 +2435,15 @@ class TestSearch(unittest.TestCase):
             self.assertEqual(vh[0].context, "生物 > 光合成")
 
     def test_fts_query_quoting(self) -> None:
-        self.assertEqual(fts_query('weather "quote'), '"weather" OR "quote"')
+        # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
+        # ＧＰＵ and ２０２４ are ordinary in Japanese prose, and without this the
+        # width bridge would be one-way — ＧＰＵ would find a GPU document via
+        # NFKC while GPU could never find a ＧＰＵ one.  The quote in '"quote'
+        # must still be escaped in every spelling it appears in.
+        self.assertEqual(
+            fts_query('weather "quote'),
+            '"weather" OR "ｗｅａｔｈｅｒ" OR "quote" OR "ｑｕｏｔｅ"',
+        )
         expr = fts_query("書院は知の書斎")
         self.assertIn('"書院は"', expr)  # CJK runs decompose into trigrams
         self.assertIn(" OR ", expr)
@@ -7136,6 +7145,123 @@ class TestRerankContext(unittest.TestCase):
             self.assertEqual(ranking, [b.id, a.id, c.id])
             # Control: a term absent from every breadcrumb is unaffected.
             self.assertEqual([h.source_id for h in retrieve(st, nb.id, "予算", k=5)], [c.id])
+        finally:
+            st.close()
+
+
+class TestWidthVariants(unittest.TestCase):
+    """Width/script spellings of the same word must retrieve each other.
+
+    Japanese encodes one word three ways — fullwidth kana (データ), halfwidth
+    JIS X 0201 kana (ﾃﾞｰﾀ, which is what cp932 exports carry and ingest._decode()
+    actively prefers), and fullwidth ASCII (ＧＰＵ, ２０２４). FTS5's trigram
+    tokeniser folds case but never width, and SQL LIKE folds neither, so none of
+    these found each other — while citation.py's _bigrams() NFKC-folds both sides
+    and happily confirmed a citation against a source the search could not reach
+    with the same query string.
+    """
+
+    def _seeded_store(self) -> tuple[Store, int, dict[str, int]]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        docs = {
+            "hw": "ﾃﾞｰﾀﾍﾞｰｽの設計方針を説明する。",   # halfwidth kana body
+            "fw": "データベースの設計方針を説明する。",  # fullwidth kana body
+            "gpu": "ＧＰＵの性能比較を行った。",        # fullwidth ASCII body
+            "kata": "コードの品質を保つ。",            # katakana body
+            "gas": "ガスの供給を管理する。",           # fullwidth, queried halfwidth
+        }
+        ids: dict[str, int] = {}
+        for name, text in docs.items():
+            s = st.add_source(nb.id, "md", name, f"{name}.md", name)
+            st.add_chunks(s.id, [text], contexts=[name])
+            ids[name] = s.id
+        return st, nb.id, ids
+
+    def test_halfwidth_kana_run_not_fragmented_by_sound_marks(self) -> None:
+        """U+FF9E/FF9F must be word characters, or every dakuten splits the run."""
+        self.assertEqual(query_terms("ﾃﾞｰﾀﾍﾞｰｽ"), ["ﾃﾞｰﾀﾍﾞｰｽ"])
+
+    def test_halfwidth_punctuation_mirrors_fullwidth_boundaries(self) -> None:
+        """｡｢｣､ break runs like 。「」、 while ･ joins them like ・."""
+        self.assertNotIn("書院｡", query_terms("書院｡"))
+        self.assertIn("書院", query_terms("書院｡"))
+        self.assertEqual(query_terms("ｿﾌﾄ･ｳｪｱ"), ["ｿﾌﾄ･ｳｪｱ"])  # ･ is a word char
+
+    def test_negation_on_voiced_halfwidth_kana(self) -> None:
+        """The residue of a mis-parsed -ﾃﾞｰﾀ used to survive as a POSITIVE term."""
+        self.assertEqual(neg_terms("Python -ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ"])
+        self.assertEqual(strip_neg_terms("Python -ﾃﾞｰﾀ"), "Python")
+
+    def test_term_variants_shapes(self) -> None:
+        self.assertEqual(term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "でーた"])
+        self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
+        self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
+        # Control: a term whose spellings all coincide yields only itself, so
+        # pure-kanji FTS expressions stay byte-identical to before.
+        self.assertEqual(term_variants("研究論文"), ["研究論文"])
+        self.assertEqual(fts_query("研究論文"), '"研究論" OR "究論文"')
+
+    def test_cross_width_retrieval_both_directions(self) -> None:
+        st, nb_id, ids = self._seeded_store()
+        try:
+            for query, want in (
+                ("データベース", {ids["hw"], ids["fw"]}),  # fullwidth query finds both
+                ("ﾃﾞｰﾀﾍﾞｰｽ", {ids["hw"], ids["fw"]}),      # halfwidth query finds both
+                ("GPU", {ids["gpu"]}),                     # ASCII query -> fullwidth doc
+                ("ＧＰＵ", {ids["gpu"]}),                   # fullwidth query -> same doc
+                ("ｺｰﾄﾞ", {ids["kata"]}),                   # halfwidth -> katakana doc
+                ("こー", {ids["kata"]}),                    # 2-char kana: LIKE path only
+            ):
+                got = {h.source_id for h in bm25_search(st, nb_id, query, 9)}
+                self.assertEqual(got, want, query)
+        finally:
+            st.close()
+
+    def test_nfkc_shortened_variant_still_reaches_like_path(self) -> None:
+        """ｶﾞｽ is 3 chars but normalises to ガス (2), which FTS5 cannot trigram.
+
+        Measuring coverage on the raw length alone reported "fully covered" and
+        skipped the LIKE scan, leaving the fullwidth document unreachable.
+        """
+        st, nb_id, ids = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in bm25_search(st, nb_id, "ｶﾞｽ", 9)}, {ids["gas"]}
+            )
+        finally:
+            st.close()
+
+    def test_does_not_match_unrelated_documents(self) -> None:
+        """Control: widening spellings must not widen what actually matches."""
+        st, nb_id, _ids = self._seeded_store()
+        try:
+            self.assertEqual(bm25_search(st, nb_id, "量子", 9), [])
+            self.assertEqual(_fallback_needles("A"), [])  # 1-char ASCII stays dropped
+        finally:
+            st.close()
+
+    def test_lexical_overlap_and_rerank_see_width_variants(self) -> None:
+        """A width-matched hit must not be handed lex=0 and pushed back down."""
+        self.assertEqual(
+            lexical_overlap("データベース", "ﾃﾞｰﾀﾍﾞｰｽの設計。"),
+            lexical_overlap("データベース", "データベースの設計。"),
+        )
+        st, nb_id, ids = self._seeded_store()
+        try:
+            hits = retrieve(st, nb_id, "データベース", k=9)
+            by_src = {h.source_id: h for h in hits}
+            self.assertIn(ids["hw"], by_src)
+            self.assertGreater(by_src[ids["hw"]].detail["lex"], 0.0)
+        finally:
+            st.close()
+
+    def test_negation_excludes_across_widths(self) -> None:
+        """-データベース must suppress the ﾃﾞｰﾀﾍﾞｰｽ-only document too."""
+        st, nb_id, _ids = self._seeded_store()
+        try:
+            self.assertTrue(bm25_search(st, nb_id, "設計", 9))
+            self.assertEqual(bm25_search(st, nb_id, "設計 -データベース", 9), [])
         finally:
             st.close()
 

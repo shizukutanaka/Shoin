@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
@@ -99,13 +100,22 @@ def _is_cjk_word(ch: str) -> bool:
 
     Exception: 々 (U+3005, ideographic iteration mark) appears inside words
     (人々, 様々) and must stay part of CJK word runs, not break them.
+
+    The halfwidth block (U+FF61–FF65) gets the mirror-image treatment, so a
+    halfwidth string tokenises exactly like its fullwidth equivalent: ｡｢｣､ are
+    boundaries like 。「」、, while ･ (U+FF65) stays a word character because its
+    NFKC target ・ (U+30FB) already is one.  Without this, ｿﾌﾄｳｪｱ･ｱｰｷﾃｸﾁｬ and
+    ソフトウェア・アーキテクチャ would split into different numbers of terms.
     """
     cp = ord(ch)
     if not is_cjk(ch):
         return False
     if 0x3000 <= cp <= 0x303F:
         return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
-    return True
+    # ｡｢｣､ (U+FF61–FF64) are the halfwidth counterparts of 。「」、 and break runs
+    # the same way; ･ (U+FF65) is excluded from this test because its NFKC target
+    # ・ (U+30FB) is already a word character.
+    return not 0xFF61 <= cp <= 0xFF64
 
 
 def query_terms(query: str) -> list[str]:
@@ -151,34 +161,130 @@ def _kana_alt(term: str) -> str:
     return "".join(result) if changed else term
 
 
+def _build_fw_to_hw() -> dict[str, str]:
+    """Fullwidth-kana → halfwidth map, derived from NFKC rather than hand-written.
+
+    NFKC folds halfwidth to fullwidth (ﾃﾞ → デ), so inverting its own output is
+    the only way to get the reverse direction without maintaining a second table
+    that can silently drift out of sync — the same "derive it from the shared
+    source" discipline v0.2.118 applied to _NEG_RE's character classes.
+
+    Voiced morae need the two-codepoint sequences (ﾃ + ﾞ) as well as the singles,
+    because NFKC composes them into one fullwidth character.
+    """
+    table: dict[str, str] = {}
+    for cp in range(0xFF61, 0xFFA0):
+        table.setdefault(unicodedata.normalize("NFKC", chr(cp)), chr(cp))
+    for base in range(0xFF66, 0xFF9E):
+        for mark in ("ﾞ", "ﾟ"):
+            composed = unicodedata.normalize("NFKC", chr(base) + mark)
+            if len(composed) == 1:
+                table.setdefault(composed, chr(base) + mark)
+    return table
+
+
+_FW_TO_HW = _build_fw_to_hw()
+
+
+def _to_katakana(s: str) -> str:
+    """Hiragana → katakana (one-directional, unlike _kana_alt's swap)."""
+    return "".join(chr(ord(c) + 0x60) if 0x3041 <= ord(c) <= 0x3096 else c for c in s)
+
+
+def _to_hiragana(s: str) -> str:
+    """Katakana → hiragana (one-directional, unlike _kana_alt's swap)."""
+    return "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in s)
+
+
+def _to_halfwidth(s: str) -> str:
+    """Fullwidth katakana → halfwidth, via the inverted-NFKC table."""
+    return "".join(_FW_TO_HW.get(c, c) for c in s)
+
+
+def _to_fullwidth_ascii(s: str) -> str:
+    """ASCII → fullwidth forms (Ａ-Ｚ ０-９ …), the U+FEE0 offset block."""
+    return "".join(chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s)
+
+
+def term_variants(term: str) -> list[str]:
+    """Width/script spellings of *term* that should all retrieve each other.
+
+    Japanese text encodes the same word three ways — fullwidth kana (データ),
+    halfwidth JIS X 0201 kana (ﾃﾞｰﾀ, ubiquitous in cp932 exports, which
+    ingest._decode() actively prefers), and fullwidth ASCII (ＧＰＵ, ２０２４,
+    ordinary in JA prose).  SQLite's FTS5 trigram tokeniser folds case (including
+    fullwidth Latin) but never width, and SQL LIKE folds neither, so nothing
+    bridges these spellings unless the query does it explicitly.  Standard
+    practice elsewhere is an NFKC pass before tokenisation (Elasticsearch's
+    icu_normalizer, Lucene's cjk_width filter); Shoin cannot normalise at index
+    time because chunk text must stay byte-identical to the source (v0.2.123),
+    so the bridge is built query-side instead, extending the katakana↔hiragana
+    alternates v0.2.42 already generated.
+
+    Conversions are deliberately one-directional and composed off the NFKC form
+    rather than iterated to a fixed point: a naive closure over _kana_alt's swap
+    emits mixed-width nonsense (でーた → でｰた) because the swap flips fullwidth
+    kana while leaving an already-halfwidth ｰ alone.  Only variants that actually
+    differ are emitted, so a pure-kanji or plain-ASCII-lowercase term whose forms
+    all coincide yields just itself.
+    """
+    norm = unicodedata.normalize("NFKC", term)
+    katakana = _to_katakana(norm)
+    candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    if norm.isascii():
+        candidates.append(_to_fullwidth_ascii(norm))
+    out: list[str] = []
+    for v in candidates:
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _fts_escape(term: str) -> str:
+    """Escape a term for inclusion in a double-quoted FTS5 MATCH string.
+
+    Must run per variant at emission time, never once before term_variants():
+    NFKC *creates* a double quote out of ＂ (U+FF02), so a term escaped only in
+    its raw form can still carry an unescaped quote into the MATCH expression
+    through one of its variants.
+    """
+    return term.replace("\x00", "").replace('"', '""')
+
+
 def fts_query(query: str) -> str:
     """Build a recall-oriented FTS5 MATCH expression.
 
     ASCII words become quoted terms; CJK runs are decomposed into their
-    trigrams.  For kana-containing terms, trigrams for the katakana↔hiragana
-    alternate script are also added so that a katakana query finds hiragana-
-    indexed documents and vice-versa.  Everything is OR-joined: BM25 ranks
-    denser matches higher and precision is restored downstream by the lexical
-    reranker + MMR.
+    trigrams.  Every width/script variant of a term (term_variants) contributes
+    its own grams, so a katakana query finds hiragana-indexed documents, a
+    fullwidth query finds halfwidth-indexed ones, and vice-versa in both cases.
+    Everything is OR-joined: BM25 ranks denser matches higher and precision is
+    restored downstream by the lexical reranker + MMR.
     """
     groups: list[str] = []
     seen: set[str] = set()
-    for term in query_terms(query):
-        term = term.replace("\x00", "").replace('"', '""')
-        if len(term) < 3:
-            continue
-        if is_cjk(term[0]):
-            grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
-            alt = _kana_alt(term)
-            if alt != term:
-                alt_grams = [alt[i : i + 3] for i in range(len(alt) - 2)]
-                grams = grams + alt_grams
-        else:
-            grams = [term]
-        for g in grams:
-            if g not in seen:
-                seen.add(g)
-                groups.append(f'"{g}"')
+    for raw_term in query_terms(query):
+        # Trigram-vs-whole-term is a property of the TERM, not of each spelling:
+        # a fullwidth ASCII variant is is_cjk()-true (fullwidth Latin lives in
+        # _CJK_RANGES), so branching per variant would shred ｗｅａｔｈｅｒ into five
+        # trigrams while its own raw form stays one quoted word.  FTS5 matches a
+        # quoted string of 3+ characters through the trigram index either way.
+        cjk_term = is_cjk(raw_term[0])
+        for variant in term_variants(raw_term):
+            term = _fts_escape(variant)
+            # Shorter-than-trigram variants contribute nothing here (the gram
+            # comprehension below is simply empty); bm25_search's coverage check
+            # knows this and keeps the LIKE fallback alive for them.
+            if len(term) < 3:
+                continue
+            if cjk_term:
+                grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
+            else:
+                grams = [term]
+            for g in grams:
+                if g not in seen:
+                    seen.add(g)
+                    groups.append(f'"{g}"')
     return " OR ".join(groups)
 
 
@@ -189,16 +295,33 @@ def _fallback_needles(query: str) -> list[str]:
     every English chunk and floods results with irrelevant hits.  Single-char CJK
     terms (猫, 木, …) are kept because they can be meaningful content words and
     a LIKE like '%猫%' is still a selective filter.
+
+    Needles are generated per width/script variant (term_variants).  SQL LIKE
+    compares codepoints and folds neither case beyond ASCII nor width, so the
+    only way this branch can bridge spellings is to materialise each one as its
+    own needle.  This is also where kana bridging reaches the LIKE path at all:
+    v0.2.42 added katakana↔hiragana alternates to fts_query only, and closed
+    with "the LIKE-scan fallback path for short terms is unchanged" — so every
+    two-character kana query (こー vs コー) stayed script-brittle, since terms
+    that short never reach FTS5's trigram tokeniser in the first place.
     """
     needles: list[str] = []
-    for term in query_terms(query):
-        if is_cjk(term[0]):
-            if len(term) >= 2:
-                needles.extend(term[i : i + 2] for i in range(len(term) - 1))
-            else:
-                needles.append(term)  # 1-char CJK content word: keep
-        elif len(term) >= 2:  # skip single ASCII chars like "A", "I"
-            needles.append(term)
+    for raw_term in query_terms(query):
+        # Drop a single-character ASCII term before expanding it: is_cjk('Ａ') is
+        # true (fullwidth Latin lives in _CJK_RANGES), so its fullwidth variant
+        # would otherwise fall into the CJK branch's keep-1-char path and
+        # reintroduce precisely the flooding needle the raw term was excluded to
+        # avoid.  Eligibility is a property of the term, not of each spelling.
+        if not is_cjk(raw_term[0]) and len(raw_term) < 2:
+            continue
+        for term in term_variants(raw_term):
+            if is_cjk(term[0]):
+                if len(term) >= 2:
+                    needles.extend(term[i : i + 2] for i in range(len(term) - 1))
+                else:
+                    needles.append(term)  # 1-char CJK content word: keep
+            elif len(term) >= 2:  # skip single ASCII chars like "A", "I"
+                needles.append(term)
     return list(dict.fromkeys(needles))
 
 
@@ -230,7 +353,17 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             )
         # Return early only when fts_query covered every query term (no terms with
         # len < 3 were silently skipped).  Short terms still need the LIKE path.
-        if fts_hits and all(len(t) >= 3 for t in query_terms(clean_query)):
+        #
+        # Coverage is measured over every VARIANT, not just the raw term, because
+        # NFKC can shorten a term below the trigram floor: ｶﾞｽ is 3 characters but
+        # normalises to ガス, which is 2, and fts_query's gram comprehension then
+        # yields nothing for it — silently, with no error.  Checking only the raw
+        # length would read "fully covered" and skip the LIKE scan, leaving every
+        # fullwidth-spelled document unreachable for exactly the halfwidth queries
+        # this variant machinery exists to serve.
+        if fts_hits and all(
+            len(v) >= 3 for t in query_terms(clean_query) for v in term_variants(t)
+        ):
             if negs:
                 fts_hits = _apply_neg_filter(fts_hits, negs)
             return fts_hits
@@ -332,11 +465,22 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     exclude it on that same basis.  Otherwise `legacy` surfaces a source whose only
     mention of it is in its title while `-legacy` cannot suppress it — the filter
     would be blind to exactly the signal that produced the hit.
+
+    Both sides are NFKC-folded for that same reason, one dimension over: now that
+    a halfwidth-spelled chunk is retrievable by a fullwidth query, `-データ` has to
+    be able to suppress a ﾃﾞｰﾀ-only document.  This does widen `-term` slightly —
+    `-GPU` now also excludes a ＧＰＵ-only chunk — which is the intended reading of
+    an exclusion, and the symmetric counterpart of the widened positive match.
     """
+    folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
     return [
         h
         for h in hits
-        if not any(n in h.text.lower() or n in h.context.lower() for n in negs)
+        if not any(
+            n in unicodedata.normalize("NFKC", h.text).lower()
+            or n in unicodedata.normalize("NFKC", h.context).lower()
+            for n in folded_negs
+        )
     ]
 
 
@@ -531,14 +675,22 @@ def _char_bigrams(text: str) -> set[str]:
 
 
 def lexical_overlap(query: str, text: str) -> float:
-    """Saturating term-frequency overlap between query terms and text."""
+    """Saturating term-frequency overlap between query terms and text.
+
+    Both sides are NFKC-folded so width spellings count as the same term, for the
+    same reason bm25_search matches them and _apply_neg_filter excludes on them:
+    a chunk retrieved through one spelling must not be scored as though it
+    contained none of the query.  Left width-blind, rerank() handed every
+    halfwidth-matched hit lex=0.0 and then pushed it back down — the v0.2.143
+    failure shape, one spelling dimension over.
+    """
     terms = query_terms(query)
     if not terms:
         return 0.0
-    low = text.lower()
+    low = unicodedata.normalize("NFKC", text).lower()
     score = 0.0
     for t in terms:
-        tf = low.count(t.lower())
+        tf = low.count(unicodedata.normalize("NFKC", t).lower())
         score += tf / (tf + 1.0)  # saturate repeated occurrences
     return score / len(terms)
 
