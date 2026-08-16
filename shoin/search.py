@@ -471,17 +471,19 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     be able to suppress a ﾃﾞｰﾀ-only document.  This does widen `-term` slightly —
     `-GPU` now also excludes a ＧＰＵ-only chunk — which is the intended reading of
     an exclusion, and the symmetric counterpart of the widened positive match.
+
+    Each hit's text and context are NFKC-folded once, not once per negated term:
+    the fold is the expensive part (a full chunk body) and does not depend on
+    which needle it is tested against.
     """
     folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
-    return [
-        h
-        for h in hits
-        if not any(
-            n in unicodedata.normalize("NFKC", h.text).lower()
-            or n in unicodedata.normalize("NFKC", h.context).lower()
-            for n in folded_negs
-        )
-    ]
+    out: list[Hit] = []
+    for h in hits:
+        folded_text = unicodedata.normalize("NFKC", h.text).lower()
+        folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
+        if not any(n in folded_text or n in folded_ctx for n in folded_negs):
+            out.append(h)
+    return out
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -674,6 +676,23 @@ def _char_bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
+def _norm_query_terms(query: str) -> list[str]:
+    """Query terms, NFKC-folded and lower-cased — the form the scorers compare in."""
+    return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
+
+
+def _overlap_from_norm(norm_terms: list[str], text: str) -> float:
+    """lexical_overlap's core, given already-normalised terms (see rerank())."""
+    if not norm_terms:
+        return 0.0
+    low = unicodedata.normalize("NFKC", text).lower()
+    score = 0.0
+    for t in norm_terms:
+        tf = low.count(t)
+        score += tf / (tf + 1.0)  # saturate repeated occurrences
+    return score / len(norm_terms)
+
+
 def lexical_overlap(query: str, text: str) -> float:
     """Saturating term-frequency overlap between query terms and text.
 
@@ -684,15 +703,7 @@ def lexical_overlap(query: str, text: str) -> float:
     halfwidth-matched hit lex=0.0 and then pushed it back down — the v0.2.143
     failure shape, one spelling dimension over.
     """
-    terms = query_terms(query)
-    if not terms:
-        return 0.0
-    low = unicodedata.normalize("NFKC", text).lower()
-    score = 0.0
-    for t in terms:
-        tf = low.count(unicodedata.normalize("NFKC", t).lower())
-        score += tf / (tf + 1.0)  # saturate repeated occurrences
-    return score / len(terms)
+    return _overlap_from_norm(_norm_query_terms(query), text)
 
 
 def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
@@ -711,9 +722,14 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     lexical_overlap()'s per-term tf/(tf+1) saturation bounds what the breadcrumb
     can contribute.  A breadcrumb is identical across all chunks of a section, so
     this lifts a section uniformly and never reorders chunks within it.
+
+    The query is tokenised and NFKC-folded once here, not once per hit inside
+    lexical_overlap: the term set is identical across the whole hit list, only the
+    text being scored changes.
     """
+    norm_terms = _norm_query_terms(query)
     for h in hits:
-        lex = lexical_overlap(query, f"{h.text}\n{h.context}" if h.context else h.text)
+        lex = _overlap_from_norm(norm_terms, f"{h.text}\n{h.context}" if h.context else h.text)
         h.detail["lex"] = lex
         h.score = (1 - weight) * h.score + weight * lex
     return sorted(hits, key=lambda h: h.score, reverse=True)

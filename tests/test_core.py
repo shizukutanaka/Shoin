@@ -57,7 +57,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.144")
+        self.assertEqual(VERSION, "0.2.145")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -7264,6 +7264,24 @@ class TestWidthVariants(unittest.TestCase):
             self.assertEqual(bm25_search(st, nb_id, "設計 -データベース", 9), [])
         finally:
             st.close()
+
+    def test_rerank_hoisted_terms_match_per_hit_lexical_overlap(self) -> None:
+        """rerank() computes the lex signal from the same NFKC-folded terms
+        lexical_overlap() does — hoisting the query normalisation out of the
+        per-hit loop must not change the number it produces."""
+        from shoin.search import rerank
+
+        query = "データベース 設計"
+        hits = [
+            Hit(1, 1, "ﾃﾞｰﾀﾍﾞｰｽの設計方針。", 0.5, context="レポート > 設計"),
+            Hit(2, 2, "無関係な天気の話。", 0.5, context="メモ"),
+        ]
+        rerank(query, hits)
+        for h in hits:
+            expected = lexical_overlap(
+                query, f"{h.text}\n{h.context}" if h.context else h.text
+            )
+            self.assertAlmostEqual(h.detail["lex"], expected, places=12)
 
 
 if __name__ == "__main__":

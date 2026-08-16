@@ -310,7 +310,15 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.144
+## Version History: v0.1.37 → v0.2.145
+
+### v0.2.145 (2026-08-16)
+**Fixed (performance)**: Re-scrutinizing v0.2.144's own diff (the v0.1.4/0.1.5 "re-examine the previous round's deliverable" discipline) found that the two NFKC folds it added to the retrieval hot path both recomputed work that does not vary across the loop they sit in. Neither is a correctness bug — output is byte-identical, pinned by a regression test — but both run on *every* query, so the waste is real.
+
+- **`_apply_neg_filter()`** NFKC-folded each hit's full text and context *inside* the `any(... for n in folded_negs)` generator, so a chunk body was normalized once per negated term instead of once. The fold is the expensive part and does not depend on which needle it is tested against; hoisting it above the `any()` cut a 24-hit / 2-neg call from ~164 µs to ~81 µs (measured), and the NFKC-call count from 98 to 50.
+- **`rerank()`** called `lexical_overlap(query, …)` per hit, and `lexical_overlap()` re-ran `query_terms()` + a per-term NFKC fold every time — but the term set is identical across the whole hit list; only the text changes. Extracting `_norm_query_terms()` (fold once) + `_overlap_from_norm()` (score against prepared terms) and hoisting the term prep out of `rerank()`'s loop cut a 24-hit / 3-term rerank from ~496 µs to ~122 µs (measured, 4.1×). `lexical_overlap()` keeps its exact signature and behavior — it now delegates to the two helpers — so its existing callers and tests are untouched.
+
+1 regression test added (`test_rerank_hoisted_terms_match_per_hit_lexical_overlap`) pinning that `rerank()`'s per-hit `lex` equals a direct `lexical_overlap()` call on the same `text\ncontext` string, so the hoist can never silently drift from the public function. `pytest tests/` runs 700 tests. `ruff check shoin/search.py` is clean; `mypy shoin/` unchanged (only the pre-existing `pypdf` stub note).
 
 ### v0.2.144 (2026-08-15)
 **Fixed**: Width and script spellings of the same Japanese word never retrieved one another. Japanese encodes one word three ways — fullwidth kana (データベース), halfwidth JIS X 0201 kana (ﾃﾞｰﾀﾍﾞｰｽ, what cp932 exports carry, and `ingest._decode()` *prefers* cp932), and fullwidth ASCII (ＧＰＵ, ２０２４, ordinary in JA prose). SQLite's FTS5 trigram tokenizer folds case (verified: `"ｇｐｕ"` MATCHes `ＧＰＵ`) but never width, SQL LIKE folds neither, and the search layer applied no normalization of its own — while `citation.py`'s `_bigrams()` NFKC-folds *both* sides and the frontend's `renderWithSeals()` has since v0.2.109. **Search was the only width-blind layer**, so Shoin would happily mark a citation ✓ against a source its own search could not reach with the same query string. The standard treatment is an NFKC pass before tokenization ([Elastic's kuromoji guidance](https://www.elastic.co/blog/how-to-implement-japanese-full-text-search-in-elasticsearch) recommends `icu_normalizer`; Lucene ships `cjk_width` for exactly this); Shoin cannot normalize at index time because chunk text must stay byte-identical to the source (v0.2.123), so the bridge is built query-side, extending the katakana↔hiragana alternates v0.2.42 already generated.
