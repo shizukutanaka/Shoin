@@ -33,7 +33,15 @@ _CJK_RANGES = (
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；])|(?<=\.)(?=\s)")
+# ｡ (U+FF61) is the halfwidth JIS X 0201 counterpart of 。 and terminates a
+# sentence identically — it is common in cp932 legacy text, which ingest._decode()
+# actively prefers, and NFKC folds it to 。 anyway. Without it, both this splitter's
+# consumers went width-blind: _hard_split() produced chunks cut mid-sentence at an
+# arbitrary character window, and citation.py's verify_grounding()/uncited_sentences()
+# saw one giant "sentence" whose diluted bigram overlap hid unsupported claims.
+# (The other terminators need no halfwidth twin: ！？ fold to the ASCII !? already
+# in the class, and ． 's halfwidth is ASCII . handled by the (?<=\.)(?=\s) branch.)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；｡])|(?<=\.)(?=\s)")
 # A genuine ATX heading closing sequence per CommonMark: one or more '#'
 # preceded by at least one space, with optional trailing spaces only
 # (e.g. "## Heading ##" -> the " ##" suffix). Requiring the preceding space

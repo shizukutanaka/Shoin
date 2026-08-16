@@ -57,7 +57,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.145")
+        self.assertEqual(VERSION, "0.2.146")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1317,6 +1317,33 @@ class TestChunk(unittest.TestCase):
         chunks = split_text(text, chunk_tokens=2, overlap_tokens=0)
         # With token budget=2, the two clauses separated by ； should split
         self.assertGreater(len(chunks), 1, msg="；should trigger a sentence split")
+
+    def test_sentence_split_on_halfwidth_ideographic_period(self) -> None:
+        """｡ (U+FF61), the halfwidth counterpart of 。, must terminate a sentence.
+
+        cp932 legacy text (which ingest._decode() prefers) uses ｡, and NFKC folds
+        it to 。 anyway — but the raw split runs before any NFKC pass, so without ｡
+        in the class a whole ｡-terminated document was one giant unsplittable
+        "sentence": chunks were cut mid-sentence at an arbitrary character window,
+        and citation.py's sentence-level checks saw diluted bigram overlap.
+        """
+        hw = "".join(f"第{i}文の内容である｡" for i in range(40))
+        fw = hw.replace("｡", "。")
+        ch_hw = split_text(hw, chunk_tokens=64, overlap_tokens=8)
+        ch_fw = split_text(fw, chunk_tokens=64, overlap_tokens=8)
+        # Halfwidth now chunks like fullwidth (same count) and on clean boundaries.
+        self.assertEqual(len(ch_hw), len(ch_fw))
+        self.assertTrue(ch_hw[0].rstrip().endswith("｡"))
+
+    def test_halfwidth_period_uncited_assertion_not_hidden(self) -> None:
+        """An unsupported ｡-terminated clause must still be flagged, not hidden by
+        the width of its own sentence terminator (verify_grounding's sibling check)."""
+        from shoin.citation import uncited_sentences
+
+        ans = "光合成は光からエネルギーを作る[S1]｡マグマは地下の岩石である｡"
+        flagged = uncited_sentences(ans)
+        self.assertEqual(len(flagged), 1)
+        self.assertIn("マグマ", flagged[0])
 
     def test_tail_cjk_includes_trigger_token(self) -> None:
         """_tail must include the CJK character that triggered acc >= tokens, not skip it.

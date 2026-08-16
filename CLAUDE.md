@@ -310,7 +310,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.145
+## Version History: v0.1.37 → v0.2.146
+
+### v0.2.146 (2026-08-16)
+**Fixed**: `_SENTENCE_SPLIT_RE` (`chunk.py`) split on the fullwidth ideographic period `。` but not its halfwidth JIS X 0201 twin `｡` (U+FF61) — the last width-blind spot in the pipeline after the v0.2.144 search work, and in the one place where being width-blind silently degrades *two* subsystems at once. Found by carrying the width lens from search into the shared sentence splitter (this regex is the single source of truth imported by both `chunk.py` and `citation.py`). `｡` is exactly the character cp932 legacy text uses, and `ingest._decode()` *prefers* cp932 — so this is the common case for the content Shoin most often ingests, not an exotic one. NFKC folds `｡` → `。`, but the split runs on raw text *before* any NFKC pass, so the fold never helped here.
+
+- **Two subsystems, both live-reproduced against the real functions**: (1) `_hard_split()` — a 40-sentence document terminated with `｡` was **one** unsplittable "sentence" (`_SENTENCE_SPLIT_RE.split` returned 1 fragment vs 61 for the `。` equivalent), so chunks were cut mid-sentence at an arbitrary character window (first chunk ended `…である` mid-word) instead of on the 20 clean sentence boundaries the fullwidth doc produced. (2) `citation.uncited_sentences()` — the answer `光合成は光からエネルギーを作る[S1]｡マグマは地下の岩石である｡`, whose second clause is an unsupported, uncited assertion, returned `[]` (nothing flagged) because the whole answer was a single "sentence" whose one citation covered it; the `。` version correctly flagged `マグマは地下の岩石である`. A hallucination the four-layer citation check exists to catch was silently defeated by the width of a period.
+- **Fix**: add `｡` to the character class — one character, in the single shared regex, so `chunk.py` and `citation.py` (`verify_grounding`/`uncited_sentences`) are fixed together. No halfwidth twin is needed for the other terminators: `！？` fold to the ASCII `!?` already in the class, and `．`'s halfwidth is ASCII `.`, handled by the existing `(?<=\.)(?=\s)` branch.
+
+**Measured with `shoin eval`, reported honestly**: on a cp932-style notebook whose `免疫ノート.md` buries the answer term in a late `｡`-terminated sentence, recall/MRR were **1.000 both before and after** — `shoin eval` scores at *source* granularity, and the source is found either way. The gains here are below what that metric can see: chunk boundaries that fall on sentences rather than mid-word, and citation checks that no longer go blind on `｡`. Those are pinned by the two regression tests, not by the eval, which is the honest place to claim them.
+
+2 regression tests added (`test_sentence_split_on_halfwidth_ideographic_period`: halfwidth now chunks identically to fullwidth and on clean boundaries; `test_halfwidth_period_uncited_assertion_not_hidden`: the unsupported `｡`-clause is flagged). Fail-then-pass verified via `git stash` on `shoin/chunk.py` — both fail pre-fix. `pytest tests/` now runs 702 tests. `ruff check shoin/chunk.py` is clean; `mypy shoin/` unchanged (only the pre-existing `pypdf` stub note).
 
 ### v0.2.145 (2026-08-16)
 **Fixed (performance)**: Re-scrutinizing v0.2.144's own diff (the v0.1.4/0.1.5 "re-examine the previous round's deliverable" discipline) found that the two NFKC folds it added to the retrieval hot path both recomputed work that does not vary across the loop they sit in. Neither is a correctness bug — output is byte-identical, pinned by a regression test — but both run on *every* query, so the waste is real.
