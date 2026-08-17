@@ -310,7 +310,15 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.147
+## Version History: v0.1.37 → v0.2.148
+
+### v0.2.148 (2026-08-17)
+**Fixed (docs)**: Two stale claims in `docs/spec.md`, found by checking the requirements table and data model against the actual code — the same "a doc claim contradicts the code (or itself)" method that fixed CLAUDE.md in v0.2.75/112/113.
+
+1. **REQ-004 was internally self-contradictory**: the P0 requirements row said the hybrid search uses `Convex Combination融合`, while the "検索パイプライン" section 40 lines below (line 86) correctly said `RRF方式` and noted the v0.2.56 migration away from convex combination. The code has called `rrf_fuse()` since v0.2.56; the CC path (`fuse()`/`adaptive_alpha()`) survives only for test compatibility and is never on `retrieve()`'s path. REQ-004 now says RRF, consistent with line 86, line 117, and the code — and gained a note about the v0.2.144 width/script-variant bridging.
+2. **The data model omitted `chunks.context`**: the schema sketch read `chunks(id, source_id FK, seq, text, embedding BLOB?)`, but migration 5 (v0.2.123) added `context TEXT NOT NULL DEFAULT ''` and rebuilt `chunks_fts` as a two-column `(context, text)` table. Corrected to `chunks(… text, context, embedding BLOB?)` with the FTS two-column note.
+
+Confirmed *not* stale while checking: the detailed 引用検証仕様 section (lines 90-99) already describes all four verification stages (range / confirmed / misattributed / uncited) correctly — REQ-006's one-line table summary is a summary, not a contradiction — and the migration description (append-only, up-only, idempotent) matches `store.py`. No code changed. `pytest tests/` still runs 704 tests; `mypy`/`ruff` unaffected.
 
 ### v0.2.147 (2026-08-17)
 **Fixed**: `_decode()` (`ingest.py`) misdetected UTF-32 as UTF-16 — the documented `FF FE` / `FF FE 00 00` BOM-precedence ambiguity (Unicode BOM FAQ), found by following the UTF-16-BOM detection this same function added in v0.2.50. The UTF-16 LE BOM is `FF FE`; the UTF-32 LE BOM is `FF FE 00 00`, which *begins* with it. The v0.2.50 check tested only `data[:2]`, so a UTF-32 LE file matched the UTF-16 branch and was decoded as UTF-16 — every character interleaved with a `U+0000`. And the UTF-32 BE BOM (`00 00 FE FF`) matched neither branch, falling through to the cp932 catch-all, which accepts any byte sequence and produced mojibake.
