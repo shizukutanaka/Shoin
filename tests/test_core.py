@@ -57,7 +57,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.146")
+        self.assertEqual(VERSION, "0.2.147")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -1552,6 +1552,36 @@ class TestIngest(unittest.TestCase):
             p.write_bytes("Hello world".encode("utf-16"))  # includes BOM (\xff\xfe)
             ex = extract_file(p)
             self.assertIn("Hello", ex.text, f"got mojibake instead: {ex.text!r:.60}")
+
+    def test_utf32_bom_decoded_correctly(self) -> None:
+        """UTF-32 must be detected before UTF-16: the UTF-32 LE BOM (FF FE 00 00)
+        begins with the UTF-16 LE BOM (FF FE), so a 2-byte-first test decodes UTF-32
+        LE as UTF-16 with a null between every character; the UTF-32 BE BOM
+        (00 00 FE FF) is missed entirely and falls to cp932 garbage.
+        """
+        from shoin.ingest import _decode
+
+        text = "日本語テキスト。カタカナも。"
+        # LE and BE, each with an explicit UTF-32 BOM.
+        self.assertEqual(_decode(b"\xff\xfe\x00\x00" + text.encode("utf-32-le")), text)
+        self.assertEqual(_decode(b"\x00\x00\xfe\xff" + text.encode("utf-32-be")), text)
+        # The utf-32 codec's own BOM output must round-trip too.
+        self.assertEqual(_decode(text.encode("utf-32")), text)
+        # No regression: a genuine UTF-16 file (BOM not followed by 00 00) still works.
+        self.assertEqual(_decode(text.encode("utf-16")), text)
+
+    def test_utf32_le_html_extracts_clean_text(self) -> None:
+        """The HTML path decodes before null-stripping, so a UTF-32 LE HTML file
+        misdetected as UTF-16 fed the parser a null-interleaved string it could not
+        tokenize, leaking raw <tags> into the indexed text."""
+        html = "<html><body><p>日本語の本文です。</p></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "doc.html"
+            p.write_bytes(b"\xff\xfe\x00\x00" + html.encode("utf-32-le"))
+            ex = extract_file(p)
+            self.assertIn("日本語の本文です", ex.text)
+            self.assertNotIn("<p>", ex.text)
+            self.assertNotIn("body", ex.text)
 
     def test_html_extract(self) -> None:
         html = (
