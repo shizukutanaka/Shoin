@@ -310,7 +310,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.148
+## Version History: v0.1.37 → v0.2.149
+
+### v0.2.149 (2026-08-17)
+**Added**: `SHOIN_CHUNK_TOKENS` / `SHOIN_CHUNK_OVERLAP` env overrides — completing the premise `shoin eval` (v0.2.141) shipped on. That entry flagged that *every* retrieval decision, `CHUNK_OVERLAP=64` included, was "justified from the literature and never measured on Shoin's own data," and shipped `shoin eval` so a user could measure on their own corpus. But chunk size and overlap — the two first-order RAG knobs, and the ones a [2026 systematic study](https://www.digitalapplied.com/blog/rag-chunking-strategies-2026-retrieval-quality-playbook) found gave *no* benefit while the usual advice is 10–20% — were hardcoded module constants, so the one A/B test the eval most exists to enable could not be run. Now it can: set the env, re-add a source, `shoin eval` before/after.
+
+- `config.chunk_tokens()` / `config.chunk_overlap()`: mirror `embed_batch()`'s validate-or-fall-back contract (v0.2.124). Invalid, non-integer, or non-positive values fall back to the `CHUNK_TOKENS`/`CHUNK_OVERLAP` defaults; `chunk_overlap()` additionally rejects any value `>= chunk_tokens()` (an overlap at or beyond the chunk size would make consecutive chunks overlap wholly or stall the splitter's forward progress) and falls back.
+- `pipeline.index_source()` / `refresh_source()` pass both through to `split_text_with_context()`; `split_text()`'s own signature defaults are untouched, so callers that pass explicit values (and every existing test) are unaffected. The knob takes effect at index time only — existing chunks keep the size they were split at until re-added/reindexed, exactly like `SHOIN_EMBED_MODEL` and the reindex flow.
+- `shoin health` prints the effective chunk config (ja/en), matching the `SHOIN_EMBED_BATCH` line — the "confirm a setting actually took effect without reading source" purpose health exists for (v0.2.127). README config table documents both, framed as measure-before-and-after knobs.
+
+2 regression tests added (`test_chunk_tokens_overlap_env_override`: the full validate/fall-back matrix incl. overlap≥size; `test_chunk_env_changes_index_chunk_count`: the override actually reaches `index_source`'s stored chunk count). Live-verified `shoin health` in both locales. `pytest tests/` now runs 706 tests. `ruff check` adds no new finding on the changed files (pre-existing cli.py/pipeline.py style notes untouched); `mypy shoin/` unchanged (only the `pypdf` stub note).
 
 ### v0.2.148 (2026-08-17)
 **Fixed (docs)**: Two stale claims in `docs/spec.md`, found by checking the requirements table and data model against the actual code — the same "a doc claim contradicts the code (or itself)" method that fixed CLAUDE.md in v0.2.75/112/113.

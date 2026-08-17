@@ -57,7 +57,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.148")
+        self.assertEqual(VERSION, "0.2.149")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -7000,6 +7000,67 @@ class TestChunkContext(unittest.TestCase):
         self.assertEqual(run("abc"), [10])  # invalid → default 16 → one batch
         self.assertEqual(run("0"), [10])  # below minimum → default
         self.assertEqual(run(None), [10])  # unset → default
+
+    def test_chunk_tokens_overlap_env_override(self) -> None:
+        """SHOIN_CHUNK_TOKENS/SHOIN_CHUNK_OVERLAP tune the chunker (so `shoin eval`
+        can measure them per v0.2.141); invalid/out-of-range values fall back to
+        the CHUNK_TOKENS/CHUNK_OVERLAP defaults, and overlap must stay < chunk size."""
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from shoin import config
+
+        def probe(env: dict[str, str]) -> tuple[int, int]:
+            with mock_patch.dict(os.environ, env, clear=False):
+                for k in ("SHOIN_CHUNK_TOKENS", "SHOIN_CHUNK_OVERLAP"):
+                    if k not in env and k in os.environ:
+                        del os.environ[k]
+                return config.chunk_tokens(), config.chunk_overlap()
+
+        self.assertEqual(probe({}), (512, 64))  # unset → defaults
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}), (256, 32))
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "abc"}), (512, 64))  # invalid → default
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "0"}), (512, 64))  # non-positive → default
+        self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "-5"}), (512, 64))  # negative → default
+        self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "999"}), (512, 64))  # >= size → default
+        # overlap == effective chunk size is rejected (would overlap wholly/stall)
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}), (128, 64))
+
+    def test_chunk_env_changes_index_chunk_count(self) -> None:
+        """The knob actually reaches the ingest path: with a smaller chunk size,
+        pipeline.index_source() stores more chunks for the same source."""
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from shoin.pipeline import index_source
+
+        class NoEmbedLLM:
+            embedding_model = ""
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return []
+
+            def embed_one(self, text: str) -> list[float]:
+                return []
+
+        doc = "これは十分に長い日本語の文書である。" * 200
+
+        def count_chunks(env: dict[str, str]) -> int:
+            with make_store() as s, mock_patch.dict(os.environ, env, clear=False):
+                for k in ("SHOIN_CHUNK_TOKENS", "SHOIN_CHUNK_OVERLAP"):
+                    if k not in env and k in os.environ:
+                        del os.environ[k]
+                nb = s.create_notebook("n")
+                with mock_patch("shoin.pipeline.extract_file") as ef:
+                    ef.return_value = Extracted(
+                        "txt", "d", doc, "o", "sha-" + env.get("SHOIN_CHUNK_TOKENS", "def")
+                    )
+                    res = index_source(s, nb.id, "/tmp/x.txt", NoEmbedLLM())
+                return res.n_chunks
+
+        small = count_chunks({"SHOIN_CHUNK_TOKENS": "64", "SHOIN_CHUNK_OVERLAP": "8"})
+        default = count_chunks({})
+        self.assertGreater(small, default)
 
     def test_upgrade_v4_to_v5_backfills_fts(self) -> None:
         """Applying migration 5 to a v4 database adds the context column and

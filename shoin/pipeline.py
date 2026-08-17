@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
-from .config import MAX_CHUNKS_PER_NOTEBOOK, embed_batch
+from .config import MAX_CHUNKS_PER_NOTEBOOK, chunk_overlap, chunk_tokens, embed_batch
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
@@ -177,7 +177,9 @@ def index_source(
         extracted = extract_file(target)
     # Guard before add_source so that zero-text documents don't leave an orphaned
     # source row (no chunks → permanently invisible to all retrieval queries).
-    pairs = split_text_with_context(extracted.text)
+    pairs = split_text_with_context(
+        extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
+    )
     contexts = [c for c, _ in pairs]
     texts = [t for _, t in pairs]
     if not texts:
@@ -227,7 +229,9 @@ def refresh_source(
     ).fetchone()
     if dup:
         raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
-    pairs = split_text_with_context(extracted.text)
+    pairs = split_text_with_context(
+        extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
+    )
     contexts = [c for c, _ in pairs]
     texts = [t for _, t in pairs]
     if not texts:
