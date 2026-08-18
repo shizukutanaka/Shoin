@@ -225,10 +225,11 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `fts_query()`: build FTS5 MATCH expression (trigrams for CJK, quoted terms for ASCII)
 - `bm25_search()`: FTS5 scoring + LIKE fallback
 - `vector_search()`: cosine similarity over notebook chunks (if embeddings enabled)
-- `adaptive_alpha()`: boost semantic search for natural-language queries
-- `_minmax()`: min-max normalization for fusion
-- `mmr()`: rerank hits by diversity (lexical bigram overlap)
-- `retrieve()`: orchestrates BM25 + vector + fusion + rerank
+- `term_variants()`: width/script spellings of a term (half/full-width kana, fullwidth ASCII) so they retrieve one another (v0.2.144)
+- `rrf_fuse()` / `rrf_fuse_lists()`: Reciprocal Rank Fusion — the ONLY fusion path (v0.2.56; the old convex-combination `fuse()`/`adaptive_alpha()` were deleted in v0.2.150)
+- `_minmax()`: min-max normalization (rescales RRF scores to [0,1] before the lexical rerank)
+- `rerank()` / `mmr()`: lexical rerank then diversity (lexical bigram overlap)
+- `retrieve()`: orchestrates BM25 + vector + RRF fusion + rerank + MMR
 
 **`citation.py`** (Citation Extraction & Verification)
 - `extract_citations(text)`: find all [S#] markers, handle full-width variants
@@ -310,7 +311,16 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.149
+## Version History: v0.1.37 → v0.2.150
+
+### v0.2.150 (2026-08-18)
+**Deleted** (first-principles / "delete the part" pass): `fuse()` and `adaptive_alpha()` (plus the now-orphaned `_DIGIT_RE`) removed from `search.py`, and their 17 tests removed from `tests/test_core.py` — a net **−227 lines** (67 of production code, 159 of tests).
+
+- **Why**: these were the pre-RRF convex-combination fusion path. `retrieve()` has called `rrf_fuse()` *exclusively* since v0.2.56 (verified: `grep` finds zero production callers of either function — only comments and their own tests referenced them). They survived under the justification "kept for backward compatibility with existing tests" — which is the anti-pattern itself: a part kept alive *only* to satisfy tests of that part. Shoin is an application, not a library, so `search.py`'s internal functions have no external API contract to preserve. The requirement "keep fuse()/adaptive_alpha()" had no name attached and did not survive being questioned.
+- **Confirmed safe before deleting**: `_minmax()` is retained — `retrieve()`/`retrieve_multi()` use it to rescale RRF scores to [0,1] before the lexical rerank. The `detail["bm25_norm"]`/`["vec_norm"]` keys were written *only* by `fuse()`; `grep` confirms nothing reads them, so removing the writer orphans no reader. `retrieve()` re-verified end-to-end after the deletion.
+- **Cost of the dead code was not hypothetical**: it had already caused two documentation defects this session — v0.2.148 fixed `spec.md` REQ-004 still describing the deleted CC融合 as the live design, and the "legacy … retained for test compat" note on `spec.md:86`. Both are now corrected to say the code was deleted. CLAUDE.md's "Key Files" `search.py` list dropped `adaptive_alpha()` and now names the actual current surface (`rrf_fuse`/`term_variants`/`rerank`).
+
+The historical changelog entries that describe *past* work on these functions (v0.1.54, v0.2.34, v0.2.47, v0.2.51, v0.2.60, …) are left untouched — they are the immutable record of what happened at those versions, not current-state claims. `pytest tests/` now runs 689 tests (706 − 17), all green. `ruff check shoin/search.py` clean; `mypy shoin/` unchanged (only the pre-existing `pypdf` stub note).
 
 ### v0.2.149 (2026-08-17)
 **Added**: `SHOIN_CHUNK_TOKENS` / `SHOIN_CHUNK_OVERLAP` env overrides — completing the premise `shoin eval` (v0.2.141) shipped on. That entry flagged that *every* retrieval decision, `CHUNK_OVERLAP=64` included, was "justified from the literature and never measured on Shoin's own data," and shipped `shoin eval` so a user could measure on their own corpus. But chunk size and overlap — the two first-order RAG knobs, and the ones a [2026 systematic study](https://www.digitalapplied.com/blog/rag-chunking-strategies-2026-retrieval-quality-playbook) found gave *no* benefit while the usual advice is 10–20% — were hardcoded module constants, so the one A/B test the eval most exists to enable could not be run. Now it can: set the env, re-add a source, `shoin eval` before/after.

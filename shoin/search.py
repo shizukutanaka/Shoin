@@ -24,7 +24,6 @@ from .config import TOP_K
 from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_DIGIT_RE = re.compile(r"\d")
 # Built from chunk._CJK_RANGES (the same table is_cjk()/query_terms()/fts_query()
 # already use) instead of a second hand-picked range literal \u2014 the original
 # hardcoded [\u3041-\u30FF\u4E00-\u9FFF] only covered hiragana/katakana/CJK
@@ -417,7 +416,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
         # compare fairly against LIKE-only hits.  Raw FTS5 BM25 is near-zero for
         # small corpora (~2e-6), while LIKE scores are integers (1, 2, …).
-        # Without this, min-max normalization in fuse() makes LIKE-only hits
+        # Without this, the min-max rescale before rerank makes LIKE-only hits
         # dominate even when the FTS5 hit matches more query terms.
         fts_ids = {h.chunk_id for h in fts_hits}
         for h in fts_hits:
@@ -525,36 +524,6 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
 # --- fusion ---------------------------------------------------------------
 
 
-def adaptive_alpha(query: str) -> float:
-    """Vector weight in [0.2, 0.8]. Lexical-looking queries push toward BM25.
-
-    Heuristics (applied in order, each adjusts alpha from 0.5 baseline):
-    - Short keyword query (≤ 3 terms, no question markers) → -0.15 (BM25 favoured)
-    - Natural-language question (≥ 6 terms, ends with か/？/?) → +0.15 (semantic)
-    - Digits or long identifiers → -0.15 (exact match)
-    - Quoted phrase → -0.10 (exact match)
-    """
-    alpha = 0.5
-    terms = query_terms(strip_neg_terms(query))
-    q_tail = query.rstrip("。．!！?？ 　\t\n")
-    q_ws = query.rstrip(" 　\t\n")
-    is_question = (
-        q_tail.endswith("か") or q_ws.endswith(("?", "？"))
-    )
-    if len(terms) <= 3 and not is_question:
-        alpha -= 0.15  # short keyword lookup: exact match matters
-    if len(terms) >= 6 or is_question:
-        alpha += 0.15  # natural-language question: semantics matter
-    # Use neg-stripped query for digit/quote checks so a neg-term like -v2 or
-    # -"phrase" doesn't falsely bias alpha toward exact-match retrieval.
-    clean_q = strip_neg_terms(query)
-    if _DIGIT_RE.search(clean_q) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
-        alpha -= 0.15  # identifiers / numbers: exact match matters
-    if '"' in clean_q or "「" in clean_q:
-        alpha -= 0.10  # quoted phrase: exact match matters
-    return min(0.8, max(0.2, alpha))
-
-
 def _minmax(values: list[float]) -> list[float]:
     if not values:
         return []
@@ -566,43 +535,6 @@ def _minmax(values: list[float]) -> list[float]:
     return [(v - lo) / (hi - lo) for v in values]
 
 
-def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
-    """Convex combination over min-max normalised score lists.
-
-    When only one signal is available, the degenerate case normalises that
-    signal to [0..1] directly (same as the convex combination with the other
-    weight at 0 and normalization applied before combining).  This keeps MMR
-    scores symmetric: BM25-only and vec-only paths both produce scores in
-    [0..1] so MMR's relevance/diversity trade-off is not biased by which signal
-    happened to return results.
-    """
-    if not vec_hits:
-        for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
-            h.score = n
-            h.detail["bm25_norm"] = n
-        return sorted(bm25_hits, key=lambda h: h.score, reverse=True)
-    if not bm25_hits:
-        # Symmetric case: only vector hits; normalize to [0..1] directly so
-        # MMR gets the same score range as the BM25-only path above.
-        for h, n in zip(vec_hits, _minmax([h.vec for h in vec_hits])):
-            h.score = n
-            h.detail["vec_norm"] = n
-        return sorted(vec_hits, key=lambda h: h.score, reverse=True)
-    merged: dict[int, Hit] = {}
-    for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
-        merged[h.chunk_id] = h
-        h.detail["bm25_norm"] = n
-    for h, n in zip(vec_hits, _minmax([h.vec for h in vec_hits])):
-        cur = merged.setdefault(h.chunk_id, h)
-        cur.vec = h.vec
-        cur.detail["vec_norm"] = n
-    for h in merged.values():
-        h.score = alpha * h.detail.get("vec_norm", 0.0) + (1 - alpha) * h.detail.get(
-            "bm25_norm", 0.0
-        )
-    return sorted(merged.values(), key=lambda h: h.score, reverse=True)
-
-
 def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit]:
     """Reciprocal Rank Fusion over BM25 and vector rank lists.
 
@@ -611,17 +543,16 @@ def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit
     relevance).  k=60 is the empirically optimal constant from Cormack et al.
     SIGIR 2009, confirmed across TREC, WANDS, and hybrid-search benchmarks.
 
-    Advantages over the previous min-max convex combination (fuse()):
+    Advantages over the previous min-max convex combination (removed v0.2.150):
     1. No score-scale normalization required — BM25 raw values and cosine
        similarity [0,1] are on completely incompatible scales; min-max is
        per-query, misbehaves on single-hit result sets (v0.1.45 bug), and
        compresses the BM25 dynamic range so any single vector hit dominates.
-    2. No alpha tuning required — adaptive_alpha() heuristics disappear.
+    2. No alpha tuning required — the old adaptive-alpha heuristics disappear.
     3. A chunk that ranks well in BOTH lists scores higher than one that only
        ranks well in one, which is the correct semantic for hybrid retrieval.
 
-    The legacy fuse() is kept for backward compatibility with direct callers.
-    retrieve() uses rrf_fuse() as of v0.2.56.
+    retrieve() has used rrf_fuse() exclusively since v0.2.56.
     """
     return rrf_fuse_lists(
         [bm25_hits, vec_hits], k, detail_names=["rrf_bm25_rank", "rrf_vec_rank"]
@@ -819,8 +750,8 @@ def retrieve(
     # blend ratio is calibrated correctly. Without this, RRF scores (~0.01-0.03)
     # are overwhelmed by lexical_overlap values in [0,1]: lex contributes ~10×
     # more than the RRF signal, making the reranker effectively ignore hybrid
-    # retrieval. The old fuse() emitted [0,1] scores implicitly via _minmax;
-    # rrf_fuse() emits raw rank-reciprocal values and needs explicit normalization.
+    # retrieval. rrf_fuse() emits raw rank-reciprocal values, so _minmax here
+    # rescales them to [0,1] before the lexical blend.
     if fused:
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):

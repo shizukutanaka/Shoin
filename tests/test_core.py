@@ -22,10 +22,8 @@ from shoin.ingest import (
     validate_public_url,
 )
 from shoin.search import (
-    adaptive_alpha,
     bm25_search,
     fts_query,
-    fuse,
     lexical_overlap,
     mmr,
     neg_terms,
@@ -57,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.149")
+        self.assertEqual(VERSION, "0.2.150")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -2635,74 +2633,9 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb_id, "完全に別の内容", 5)
             self.assertEqual(hits, [])
 
-    def test_adaptive_alpha_bounds(self) -> None:
-        for q in ("短い", "これはどういう意味ですか？", 'ERR_404 "exact phrase" 12345'):
-            a = adaptive_alpha(q)
-            self.assertGreaterEqual(a, 0.2)
-            self.assertLessEqual(a, 0.8)
-        self.assertGreater(adaptive_alpha("この論文の主要な貢献は何ですか？"), 0.5)
-        self.assertLess(adaptive_alpha("error code 12345"), 0.5)
-
-    def test_adaptive_alpha_english_question_gets_semantic_bump(self) -> None:
-        """English ? at end must raise alpha above 0.5 (rstrip removed ? so endswith was dead code)."""
-        self.assertGreater(adaptive_alpha("What is Shoin?"), 0.5)
-        self.assertGreater(adaptive_alpha("Does Shoin support PDF?"), 0.5)
-
-    def test_adaptive_alpha_fullwidth_question_mark_semantic_bump(self) -> None:
-        """Full-width ？ alone (no か suffix) must also trigger the semantic bump."""
-        self.assertGreater(adaptive_alpha("Shoin？"), 0.5)
-        self.assertGreater(adaptive_alpha("書院とは？"), 0.5)
-
-    def test_fuse_bm25_only(self) -> None:
-        hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        self.assertEqual(fused[0].chunk_id, 1)
-        self.assertEqual(fused[0].score, 1.0)
-
-    def test_fuse_all_zero_bm25_scores_stay_zero(self) -> None:
-        """All-zero BM25 scores (IDF=0 for ubiquitous terms) must normalize to 0.0.
-
-        Previously _minmax returned [1.0, 1.0] for equal values regardless of
-        whether they were 0, causing zero-relevance hits to receive the maximum
-        BM25 weight in fusion and potentially outrank genuinely relevant results.
-        """
-        hits = [Hit(1, 1, "a", 0, bm25=0.0), Hit(2, 1, "b", 0, bm25=0.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertEqual(h.score, 0.0, "zero BM25 scores must normalize to 0.0 not 1.0")
-
-    def test_fuse_equal_nonzero_bm25_scores_stay_one(self) -> None:
-        """All equal but non-zero BM25 scores should still normalize to 1.0 (undifferentiated tie)."""
-        hits = [Hit(1, 1, "a", 0, bm25=3.5), Hit(2, 1, "b", 0, bm25=3.5)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertAlmostEqual(h.score, 1.0, msg="equal non-zero BM25 scores must normalize to 1.0")
-
-    def test_fuse_bm25_only_populates_detail(self) -> None:
-        """BM25-only path must populate detail['bm25_norm'] like the merged path does."""
-        hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertIn("bm25_norm", h.detail, "detail['bm25_norm'] must be set in BM25-only path")
-
-    def test_fuse_combines(self) -> None:
-        b = [Hit(1, 1, "a", 0, bm25=1.0)]
-        v = [Hit(2, 1, "b", 0, vec=0.9)]
-        fused = fuse(b, v, alpha=0.8)
-        self.assertEqual(fused[0].chunk_id, 2)  # high alpha favours vector hit
-
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
-
-    def test_fuse_same_chunk_in_both_lists(self) -> None:
-        """A chunk appearing in both BM25 and vector results must be merged, not duplicated."""
-        bm25 = [Hit(1, 1, "共有チャンク", 0, bm25=2.0), Hit(2, 1, "BM25のみ", 0, bm25=1.0)]
-        vec = [Hit(1, 1, "共有チャンク", 0, vec=0.9), Hit(3, 1, "ベクトルのみ", 0, vec=0.7)]
-        result = fuse(bm25, vec, alpha=0.5)
-        ids = [h.chunk_id for h in result]
-        self.assertEqual(len(set(ids)), len(ids), "duplicate chunk IDs in fuse result")
-        self.assertIn(1, ids)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
@@ -4963,30 +4896,6 @@ class TestPipeline(unittest.TestCase):
                     refresh_source(s, src.id)
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
-    def test_fuse_vec_only_scores_in_unit_range(self) -> None:
-        """fuse() with empty bm25_hits must normalize vec scores to [0..1].
-
-        Before v0.2.46, when bm25_hits=[] but vec_hits was non-empty, fuse()
-        entered the merged-dict path and set h.score = alpha * vec_norm, capping
-        scores at alpha (≈0.5).  BM25-only hits scored in [0..1].  The asymmetry
-        caused MMR's relevance/diversity balance to skew toward diversity for
-        vec-only queries, because all candidate scores were compressed by alpha.
-        """
-        from shoin.search import Hit, fuse
-
-        vec_hits = [
-            Hit(chunk_id=1, source_id=1, text="a", score=0.0, vec=0.9),
-            Hit(chunk_id=2, source_id=1, text="b", score=0.0, vec=0.4),
-        ]
-        result = fuse([], vec_hits, alpha=0.5)
-        scores = [h.score for h in result]
-        # With proper normalization, top score = 1.0, bottom = 0.0
-        self.assertAlmostEqual(max(scores), 1.0, places=6, msg="vec-only top score must be 1.0")
-        self.assertAlmostEqual(min(scores), 0.0, places=6, msg="vec-only bottom score must be 0.0")
-        # Ordering must be preserved (vec=0.9 ranked above vec=0.4)
-        self.assertEqual(result[0].chunk_id, 1, "highest vec score must rank first")
-
-
 class TestChunkLimit(unittest.TestCase):
     """MAX_CHUNKS_PER_NOTEBOOK (v0.2.70): spec.md STRIDE DoS control 'チャンク数
     上限/notebook', found unimplemented by this session's Socratic audit of spec.md.
@@ -5876,74 +5785,6 @@ class TestBM25FTSLikeMerge(unittest.TestCase):
                 hits[0].source_id, a.id,
                 "source A (matches both FTS5 and LIKE terms) must rank first",
             )
-
-
-class TestAdaptiveAlphaKeyword(unittest.TestCase):
-    """Tests for keyword-detection in adaptive_alpha (v0.2.47)."""
-
-    def test_short_keyword_query_favours_bm25(self) -> None:
-        """A short keyword-style query (≤3 terms, no question) should get alpha < 0.5."""
-        alpha = adaptive_alpha("Python Django")
-        self.assertLess(alpha, 0.5, "short keyword query must favour BM25 (alpha < 0.5)")
-
-    def test_short_cjk_keyword_favours_bm25(self) -> None:
-        alpha = adaptive_alpha("書院")
-        self.assertLess(alpha, 0.5)
-
-    def test_question_overrides_short_keyword(self) -> None:
-        """A short query ending in '?' must NOT get the keyword penalty."""
-        alpha_q = adaptive_alpha("何ですか？")
-        alpha_kw = adaptive_alpha("Python")
-        self.assertGreater(alpha_q, alpha_kw, "question must get higher alpha than bare keyword")
-
-    def test_long_narrative_query_favours_vector(self) -> None:
-        """A natural-language question must get alpha > 0.5."""
-        # Japanese question detected via ？ ending (gets +0.15 boost)
-        alpha_ja = adaptive_alpha("機械学習と深層学習の違いは何ですか？")
-        self.assertGreater(alpha_ja, 0.5)
-        # English question with ≥6 terms (keyword penalty does not apply when >= 6 terms)
-        alpha_en = adaptive_alpha("what is the difference between machine learning and deep learning")
-        self.assertGreater(alpha_en, 0.5)
-
-    def test_alpha_within_bounds(self) -> None:
-        """Alpha must stay in [0.2, 0.8] for all test cases."""
-        queries = ["a", "a b c d e f g h i j", "何か？", '"quoted"', "123 -abc"]
-        for q in queries:
-            a = adaptive_alpha(q)
-            self.assertGreaterEqual(a, 0.2)
-            self.assertLessEqual(a, 0.8)
-
-    def test_digit_in_neg_term_does_not_trigger_exact_match_bias(self) -> None:
-        """A digit inside a negated term must not reduce alpha via the digit heuristic.
-
-        Before the fix, _DIGIT_RE.search(query) matched digits in neg-terms like -v2,
-        triggering the exact-match penalty even though the positive query had no digits.
-        Fix: search the neg-stripped query (clean_q) instead of the raw query.
-        """
-        # "neural network" → 2 terms → short-keyword penalty applied (-0.15 → 0.35)
-        # "-v2" is a neg-term and must NOT trigger the digit penalty
-        alpha_with_neg_digit = adaptive_alpha("neural network -v2")
-        alpha_no_neg = adaptive_alpha("neural network")
-        self.assertEqual(
-            alpha_with_neg_digit, alpha_no_neg,
-            "neg-term digit -v2 must not change alpha vs. the same query without it",
-        )
-
-    def test_digit_in_neg_term_does_not_affect_long_identifier_check(self) -> None:
-        """A long identifier inside a neg-term must not trigger the long-token penalty.
-
-        The `any(len(t) >= 12 ...)` check iterates over `terms` which already comes from
-        strip_neg_terms, so long identifiers in neg-terms can't trigger it that way.
-        This test confirms the check is consistently applied to positive terms only.
-        """
-        # The neg-term "-averylongnegidentifier" (22 chars) must NOT trigger the
-        # long-identifier penalty (len >= 12). Only positive terms matter.
-        alpha_neg_long = adaptive_alpha("cats -averylongnegidentifier")
-        alpha_baseline = adaptive_alpha("cats")
-        self.assertEqual(
-            alpha_neg_long, alpha_baseline,
-            "long neg-term identifier must not trigger the long-identifier alpha penalty",
-        )
 
 
 class TestBM25MergePathCap(unittest.TestCase):
