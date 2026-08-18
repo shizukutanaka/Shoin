@@ -311,7 +311,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.151
+## Version History: v0.1.37 → v0.2.152
+
+### v0.2.152 (2026-08-18)
+**Documented (first-principles "question the requirement" pass, no behavior change)**: Recorded why `retrieve()` and `retrieve_multi()` are kept as two functions rather than collapsed. A 400-case fuzz (BM25-only and vector modes, ranking *and* score) confirmed `retrieve(q)` is byte-identical to `retrieve_multi([q])` — so the natural "delete the duplication" move would be to make `retrieve()` a one-line delegation. It is deliberately not done, and `retrieve()`'s docstring now says why: `retrieve()` is the default/hot path and fuses exactly two lists via the two-arg `rrf_fuse()` primitive, which carries its own RRF-scoring test suite (the `1/(60+rank)` formula, dedup, empty-list handling); `retrieve_multi()` exists only for the opt-in multi-query feature and fuses N lists via `rrf_fuse_lists()`. Collapsing them would route the common case through an inert N-query loop and orphan the well-tested `rrf_fuse()` primitive of its only production caller. This is the counterpart to v0.2.150: there the questioned requirement (`fuse()` kept for its own tests) did not survive and 227 lines were deleted; here the questioned requirement (two arity-matched retrieval entry points) *does* survive scrutiny, so the conclusion is recorded to stop a future contributor from "simplifying" it into a regression. Also examined and kept: `qa.NO_HIT_TEXT`, a one-line test-facing semantic anchor — deleting it would churn three test sites to save one line, the disproportionate-optimization error the same method warns against. `pytest tests/` unchanged at 689; no code changed beyond the docstring.
 
 ### v0.2.151 (2026-08-18)
 **Fixed (docs)**: The `CHANGELOG.md` freeze note had itself gone stale — it said the project "continued through v0.2.70," a specific version overtaken within days and now 80 versions behind. Rewrote it to be version-agnostic (points at `shoin.config.VERSION` / `pyproject.toml` for the current version and CLAUDE.md for the canonical history) so it cannot go stale again — the same "write the doc so it doesn't need re-touching" discipline behind the v0.2.129 `SHOIN_DEBUG` rename and this file's own product-review backlog item #4. No code changed.

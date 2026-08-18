@@ -731,7 +731,18 @@ def retrieve(
     query_vec: list[float] | None = None,
     k: int = TOP_K,
 ) -> list[Hit]:
-    """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR."""
+    """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR.
+
+    This single-query path is behaviourally identical to retrieve_multi() called
+    with one query (verified by a 400-case fuzz over BM25-only and vector modes,
+    ranking AND score). It is deliberately NOT collapsed into that delegation:
+    retrieve() is the default, hot path and fuses exactly two lists via the
+    two-arg rrf_fuse() primitive, which carries its own RRF-scoring test suite;
+    retrieve_multi() exists only for the opt-in multi-query feature and fuses N
+    lists via rrf_fuse_lists(). Keeping the arity-matched primitives means the
+    common case reads without an inert N-query loop and the tested rrf_fuse()
+    primitive keeps a production caller.
+    """
     pool = max(k * 3, 12)
     negs = neg_terms(query)
     clean = strip_neg_terms(query) if negs else query
