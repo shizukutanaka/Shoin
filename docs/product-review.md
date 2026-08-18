@@ -39,7 +39,7 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 | 8 | **ブラウザ自動化テストが恒久スイートに無い** | UI(index.html, 単一ファイルで JS 多数)の回帰は各セッションのライブ Playwright 検証のみで、恒久テストに残さない規約。リグレッションは次のセッションが同じ操作を再検証するまで検出されない。parked CI にもブラウザテスト段は無い |
 | 2 | **`ruff format` 不整合** | parked CI の `ruff format --check .` ステップは 18ファイル中16で失敗する。プロジェクトは手整形スタイル(`ruff check` は通る)。方針決定(全面採用 or CIステップ削除)が未着手 (v0.2.133 で記録) |
 | 3 | **CHANGELOG.md が v0.1.55 で停止** | 正史は CLAUDE.md の Version History 節にあるが、標準的な場所を見る利用者には不親切 |
-| 4 | **PyPI 未発行** | README は `pip install shoin` を案内するが wheel は未発行・未検証。`static/*.html` の package-data 同梱も実機未確認 |
+| 4 | **PyPI 未発行**(ビルドは検証済) | README は `pip install shoin` を案内するが wheel は未**発行**。ただしビルド自体は v0.2.151 で実機検証済: `pip wheel . --no-deps` 成功、隔離 venv へ install → `shoin --version` 動作、`static/index.html`(52KB)が package-data として同梱・実行時に `importlib.resources`/`__file__` 相対の両方で解決可能。残るは PyPI へ push する認証情報のみ(エージェント不可) |
 | 5 | **改名後の埋め込み陳腐化** | ソース改名で FTS 側 context は即時更新されるが、埋め込みベクトル内の旧タイトルは reindex まで残る(v0.2.124 の許容済み劣化) |
 | 6 | **トークン予算の制約** | 2400トークン総予算・TOP_K=8。長文ソースの切詰め、10ターン超会話の履歴脱落。軽量LLM前提の意図的設計だが限界でもある |
 | 7 | **デフォルトブランチが作業ブランチ名のまま** | `main` は存在し最新だが、デフォルトは `claude/product-swot-analysis-0gaz09`。切替は Settings から1クリック(オーナーのみ可能) |
@@ -52,7 +52,7 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 |---|--------|--------|----------|--------------------------|
 | 1 | **CI 有効化** | 人手のみ | リポジトリ管理者 | `git mv ci/ci.yml .github/workflows/ci.yml`。エージェントには権限がない |
 | 2 | **`ruff format` 方針決定** | 小(判断) | メンテナ判断→どちらのモデルでも実装可 | 採用なら全ファイル一括整形+回帰確認、不採用なら ci.yml から該当行削除 |
-| 3 | **PyPI 発行前検証** | 中 | Sonnet可 | `pip wheel . --no-deps` → 隔離環境へ install → `shoin --version` / `shoin serve` 起動 / static 同梱確認。壊れていれば pyproject の package-data 修正 |
+| 3 | **PyPI 発行**(検証は完了) | 人手のみ(認証) | リポジトリ管理者 | ビルド・install・static同梱は v0.2.151 で検証済(短所#4参照)。残作業は `twine upload` の認証情報のみ、エージェント不可 |
 | 4 | **CHANGELOG.md の追補 or アーカイブ宣言** | 小 | Sonnet可 | 全130版の逆移植は非現実的。冒頭注記を「正史はCLAUDE.md」と明確化する数行で足りる |
 | 5 | **デフォルトブランチを main へ** | 人手のみ | リポジトリ管理者 | GitHub Settings → General → Default branch |
 | 6 | **リリースタグ/Release 作成** | 人手のみ | リポジトリ管理者 | エージェントのタグ push はプロキシが 403 で拒否(検証済み) |
