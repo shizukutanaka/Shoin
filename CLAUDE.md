@@ -311,7 +311,10 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.150
+## Version History: v0.1.37 → v0.2.151
+
+### v0.2.151 (2026-08-18)
+**Fixed (docs)**: The `CHANGELOG.md` freeze note had itself gone stale — it said the project "continued through v0.2.70," a specific version overtaken within days and now 80 versions behind. Rewrote it to be version-agnostic (points at `shoin.config.VERSION` / `pyproject.toml` for the current version and CLAUDE.md for the canonical history) so it cannot go stale again — the same "write the doc so it doesn't need re-touching" discipline behind the v0.2.129 `SHOIN_DEBUG` rename and this file's own product-review backlog item #4. No code changed.
 
 ### v0.2.150 (2026-08-18)
 **Deleted** (first-principles / "delete the part" pass): `fuse()` and `adaptive_alpha()` (plus the now-orphaned `_DIGIT_RE`) removed from `search.py`, and their 17 tests removed from `tests/test_core.py` — a net **−227 lines** (67 of production code, 159 of tests).
