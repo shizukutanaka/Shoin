@@ -510,7 +510,6 @@ class ServerTest(unittest.TestCase):
             # should be blocked.
             existing = handler.questions_cache.get(nb_id)
             self.assertIsNotNone(existing)
-            real_fp = existing[0]
             # The guard condition: only overwrite if no entry exists OR it matches fp.
             if existing is None or existing[0] == stale_fp:
                 handler.questions_cache[nb_id] = (stale_fp, ["stale question"])
@@ -669,7 +668,6 @@ class ServerTest(unittest.TestCase):
             {"X-Filename": "../../evil/secret.txt"},
         )
         self.assertEqual(status, 201)
-        data = json.loads(body if isinstance(body, (str, bytes)) else "{}") if status == 201 else {}
         # The stored title must not contain any directory separators
         _, nb_data = self._json("GET", f"/api/notebooks/{nb['id']}")
         titles = [s["title"] for s in (nb_data or {}).get("sources", [])]
@@ -1497,7 +1495,6 @@ class UrlSourceIngestionTest(unittest.TestCase):
         from unittest.mock import patch
 
         from shoin.ingest import Extracted
-        from shoin.pipeline import IndexResult, index_source
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "url-ingest"})
         nb_id = nb["id"]
@@ -1581,7 +1578,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
             original_sse(self_h, event, payload)
 
         with patch.object(_Handler, "_sse", sse_fail_on_delta):
-            raw = self._ask_raw(nb_id, "zzz completely unrelated question zzz")
+            self._ask_raw(nb_id, "zzz completely unrelated question zzz")
         # Must complete without server error — SSE response started
         self.assertGreater(call_count[0], 0)
 
@@ -1673,7 +1670,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
 
         def stream_raise_llmerror(messages, temperature=0.2):
             raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "test down")
-            yield  # noqa: unreachable
+            yield  # unreachable, but makes this a generator like chat_stream
 
         with (
             patch.object(_Handler, "_sse", sse_fail_on_degraded_delta),

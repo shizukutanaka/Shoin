@@ -95,6 +95,19 @@ OpenAI互換APIを話せるローカルモデルなら何でも可。動作確�
 | 埋め込み | nomic-embed-text | 0.3GB |
 | 埋め込み(日本語特化) | ruri-v3 | 0.5GB |
 
+## Development
+
+```bash
+pip install -e . && pip install ruff mypy coverage    # 依存
+./scripts/verify.sh                                    # 全ゲート(lint/型/テスト+カバレッジ)
+git config core.hooksPath .githooks                    # push前に自動実行(1回だけ)
+```
+
+`scripts/verify.sh` は `ci/ci.yml` と同じ検証を1コマンドで実行する。
+`.githooks/pre-push` を有効化すると push 前に自動で走り、失敗すれば push を止める
+(緊急時は `git push --no-verify`)。GitHub Actions の権限が無い環境でも
+「landする前に自動検証される」という要件をこれで満たす — 詳細は `ci/README.md`。
+
 ## License
 
 MIT

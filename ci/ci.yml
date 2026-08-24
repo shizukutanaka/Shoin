@@ -15,16 +15,20 @@ jobs:
         run: |
           pip install -e .
           pip install ruff mypy coverage detect-secrets cyclonedx-bom
+      # `ruff format --check` is deliberately NOT run: this codebase is
+      # hand-formatted (aligned trailing comments in config.py/chunk.py that
+      # ruff format would collapse), and the autoformatter would rewrite 16 of
+      # 18 files. Asserting a style the project deliberately does not follow is
+      # a broken gate, not a standard. `ruff check` (the linter) is the contract,
+      # and pyproject pins its rule set so the result can't drift by ruff version.
       - name: Lint
-        run: |
-          ruff format --check .
-          ruff check .
+        run: ruff check .
       - name: Type check
         run: mypy --strict shoin/
       - name: Test + Coverage
         run: |
           coverage run -m unittest discover -s tests -p "test_*.py"
-          coverage report --include="shoin/*" --fail-under=50
+          coverage report --include="shoin/*" --fail-under=90
       - name: Secret scan
         run: |
           detect-secrets scan shoin/ tests/ > ds.json

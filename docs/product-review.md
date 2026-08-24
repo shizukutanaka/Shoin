@@ -35,9 +35,9 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 
 | # | 弱点 | 現状 |
 |---|------|------|
-| 1 | **CI が実際には稼働していない** | `.github/workflows/` が存在しない。`ci/ci.yml` は完成品だがパーク中(GitHub App の workflows 権限制約でエージェントから配置不可)。全コミットが自動検証なしでランドしている |
+| 1 | **GitHub Actions CI は未稼働**(ただし自動検証は稼働) | `.github/workflows/` は不在。GitHub App の `workflows` 権限制約は v0.2.153 で実測再確認(push が remote rejected)。ただし「CIをGitHubで回す」は手段であって要件ではなく、本当の要件「landする前に自動検証される」は `scripts/verify.sh` + `.githooks/pre-push`(`git config core.hooksPath .githooks`)で権限なしに達成済み。`ci/ci.yml` 側も全ゲートを実測し赤くなる3点を修正済み(ci/README.md 参照) |
 | 8 | **ブラウザ自動化テストが恒久スイートに無い** | UI(index.html, 単一ファイルで JS 多数)の回帰は各セッションのライブ Playwright 検証のみで、恒久テストに残さない規約。リグレッションは次のセッションが同じ操作を再検証するまで検出されない。parked CI にもブラウザテスト段は無い |
-| 2 | **`ruff format` 不整合** | parked CI の `ruff format --check .` ステップは 18ファイル中16で失敗する。プロジェクトは手整形スタイル(`ruff check` は通る)。方針決定(全面採用 or CIステップ削除)が未着手 (v0.2.133 で記録) |
+| 2 | ~~**`ruff format` 不整合**~~ (v0.2.153 で決着) | 第一原理で解決: プロジェクトは意図的に手整形(桁揃えコメント)しており、従わないと決めたスタイルを CI で強制するのは壊れたゲート。`ruff format --check` ステップを削除し、`ruff check` をルール集合ピン留めの上で唯一の lint 契約とした |
 | 3 | **CHANGELOG.md が v0.1.55 で停止** | 正史は CLAUDE.md の Version History 節にあるが、標準的な場所を見る利用者には不親切 |
 | 4 | **PyPI 未発行**(ビルドは検証済) | README は `pip install shoin` を案内するが wheel は未**発行**。ただしビルド自体は v0.2.151 で実機検証済: `pip wheel . --no-deps` 成功、隔離 venv へ install → `shoin --version` 動作、`static/index.html`(52KB)が package-data として同梱・実行時に `importlib.resources`/`__file__` 相対の両方で解決可能。残るは PyPI へ push する認証情報のみ(エージェント不可) |
 | 5 | **改名後の埋め込み陳腐化** | ソース改名で FTS 側 context は即時更新されるが、埋め込みベクトル内の旧タイトルは reindex まで残る(v0.2.124 の許容済み劣化) |
@@ -50,8 +50,8 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 
 | # | 改善案 | 難易度 | 担当推奨 | エントリポイント / 備考 |
 |---|--------|--------|----------|--------------------------|
-| 1 | **CI 有効化** | 人手のみ | リポジトリ管理者 | `git mv ci/ci.yml .github/workflows/ci.yml`。エージェントには権限がない |
-| 2 | **`ruff format` 方針決定** | 小(判断) | メンテナ判断→どちらのモデルでも実装可 | 採用なら全ファイル一括整形+回帰確認、不採用なら ci.yml から該当行削除 |
+| 1 | **GitHub Actions への CI 移設**(自動検証自体は稼働済) | 人手のみ | リポジトリ管理者 | `git mv ci/ci.yml .github/workflows/ci.yml`。エージェントには権限がない(v0.2.153 で実測再確認)。**急ぎではない**: 本当の要件「landする前の自動検証」は `git config core.hooksPath .githooks` で既に達成済み。移設時は ci.yml が実測済みで全ゲート緑になることも確認済み |
+| 2 | ~~**`ruff format` 方針決定**~~ | — | 完了 (v0.2.153) | ステップ削除で決着。短所#2 参照 |
 | 3 | **PyPI 発行**(検証は完了) | 人手のみ(認証) | リポジトリ管理者 | ビルド・install・static同梱は v0.2.151 で検証済(短所#4参照)。残作業は `twine upload` の認証情報のみ、エージェント不可 |
 | 4 | **CHANGELOG.md の追補 or アーカイブ宣言** | 小 | Sonnet可 | 全130版の逆移植は非現実的。冒頭注記を「正史はCLAUDE.md」と明確化する数行で足りる |
 | 5 | **デフォルトブランチを main へ** | 人手のみ | リポジトリ管理者 | GitHub Settings → General → Default branch |

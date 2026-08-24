@@ -363,7 +363,6 @@ class TestAsk(unittest.TestCase):
         After the fix: uses [S1], [S2], [S3] so citations extract and coverage reflects
         the sources actually cited.
         """
-        from shoin.citation import extract_citations, make_report
 
         s, nb = seeded_store()
         with s:
@@ -1208,7 +1207,9 @@ class TestTruncateTokens(unittest.TestCase):
         """
         from shoin.qa import _truncate_tokens
 
-        blob = "a1b2c3d4e5" * 5000  # 50,000-char unbroken alphanumeric run
+        # A repeated test fixture, not a credential — it only trips
+        # detect-secrets' hex-entropy heuristic because of its length.
+        blob = "a1b2c3d4e5" * 5000  # 50,000-char run  # pragma: allowlist secret
         truncated = _truncate_tokens(blob, 50)
         self.assertLess(
             len(truncated), 1000,
@@ -1509,9 +1510,9 @@ class TestCheckEmbedModelOk(unittest.TestCase):
 
     def test_ask_skips_vector_on_mismatch(self) -> None:
         """ask() falls back to BM25-only when stored embed model != current model."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
-        from shoin.qa import _check_embed_model_ok, _query_vector, ask
+        from shoin.qa import _query_vector, ask
 
         s, nb = seeded_store()
         with s:

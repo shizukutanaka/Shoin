@@ -55,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.152")
+        self.assertEqual(VERSION, "0.2.153")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -757,7 +757,9 @@ class TestStore(unittest.TestCase):
         'CREATE VIRTUAL TABLE chunks_fts' raised OperationalError: table already exists
         because virtual tables did not support IF NOT EXISTS in the migration string.
         """
-        import tempfile, threading, os
+        import tempfile
+        import threading
+        import os
         errors: list[Exception] = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3156,7 +3158,7 @@ class TestQA(unittest.TestCase):
 
     def test_history_messages_drops_multiple_leading_assistants(self) -> None:
         """Citation stripping may produce consecutive leading assistant turns; all must be removed."""
-        from shoin.qa import _HISTORY_CITE_RE, history_messages
+        from shoin.qa import history_messages
 
         with make_store() as s:
             nb = s.create_notebook("multi-leading")
@@ -3946,7 +3948,7 @@ class TestLLMClient(unittest.TestCase):
         with an HTTP 500 status written into the already-flushed stream body.
         """
         import http.client
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from shoin.llm import LLMClient, LLMError
 
         exc = http.client.IncompleteRead(b"data: {", 50)
@@ -4018,9 +4020,8 @@ class TestLLMClient(unittest.TestCase):
         then sliced — a malicious endpoint returning a gigabyte 500 response caused OOM.
         Fix: `exc.read(300).decode(...)` passes the limit to read().
         """
-        import http.client
         import io
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from shoin.llm import LLMClient, LLMError
 
         # Build a fake HTTPError whose read() raises if called without a limit
@@ -4196,7 +4197,6 @@ class TestServerSSE(unittest.TestCase):
         The build_context exception path (v0.2.39) already saved an empty message;
         this fix makes the meta-send ConnectionError path consistent with that pattern.
         """
-        import json
         import os
         import tempfile
         import threading
@@ -4333,7 +4333,6 @@ class TestServerSSE(unittest.TestCase):
         import threading
 
         from shoin.server import _Handler
-        from shoin.llm import LLMError
 
         class _ZeroTokenLLM:
             embedding_model = ""
@@ -4692,7 +4691,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res1.source.id, source_id, "source ID must be preserved")
         self.assertEqual(res1.source.title, "Page v1", "refresh must not overwrite the title")
         self.assertEqual(res1.source.sha256, "sha-v2")
-        with make_store() as s2:
+        with make_store():
             pass  # store closed; already verified above
 
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
@@ -5039,7 +5038,7 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_source(nb.id, "url", "Title\nSecond line", "http://x.com", "sha1")
             md = export_markdown(s, nb.id)
-        item_lines = [l for l in md.splitlines() if l.startswith("- [S1]")]
+        item_lines = [ln for ln in md.splitlines() if ln.startswith("- [S1]")]
         self.assertEqual(len(item_lines), 1)
         self.assertIn("Title Second line", item_lines[0])
 
@@ -5050,7 +5049,7 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_note(nb.id, "Note\nTitle", "body")
             md = export_markdown(s, nb.id)
-        heading_lines = [l for l in md.splitlines() if l.startswith("### ")]
+        heading_lines = [ln for ln in md.splitlines() if ln.startswith("### ")]
         self.assertEqual(len(heading_lines), 1)
         self.assertIn("Note Title", heading_lines[0])
 
@@ -5060,7 +5059,7 @@ class TestExport(unittest.TestCase):
         with make_store() as s:
             nb = s.create_notebook("My\nNotebook")
             md = export_markdown(s, nb.id)
-        h1_lines = [l for l in md.splitlines() if l.startswith("# ")]
+        h1_lines = [ln for ln in md.splitlines() if ln.startswith("# ")]
         self.assertEqual(len(h1_lines), 1)
         self.assertIn("My Notebook", h1_lines[0])
 
@@ -5132,7 +5131,7 @@ class TestExport(unittest.TestCase):
             s.conn.execute("UPDATE sources SET added_at='' WHERE id=?", (src.id,))
             s.conn.commit()
             ris = export_ris(s, nb.id)
-        da_lines = [l for l in ris.splitlines() if l.startswith("DA  -")]
+        da_lines = [ln for ln in ris.splitlines() if ln.startswith("DA  -")]
         self.assertEqual(len(da_lines), 1)
         self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
         # No structured PY (year) line for a malformed/empty added_at (v0.2.136).
@@ -5222,7 +5221,7 @@ class TestExport(unittest.TestCase):
             md = export_markdown(s, nb.id)
         # Every line that starts with **User**: must also END on the same physical line
         # (i.e., the embedded newline must have been collapsed).
-        user_lines = [l for l in md.splitlines() if "**User**:" in l]
+        user_lines = [ln for ln in md.splitlines() if "**User**:" in ln]
         self.assertEqual(len(user_lines), 1, "user question must appear on exactly one line")
         self.assertIn("line one", user_lines[0])
         self.assertIn("line two", user_lines[0])
@@ -6007,7 +6006,7 @@ class TestCLI(unittest.TestCase):
         Fix: guard print('---') and _print_report() with if result.report['cited'].
         """
         import io
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from shoin.cli import main
         from shoin.studio import StudioResult
         from shoin.citation import CitationReport
@@ -6023,11 +6022,12 @@ class TestCLI(unittest.TestCase):
             s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
 
         # Run via temp DB file so main() can open it
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
             db_file = f.name
         try:
-            with make_store() as s2:
+            with make_store():
                 pass  # just need a clean DB
             # Build a store at db_file path and add a notebook + source
             from shoin.store import Store
@@ -6189,7 +6189,8 @@ class TestCLI(unittest.TestCase):
         """
         import sqlite3 as _sqlite3
         import io
-        import tempfile, os
+        import tempfile
+        import os
         from unittest.mock import patch
         from shoin.cli import main
         from shoin.store import Store
