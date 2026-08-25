@@ -311,7 +311,22 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.153
+## Version History: v0.1.37 → v0.2.154
+
+### v0.2.154 (2026-08-18)
+**Added**: `tests/test_ui_contract.py` — persistent regression tests for the single-file Web UI, closing product-review 短所#8 / backlog#11 (UI breakage was caught only by live Playwright verification in whichever session touched the UI, and never persisted, so a regression stayed invisible until someone manually redid the same clicks).
+
+The obvious move was "add Playwright to the suite." Questioned first: *what actually breaks in a single vanilla-JS file, and how much of it genuinely needs a browser?* Three classes cover most of it and none of them do — so the fix adds **zero dependencies** and runs in 0.4s instead of pulling in a browser download:
+
+1. **JS syntax** — the whole app is one `<script>` block, so a single typo kills the entire UI. `node --check` on the extracted script catches it; the test **SKIPs** (never fails) when node is absent, keeping the suite dependency-free.
+2. **i18n completeness** — every `data-i18n` / `-aria` / `-ph` / `-title` key the markup references must exist in **both** `I18N.ja` and `I18N.en`, or one locale renders a blank control. A real regression path: v0.2.71 converted 11 hardcoded `aria-label`s to this mechanism precisely because they had drifted.
+3. **API contract** — every `/api/…` path the UI fetches (including `${...}`-interpolated ones, substituted with a concrete id) must match a pattern in `server._Handler._ROUTES`. Catches "renamed the route, forgot the caller," otherwise a 404 found only by clicking.
+
+**Each test was proven to catch its class**, not merely to pass: injecting a JS syntax error, an undefined `data-i18n` key, and a call to an unregistered `/api/healthz` each produced a precise failure (`data-i18n keys missing from I18N.ja: ['tabs.nonexistent']`, `index.html calls '/api/healthz' … but no server route matches it`), and all three passed again once `index.html` was restored byte-identical to HEAD.
+
+**Honestly scoped**: rendering, layout, and event wiring — the things that genuinely need a browser — are *not* covered and remain live-verified per project convention. This closes the cheap 80%; product-review #8/#11 are updated to say exactly that rather than claiming the gap is gone.
+
+`pytest tests/` now runs 692 tests (689 + 3). `ruff check .` clean; `scripts/verify.sh` all gates pass.
 
 ### v0.2.153 (2026-08-18)
 **Added / Fixed (automation, the last open "完成" item)**: Automated verification now runs before every push, without the GitHub permission that was blocking it — and the parked CI, long described as "a finished artifact that just needs moving," turned out to be **broken in three separate ways** that would have made it permanently red on activation.

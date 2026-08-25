@@ -36,7 +36,7 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 | # | 弱点 | 現状 |
 |---|------|------|
 | 1 | **GitHub Actions CI は未稼働**(ただし自動検証は稼働) | `.github/workflows/` は不在。GitHub App の `workflows` 権限制約は v0.2.153 で実測再確認(push が remote rejected)。ただし「CIをGitHubで回す」は手段であって要件ではなく、本当の要件「landする前に自動検証される」は `scripts/verify.sh` + `.githooks/pre-push`(`git config core.hooksPath .githooks`)で権限なしに達成済み。`ci/ci.yml` 側も全ゲートを実測し赤くなる3点を修正済み(ci/README.md 参照) |
-| 8 | **ブラウザ自動化テストが恒久スイートに無い** | UI(index.html, 単一ファイルで JS 多数)の回帰は各セッションのライブ Playwright 検証のみで、恒久テストに残さない規約。リグレッションは次のセッションが同じ操作を再検証するまで検出されない。parked CI にもブラウザテスト段は無い |
+| 8 | **ブラウザ描画の自動テストは無い**(静的契約テストは v0.2.154 で導入) | レンダリング・レイアウト・イベント配線の回帰は依然ライブ検証のみ。ただし「ブラウザが必要な壊れ方」以外は `tests/test_ui_contract.py` が恒久カバー: JS構文(`node --check`、node不在時はSKIP)・data-i18n キーの ja/en 両locale完備・UIが叩く `/api/…` が実在ルートに一致するか。依存追加ゼロ、3件とも故意の破壊で捕捉を実証済み |
 | 2 | ~~**`ruff format` 不整合**~~ (v0.2.153 で決着) | 第一原理で解決: プロジェクトは意図的に手整形(桁揃えコメント)しており、従わないと決めたスタイルを CI で強制するのは壊れたゲート。`ruff format --check` ステップを削除し、`ruff check` をルール集合ピン留めの上で唯一の lint 契約とした |
 | 3 | **CHANGELOG.md が v0.1.55 で停止** | 正史は CLAUDE.md の Version History 節にあるが、標準的な場所を見る利用者には不親切 |
 | 4 | **PyPI 未発行**(ビルドは検証済) | README は `pip install shoin` を案内するが wheel は未**発行**。ただしビルド自体は v0.2.151 で実機検証済: `pip wheel . --no-deps` 成功、隔離 venv へ install → `shoin --version` 動作、`static/index.html`(52KB)が package-data として同梱・実行時に `importlib.resources`/`__file__` 相対の両方で解決可能。残るは PyPI へ push する認証情報のみ(エージェント不可) |
@@ -60,7 +60,7 @@ v0.2.133 全コード(shoin/ 14モジュール + 単一HTML UI)・テスト669�
 | 8 | **serve 起動ログの i18n** | 小 | Sonnet可 | 旧版レビューからの持ち越し。`# pragma: no cover` のブロッキングループ内のため優先度低 |
 | 9 | **Studio 出力への節文脈表示の拡充** | 小 | Sonnet可 | Studio カードは `renderWithSeals()` 経由で節ツールチップ済み。エクスポートの Studio 節も凡例を出すか検討(現状はステータス行のみ) |
 | 10 | **監査ラウンドの継続** | 中 | Opus | find→3票敵対的検証→修正のワークフローパターン(v0.2.128 前例)。対象は直近追加コード優先 |
-| 11 | **Playwright スモークテストを CI へ** | 中 | Opus | CI 有効化(#1)とセット。主要 UI 操作(質問→シール→ビューア、ソース改名/リフレッシュ)を headless で回す1本を `ci.yml` に追加し、恒久ブラウザ回帰を確立(短所#8 の解消) |
+| 11 | **Playwright スモークテストを CI へ**(安価な8割は v0.2.154 で完了) | 中 | Opus | 静的契約テスト(`tests/test_ui_contract.py`)で JS構文・i18n・APIパスは恒久カバー済み。残るのは描画/イベント配線の実ブラウザ検証で、Playwright + ブラウザDL という重い依存に見合うかは要判断 |
 
 ## 結論
 
