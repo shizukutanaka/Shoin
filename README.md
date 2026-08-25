@@ -13,9 +13,20 @@
 ## Installation
 
 ```bash
-pip install shoin        # または: pipx install shoin / uvx shoin
+# ソースから (現時点で唯一の方法。動作検証済み)
+git clone https://github.com/shizukutanaka/Shoin.git && cd Shoin
+pip install .
+
 shoin serve              # http://localhost:7440 が開く
 ```
+
+> **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
+> メンテナの認証情報が必要)。リポジトリから直接入れる場合は **ref を明示**してください —
+> 既定ブランチは古い版を指していることがあります:
+>
+> ```bash
+> pip install "git+https://github.com/shizukutanaka/Shoin.git@main"
+> ```
 
 前提: [Ollama](https://ollama.com)、llama.cpp、LM Studio いずれかのOpenAI互換ローカルエンドポイント。
 

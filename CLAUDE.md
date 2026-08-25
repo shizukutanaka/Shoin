@@ -311,7 +311,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.155
+## Version History: v0.1.37 → v0.2.156
+
+### v0.2.156 (2026-08-18)
+**Fixed**: The README's very first instruction did not work. `pip install shoin` fails — measured, not assumed: `ERROR: Could not find a version that satisfies the requirement shoin (from versions: none)`. The single most important line in the project's documentation, the one a new user runs before anything else, was a false promise. This is the exact "documented but never implemented" class the project has fixed four times before (v0.2.75/112/113/129), sitting in the most visible place of all.
+
+This round came from applying the method to my *own* prior conclusion. Three items had been parked as "admin-only, therefore not incompleteness." That is not questioning the requirement — it is declaring a blocker to be someone else's job. Re-examined by asking what **user-facing defect** each blocker actually causes:
+
+- **PyPI unpublished → the install command is a lie.** The requirement is "a user can install and run this," not "it is on PyPI." Fixed by documenting what actually works and verifying it end-to-end: `git clone` → `pip install .` → `shoin serve` → **HTTP 200** from a clean venv. The PyPI line is now an explicit "not yet published" note rather than a broken command.
+- **Stale default branch → installs deliver 14-version-old code.** Previously filed as cosmetic ("main exists and is current"). It is not cosmetic and main is not current: `pip install git+<repo>` with no ref resolves to the default branch and installs **v0.2.141**, while an explicit ref installs **v0.2.155** (both measured). README now tells users to pin a ref; product-review 短所#7 is rewritten from "cosmetic" to "real user impact" with the measured evidence.
+- **CI** was already resolved in v0.2.153 by separating the requirement (verification before landing) from the mechanism (GitHub Actions).
+
+Also verified rather than assumed: every CLI subcommand the README advertises (`serve`/`notebook`/`add`/`ask`/`studio`/`health`/`eval`) exists and responds to `--help`.
+
+**Honest remainder**: the maintainer still needs to merge this branch to `main`, flip the default branch, and (optionally) publish to PyPI. Those are *delivery* actions on a finished product, not missing engineering — and the README no longer misleads anyone in the meantime. `pytest tests/` unchanged at 693; `scripts/verify.sh` all gates pass.
 
 ### v0.2.155 (2026-08-18)
 **Added**: A fourth UI contract test — `studio.KINDS` (Python) vs the UI's i18n table — found by re-scrutinizing v0.2.154's own deliverable (the v0.1.4/0.1.5 discipline) rather than by a new feature idea.
