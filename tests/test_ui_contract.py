@@ -85,6 +85,27 @@ class TestUIContract(unittest.TestCase):
             missing = sorted(used - defined)
             self.assertEqual(missing, [], f"data-i18n keys missing from I18N.{loc}: {missing}")
 
+    def test_every_studio_kind_has_a_label_in_both_locales(self) -> None:
+        """studio.KINDS (Python) and the UI's i18n table are a cross-language contract.
+
+        The Studio buttons build their label dynamically — `t("studio."+kind)` —
+        so a kind added to KINDS without a matching i18n key renders a button with
+        a BLANK label. The data-i18n scan above cannot see this: the key never
+        appears literally in the markup. Only comparing the two sources catches it.
+        """
+        from shoin.studio import KINDS
+
+        script = _script_body(_html())
+        for loc in ("ja", "en"):
+            m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
+            self.assertIsNotNone(m, f"I18N.{loc} block not found")
+            assert m is not None
+            keys = set(re.findall(r'"([^"]+)"\s*:', m.group(1)))
+            missing = [k for k in KINDS if f"studio.{k}" not in keys]
+            self.assertEqual(
+                missing, [], f"studio kinds with no I18N.{loc} label (blank button): {missing}"
+            )
+
     def test_every_api_path_matches_a_registered_route(self) -> None:
         """A path the UI fetches but the server never registers is a 404 in waiting."""
         script = _script_body(_html())

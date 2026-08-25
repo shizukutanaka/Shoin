@@ -311,7 +311,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.154
+## Version History: v0.1.37 → v0.2.155
+
+### v0.2.155 (2026-08-18)
+**Added**: A fourth UI contract test — `studio.KINDS` (Python) vs the UI's i18n table — found by re-scrutinizing v0.2.154's own deliverable (the v0.1.4/0.1.5 discipline) rather than by a new feature idea.
+
+- **How it surfaced**: a "delete the part" scan for i18n keys defined but never referenced flagged 5 as dead — `studio.briefing`, `studio.study_guide`, `studio.faq`, `studio.timeline`, `studio.mindmap`. **Verified before deleting** (the step that mattered): they are live, built dynamically at `index.html:885` as `t("studio."+kind)`. A naive unused-key deletion would have blanked every Studio button. Recorded here because the scan's regex only sees literal `t("key")` calls — dynamic key construction is invisible to it.
+- **The real finding**: that same invisibility is a hole in v0.2.154's own i18n test. It checks that every key the *markup* references exists in both locales, but `studio.<kind>` never appears literally in the markup — so a sixth kind added to `studio.KINDS` would ship a button with a **blank label**, and nothing in the suite would notice. This is a genuine cross-language contract (Python tuple ↔ JS i18n table) that no single-file check can cover.
+- **Fix**: `test_every_studio_kind_has_a_label_in_both_locales` compares `shoin.studio.KINDS` against the parsed `I18N.ja`/`I18N.en` key sets directly. **Proven to catch it**: temporarily prepending a `comparison` kind to `KINDS` produced `studio kinds with no I18N.ja label (blank button): ['comparison']`, and the test passed again once `studio.py` was restored byte-identical to HEAD.
+- **Not deleted**: no i18n key is actually dead. The scan's value was the contract gap it exposed, not a deletion — the honest outcome of questioning a part and finding it earns its place, same as v0.2.152.
+
+`pytest tests/` now runs 693 tests. `scripts/verify.sh` all gates pass; `ruff check .` clean.
 
 ### v0.2.154 (2026-08-18)
 **Added**: `tests/test_ui_contract.py` — persistent regression tests for the single-file Web UI, closing product-review 短所#8 / backlog#11 (UI breakage was caught only by live Playwright verification in whichever session touched the UI, and never persisted, so a regression stayed invisible until someone manually redid the same clicks).
