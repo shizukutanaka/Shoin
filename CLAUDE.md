@@ -311,7 +311,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.156
+## Version History: v0.1.37 → v0.2.157
+
+### v0.2.157 (2026-08-18)
+**Verified (end-to-end on real machinery) + docs**: Ran the complete user journey against a freshly installed copy rather than trusting the unit suite — the "actually run the machine" check the 693 tests cannot substitute for.
+
+- **Journey, all passing**: `git clone` → `pip install .` (clean venv) → `shoin notebook new` → `shoin add` → `shoin ask` in **both** modes (LLM-unreachable search-only, and with a minimal OpenAI-compatible mock endpoint serving `/models`, `/chat/completions` streaming + non-streaming, and `/embeddings`) → `shoin studio` → `shoin note add` → `shoin export` (md/bibtex) → `shoin eval` → `shoin serve`. The product's differentiator worked on real machinery: the answer came back cited, and the CLI report showed `[S1] doc.md (§ 和紙の製法) ✓根拠確認済み` — retrieval, generation, section breadcrumb, and grounding confirmation all live. The Markdown export carried the verification outside the app for both the degraded (`*検索のみ / ✓根拠確認済み: S1*`) and the generated answer.
+- **Web path**: `GET /api/health` correct; `POST /api/notebooks/1/ask` streamed `meta` → `delta`×N → `done`, and the `done` report parsed to `confirmed=[1], cited=[1], coverage=1.0, source_contexts={'S1': '和紙の製法'}, degraded=False`.
+- **Error and security paths, live**: 404 (missing notebook), 405 (wrong method on a known path, RFC 9110), 400 with a stable code (`VALIDATION_FIELD_FORMAT_INVALID`) for malformed JSON, `INGEST_URL_BLOCKED` for both `127.0.0.1` and the cloud-metadata address `169.254.169.254`, and 403 for a cross-site `Host` header. No defect found in any of them.
+- **Branch made trivially landable**: merged `origin/main` in (it carried a `.github/dependabot.yml` this branch lacked). `origin/main` is now an ancestor of HEAD, so the maintainer's merge is a **fast-forward with zero conflict risk** — the most that can be done toward landing without push access to `main`. Incidentally established that the GitHub App restriction is scoped to `.github/workflows/` specifically: `.github/dependabot.yml` pushed without complaint.
+- **Docs**: `docs/product-review.md`'s header was stale (claimed v0.2.133 / 14 modules / 669 tests; actually 15 modules / 693 tests) and its conclusion still listed CI and the install path as open weaknesses. Both corrected, with the remaining items stated precisely as *delivery* actions needing maintainer credentials rather than missing engineering.
+
+`pytest tests/` unchanged at 693; `scripts/verify.sh` all gates pass.
 
 ### v0.2.156 (2026-08-18)
 **Fixed**: The README's very first instruction did not work. `pip install shoin` fails — measured, not assumed: `ERROR: Could not find a version that satisfies the requirement shoin (from versions: none)`. The single most important line in the project's documentation, the one a new user runs before anything else, was a false promise. This is the exact "documented but never implemented" class the project has fixed four times before (v0.2.75/112/113/129), sitting in the most visible place of all.
