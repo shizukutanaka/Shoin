@@ -311,7 +311,17 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.157
+## Version History: v0.1.37 → v0.2.158
+
+### v0.2.158 (2026-08-31)
+**Verified (Socratic audit of recorded claims, docs only)**: A Socratic-method pass posed a falsifiable question against each core claim in `docs/product-review.md` and README, answering each empirically against the current code — the v0.2.75/112/113 "a doc claim is either verified or corrected" discipline applied to the *strengths* ledger, which had never itself been adversarially re-checked as a set.
+
+- **"完全ローカル" (the product's headline privacy claim) survives enumeration**: the only outbound network call sites in the entire codebase are `llm.py` (the user-configured `SHOIN_LLM_URL` endpoint) and `ingest.py` (user-requested URL fetches, SSRF-pinned). The UI has exactly one `fetch()` call, to relative `/api/…` paths, and zero external `src`/`href` assets — no CDN, no fonts, no analytics. No code path can send data anywhere the user didn't point it.
+- **Downgrade safety verified**: an older binary opening a newer-schema DB runs zero migrations (`_migrate_once()` skips every `version <= MAX(version)`), and every migration is append-only and additive (DEFAULT-valued column adds, new tables), so old code operates on a new schema without error. Not previously recorded anywhere.
+- **Spot-checks of recorded strengths, all true**: runtime dependency is pypdf alone (AST scan of every `shoin/*.py` import); `innerHTML` appears 0 times in `index.html`; SSRF IP-pinning (`_PinnedHTTPConnection`/`_PinnedHTTPSConnection`, `getaddrinfo` validation) is present and live.
+- **No actionable defect found** — recorded honestly: the audit coming up empty is itself additional evidence for the standing "出荷水準" conclusion, and this entry is the record that the strengths ledger was checked rather than assumed.
+
+`docs/product-review.md` updated (new 長所10: privacy claim falsification-tested; 長所8 gains the downgrade-safety note; conclusion notes the audit). No code changed; `pytest tests/` unchanged at 693; `scripts/verify.sh` all gates pass.
 
 ### v0.2.157 (2026-08-18)
 **Verified (end-to-end on real machinery) + docs**: Ran the complete user journey against a freshly installed copy rather than trusting the unit suite — the "actually run the machine" check the 693 tests cannot substitute for.
