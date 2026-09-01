@@ -311,7 +311,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.159
+## Version History: v0.1.37 → v0.2.160
+
+### v0.2.160 (2026-09-01)
+**Fixed**: Renaming a source left its **embeddings** encoding the OLD title — the last open engineering defect in `docs/product-review.md` (短所#5 / backlog#7), and the same *half-repaired index* shape this project fixed three times for other fields (v0.2.142/143/144). Found by turning the Socratic pass that verified the strengths ledger (v0.2.158) onto the weaknesses ledger instead.
+
+- **Root cause**: `_embed_input(context, text)` prepends the chunk's context breadcrumb — which begins with the source title — to the embedding input. `update_source_title()` rewrites `chunks.context` in its own transaction (v0.2.124), so FTS/BM25 sees the new title immediately and the `chunks_au` trigger keeps `chunks_fts` in sync; nothing ever refreshed the vectors, and both rename call sites (`server._h_src_patch`, `cli source rename`) called the store method directly. The vector half of a hybrid index kept answering for a title the user had deleted.
+- **Live-reproduced against a real `Store`** (deterministic lexical embedding backend — it models the mechanism under test, "the title is part of the embedding input", not a real model's semantics): a source renamed to `免疫レポート`, whose body never contains that word, scored **cosine 0.0** in `vector_search()` for that exact query and ranked **below** an off-topic meeting-note that merely name-drops 免疫. After the fix it ranks first (0.577 vs 0.198).
+- **Fix**: new `pipeline.rename_source(store, source_id, title, origin, llm)` — renames, then re-embeds *that source's* chunks from the already-rewritten context via the existing `_embed_input`/`_embed_chunks` path; `store.id_context_text_chunks_for_source()` is the source-scoped counterpart of the notebook-scoped fetch `reindex_notebook` already uses. Both call sites now go through it.
+- **`force=False` is load-bearing**: it keeps `_embed_chunks()`'s embedding-model mismatch guard intact, so a DB whose vectors came from a different model is never handed a few new-model vectors by a rename — only a full reindex may overwrite in place. Regression-tested.
+- **Costs nothing when it should not run**: a rename that does not change the title issues zero embedding calls; an empty `embedding_model` returns immediately; an `LLMError` is swallowed by `_embed_chunks` so the rename itself always commits (the REQ-004/008 degradation contract). Synchronous re-embedding matches the latency profile the sibling `↻ refresh` button already has in the same UI, so no background-thread complexity was added.
+
+**Measured with `shoin eval`, reported honestly**: on a 3-source notebook where the renamed document is the expected answer for its new title, **recall/MRR were 1.000 both before and after** — BM25 was already repaired in v0.2.124 and the lexical rerank pushes the source back up, so at `shoin eval`'s source granularity the hybrid recovers what the stale vectors lose. The gain is inside the vector half of the index (cosine 0.0 → 0.577, rank 2 → 1 among vector hits) and is claimed only at that level, pinned by the regression tests rather than by the eval.
+
+6 regression tests added (`TestRenameReembed`): vector refreshed to the new-title input, the rank reproduction end-to-end through `vector_search()`, no-op rename spends no LLM call, embedding failure never blocks the rename, no embedding model means no call, and the model-mismatch guard is respected. Fail-then-pass verified via `git stash` on `shoin/pipeline.py`+`store.py`+`server.py`+`cli.py` — pre-fix the module cannot even import `rename_source`, so the same assertions were re-expressed against the pre-fix public API and reproduce the rank-2 failure exactly. `pytest tests/` now runs 699 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.159 (2026-09-01)
 **Delivered**: The delivery operations previously parked as "maintainer-only" were re-examined for what an agent can actually execute, and executed — closing the two remaining user-facing delivery defects without any maintainer credential.

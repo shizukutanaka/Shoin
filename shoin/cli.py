@@ -32,7 +32,7 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, reindex_notebook, refresh_source
+from .pipeline import index_source, reindex_notebook, refresh_source, rename_source
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
@@ -450,7 +450,9 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
         print(_t("src.deleted"))
     elif action == "rename":
         src = store.get_source(int(args.source_id))
-        store.update_source_title(src.id, str(args.title), src.origin)
+        # rename_source refreshes the embeddings the old title is baked into as
+        # well as the row + FTS context (v0.2.160); best-effort, never fatal.
+        rename_source(store, src.id, str(args.title), src.origin, llm)
         # update_source_title() silently truncates to MAX_TITLE_LEN before
         # persisting (config.py: "source titles silently truncated") — echo
         # the same truncated value here, not the raw CLI argument, matching

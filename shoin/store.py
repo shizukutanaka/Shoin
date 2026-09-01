@@ -754,6 +754,21 @@ class Store:
         ).fetchall()
         return [(int(r["id"]), str(r["context"]), str(r["text"])) for r in rows]
 
+    def id_context_text_chunks_for_source(self, source_id: int) -> list[tuple[int, str, str]]:
+        """Return (chunk_id, context, text) triples for one source, ordered by seq.
+
+        The source-scoped counterpart of id_context_text_chunks_for_notebook,
+        used by pipeline.rename_source to re-embed only the renamed source's
+        chunks — the context column already holds the REWRITTEN title prefix
+        (update_source_title refreshes it in the same transaction), so feeding
+        these rows through _embed_input reproduces exactly what index_source
+        would have embedded had the source carried the new title all along.
+        """
+        rows = self.conn.execute(
+            "SELECT id, context, text FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
+        ).fetchall()
+        return [(int(r["id"]), str(r["context"]), str(r["text"])) for r in rows]
+
     @staticmethod
     def _row_to_chunk(r: sqlite3.Row) -> Chunk:
         blob: Any = r["embedding"]

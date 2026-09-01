@@ -10,7 +10,13 @@ import sys
 from dataclasses import dataclass
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
-from .config import MAX_CHUNKS_PER_NOTEBOOK, chunk_overlap, chunk_tokens, embed_batch
+from .config import (
+    MAX_CHUNKS_PER_NOTEBOOK,
+    MAX_TITLE_LEN,
+    chunk_overlap,
+    chunk_tokens,
+    embed_batch,
+)
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
 from .qa import ChatBackend
@@ -202,6 +208,47 @@ def index_source(
     embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     return IndexResult(source, len(chunk_ids), n_embedded)
+
+
+def rename_source(
+    store: Store,
+    source_id: int,
+    title: str,
+    origin: str,
+    llm: ChatBackend | None = None,
+) -> int:
+    """Rename a source and refresh the embeddings its old title is baked into.
+
+    Returns the number of chunks re-embedded (0 when nothing needed doing).
+
+    _embed_input() prepends each chunk's context breadcrumb — which begins with
+    the SOURCE TITLE — to the text handed to the embedding model. update_source_title()
+    rewrites chunks.context in its own transaction (v0.2.124), so FTS/BM25 sees the
+    new title immediately, but the stored vectors keep encoding the OLD one until a
+    full reindex. That left exactly half the index repaired: measured on a real Store,
+    a source renamed to "免疫レポート" scored cosine 0.0 for that very query and ranked
+    BELOW an off-topic document that merely name-drops the word.
+
+    force=False is deliberate: it keeps the embedding-model mismatch guard in
+    _embed_chunks() intact, so a DB whose vectors came from a different model is
+    never given a few new-model vectors on a rename (only a full reindex may do
+    that). Embedding failures stay non-fatal — the rename itself always commits,
+    and BM25 already covers the new title.
+    """
+    src = store.get_source(source_id)
+    new_title = title.strip()[:MAX_TITLE_LEN]
+    store.update_source_title(source_id, title, origin)
+    if new_title == src.title:
+        # Nothing about the embedding input changed; don't spend an LLM round trip.
+        return 0
+    rows = store.id_context_text_chunks_for_source(source_id)
+    if not rows:
+        return 0
+    chunk_ids = [r[0] for r in rows]
+    # The context column now holds the rewritten title prefix, so this reproduces
+    # exactly the string index_source would have embedded for the new title.
+    texts = [_embed_input(r[1], r[2]) for r in rows]
+    return _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
 
 
 def refresh_source(
