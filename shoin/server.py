@@ -30,7 +30,7 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, refresh_source, reindex_notebook
+from .pipeline import index_source, refresh_source, reindex_notebook, rename_source
 from .qa import (
     ChatBackend,
     _check_embed_model_ok,
@@ -488,7 +488,10 @@ class _Handler(BaseHTTPRequestHandler):
         title = self._require(self._read_json(), "title")
         with Store(self.db) as store:
             src = store.get_source(src_id)
-            store.update_source_title(src_id, title, src.origin)
+            # rename_source, not store.update_source_title, so the embeddings that
+            # bake in the old title are refreshed too (v0.2.160); the rename itself
+            # commits regardless of whether embedding succeeds.
+            rename_source(store, src_id, title, src.origin, self.llm)
         # Use src_id and title from the request — no second get_source() to avoid
         # a TOCTOU window where a concurrent delete would return HTTP 404 despite
         # the update having already committed successfully. But update_source_title()
