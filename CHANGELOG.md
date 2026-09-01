@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-> **Note**: This file was not kept up to date after v0.1.55. The project has
-> continued through v0.2.70 with the same bug-by-bug discipline, but those
-> entries live only in `CLAUDE.md`'s "Version History" section (and as a
-> one-line summary per version in `git log`) rather than here. Found by this
-> session's own Socratic "過不足" audit of the project's documentation.
+> **Note**: This file is frozen at v0.1.55. The project has continued well beyond
+> it (see `shoin.config.VERSION` / `pyproject.toml` for the current version) with
+> the same bug-by-bug discipline, but the canonical history from v0.1.56 onward
+> lives in `CLAUDE.md`'s "Version History" section (and as a one-line summary per
+> version in `git log`), not here — back-porting 90+ versions is not worthwhile.
+> This note is intentionally version-agnostic so it does not itself go stale (it
+> previously named a specific version that was overtaken within days).
 
 ## [v0.1.55] - 2026-06-14
 ### Fixed

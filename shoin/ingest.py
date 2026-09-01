@@ -70,9 +70,16 @@ def _decode(data: bytes, charset: str | None = None) -> str:
     candidates = []
     if charset:
         candidates.append(charset)
-    # UTF-16 BOM detection: cp932 accepts any byte sequence so it would silently
-    # produce mojibake for UTF-16 content. Detect BOM-prefixed UTF-16 explicitly
-    # before the cp932 fallback so the correct codec is used.
+    # BOM detection: cp932 accepts any byte sequence so it would silently produce
+    # mojibake for UTF-16/32 content. Detect BOM-prefixed content explicitly before
+    # the cp932 fallback so the correct codec is used. UTF-32 MUST be checked before
+    # UTF-16: the UTF-32 LE BOM (FF FE 00 00) begins with the UTF-16 LE BOM (FF FE),
+    # so a 2-byte-first test misdetects UTF-32 LE as UTF-16 and decodes every
+    # character interleaved with a null (Unicode BOM FAQ's documented ambiguity),
+    # and the UTF-32 BE BOM (00 00 FE FF) is missed entirely and falls to cp932
+    # garbage. Longest BOM first is the correct precedence.
+    if data[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        candidates.append("utf-32")
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         candidates.append("utf-16")
     # utf-8-sig handles plain UTF-8 and BOM-prefixed UTF-8 (Windows Notepad);

@@ -18,6 +18,8 @@ from .config import (
     MAX_TITLE_LEN,
     TOP_K,
     VERSION,
+    chunk_overlap,
+    chunk_tokens,
     db_path,
     embed_batch,
     embed_model,
@@ -72,6 +74,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_model_off": "(無効 — BM25のみ)",
         "health.multi_query": "マルチクエリ検索(SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "埋め込みバッチサイズ(SHOIN_EMBED_BATCH): {v}",
+        "health.chunking": "チャンク設定(SHOIN_CHUNK_TOKENS/OVERLAP): {tokens}トークン/オーバーラップ{overlap}",
         "health.embed_batch_default": "{n} (既定)",
         "health.data_dir": "データベースファイル: {v}",
         "health.llm_url": "LLMエンドポイント: {v}",
@@ -112,6 +115,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_model_off": "(disabled — BM25 only)",
         "health.multi_query": "Multi-query retrieval (SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "Embed batch size (SHOIN_EMBED_BATCH): {v}",
+        "health.chunking": "Chunking (SHOIN_CHUNK_TOKENS/OVERLAP): {tokens} tokens / overlap {overlap}",
         "health.embed_batch_default": "{n} (default)",
         "health.data_dir": "Database file: {v}",
         "health.llm_url": "LLM endpoint: {v}",
@@ -273,6 +277,7 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
         "health.embed_batch_default", n=str(_default_embed_batch)
     )
     print(_t("health.embed_batch", v=batch_v))
+    print(_t("health.chunking", tokens=str(chunk_tokens()), overlap=str(chunk_overlap())))
     print(_t("health.data_dir", v=db if db else str(db_path())))
     return 0
 

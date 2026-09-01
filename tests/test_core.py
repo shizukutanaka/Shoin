@@ -22,10 +22,8 @@ from shoin.ingest import (
     validate_public_url,
 )
 from shoin.search import (
-    adaptive_alpha,
     bm25_search,
     fts_query,
-    fuse,
     lexical_overlap,
     mmr,
     neg_terms,
@@ -33,8 +31,9 @@ from shoin.search import (
     retrieve,
     rrf_fuse,
     strip_neg_terms,
+    term_variants,
 )
-from shoin.search import Hit, _char_bigrams
+from shoin.search import Hit, _char_bigrams, _fallback_needles
 from shoin.store import Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -56,7 +55,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.141")
+        self.assertEqual(VERSION, "0.2.159")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -758,7 +757,9 @@ class TestStore(unittest.TestCase):
         'CREATE VIRTUAL TABLE chunks_fts' raised OperationalError: table already exists
         because virtual tables did not support IF NOT EXISTS in the migration string.
         """
-        import tempfile, threading, os
+        import tempfile
+        import threading
+        import os
         errors: list[Exception] = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1317,6 +1318,33 @@ class TestChunk(unittest.TestCase):
         # With token budget=2, the two clauses separated by ； should split
         self.assertGreater(len(chunks), 1, msg="；should trigger a sentence split")
 
+    def test_sentence_split_on_halfwidth_ideographic_period(self) -> None:
+        """｡ (U+FF61), the halfwidth counterpart of 。, must terminate a sentence.
+
+        cp932 legacy text (which ingest._decode() prefers) uses ｡, and NFKC folds
+        it to 。 anyway — but the raw split runs before any NFKC pass, so without ｡
+        in the class a whole ｡-terminated document was one giant unsplittable
+        "sentence": chunks were cut mid-sentence at an arbitrary character window,
+        and citation.py's sentence-level checks saw diluted bigram overlap.
+        """
+        hw = "".join(f"第{i}文の内容である｡" for i in range(40))
+        fw = hw.replace("｡", "。")
+        ch_hw = split_text(hw, chunk_tokens=64, overlap_tokens=8)
+        ch_fw = split_text(fw, chunk_tokens=64, overlap_tokens=8)
+        # Halfwidth now chunks like fullwidth (same count) and on clean boundaries.
+        self.assertEqual(len(ch_hw), len(ch_fw))
+        self.assertTrue(ch_hw[0].rstrip().endswith("｡"))
+
+    def test_halfwidth_period_uncited_assertion_not_hidden(self) -> None:
+        """An unsupported ｡-terminated clause must still be flagged, not hidden by
+        the width of its own sentence terminator (verify_grounding's sibling check)."""
+        from shoin.citation import uncited_sentences
+
+        ans = "光合成は光からエネルギーを作る[S1]｡マグマは地下の岩石である｡"
+        flagged = uncited_sentences(ans)
+        self.assertEqual(len(flagged), 1)
+        self.assertIn("マグマ", flagged[0])
+
     def test_tail_cjk_includes_trigger_token(self) -> None:
         """_tail must include the CJK character that triggered acc >= tokens, not skip it.
 
@@ -1524,6 +1552,36 @@ class TestIngest(unittest.TestCase):
             p.write_bytes("Hello world".encode("utf-16"))  # includes BOM (\xff\xfe)
             ex = extract_file(p)
             self.assertIn("Hello", ex.text, f"got mojibake instead: {ex.text!r:.60}")
+
+    def test_utf32_bom_decoded_correctly(self) -> None:
+        """UTF-32 must be detected before UTF-16: the UTF-32 LE BOM (FF FE 00 00)
+        begins with the UTF-16 LE BOM (FF FE), so a 2-byte-first test decodes UTF-32
+        LE as UTF-16 with a null between every character; the UTF-32 BE BOM
+        (00 00 FE FF) is missed entirely and falls to cp932 garbage.
+        """
+        from shoin.ingest import _decode
+
+        text = "日本語テキスト。カタカナも。"
+        # LE and BE, each with an explicit UTF-32 BOM.
+        self.assertEqual(_decode(b"\xff\xfe\x00\x00" + text.encode("utf-32-le")), text)
+        self.assertEqual(_decode(b"\x00\x00\xfe\xff" + text.encode("utf-32-be")), text)
+        # The utf-32 codec's own BOM output must round-trip too.
+        self.assertEqual(_decode(text.encode("utf-32")), text)
+        # No regression: a genuine UTF-16 file (BOM not followed by 00 00) still works.
+        self.assertEqual(_decode(text.encode("utf-16")), text)
+
+    def test_utf32_le_html_extracts_clean_text(self) -> None:
+        """The HTML path decodes before null-stripping, so a UTF-32 LE HTML file
+        misdetected as UTF-16 fed the parser a null-interleaved string it could not
+        tokenize, leaking raw <tags> into the indexed text."""
+        html = "<html><body><p>日本語の本文です。</p></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "doc.html"
+            p.write_bytes(b"\xff\xfe\x00\x00" + html.encode("utf-32-le"))
+            ex = extract_file(p)
+            self.assertIn("日本語の本文です", ex.text)
+            self.assertNotIn("<p>", ex.text)
+            self.assertNotIn("body", ex.text)
 
     def test_html_extract(self) -> None:
         html = (
@@ -2434,7 +2492,15 @@ class TestSearch(unittest.TestCase):
             self.assertEqual(vh[0].context, "生物 > 光合成")
 
     def test_fts_query_quoting(self) -> None:
-        self.assertEqual(fts_query('weather "quote'), '"weather" OR "quote"')
+        # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
+        # ＧＰＵ and ２０２４ are ordinary in Japanese prose, and without this the
+        # width bridge would be one-way — ＧＰＵ would find a GPU document via
+        # NFKC while GPU could never find a ＧＰＵ one.  The quote in '"quote'
+        # must still be escaped in every spelling it appears in.
+        self.assertEqual(
+            fts_query('weather "quote'),
+            '"weather" OR "ｗｅａｔｈｅｒ" OR "quote" OR "ｑｕｏｔｅ"',
+        )
         expr = fts_query("書院は知の書斎")
         self.assertIn('"書院は"', expr)  # CJK runs decompose into trigrams
         self.assertIn(" OR ", expr)
@@ -2569,74 +2635,9 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb_id, "完全に別の内容", 5)
             self.assertEqual(hits, [])
 
-    def test_adaptive_alpha_bounds(self) -> None:
-        for q in ("短い", "これはどういう意味ですか？", 'ERR_404 "exact phrase" 12345'):
-            a = adaptive_alpha(q)
-            self.assertGreaterEqual(a, 0.2)
-            self.assertLessEqual(a, 0.8)
-        self.assertGreater(adaptive_alpha("この論文の主要な貢献は何ですか？"), 0.5)
-        self.assertLess(adaptive_alpha("error code 12345"), 0.5)
-
-    def test_adaptive_alpha_english_question_gets_semantic_bump(self) -> None:
-        """English ? at end must raise alpha above 0.5 (rstrip removed ? so endswith was dead code)."""
-        self.assertGreater(adaptive_alpha("What is Shoin?"), 0.5)
-        self.assertGreater(adaptive_alpha("Does Shoin support PDF?"), 0.5)
-
-    def test_adaptive_alpha_fullwidth_question_mark_semantic_bump(self) -> None:
-        """Full-width ？ alone (no か suffix) must also trigger the semantic bump."""
-        self.assertGreater(adaptive_alpha("Shoin？"), 0.5)
-        self.assertGreater(adaptive_alpha("書院とは？"), 0.5)
-
-    def test_fuse_bm25_only(self) -> None:
-        hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        self.assertEqual(fused[0].chunk_id, 1)
-        self.assertEqual(fused[0].score, 1.0)
-
-    def test_fuse_all_zero_bm25_scores_stay_zero(self) -> None:
-        """All-zero BM25 scores (IDF=0 for ubiquitous terms) must normalize to 0.0.
-
-        Previously _minmax returned [1.0, 1.0] for equal values regardless of
-        whether they were 0, causing zero-relevance hits to receive the maximum
-        BM25 weight in fusion and potentially outrank genuinely relevant results.
-        """
-        hits = [Hit(1, 1, "a", 0, bm25=0.0), Hit(2, 1, "b", 0, bm25=0.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertEqual(h.score, 0.0, "zero BM25 scores must normalize to 0.0 not 1.0")
-
-    def test_fuse_equal_nonzero_bm25_scores_stay_one(self) -> None:
-        """All equal but non-zero BM25 scores should still normalize to 1.0 (undifferentiated tie)."""
-        hits = [Hit(1, 1, "a", 0, bm25=3.5), Hit(2, 1, "b", 0, bm25=3.5)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertAlmostEqual(h.score, 1.0, msg="equal non-zero BM25 scores must normalize to 1.0")
-
-    def test_fuse_bm25_only_populates_detail(self) -> None:
-        """BM25-only path must populate detail['bm25_norm'] like the merged path does."""
-        hits = [Hit(1, 1, "a", 0, bm25=2.0), Hit(2, 1, "b", 0, bm25=1.0)]
-        fused = fuse(hits, [], alpha=0.5)
-        for h in fused:
-            self.assertIn("bm25_norm", h.detail, "detail['bm25_norm'] must be set in BM25-only path")
-
-    def test_fuse_combines(self) -> None:
-        b = [Hit(1, 1, "a", 0, bm25=1.0)]
-        v = [Hit(2, 1, "b", 0, vec=0.9)]
-        fused = fuse(b, v, alpha=0.8)
-        self.assertEqual(fused[0].chunk_id, 2)  # high alpha favours vector hit
-
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
-
-    def test_fuse_same_chunk_in_both_lists(self) -> None:
-        """A chunk appearing in both BM25 and vector results must be merged, not duplicated."""
-        bm25 = [Hit(1, 1, "共有チャンク", 0, bm25=2.0), Hit(2, 1, "BM25のみ", 0, bm25=1.0)]
-        vec = [Hit(1, 1, "共有チャンク", 0, vec=0.9), Hit(3, 1, "ベクトルのみ", 0, vec=0.7)]
-        result = fuse(bm25, vec, alpha=0.5)
-        ids = [h.chunk_id for h in result]
-        self.assertEqual(len(set(ids)), len(ids), "duplicate chunk IDs in fuse result")
-        self.assertIn(1, ids)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
@@ -3157,7 +3158,7 @@ class TestQA(unittest.TestCase):
 
     def test_history_messages_drops_multiple_leading_assistants(self) -> None:
         """Citation stripping may produce consecutive leading assistant turns; all must be removed."""
-        from shoin.qa import _HISTORY_CITE_RE, history_messages
+        from shoin.qa import history_messages
 
         with make_store() as s:
             nb = s.create_notebook("multi-leading")
@@ -3947,7 +3948,7 @@ class TestLLMClient(unittest.TestCase):
         with an HTTP 500 status written into the already-flushed stream body.
         """
         import http.client
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from shoin.llm import LLMClient, LLMError
 
         exc = http.client.IncompleteRead(b"data: {", 50)
@@ -4019,9 +4020,8 @@ class TestLLMClient(unittest.TestCase):
         then sliced — a malicious endpoint returning a gigabyte 500 response caused OOM.
         Fix: `exc.read(300).decode(...)` passes the limit to read().
         """
-        import http.client
         import io
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from shoin.llm import LLMClient, LLMError
 
         # Build a fake HTTPError whose read() raises if called without a limit
@@ -4197,7 +4197,6 @@ class TestServerSSE(unittest.TestCase):
         The build_context exception path (v0.2.39) already saved an empty message;
         this fix makes the meta-send ConnectionError path consistent with that pattern.
         """
-        import json
         import os
         import tempfile
         import threading
@@ -4334,7 +4333,6 @@ class TestServerSSE(unittest.TestCase):
         import threading
 
         from shoin.server import _Handler
-        from shoin.llm import LLMError
 
         class _ZeroTokenLLM:
             embedding_model = ""
@@ -4693,7 +4691,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res1.source.id, source_id, "source ID must be preserved")
         self.assertEqual(res1.source.title, "Page v1", "refresh must not overwrite the title")
         self.assertEqual(res1.source.sha256, "sha-v2")
-        with make_store() as s2:
+        with make_store():
             pass  # store closed; already verified above
 
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
@@ -4897,30 +4895,6 @@ class TestPipeline(unittest.TestCase):
                     refresh_source(s, src.id)
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
-    def test_fuse_vec_only_scores_in_unit_range(self) -> None:
-        """fuse() with empty bm25_hits must normalize vec scores to [0..1].
-
-        Before v0.2.46, when bm25_hits=[] but vec_hits was non-empty, fuse()
-        entered the merged-dict path and set h.score = alpha * vec_norm, capping
-        scores at alpha (≈0.5).  BM25-only hits scored in [0..1].  The asymmetry
-        caused MMR's relevance/diversity balance to skew toward diversity for
-        vec-only queries, because all candidate scores were compressed by alpha.
-        """
-        from shoin.search import Hit, fuse
-
-        vec_hits = [
-            Hit(chunk_id=1, source_id=1, text="a", score=0.0, vec=0.9),
-            Hit(chunk_id=2, source_id=1, text="b", score=0.0, vec=0.4),
-        ]
-        result = fuse([], vec_hits, alpha=0.5)
-        scores = [h.score for h in result]
-        # With proper normalization, top score = 1.0, bottom = 0.0
-        self.assertAlmostEqual(max(scores), 1.0, places=6, msg="vec-only top score must be 1.0")
-        self.assertAlmostEqual(min(scores), 0.0, places=6, msg="vec-only bottom score must be 0.0")
-        # Ordering must be preserved (vec=0.9 ranked above vec=0.4)
-        self.assertEqual(result[0].chunk_id, 1, "highest vec score must rank first")
-
-
 class TestChunkLimit(unittest.TestCase):
     """MAX_CHUNKS_PER_NOTEBOOK (v0.2.70): spec.md STRIDE DoS control 'チャンク数
     上限/notebook', found unimplemented by this session's Socratic audit of spec.md.
@@ -5064,7 +5038,7 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_source(nb.id, "url", "Title\nSecond line", "http://x.com", "sha1")
             md = export_markdown(s, nb.id)
-        item_lines = [l for l in md.splitlines() if l.startswith("- [S1]")]
+        item_lines = [ln for ln in md.splitlines() if ln.startswith("- [S1]")]
         self.assertEqual(len(item_lines), 1)
         self.assertIn("Title Second line", item_lines[0])
 
@@ -5075,7 +5049,7 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_note(nb.id, "Note\nTitle", "body")
             md = export_markdown(s, nb.id)
-        heading_lines = [l for l in md.splitlines() if l.startswith("### ")]
+        heading_lines = [ln for ln in md.splitlines() if ln.startswith("### ")]
         self.assertEqual(len(heading_lines), 1)
         self.assertIn("Note Title", heading_lines[0])
 
@@ -5085,7 +5059,7 @@ class TestExport(unittest.TestCase):
         with make_store() as s:
             nb = s.create_notebook("My\nNotebook")
             md = export_markdown(s, nb.id)
-        h1_lines = [l for l in md.splitlines() if l.startswith("# ")]
+        h1_lines = [ln for ln in md.splitlines() if ln.startswith("# ")]
         self.assertEqual(len(h1_lines), 1)
         self.assertIn("My Notebook", h1_lines[0])
 
@@ -5157,7 +5131,7 @@ class TestExport(unittest.TestCase):
             s.conn.execute("UPDATE sources SET added_at='' WHERE id=?", (src.id,))
             s.conn.commit()
             ris = export_ris(s, nb.id)
-        da_lines = [l for l in ris.splitlines() if l.startswith("DA  -")]
+        da_lines = [ln for ln in ris.splitlines() if ln.startswith("DA  -")]
         self.assertEqual(len(da_lines), 1)
         self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
         # No structured PY (year) line for a malformed/empty added_at (v0.2.136).
@@ -5247,7 +5221,7 @@ class TestExport(unittest.TestCase):
             md = export_markdown(s, nb.id)
         # Every line that starts with **User**: must also END on the same physical line
         # (i.e., the embedded newline must have been collapsed).
-        user_lines = [l for l in md.splitlines() if "**User**:" in l]
+        user_lines = [ln for ln in md.splitlines() if "**User**:" in ln]
         self.assertEqual(len(user_lines), 1, "user question must appear on exactly one line")
         self.assertIn("line one", user_lines[0])
         self.assertIn("line two", user_lines[0])
@@ -5812,74 +5786,6 @@ class TestBM25FTSLikeMerge(unittest.TestCase):
             )
 
 
-class TestAdaptiveAlphaKeyword(unittest.TestCase):
-    """Tests for keyword-detection in adaptive_alpha (v0.2.47)."""
-
-    def test_short_keyword_query_favours_bm25(self) -> None:
-        """A short keyword-style query (≤3 terms, no question) should get alpha < 0.5."""
-        alpha = adaptive_alpha("Python Django")
-        self.assertLess(alpha, 0.5, "short keyword query must favour BM25 (alpha < 0.5)")
-
-    def test_short_cjk_keyword_favours_bm25(self) -> None:
-        alpha = adaptive_alpha("書院")
-        self.assertLess(alpha, 0.5)
-
-    def test_question_overrides_short_keyword(self) -> None:
-        """A short query ending in '?' must NOT get the keyword penalty."""
-        alpha_q = adaptive_alpha("何ですか？")
-        alpha_kw = adaptive_alpha("Python")
-        self.assertGreater(alpha_q, alpha_kw, "question must get higher alpha than bare keyword")
-
-    def test_long_narrative_query_favours_vector(self) -> None:
-        """A natural-language question must get alpha > 0.5."""
-        # Japanese question detected via ？ ending (gets +0.15 boost)
-        alpha_ja = adaptive_alpha("機械学習と深層学習の違いは何ですか？")
-        self.assertGreater(alpha_ja, 0.5)
-        # English question with ≥6 terms (keyword penalty does not apply when >= 6 terms)
-        alpha_en = adaptive_alpha("what is the difference between machine learning and deep learning")
-        self.assertGreater(alpha_en, 0.5)
-
-    def test_alpha_within_bounds(self) -> None:
-        """Alpha must stay in [0.2, 0.8] for all test cases."""
-        queries = ["a", "a b c d e f g h i j", "何か？", '"quoted"', "123 -abc"]
-        for q in queries:
-            a = adaptive_alpha(q)
-            self.assertGreaterEqual(a, 0.2)
-            self.assertLessEqual(a, 0.8)
-
-    def test_digit_in_neg_term_does_not_trigger_exact_match_bias(self) -> None:
-        """A digit inside a negated term must not reduce alpha via the digit heuristic.
-
-        Before the fix, _DIGIT_RE.search(query) matched digits in neg-terms like -v2,
-        triggering the exact-match penalty even though the positive query had no digits.
-        Fix: search the neg-stripped query (clean_q) instead of the raw query.
-        """
-        # "neural network" → 2 terms → short-keyword penalty applied (-0.15 → 0.35)
-        # "-v2" is a neg-term and must NOT trigger the digit penalty
-        alpha_with_neg_digit = adaptive_alpha("neural network -v2")
-        alpha_no_neg = adaptive_alpha("neural network")
-        self.assertEqual(
-            alpha_with_neg_digit, alpha_no_neg,
-            "neg-term digit -v2 must not change alpha vs. the same query without it",
-        )
-
-    def test_digit_in_neg_term_does_not_affect_long_identifier_check(self) -> None:
-        """A long identifier inside a neg-term must not trigger the long-token penalty.
-
-        The `any(len(t) >= 12 ...)` check iterates over `terms` which already comes from
-        strip_neg_terms, so long identifiers in neg-terms can't trigger it that way.
-        This test confirms the check is consistently applied to positive terms only.
-        """
-        # The neg-term "-averylongnegidentifier" (22 chars) must NOT trigger the
-        # long-identifier penalty (len >= 12). Only positive terms matter.
-        alpha_neg_long = adaptive_alpha("cats -averylongnegidentifier")
-        alpha_baseline = adaptive_alpha("cats")
-        self.assertEqual(
-            alpha_neg_long, alpha_baseline,
-            "long neg-term identifier must not trigger the long-identifier alpha penalty",
-        )
-
-
 class TestBM25MergePathCap(unittest.TestCase):
     """bm25_search() merge path must cap results to k (v0.2.51)."""
 
@@ -6100,7 +6006,7 @@ class TestCLI(unittest.TestCase):
         Fix: guard print('---') and _print_report() with if result.report['cited'].
         """
         import io
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from shoin.cli import main
         from shoin.studio import StudioResult
         from shoin.citation import CitationReport
@@ -6116,11 +6022,12 @@ class TestCLI(unittest.TestCase):
             s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
 
         # Run via temp DB file so main() can open it
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
             db_file = f.name
         try:
-            with make_store() as s2:
+            with make_store():
                 pass  # just need a clean DB
             # Build a store at db_file path and add a notebook + source
             from shoin.store import Store
@@ -6282,7 +6189,8 @@ class TestCLI(unittest.TestCase):
         """
         import sqlite3 as _sqlite3
         import io
-        import tempfile, os
+        import tempfile
+        import os
         from unittest.mock import patch
         from shoin.cli import main
         from shoin.store import Store
@@ -6935,6 +6843,67 @@ class TestChunkContext(unittest.TestCase):
         self.assertEqual(run("0"), [10])  # below minimum → default
         self.assertEqual(run(None), [10])  # unset → default
 
+    def test_chunk_tokens_overlap_env_override(self) -> None:
+        """SHOIN_CHUNK_TOKENS/SHOIN_CHUNK_OVERLAP tune the chunker (so `shoin eval`
+        can measure them per v0.2.141); invalid/out-of-range values fall back to
+        the CHUNK_TOKENS/CHUNK_OVERLAP defaults, and overlap must stay < chunk size."""
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from shoin import config
+
+        def probe(env: dict[str, str]) -> tuple[int, int]:
+            with mock_patch.dict(os.environ, env, clear=False):
+                for k in ("SHOIN_CHUNK_TOKENS", "SHOIN_CHUNK_OVERLAP"):
+                    if k not in env and k in os.environ:
+                        del os.environ[k]
+                return config.chunk_tokens(), config.chunk_overlap()
+
+        self.assertEqual(probe({}), (512, 64))  # unset → defaults
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}), (256, 32))
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "abc"}), (512, 64))  # invalid → default
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "0"}), (512, 64))  # non-positive → default
+        self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "-5"}), (512, 64))  # negative → default
+        self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "999"}), (512, 64))  # >= size → default
+        # overlap == effective chunk size is rejected (would overlap wholly/stall)
+        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}), (128, 64))
+
+    def test_chunk_env_changes_index_chunk_count(self) -> None:
+        """The knob actually reaches the ingest path: with a smaller chunk size,
+        pipeline.index_source() stores more chunks for the same source."""
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from shoin.pipeline import index_source
+
+        class NoEmbedLLM:
+            embedding_model = ""
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return []
+
+            def embed_one(self, text: str) -> list[float]:
+                return []
+
+        doc = "これは十分に長い日本語の文書である。" * 200
+
+        def count_chunks(env: dict[str, str]) -> int:
+            with make_store() as s, mock_patch.dict(os.environ, env, clear=False):
+                for k in ("SHOIN_CHUNK_TOKENS", "SHOIN_CHUNK_OVERLAP"):
+                    if k not in env and k in os.environ:
+                        del os.environ[k]
+                nb = s.create_notebook("n")
+                with mock_patch("shoin.pipeline.extract_file") as ef:
+                    ef.return_value = Extracted(
+                        "txt", "d", doc, "o", "sha-" + env.get("SHOIN_CHUNK_TOKENS", "def")
+                    )
+                    res = index_source(s, nb.id, "/tmp/x.txt", NoEmbedLLM())
+                return res.n_chunks
+
+        small = count_chunks({"SHOIN_CHUNK_TOKENS": "64", "SHOIN_CHUNK_OVERLAP": "8"})
+        default = count_chunks({})
+        self.assertGreater(small, default)
+
     def test_upgrade_v4_to_v5_backfills_fts(self) -> None:
         """Applying migration 5 to a v4 database adds the context column and
         rebuilds chunks_fts with every pre-existing chunk backfilled, and the
@@ -6969,6 +6938,310 @@ class TestChunkContext(unittest.TestCase):
             n_fts = s2.conn.execute("SELECT COUNT(*) AS n FROM chunks_fts").fetchone()["n"]
             self.assertEqual(int(n_fts), 0)  # delete trigger consistent post-rebuild
             s2.close()
+
+
+class TestLikeFallbackContext(unittest.TestCase):
+    """The LIKE-scan fallback must search the contextual breadcrumb, exactly as a
+    bare-term FTS5 MATCH already does across every chunks_fts column.
+
+    The trigram tokeniser needs >= 3 characters, so every two-character Japanese
+    compound (総説, 経済, 免疫 …) — the most common query shape in Japanese —
+    skips FTS5 entirely and lands on the LIKE path.  While that path looked only
+    at c.text, contextual retrieval's recall win was silently absent for exactly
+    those queries: '猫の飼育' found a title-only match and '猫' did not.
+    """
+
+    def _seeded_store(self) -> tuple[Store, int, int, int, int]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        # Body text deliberately never repeats the title/heading terms — the
+        # breadcrumb is the only place they appear, which is precisely the case
+        # contextual chunking exists to make retrievable.
+        cat = st.add_source(nb.id, "md", "猫の飼育ガイド", "cat.md", "h1")
+        st.add_chunks(
+            cat.id,
+            ["この動物は一日のほとんどを睡眠に費やす。", "食事は一日二回が目安である。"],
+            contexts=["猫の飼育ガイド > 生態", "猫の飼育ガイド > 食事"],
+        )
+        ai = st.add_source(nb.id, "md", "AI 総説", "ai.md", "h2")
+        st.add_chunks(ai.id, ["機械学習の歴史について述べる。"], contexts=["AI 総説 > 歴史"])
+        other = st.add_source(nb.id, "md", "無関係", "x.md", "h3")
+        st.add_chunks(other.id, ["天気の話をする。"], contexts=["無関係 > 雑談"])
+        return st, nb.id, cat.id, ai.id, other.id
+
+    def test_short_terms_match_context_breadcrumb(self) -> None:
+        st, nb_id, cat_id, ai_id, _other = self._seeded_store()
+        try:
+            for query, expected in (
+                ("猫", cat_id),        # 1-char CJK: below the trigram minimum
+                ("総説", ai_id),        # 2-char CJK compound: the common JA shape
+                ("AI", ai_id),         # 2-char ASCII: also skipped by fts_query
+                ("AI 総説", ai_id),     # every term short -> fts_query returns ""
+            ):
+                hits = bm25_search(st, nb_id, query, 5)
+                self.assertTrue(hits, f"{query!r} found nothing via the context breadcrumb")
+                self.assertEqual({h.source_id for h in hits}, {expected}, query)
+        finally:
+            st.close()
+
+    def test_short_term_does_not_match_unrelated_sources(self) -> None:
+        """The context scan must stay selective — a needle absent from both fields
+        still returns nothing, so this widens recall without flooding results."""
+        st, nb_id, _cat, _ai, other_id = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in bm25_search(st, nb_id, "天気", 5)}, {other_id}
+            )
+            self.assertEqual(bm25_search(st, nb_id, "量子", 5), [])
+        finally:
+            st.close()
+
+    def test_neg_term_excludes_on_context_match(self) -> None:
+        """`-term` must suppress a chunk whose only mention is in its breadcrumb;
+        otherwise the filter is blind to the very signal that produced the hit."""
+        st, nb_id, _cat, _ai, _other = self._seeded_store()
+        try:
+            # Both 猫 chunks match "一日" in their text but belong to 猫の飼育ガイド.
+            self.assertTrue(bm25_search(st, nb_id, "一日", 5))
+            self.assertEqual(bm25_search(st, nb_id, "一日 -猫", 5), [])
+        finally:
+            st.close()
+
+    def test_retrieve_surfaces_context_only_match_end_to_end(self) -> None:
+        """The win must survive fusion + rerank + MMR, not just bm25_search()."""
+        st, nb_id, _cat, ai_id, _other = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in retrieve(st, nb_id, "総説", k=5)}, {ai_id}
+            )
+        finally:
+            st.close()
+
+
+class TestRerankContext(unittest.TestCase):
+    """rerank()'s lexical signal must read the context breadcrumb too.
+
+    Every field retrieval can *find* a chunk by has to be visible to the stage
+    that re-scores it. Scoring text only handed a breadcrumb-retrieved chunk
+    lex=0.0 and then pushed it back down by 0.3 * (1 - 0) relative to any chunk
+    naming the term in its body — so a document whose title is the topic lost to
+    one that merely name-drops it in passing.
+    """
+
+    def test_lex_reads_context_breadcrumb(self) -> None:
+        from shoin.search import rerank
+
+        hit = Hit(1, 1, "体内の防御機構が働く仕組みを説明する。", 1.0, context="免疫レポート > 概要")
+        rerank("免疫", [hit])
+        self.assertGreater(hit.detail["lex"], 0.0)
+
+    def test_contextless_hit_scored_exactly_as_before(self) -> None:
+        """No-regression control: with no breadcrumb, lex is unchanged."""
+        from shoin.search import rerank
+
+        text = "免疫の研究は進展した。免疫は複雑である。"
+        hit = Hit(1, 1, text, 1.0)  # context defaults to ""
+        rerank("免疫", [hit])
+        self.assertEqual(hit.detail["lex"], lexical_overlap("免疫", text))
+
+    def _build(self, order: list[str]) -> tuple[Store, int, dict[str, int]]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        ids: dict[str, int] = {}
+        for name in order:
+            if name == "A":  # the document ABOUT the topic: term only in its breadcrumb
+                s = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
+                st.add_chunks(
+                    s.id,
+                    ["体内の防御機構が働く仕組みを説明する。観察結果は再現性が高い。"],
+                    contexts=["免疫レポート > 概要"],
+                )
+            else:  # off-topic minutes that merely name-drop the term once
+                s = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
+                st.add_chunks(
+                    s.id,
+                    ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"],
+                    contexts=["経営会議メモ > 議事"],
+                )
+            ids[name] = s.id
+        return st, nb.id, ids
+
+    def test_breadcrumb_match_not_zeroed_against_incidental_body_mention(self) -> None:
+        """Both documents carry exactly one occurrence of the term — A's in its
+        breadcrumb, C's in its body — so neither may be scored to nothing, in
+        either insertion order."""
+        for order in (["A", "C"], ["C", "A"]):
+            st, nb_id, ids = self._build(order)
+            try:
+                scores = {h.source_id: h for h in retrieve(st, nb_id, "免疫", k=5)}
+                self.assertIn(ids["A"], scores, f"order={order}")
+                self.assertGreater(scores[ids["A"]].score, 0.0, f"order={order}")
+                self.assertEqual(
+                    scores[ids["A"]].detail["lex"], scores[ids["C"]].detail["lex"],
+                    f"equal lexical evidence must score equally (order={order})",
+                )
+            finally:
+                st.close()
+
+    def test_title_named_topic_outranks_incidental_mention(self) -> None:
+        """With a stronger breadcrumb (title AND heading) A must beat the
+        name-drop, while a genuinely on-topic body still ranks first."""
+        st = Store(":memory:")
+        try:
+            nb = st.create_notebook("N")
+            a = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
+            st.add_chunks(
+                a.id, ["体内の防御機構が働く仕組みを説明する。"], contexts=["免疫レポート > 免疫の基礎"]
+            )
+            b = st.add_source(nb.id, "md", "研究総括", "b.md", "hb")
+            st.add_chunks(
+                b.id, ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"], contexts=["研究総括 > 本文"]
+            )
+            c = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
+            st.add_chunks(
+                c.id, ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"], contexts=["経営会議メモ > 議事"]
+            )
+            ranking = [h.source_id for h in retrieve(st, nb.id, "免疫", k=5)]
+            self.assertEqual(ranking, [b.id, a.id, c.id])
+            # Control: a term absent from every breadcrumb is unaffected.
+            self.assertEqual([h.source_id for h in retrieve(st, nb.id, "予算", k=5)], [c.id])
+        finally:
+            st.close()
+
+
+class TestWidthVariants(unittest.TestCase):
+    """Width/script spellings of the same word must retrieve each other.
+
+    Japanese encodes one word three ways — fullwidth kana (データ), halfwidth
+    JIS X 0201 kana (ﾃﾞｰﾀ, which is what cp932 exports carry and ingest._decode()
+    actively prefers), and fullwidth ASCII (ＧＰＵ, ２０２４). FTS5's trigram
+    tokeniser folds case but never width, and SQL LIKE folds neither, so none of
+    these found each other — while citation.py's _bigrams() NFKC-folds both sides
+    and happily confirmed a citation against a source the search could not reach
+    with the same query string.
+    """
+
+    def _seeded_store(self) -> tuple[Store, int, dict[str, int]]:
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        docs = {
+            "hw": "ﾃﾞｰﾀﾍﾞｰｽの設計方針を説明する。",   # halfwidth kana body
+            "fw": "データベースの設計方針を説明する。",  # fullwidth kana body
+            "gpu": "ＧＰＵの性能比較を行った。",        # fullwidth ASCII body
+            "kata": "コードの品質を保つ。",            # katakana body
+            "gas": "ガスの供給を管理する。",           # fullwidth, queried halfwidth
+        }
+        ids: dict[str, int] = {}
+        for name, text in docs.items():
+            s = st.add_source(nb.id, "md", name, f"{name}.md", name)
+            st.add_chunks(s.id, [text], contexts=[name])
+            ids[name] = s.id
+        return st, nb.id, ids
+
+    def test_halfwidth_kana_run_not_fragmented_by_sound_marks(self) -> None:
+        """U+FF9E/FF9F must be word characters, or every dakuten splits the run."""
+        self.assertEqual(query_terms("ﾃﾞｰﾀﾍﾞｰｽ"), ["ﾃﾞｰﾀﾍﾞｰｽ"])
+
+    def test_halfwidth_punctuation_mirrors_fullwidth_boundaries(self) -> None:
+        """｡｢｣､ break runs like 。「」、 while ･ joins them like ・."""
+        self.assertNotIn("書院｡", query_terms("書院｡"))
+        self.assertIn("書院", query_terms("書院｡"))
+        self.assertEqual(query_terms("ｿﾌﾄ･ｳｪｱ"), ["ｿﾌﾄ･ｳｪｱ"])  # ･ is a word char
+
+    def test_negation_on_voiced_halfwidth_kana(self) -> None:
+        """The residue of a mis-parsed -ﾃﾞｰﾀ used to survive as a POSITIVE term."""
+        self.assertEqual(neg_terms("Python -ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ"])
+        self.assertEqual(strip_neg_terms("Python -ﾃﾞｰﾀ"), "Python")
+
+    def test_term_variants_shapes(self) -> None:
+        self.assertEqual(term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "でーた"])
+        self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
+        self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
+        # Control: a term whose spellings all coincide yields only itself, so
+        # pure-kanji FTS expressions stay byte-identical to before.
+        self.assertEqual(term_variants("研究論文"), ["研究論文"])
+        self.assertEqual(fts_query("研究論文"), '"研究論" OR "究論文"')
+
+    def test_cross_width_retrieval_both_directions(self) -> None:
+        st, nb_id, ids = self._seeded_store()
+        try:
+            for query, want in (
+                ("データベース", {ids["hw"], ids["fw"]}),  # fullwidth query finds both
+                ("ﾃﾞｰﾀﾍﾞｰｽ", {ids["hw"], ids["fw"]}),      # halfwidth query finds both
+                ("GPU", {ids["gpu"]}),                     # ASCII query -> fullwidth doc
+                ("ＧＰＵ", {ids["gpu"]}),                   # fullwidth query -> same doc
+                ("ｺｰﾄﾞ", {ids["kata"]}),                   # halfwidth -> katakana doc
+                ("こー", {ids["kata"]}),                    # 2-char kana: LIKE path only
+            ):
+                got = {h.source_id for h in bm25_search(st, nb_id, query, 9)}
+                self.assertEqual(got, want, query)
+        finally:
+            st.close()
+
+    def test_nfkc_shortened_variant_still_reaches_like_path(self) -> None:
+        """ｶﾞｽ is 3 chars but normalises to ガス (2), which FTS5 cannot trigram.
+
+        Measuring coverage on the raw length alone reported "fully covered" and
+        skipped the LIKE scan, leaving the fullwidth document unreachable.
+        """
+        st, nb_id, ids = self._seeded_store()
+        try:
+            self.assertEqual(
+                {h.source_id for h in bm25_search(st, nb_id, "ｶﾞｽ", 9)}, {ids["gas"]}
+            )
+        finally:
+            st.close()
+
+    def test_does_not_match_unrelated_documents(self) -> None:
+        """Control: widening spellings must not widen what actually matches."""
+        st, nb_id, _ids = self._seeded_store()
+        try:
+            self.assertEqual(bm25_search(st, nb_id, "量子", 9), [])
+            self.assertEqual(_fallback_needles("A"), [])  # 1-char ASCII stays dropped
+        finally:
+            st.close()
+
+    def test_lexical_overlap_and_rerank_see_width_variants(self) -> None:
+        """A width-matched hit must not be handed lex=0 and pushed back down."""
+        self.assertEqual(
+            lexical_overlap("データベース", "ﾃﾞｰﾀﾍﾞｰｽの設計。"),
+            lexical_overlap("データベース", "データベースの設計。"),
+        )
+        st, nb_id, ids = self._seeded_store()
+        try:
+            hits = retrieve(st, nb_id, "データベース", k=9)
+            by_src = {h.source_id: h for h in hits}
+            self.assertIn(ids["hw"], by_src)
+            self.assertGreater(by_src[ids["hw"]].detail["lex"], 0.0)
+        finally:
+            st.close()
+
+    def test_negation_excludes_across_widths(self) -> None:
+        """-データベース must suppress the ﾃﾞｰﾀﾍﾞｰｽ-only document too."""
+        st, nb_id, _ids = self._seeded_store()
+        try:
+            self.assertTrue(bm25_search(st, nb_id, "設計", 9))
+            self.assertEqual(bm25_search(st, nb_id, "設計 -データベース", 9), [])
+        finally:
+            st.close()
+
+    def test_rerank_hoisted_terms_match_per_hit_lexical_overlap(self) -> None:
+        """rerank() computes the lex signal from the same NFKC-folded terms
+        lexical_overlap() does — hoisting the query normalisation out of the
+        per-hit loop must not change the number it produces."""
+        from shoin.search import rerank
+
+        query = "データベース 設計"
+        hits = [
+            Hit(1, 1, "ﾃﾞｰﾀﾍﾞｰｽの設計方針。", 0.5, context="レポート > 設計"),
+            Hit(2, 2, "無関係な天気の話。", 0.5, context="メモ"),
+        ]
+        rerank(query, hits)
+        for h in hits:
+            expected = lexical_overlap(
+                query, f"{h.text}\n{h.context}" if h.context else h.text
+            )
+            self.assertAlmostEqual(h.detail["lex"], expected, places=12)
 
 
 if __name__ == "__main__":

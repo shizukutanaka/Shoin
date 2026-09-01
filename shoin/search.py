@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
@@ -23,7 +24,6 @@ from .config import TOP_K
 from .store import Store, unpack_vector
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_DIGIT_RE = re.compile(r"\d")
 # Built from chunk._CJK_RANGES (the same table is_cjk()/query_terms()/fts_query()
 # already use) instead of a second hand-picked range literal \u2014 the original
 # hardcoded [\u3041-\u30FF\u4E00-\u9FFF] only covered hiragana/katakana/CJK
@@ -99,13 +99,22 @@ def _is_cjk_word(ch: str) -> bool:
 
     Exception: 々 (U+3005, ideographic iteration mark) appears inside words
     (人々, 様々) and must stay part of CJK word runs, not break them.
+
+    The halfwidth block (U+FF61–FF65) gets the mirror-image treatment, so a
+    halfwidth string tokenises exactly like its fullwidth equivalent: ｡｢｣､ are
+    boundaries like 。「」、, while ･ (U+FF65) stays a word character because its
+    NFKC target ・ (U+30FB) already is one.  Without this, ｿﾌﾄｳｪｱ･ｱｰｷﾃｸﾁｬ and
+    ソフトウェア・アーキテクチャ would split into different numbers of terms.
     """
     cp = ord(ch)
     if not is_cjk(ch):
         return False
     if 0x3000 <= cp <= 0x303F:
         return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
-    return True
+    # ｡｢｣､ (U+FF61–FF64) are the halfwidth counterparts of 。「」、 and break runs
+    # the same way; ･ (U+FF65) is excluded from this test because its NFKC target
+    # ・ (U+30FB) is already a word character.
+    return not 0xFF61 <= cp <= 0xFF64
 
 
 def query_terms(query: str) -> list[str]:
@@ -151,34 +160,130 @@ def _kana_alt(term: str) -> str:
     return "".join(result) if changed else term
 
 
+def _build_fw_to_hw() -> dict[str, str]:
+    """Fullwidth-kana → halfwidth map, derived from NFKC rather than hand-written.
+
+    NFKC folds halfwidth to fullwidth (ﾃﾞ → デ), so inverting its own output is
+    the only way to get the reverse direction without maintaining a second table
+    that can silently drift out of sync — the same "derive it from the shared
+    source" discipline v0.2.118 applied to _NEG_RE's character classes.
+
+    Voiced morae need the two-codepoint sequences (ﾃ + ﾞ) as well as the singles,
+    because NFKC composes them into one fullwidth character.
+    """
+    table: dict[str, str] = {}
+    for cp in range(0xFF61, 0xFFA0):
+        table.setdefault(unicodedata.normalize("NFKC", chr(cp)), chr(cp))
+    for base in range(0xFF66, 0xFF9E):
+        for mark in ("ﾞ", "ﾟ"):
+            composed = unicodedata.normalize("NFKC", chr(base) + mark)
+            if len(composed) == 1:
+                table.setdefault(composed, chr(base) + mark)
+    return table
+
+
+_FW_TO_HW = _build_fw_to_hw()
+
+
+def _to_katakana(s: str) -> str:
+    """Hiragana → katakana (one-directional, unlike _kana_alt's swap)."""
+    return "".join(chr(ord(c) + 0x60) if 0x3041 <= ord(c) <= 0x3096 else c for c in s)
+
+
+def _to_hiragana(s: str) -> str:
+    """Katakana → hiragana (one-directional, unlike _kana_alt's swap)."""
+    return "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in s)
+
+
+def _to_halfwidth(s: str) -> str:
+    """Fullwidth katakana → halfwidth, via the inverted-NFKC table."""
+    return "".join(_FW_TO_HW.get(c, c) for c in s)
+
+
+def _to_fullwidth_ascii(s: str) -> str:
+    """ASCII → fullwidth forms (Ａ-Ｚ ０-９ …), the U+FEE0 offset block."""
+    return "".join(chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s)
+
+
+def term_variants(term: str) -> list[str]:
+    """Width/script spellings of *term* that should all retrieve each other.
+
+    Japanese text encodes the same word three ways — fullwidth kana (データ),
+    halfwidth JIS X 0201 kana (ﾃﾞｰﾀ, ubiquitous in cp932 exports, which
+    ingest._decode() actively prefers), and fullwidth ASCII (ＧＰＵ, ２０２４,
+    ordinary in JA prose).  SQLite's FTS5 trigram tokeniser folds case (including
+    fullwidth Latin) but never width, and SQL LIKE folds neither, so nothing
+    bridges these spellings unless the query does it explicitly.  Standard
+    practice elsewhere is an NFKC pass before tokenisation (Elasticsearch's
+    icu_normalizer, Lucene's cjk_width filter); Shoin cannot normalise at index
+    time because chunk text must stay byte-identical to the source (v0.2.123),
+    so the bridge is built query-side instead, extending the katakana↔hiragana
+    alternates v0.2.42 already generated.
+
+    Conversions are deliberately one-directional and composed off the NFKC form
+    rather than iterated to a fixed point: a naive closure over _kana_alt's swap
+    emits mixed-width nonsense (でーた → でｰた) because the swap flips fullwidth
+    kana while leaving an already-halfwidth ｰ alone.  Only variants that actually
+    differ are emitted, so a pure-kanji or plain-ASCII-lowercase term whose forms
+    all coincide yields just itself.
+    """
+    norm = unicodedata.normalize("NFKC", term)
+    katakana = _to_katakana(norm)
+    candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    if norm.isascii():
+        candidates.append(_to_fullwidth_ascii(norm))
+    out: list[str] = []
+    for v in candidates:
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _fts_escape(term: str) -> str:
+    """Escape a term for inclusion in a double-quoted FTS5 MATCH string.
+
+    Must run per variant at emission time, never once before term_variants():
+    NFKC *creates* a double quote out of ＂ (U+FF02), so a term escaped only in
+    its raw form can still carry an unescaped quote into the MATCH expression
+    through one of its variants.
+    """
+    return term.replace("\x00", "").replace('"', '""')
+
+
 def fts_query(query: str) -> str:
     """Build a recall-oriented FTS5 MATCH expression.
 
     ASCII words become quoted terms; CJK runs are decomposed into their
-    trigrams.  For kana-containing terms, trigrams for the katakana↔hiragana
-    alternate script are also added so that a katakana query finds hiragana-
-    indexed documents and vice-versa.  Everything is OR-joined: BM25 ranks
-    denser matches higher and precision is restored downstream by the lexical
-    reranker + MMR.
+    trigrams.  Every width/script variant of a term (term_variants) contributes
+    its own grams, so a katakana query finds hiragana-indexed documents, a
+    fullwidth query finds halfwidth-indexed ones, and vice-versa in both cases.
+    Everything is OR-joined: BM25 ranks denser matches higher and precision is
+    restored downstream by the lexical reranker + MMR.
     """
     groups: list[str] = []
     seen: set[str] = set()
-    for term in query_terms(query):
-        term = term.replace("\x00", "").replace('"', '""')
-        if len(term) < 3:
-            continue
-        if is_cjk(term[0]):
-            grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
-            alt = _kana_alt(term)
-            if alt != term:
-                alt_grams = [alt[i : i + 3] for i in range(len(alt) - 2)]
-                grams = grams + alt_grams
-        else:
-            grams = [term]
-        for g in grams:
-            if g not in seen:
-                seen.add(g)
-                groups.append(f'"{g}"')
+    for raw_term in query_terms(query):
+        # Trigram-vs-whole-term is a property of the TERM, not of each spelling:
+        # a fullwidth ASCII variant is is_cjk()-true (fullwidth Latin lives in
+        # _CJK_RANGES), so branching per variant would shred ｗｅａｔｈｅｒ into five
+        # trigrams while its own raw form stays one quoted word.  FTS5 matches a
+        # quoted string of 3+ characters through the trigram index either way.
+        cjk_term = is_cjk(raw_term[0])
+        for variant in term_variants(raw_term):
+            term = _fts_escape(variant)
+            # Shorter-than-trigram variants contribute nothing here (the gram
+            # comprehension below is simply empty); bm25_search's coverage check
+            # knows this and keeps the LIKE fallback alive for them.
+            if len(term) < 3:
+                continue
+            if cjk_term:
+                grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
+            else:
+                grams = [term]
+            for g in grams:
+                if g not in seen:
+                    seen.add(g)
+                    groups.append(f'"{g}"')
     return " OR ".join(groups)
 
 
@@ -189,16 +294,33 @@ def _fallback_needles(query: str) -> list[str]:
     every English chunk and floods results with irrelevant hits.  Single-char CJK
     terms (猫, 木, …) are kept because they can be meaningful content words and
     a LIKE like '%猫%' is still a selective filter.
+
+    Needles are generated per width/script variant (term_variants).  SQL LIKE
+    compares codepoints and folds neither case beyond ASCII nor width, so the
+    only way this branch can bridge spellings is to materialise each one as its
+    own needle.  This is also where kana bridging reaches the LIKE path at all:
+    v0.2.42 added katakana↔hiragana alternates to fts_query only, and closed
+    with "the LIKE-scan fallback path for short terms is unchanged" — so every
+    two-character kana query (こー vs コー) stayed script-brittle, since terms
+    that short never reach FTS5's trigram tokeniser in the first place.
     """
     needles: list[str] = []
-    for term in query_terms(query):
-        if is_cjk(term[0]):
-            if len(term) >= 2:
-                needles.extend(term[i : i + 2] for i in range(len(term) - 1))
-            else:
-                needles.append(term)  # 1-char CJK content word: keep
-        elif len(term) >= 2:  # skip single ASCII chars like "A", "I"
-            needles.append(term)
+    for raw_term in query_terms(query):
+        # Drop a single-character ASCII term before expanding it: is_cjk('Ａ') is
+        # true (fullwidth Latin lives in _CJK_RANGES), so its fullwidth variant
+        # would otherwise fall into the CJK branch's keep-1-char path and
+        # reintroduce precisely the flooding needle the raw term was excluded to
+        # avoid.  Eligibility is a property of the term, not of each spelling.
+        if not is_cjk(raw_term[0]) and len(raw_term) < 2:
+            continue
+        for term in term_variants(raw_term):
+            if is_cjk(term[0]):
+                if len(term) >= 2:
+                    needles.extend(term[i : i + 2] for i in range(len(term) - 1))
+                else:
+                    needles.append(term)  # 1-char CJK content word: keep
+            elif len(term) >= 2:  # skip single ASCII chars like "A", "I"
+                needles.append(term)
     return list(dict.fromkeys(needles))
 
 
@@ -230,7 +352,17 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             )
         # Return early only when fts_query covered every query term (no terms with
         # len < 3 were silently skipped).  Short terms still need the LIKE path.
-        if fts_hits and all(len(t) >= 3 for t in query_terms(clean_query)):
+        #
+        # Coverage is measured over every VARIANT, not just the raw term, because
+        # NFKC can shorten a term below the trigram floor: ｶﾞｽ is 3 characters but
+        # normalises to ガス, which is 2, and fts_query's gram comprehension then
+        # yields nothing for it — silently, with no error.  Checking only the raw
+        # length would read "fully covered" and skip the LIKE scan, leaving every
+        # fullwidth-spelled document unreachable for exactly the halfwidth queries
+        # this variant machinery exists to serve.
+        if fts_hits and all(
+            len(v) >= 3 for t in query_terms(clean_query) for v in term_variants(t)
+        ):
             if negs:
                 fts_hits = _apply_neg_filter(fts_hits, negs)
             return fts_hits
@@ -240,13 +372,26 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # added sources.  SQLite LIKE is case-insensitive for ASCII and case-exact for CJK
     # (correct in both cases since CJK has no case).  Special LIKE characters in
     # the needle ('|', '%', '_') are escaped with '|' as the sentinel.
+    #
+    # The scan covers c.context as well as c.text.  A bare-term FTS5 MATCH searches
+    # every column of chunks_fts, so the FTS path has matched the contextual
+    # breadcrumb (source title > heading path, v0.2.123) since that column existed —
+    # but this path only ever looked at c.text, so the same term found a
+    # heading-only match through one branch and nothing through the other, purely
+    # by term length.  That is not a corner case for a JA-first tool: the trigram
+    # tokeniser needs >= 3 characters, so EVERY two-character Japanese compound
+    # (総説, 経済, 免疫 …) — the most common query shape in Japanese — skips FTS5
+    # entirely and lands here, which meant contextual retrieval's headline recall
+    # win was silently absent for exactly those queries.
     needles = _fallback_needles(clean_query)
     if not needles:
         if negs:
             fts_hits = _apply_neg_filter(fts_hits, negs)
         return fts_hits  # return whatever FTS5 found (possibly empty)
-    conditions = " OR ".join("c.text LIKE ? ESCAPE '|'" for _ in needles)
-    like_params = [f"%{_esc_like(n)}%" for n in needles]
+    conditions = " OR ".join(
+        "(c.text LIKE ? ESCAPE '|' OR c.context LIKE ? ESCAPE '|')" for _ in needles
+    )
+    like_params = [p for n in needles for p in (f"%{_esc_like(n)}%",) * 2]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
     # score in Python, and take the top k.  Without the cap a common CJK bigram
     # on a large notebook can pull tens of thousands of rows into memory.
@@ -261,8 +406,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     like_hits: list[Hit] = []
     for r in rows:
         text = str(r["text"])
-        low = text.lower()
-        score = float(sum(low.count(n.lower()) for n in needles))
+        score = _needle_score(text, str(r["context"] or ""), needles)
         if score > 0:
             like_hits.append(
                 Hit(r["id"], r["source_id"], text, 0.0, bm25=score, context=str(r["context"] or ""))
@@ -272,12 +416,11 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
         # compare fairly against LIKE-only hits.  Raw FTS5 BM25 is near-zero for
         # small corpora (~2e-6), while LIKE scores are integers (1, 2, …).
-        # Without this, min-max normalization in fuse() makes LIKE-only hits
+        # Without this, the min-max rescale before rerank makes LIKE-only hits
         # dominate even when the FTS5 hit matches more query terms.
         fts_ids = {h.chunk_id for h in fts_hits}
         for h in fts_hits:
-            low = h.text.lower()
-            h.bm25 += float(sum(low.count(n.lower()) for n in needles))
+            h.bm25 += _needle_score(h.text, h.context, needles)
         fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
         # Re-sort the combined list after extending with LIKE-only hits.  The
         # previous sort ran before the extend, leaving LIKE-only hits appended
@@ -296,9 +439,50 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     return result
 
 
+def _needle_score(text: str, context: str, needles: list[str]) -> float:
+    """Count LIKE-fallback needle occurrences across a chunk's text and context.
+
+    Both fields count at weight 1.0, which is deliberately the same weighting the
+    FTS path gets: SQLite's bm25(chunks_fts) defaults every column to 1.0, and the
+    point of scoring context here is to remove the divergence between the two
+    branches, not to introduce a new tuning knob on one of them.  A section's
+    breadcrumb is identical across all of that section's chunks, so a context match
+    lifts the whole section uniformly and never reorders chunks within it.
+    """
+    low_text = text.lower()
+    low_ctx = context.lower()
+    return float(
+        sum(low_text.count(n.lower()) + low_ctx.count(n.lower()) for n in needles)
+    )
+
+
 def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
-    """Remove hits whose text contains any negated term (case-insensitive)."""
-    return [h for h in hits if not any(n in h.text.lower() for n in negs)]
+    """Remove hits whose text or context contains any negated term (case-insensitive).
+
+    Context is checked for the same reason it is now searched and scored: a chunk
+    can be retrieved *because of* its breadcrumb, so `-term` must be able to
+    exclude it on that same basis.  Otherwise `legacy` surfaces a source whose only
+    mention of it is in its title while `-legacy` cannot suppress it — the filter
+    would be blind to exactly the signal that produced the hit.
+
+    Both sides are NFKC-folded for that same reason, one dimension over: now that
+    a halfwidth-spelled chunk is retrievable by a fullwidth query, `-データ` has to
+    be able to suppress a ﾃﾞｰﾀ-only document.  This does widen `-term` slightly —
+    `-GPU` now also excludes a ＧＰＵ-only chunk — which is the intended reading of
+    an exclusion, and the symmetric counterpart of the widened positive match.
+
+    Each hit's text and context are NFKC-folded once, not once per negated term:
+    the fold is the expensive part (a full chunk body) and does not depend on
+    which needle it is tested against.
+    """
+    folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
+    out: list[Hit] = []
+    for h in hits:
+        folded_text = unicodedata.normalize("NFKC", h.text).lower()
+        folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
+        if not any(n in folded_text or n in folded_ctx for n in folded_negs):
+            out.append(h)
+    return out
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -340,36 +524,6 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
 # --- fusion ---------------------------------------------------------------
 
 
-def adaptive_alpha(query: str) -> float:
-    """Vector weight in [0.2, 0.8]. Lexical-looking queries push toward BM25.
-
-    Heuristics (applied in order, each adjusts alpha from 0.5 baseline):
-    - Short keyword query (≤ 3 terms, no question markers) → -0.15 (BM25 favoured)
-    - Natural-language question (≥ 6 terms, ends with か/？/?) → +0.15 (semantic)
-    - Digits or long identifiers → -0.15 (exact match)
-    - Quoted phrase → -0.10 (exact match)
-    """
-    alpha = 0.5
-    terms = query_terms(strip_neg_terms(query))
-    q_tail = query.rstrip("。．!！?？ 　\t\n")
-    q_ws = query.rstrip(" 　\t\n")
-    is_question = (
-        q_tail.endswith("か") or q_ws.endswith(("?", "？"))
-    )
-    if len(terms) <= 3 and not is_question:
-        alpha -= 0.15  # short keyword lookup: exact match matters
-    if len(terms) >= 6 or is_question:
-        alpha += 0.15  # natural-language question: semantics matter
-    # Use neg-stripped query for digit/quote checks so a neg-term like -v2 or
-    # -"phrase" doesn't falsely bias alpha toward exact-match retrieval.
-    clean_q = strip_neg_terms(query)
-    if _DIGIT_RE.search(clean_q) or any(len(t) >= 12 and not is_cjk(t[0]) for t in terms):
-        alpha -= 0.15  # identifiers / numbers: exact match matters
-    if '"' in clean_q or "「" in clean_q:
-        alpha -= 0.10  # quoted phrase: exact match matters
-    return min(0.8, max(0.2, alpha))
-
-
 def _minmax(values: list[float]) -> list[float]:
     if not values:
         return []
@@ -381,43 +535,6 @@ def _minmax(values: list[float]) -> list[float]:
     return [(v - lo) / (hi - lo) for v in values]
 
 
-def fuse(bm25_hits: list[Hit], vec_hits: list[Hit], alpha: float) -> list[Hit]:
-    """Convex combination over min-max normalised score lists.
-
-    When only one signal is available, the degenerate case normalises that
-    signal to [0..1] directly (same as the convex combination with the other
-    weight at 0 and normalization applied before combining).  This keeps MMR
-    scores symmetric: BM25-only and vec-only paths both produce scores in
-    [0..1] so MMR's relevance/diversity trade-off is not biased by which signal
-    happened to return results.
-    """
-    if not vec_hits:
-        for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
-            h.score = n
-            h.detail["bm25_norm"] = n
-        return sorted(bm25_hits, key=lambda h: h.score, reverse=True)
-    if not bm25_hits:
-        # Symmetric case: only vector hits; normalize to [0..1] directly so
-        # MMR gets the same score range as the BM25-only path above.
-        for h, n in zip(vec_hits, _minmax([h.vec for h in vec_hits])):
-            h.score = n
-            h.detail["vec_norm"] = n
-        return sorted(vec_hits, key=lambda h: h.score, reverse=True)
-    merged: dict[int, Hit] = {}
-    for h, n in zip(bm25_hits, _minmax([h.bm25 for h in bm25_hits])):
-        merged[h.chunk_id] = h
-        h.detail["bm25_norm"] = n
-    for h, n in zip(vec_hits, _minmax([h.vec for h in vec_hits])):
-        cur = merged.setdefault(h.chunk_id, h)
-        cur.vec = h.vec
-        cur.detail["vec_norm"] = n
-    for h in merged.values():
-        h.score = alpha * h.detail.get("vec_norm", 0.0) + (1 - alpha) * h.detail.get(
-            "bm25_norm", 0.0
-        )
-    return sorted(merged.values(), key=lambda h: h.score, reverse=True)
-
-
 def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit]:
     """Reciprocal Rank Fusion over BM25 and vector rank lists.
 
@@ -426,17 +543,16 @@ def rrf_fuse(bm25_hits: list[Hit], vec_hits: list[Hit], k: int = 60) -> list[Hit
     relevance).  k=60 is the empirically optimal constant from Cormack et al.
     SIGIR 2009, confirmed across TREC, WANDS, and hybrid-search benchmarks.
 
-    Advantages over the previous min-max convex combination (fuse()):
+    Advantages over the previous min-max convex combination (removed v0.2.150):
     1. No score-scale normalization required — BM25 raw values and cosine
        similarity [0,1] are on completely incompatible scales; min-max is
        per-query, misbehaves on single-hit result sets (v0.1.45 bug), and
        compresses the BM25 dynamic range so any single vector hit dominates.
-    2. No alpha tuning required — adaptive_alpha() heuristics disappear.
+    2. No alpha tuning required — the old adaptive-alpha heuristics disappear.
     3. A chunk that ranks well in BOTH lists scores higher than one that only
        ranks well in one, which is the correct semantic for hybrid retrieval.
 
-    The legacy fuse() is kept for backward compatibility with direct callers.
-    retrieve() uses rrf_fuse() as of v0.2.56.
+    retrieve() has used rrf_fuse() exclusively since v0.2.56.
     """
     return rrf_fuse_lists(
         [bm25_hits, vec_hits], k, detail_names=["rrf_bm25_rank", "rrf_vec_rank"]
@@ -491,23 +607,60 @@ def _char_bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def lexical_overlap(query: str, text: str) -> float:
-    """Saturating term-frequency overlap between query terms and text."""
-    terms = query_terms(query)
-    if not terms:
+def _norm_query_terms(query: str) -> list[str]:
+    """Query terms, NFKC-folded and lower-cased — the form the scorers compare in."""
+    return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
+
+
+def _overlap_from_norm(norm_terms: list[str], text: str) -> float:
+    """lexical_overlap's core, given already-normalised terms (see rerank())."""
+    if not norm_terms:
         return 0.0
-    low = text.lower()
+    low = unicodedata.normalize("NFKC", text).lower()
     score = 0.0
-    for t in terms:
-        tf = low.count(t.lower())
+    for t in norm_terms:
+        tf = low.count(t)
         score += tf / (tf + 1.0)  # saturate repeated occurrences
-    return score / len(terms)
+    return score / len(norm_terms)
+
+
+def lexical_overlap(query: str, text: str) -> float:
+    """Saturating term-frequency overlap between query terms and text.
+
+    Both sides are NFKC-folded so width spellings count as the same term, for the
+    same reason bm25_search matches them and _apply_neg_filter excludes on them:
+    a chunk retrieved through one spelling must not be scored as though it
+    contained none of the query.  Left width-blind, rerank() handed every
+    halfwidth-matched hit lex=0.0 and then pushed it back down — the v0.2.143
+    failure shape, one spelling dimension over.
+    """
+    return _overlap_from_norm(_norm_query_terms(query), text)
 
 
 def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
-    """Blend retrieval score with a zero-dependency lexical signal."""
+    """Blend retrieval score with a zero-dependency lexical signal.
+
+    The lexical signal reads the chunk's context breadcrumb alongside its text,
+    for the same reason bm25_search() scores both and _apply_neg_filter() excludes
+    on both: every field retrieval can *find* a chunk by must also be visible to
+    the stage that re-scores it.  Scoring text only meant a chunk retrieved via its
+    breadcrumb was handed lex=0.0 and then actively pushed back down by the very
+    reranker that ran on it — so a document whose title names the topic lost to one
+    that merely name-drops it in passing.
+
+    Concatenating (rather than max-ing) the two fields keeps the equal 1.0
+    weighting _needle_score() and SQLite's bm25(chunks_fts) already use, and
+    lexical_overlap()'s per-term tf/(tf+1) saturation bounds what the breadcrumb
+    can contribute.  A breadcrumb is identical across all chunks of a section, so
+    this lifts a section uniformly and never reorders chunks within it.
+
+    The query is tokenised and NFKC-folded once here, not once per hit inside
+    lexical_overlap: the term set is identical across the whole hit list, only the
+    text being scored changes.
+    """
+    norm_terms = _norm_query_terms(query)
     for h in hits:
-        lex = lexical_overlap(query, h.text)
+        lex = _overlap_from_norm(norm_terms, f"{h.text}\n{h.context}" if h.context else h.text)
         h.detail["lex"] = lex
         h.score = (1 - weight) * h.score + weight * lex
     return sorted(hits, key=lambda h: h.score, reverse=True)
@@ -578,7 +731,18 @@ def retrieve(
     query_vec: list[float] | None = None,
     k: int = TOP_K,
 ) -> list[Hit]:
-    """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR."""
+    """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR.
+
+    This single-query path is behaviourally identical to retrieve_multi() called
+    with one query (verified by a 400-case fuzz over BM25-only and vector modes,
+    ranking AND score). It is deliberately NOT collapsed into that delegation:
+    retrieve() is the default, hot path and fuses exactly two lists via the
+    two-arg rrf_fuse() primitive, which carries its own RRF-scoring test suite;
+    retrieve_multi() exists only for the opt-in multi-query feature and fuses N
+    lists via rrf_fuse_lists(). Keeping the arity-matched primitives means the
+    common case reads without an inert N-query loop and the tested rrf_fuse()
+    primitive keeps a production caller.
+    """
     pool = max(k * 3, 12)
     negs = neg_terms(query)
     clean = strip_neg_terms(query) if negs else query
@@ -597,8 +761,8 @@ def retrieve(
     # blend ratio is calibrated correctly. Without this, RRF scores (~0.01-0.03)
     # are overwhelmed by lexical_overlap values in [0,1]: lex contributes ~10×
     # more than the RRF signal, making the reranker effectively ignore hybrid
-    # retrieval. The old fuse() emitted [0,1] scores implicitly via _minmax;
-    # rrf_fuse() emits raw rank-reciprocal values and needs explicit normalization.
+    # retrieval. rrf_fuse() emits raw rank-reciprocal values, so _minmax here
+    # rescales them to [0,1] before the lexical blend.
     if fused:
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):

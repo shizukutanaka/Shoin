@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Runs the full verification gate before every push.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass for one push:     git push --no-verify
+#
+# Lives in .githooks/ (committed) rather than .git/hooks/ (not committed) so the
+# gate is shared with every contributor instead of being re-created by hand.
+set -eu
+exec "$(dirname "$0")/../scripts/verify.sh"

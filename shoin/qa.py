@@ -50,7 +50,7 @@ MIN_PER_SOURCE_TOKENS = 64
 # Brackets that contain an S-number, e.g. [S1] / [S1, S2] / [Ｓ１]. History
 # citations refer to a *previous* context numbering, so they are stripped
 # before re-prompting to keep the model from echoing stale numbers.
-# \b before [SsＳｸ] prevents false positives like [figs 1] or [vs 3.0] where
+# \b before [SsＳｓ] prevents false positives like [figs 1] or [vs 3.0] where
 # 's' is embedded inside a word and has no word boundary before it.
 _HISTORY_CITE_RE = re.compile(r"\[[^\[\]]*\b[SsＳｓ]\s*[0-9０-９]+[^\[\]]*\]")
 

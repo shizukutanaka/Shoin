@@ -39,8 +39,8 @@
 |----|------|-------------|
 | REQ-001 | Notebook CRUD | 作成/一覧/改名/削除。削除はソース・ノート・出力をcascade |
 | REQ-002 | ソース取込: PDF/MD/TXT/HTML/URL | 各形式でテキスト抽出成功。10MB上限。失敗時はエラーIDつき明示 |
-| REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。SQLite FTS5へ登録 |
-| REQ-004 | ハイブリッド検索 | BM25(FTS5) + ベクトル(埋め込みAPI委譲)のConvex Combination融合。埋め込み未設定時はBM25のみで劣化動作 |
+| REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。各チャンクに節文脈(タイトル>見出し)を併記(v0.2.123)。SQLite FTS5へ登録 |
+| REQ-004 | ハイブリッド検索 | BM25(FTS5) + ベクトル(埋め込みAPI委譲)をRRF融合(v0.2.56、下記「検索パイプライン」参照)。クエリは幅/字体バリアントに展開し半角カナ・全角英数を相互一致(v0.2.144)。埋め込み未設定時はBM25のみで劣化動作 |
 | REQ-005 | ソース限定・引用付きQ&A | 回答に `[S1][S2]` 形式の引用。コンテキスト外の質問には「ソースに記載なし」と回答 |
 | REQ-006 | 引用検証 | 生成テキストから `\[S(\d+)\]` を抽出し実在ソース番号と照合。不正引用をフラグ、引用カバレッジとソースマップ(`[S1]→ファイル名`)を回答に添付 |
 | REQ-007 | Web UI (3ペイン) | ソース/チャット/Studio。単一HTML+vanilla JS、引用クリックで原文ハイライト表示 |
@@ -66,7 +66,7 @@
 ```
 notebooks(id, name, created_at, updated_at)
 sources(id, notebook_id FK, kind, title, origin, sha256, added_at)
-chunks(id, source_id FK, seq, text, embedding BLOB?)   -- FTS5仮想テーブル併設
+chunks(id, source_id FK, seq, text, context, embedding BLOB?)  -- context=節文脈(v0.2.123)。FTS5は(context,text)2列で併設
 notes(id, notebook_id FK, title, body, created_at)
 studio_outputs(id, notebook_id FK, kind, body, citation_report JSON, created_at)
 messages(id, notebook_id FK, role, body, citation_report JSON, created_at)
@@ -83,7 +83,7 @@ query → [BM25 (FTS5)] ─┐
                                → レキシカルリランク + MMR → top-k(既定8) → プロンプト構築
 ```
 
-- 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合/adaptive alphaは既存テスト互換のためコードとして残存
+- 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合(`fuse()`)/`adaptive_alpha()`はv0.2.150で削除(retrieve()はv0.2.56以降RRFのみ使用しており死コードだった)
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
 - プロンプト: ソースを `[S1]..[Sn]` で番号付け、各ソースへ公平なトークン予算配分
 
