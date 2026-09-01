@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoin"
-version = "0.2.141"
+version = "0.2.158"
 description = "Local, citation-verified NotebookLM alternative for lightweight LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,14 @@ shoin = "shoin.cli:main"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+# Pin the rule set explicitly. Without a `select`, ruff applies whatever its
+# current release considers default, so the same source can pass on one machine
+# and fail on another purely by ruff version — a non-deterministic gate is not a
+# gate. These are ruff's documented defaults (pycodestyle errors + pyflakes),
+# stated here so the contract is the project's, not the installed binary's.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 strict = true

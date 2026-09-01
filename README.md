@@ -13,9 +13,20 @@
 ## Installation
 
 ```bash
-pip install shoin        # または: pipx install shoin / uvx shoin
+# ソースから (現時点で唯一の方法。動作検証済み)
+git clone https://github.com/shizukutanaka/Shoin.git && cd Shoin
+pip install .
+
 shoin serve              # http://localhost:7440 が開く
 ```
+
+> **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
+> メンテナの認証情報が必要)。リポジトリから直接入れる場合は **ref を明示**してください —
+> 既定ブランチは古い版を指していることがあります:
+>
+> ```bash
+> pip install "git+https://github.com/shizukutanaka/Shoin.git@main"
+> ```
 
 前提: [Ollama](https://ollama.com)、llama.cpp、LM Studio いずれかのOpenAI互換ローカルエンドポイント。
 
@@ -38,6 +49,15 @@ shoin eval 1 cases.json               # 検索精度を自分の文書で測定(
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
 
+### 検索の挙動(日本語)
+
+BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本語の表記ゆれを検索時に自動で吸収する:
+
+- **幅・字体の相互一致**: 全角カナ(データベース)/ 半角カナ(ﾃﾞｰﾀﾍﾞｰｽ、cp932由来の旧データに多い)/ 全角英数(ＧＰＵ、２０２４)/ ASCII(GPU) は互いに一致する。索引本文は原文のまま保持し、クエリ側でバリアントに展開する(v0.2.144)。
+- **カタカナ↔ひらがな**: コード / こーど のような同語異script を橋渡し(v0.2.42)。
+- **除外検索**: 語の前に `-` を付けるとその語を含むチャンクを除外(例: `Python -legacy`、`検索 -旧版`)。本文・節見出しの両方に作用する。
+- 埋め込みモデル未設定時はBM25のみで動作(第一級モード、フォールバックではない)。
+
 ## Configuration
 
 環境変数または `~/.config/shoin/config.json`(環境変数が優先):
@@ -52,6 +72,8 @@ Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・�
 | `SHOIN_LANG` | `ja` | UI言語(ja/en) |
 | `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
 | `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
+| `SHOIN_CHUNK_TOKENS` | `512` | チャンク分割の目安トークン数。`shoin eval` の前後で変えて自分の文書での効果を測定できる(次回の取込/再インデックスから有効) |
+| `SHOIN_CHUNK_OVERLAP` | `64` | チャンク間のオーバーラップトークン数(チャンクサイズ未満、負値・超過は既定に戻る)。オーバーラップの効果は文書依存で一律ではないため測定推奨 |
 | `SHOIN_DEBUG` | (無効) | `1`で検索の診断情報(BM25/vectorヒット数、RRF順位、最終スコア)を標準エラー出力に表示 |
 
 `shoin eval` の cases.json 例 — 設定変更(例: `SHOIN_MULTI_QUERY=1`)の前後で実行すれば、
@@ -83,6 +105,19 @@ OpenAI互換APIを話せるローカルモデルなら何でも可。動作確�
 | 生成(軽量) | Gemma 3 4B / Phi-4-mini 3.8B | 3–4GB |
 | 埋め込み | nomic-embed-text | 0.3GB |
 | 埋め込み(日本語特化) | ruri-v3 | 0.5GB |
+
+## Development
+
+```bash
+pip install -e . && pip install ruff mypy coverage    # 依存
+./scripts/verify.sh                                    # 全ゲート(lint/型/テスト+カバレッジ)
+git config core.hooksPath .githooks                    # push前に自動実行(1回だけ)
+```
+
+`scripts/verify.sh` は `ci/ci.yml` と同じ検証を1コマンドで実行する。
+`.githooks/pre-push` を有効化すると push 前に自動で走り、失敗すれば push を止める
+(緊急時は `git push --no-verify`)。GitHub Actions の権限が無い環境でも
+「landする前に自動検証される」という要件をこれで満たす — 詳細は `ci/README.md`。
 
 ## License
 

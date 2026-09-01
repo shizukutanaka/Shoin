@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.141"
+VERSION = "0.2.158"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -138,3 +138,45 @@ def embed_batch() -> int | None:
     except (ValueError, TypeError):
         return None
     return n if n >= 1 else None
+
+
+def chunk_tokens() -> int:
+    """Target tokens per chunk (SHOIN_CHUNK_TOKENS), default CHUNK_TOKENS (512).
+
+    Chunk size is a first-order retrieval-quality knob but was hardcoded, so the
+    `shoin eval` measurement v0.2.141 shipped could not actually be run against
+    different chunk sizes on the user's own corpus. This exposes it, mirroring
+    SHOIN_EMBED_BATCH: an invalid or non-positive value falls back to the default.
+    Takes effect on the next index/reindex (existing chunks keep their size).
+    """
+    raw = _get("SHOIN_CHUNK_TOKENS", "").strip()
+    if not raw:
+        return CHUNK_TOKENS
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return CHUNK_TOKENS
+    return n if n >= 1 else CHUNK_TOKENS
+
+
+def chunk_overlap() -> int:
+    """Overlap tokens between chunks (SHOIN_CHUNK_OVERLAP), default CHUNK_OVERLAP (64).
+
+    The companion knob to chunk_tokens(). A 2026 systematic study found overlap
+    gave no measurable benefit on one benchmark while the usual advice is 10-20%,
+    and Shoin's own measurement (CLAUDE.md v0.2.141) showed it raises adjacent-chunk
+    similarity — i.e. feeds the MMR redundancy penalty — so whether it helps *here*
+    is exactly the kind of corpus-specific question `shoin eval` exists to answer.
+    Invalid/negative values, or any value >= the effective chunk size (which would
+    make chunks overlap wholly or stall progress), fall back to the default.
+    """
+    raw = _get("SHOIN_CHUNK_OVERLAP", "").strip()
+    if not raw:
+        return CHUNK_OVERLAP
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return CHUNK_OVERLAP
+    if n < 0 or n >= chunk_tokens():
+        return CHUNK_OVERLAP
+    return n

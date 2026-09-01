@@ -500,7 +500,7 @@ class ExportTest(unittest.TestCase):
         self.store.add_message(self.nb, "assistant", "回答", report)
         md = export(self.store, self.nb, "md")
         # Extract the legend line
-        legend_line = next(l for l in md.splitlines() if "S1=" in l and "S10=" in l)
+        legend_line = next(ln for ln in md.splitlines() if "S1=" in ln and "S10=" in ln)
         keys_in_order = [part.split("=")[0] for part in legend_line.split("(引用元: ")[-1].rstrip("):").split(", ")]
         expected = [f"S{i}" for i in range(1, 12)]
         self.assertEqual(keys_in_order, expected, "source_map legend must be in numeric order S1, S2, ..., S10, S11")
@@ -884,7 +884,9 @@ class CliTest(unittest.TestCase):
 
     def test_ask_shows_misattr_citation_marker(self) -> None:
         """CLI _print_report must print the misattribution marker for misattributed citations."""
-        import io as _io, contextlib as _cl, shoin.cli as _cli
+        import io as _io
+        import contextlib as _cl
+        import shoin.cli as _cli
 
         report = {
             "cited": [1],
@@ -908,7 +910,9 @@ class CliTest(unittest.TestCase):
         """CLI _print_report must surface the cited source's section breadcrumb
         when the report carries source_contexts (v0.2.131) — CLI parity with the
         seal viewer and Markdown export."""
-        import io as _io, contextlib as _cl, shoin.cli as _cli
+        import io as _io
+        import contextlib as _cl
+        import shoin.cli as _cli
 
         report = {
             "cited": [1, 2],
