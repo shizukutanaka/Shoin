@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import socket
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -33,7 +35,9 @@ from shoin.search import (
     strip_neg_terms,
     term_variants,
 )
-from shoin.search import Hit, _char_bigrams, _fallback_needles
+from shoin.llm import LLMError
+from shoin.pipeline import _embed_chunks, _embed_input, rename_source
+from shoin.search import Hit, _char_bigrams, _fallback_needles, vector_search
 from shoin.store import Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -55,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.159")
+        self.assertEqual(VERSION, "0.2.160")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -7242,6 +7246,161 @@ class TestWidthVariants(unittest.TestCase):
                 query, f"{h.text}\n{h.context}" if h.context else h.text
             )
             self.assertAlmostEqual(h.detail["lex"], expected, places=12)
+
+
+class TestRenameReembed(unittest.TestCase):
+    """A renamed source's embeddings must stop encoding its OLD title.
+
+    _embed_input() prepends the chunk's context breadcrumb — which starts with
+    the source title — to the embedding input. update_source_title() rewrites
+    chunks.context (so FTS/BM25 sees the new title at once, v0.2.124) but left
+    the vectors encoding the old one until a full reindex: half the index
+    repaired, half stale. Measured on a real Store, a source renamed to
+    "免疫レポート" scored cosine 0.0 for that exact query and ranked BELOW an
+    off-topic document that merely name-drops the word.
+    """
+
+    CHARS = sorted(set("免疫レポート旧題本文議事録ワクチンの話題新しい"))
+
+    @classmethod
+    def _vec(cls, text: str) -> list[float]:
+        """Deterministic lexical embedding over a fixed vocabulary.
+
+        Models the mechanism under test — "the title is part of the embedding
+        input" — not a real model's semantics, which is all this needs to prove.
+        """
+        counts = [float(text.count(c)) for c in cls.CHARS]
+        norm = math.sqrt(sum(c * c for c in counts)) or 1.0
+        return [c / norm for c in counts]
+
+    class _FakeLLM:
+        embedding_model = "fake-embed"
+
+        def __init__(self, vec: Callable[[str], list[float]]) -> None:
+            self._vec = vec
+            self.embed_calls = 0
+
+        def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+            raise AssertionError("chat must not be called by a rename")
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.embed_calls += 1
+            return [self._vec(t) for t in texts]
+
+        def embed_one(self, text: str) -> list[float]:
+            return self._vec(text)
+
+    def _seeded(self, llm: object) -> tuple[Store, int, int, int]:
+        """Notebook with A (body never says 免疫) and B (name-drops it once)."""
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        a = st.add_source(nb.id, "md", "旧題", "mem://a", "sha-a")
+        st.add_chunks(a.id, ["ワクチンの話題についての本文"], contexts=["旧題"])
+        b = st.add_source(nb.id, "md", "議事録", "mem://b", "sha-b")
+        st.add_chunks(b.id, ["議事録: 免疫の話題が出た"], contexts=["議事録"])
+        rows = st.id_context_text_chunks_for_source(a.id) + st.id_context_text_chunks_for_source(b.id)
+        _embed_chunks(st, llm, [r[0] for r in rows], [_embed_input(r[1], r[2]) for r in rows])
+        return st, nb.id, a.id, b.id
+
+    def test_rename_refreshes_the_stored_vector(self) -> None:
+        llm = self._FakeLLM(self._vec)
+        st, _nb, a_id, _b = self._seeded(llm)
+        try:
+            rename_source(st, a_id, "免疫レポート", "mem://a", llm)
+            stored = unpack_vector(
+                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
+                    "embedding"
+                ]
+            )
+            fresh = self._vec(_embed_input("免疫レポート", "ワクチンの話題についての本文"))
+            stale = self._vec(_embed_input("旧題", "ワクチンの話題についての本文"))
+            for got, want in zip(stored, fresh):
+                self.assertAlmostEqual(got, want, places=6)
+            self.assertNotEqual(
+                [round(x, 6) for x in stored],
+                [round(x, 6) for x in stale],
+                "vector must no longer encode the old title",
+            )
+        finally:
+            st.close()
+
+    def test_renamed_source_wins_vector_search_for_its_new_title(self) -> None:
+        """The failure the fix exists for: A scored 0.0 and lost to the decoy."""
+        llm = self._FakeLLM(self._vec)
+        st, nb_id, a_id, b_id = self._seeded(llm)
+        try:
+            rename_source(st, a_id, "免疫レポート", "mem://a", llm)
+            hits = vector_search(st, nb_id, self._vec("免疫レポート"), 5)
+            order = [h.source_id for h in hits]
+            self.assertEqual(order[0], a_id, f"renamed source should rank first, got {order}")
+            self.assertIn(b_id, order)
+        finally:
+            st.close()
+
+    def test_unchanged_title_spends_no_embedding_call(self) -> None:
+        llm = self._FakeLLM(self._vec)
+        st, _nb, a_id, _b = self._seeded(llm)
+        try:
+            before = llm.embed_calls
+            n = rename_source(st, a_id, "旧題", "mem://a", llm)
+            self.assertEqual(n, 0)
+            self.assertEqual(llm.embed_calls, before)
+        finally:
+            st.close()
+
+    def test_embedding_failure_does_not_block_the_rename(self) -> None:
+        llm = self._FakeLLM(self._vec)
+        st, _nb, a_id, _b = self._seeded(llm)
+
+        class _Broken(TestRenameReembed._FakeLLM):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
+
+        try:
+            n = rename_source(st, a_id, "新しい題", "mem://a", _Broken(self._vec))
+            self.assertEqual(n, 0)
+            self.assertEqual(st.get_source(a_id).title, "新しい題")
+        finally:
+            st.close()
+
+    def test_no_embedding_model_makes_no_llm_call(self) -> None:
+        llm = self._FakeLLM(self._vec)
+        st, _nb, a_id, _b = self._seeded(llm)
+
+        class _NoModel(TestRenameReembed._FakeLLM):
+            embedding_model = ""
+
+        no_model = _NoModel(self._vec)
+        try:
+            n = rename_source(st, a_id, "新しい題", "mem://a", no_model)
+            self.assertEqual(n, 0)
+            self.assertEqual(no_model.embed_calls, 0)
+            self.assertEqual(st.get_source(a_id).title, "新しい題")
+        finally:
+            st.close()
+
+    def test_embed_model_mismatch_guard_is_respected(self) -> None:
+        """force=False: a DB whose vectors came from another model is left alone."""
+        llm = self._FakeLLM(self._vec)
+        st, _nb, a_id, _b = self._seeded(llm)
+        try:
+            st.set_setting("embed_model", "some-other-model")
+            before = unpack_vector(
+                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
+                    "embedding"
+                ]
+            )
+            n = rename_source(st, a_id, "免疫レポート", "mem://a", llm)
+            after = unpack_vector(
+                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
+                    "embedding"
+                ]
+            )
+            self.assertEqual(n, 0)
+            self.assertEqual(before, after)
+            self.assertEqual(st.get_source(a_id).title, "免疫レポート")
+        finally:
+            st.close()
 
 
 if __name__ == "__main__":
