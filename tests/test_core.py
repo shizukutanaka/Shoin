@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.166")
+        self.assertEqual(VERSION, "0.2.167")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5516,6 +5516,49 @@ class TestExport(unittest.TestCase):
             self.assertAlmostEqual(stored_norm(), 1.0, places=6)
             s.set_embedding(cid, [3.0, 4.0, 0.0])
             self.assertAlmostEqual(stored_norm(), 5.0, places=6)
+
+    def test_old_binary_embedding_write_invalidates_the_cached_norm(self) -> None:
+        """Migration 7's cache is only safe if a writer that does not know about it
+        cannot leave it stale. A binary older than v0.2.164 updates chunks.embedding
+        alone; before migration 8's trigger that left the previous vector's norm in
+        place and vector_search returned 3.0 where the true cosine is 0.6 — outside
+        cosine's range, so it would dominate every ranking."""
+        from shoin.search import cosine, vector_search
+        from shoin.store import pack_vector, unpack_vector
+
+        dim = 16
+        with make_store() as s:
+            nb = s.create_notebook("norm-invalidate")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            (cid,) = s.add_chunks(src.id, ["本文"])
+            s.set_embedding(cid, [1.0] + [0.0] * (dim - 1))
+
+            def norm() -> float | None:
+                row = s.conn.execute(
+                    "SELECT embedding_norm n FROM chunks WHERE id=?", (cid,)
+                ).fetchone()
+                return None if row["n"] is None else float(row["n"])
+
+            self.assertAlmostEqual(norm() or 0.0, 1.0, places=6, msg="new-code write caches")
+
+            # Exactly what an older binary's set_embedding does: embedding only.
+            replacement = [3.0, 4.0] + [0.0] * (dim - 2)  # true norm 5.0
+            s.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(replacement), cid)
+            )
+            s.conn.commit()
+            self.assertIsNone(norm(), "a norm-less embedding write must invalidate the cache")
+
+            q = [1.0] + [0.0] * (dim - 1)
+            self.assertAlmostEqual(
+                vector_search(s, nb.id, q, 1)[0].vec,
+                cosine(q, unpack_vector(pack_vector(replacement))),
+                places=12,
+                msg="score must follow the vector actually stored",
+            )
+            # A subsequent normal write re-populates the cache.
+            s.set_embedding(cid, [0.0, 2.0] + [0.0] * (dim - 2))
+            self.assertAlmostEqual(norm() or 0.0, 2.0, places=6)
 
     def test_migration_7_adds_embedding_norm_to_an_existing_db(self) -> None:
         """Upgrade path: a DB created at schema 6 gains the column on reopen."""
