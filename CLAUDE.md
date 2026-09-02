@@ -311,7 +311,21 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.168
+## Version History: v0.1.37 → v0.2.169
+
+### v0.2.169 (2026-09-02)
+**Verified end-to-end on a fresh install (no defect found)**: v0.2.160–168 changed `search.py`, `store.py` (three migrations), `chunk.py`, `pipeline.py`, `export.py`, `server.py` and `cli.py`. 712 green unit tests do not prove those pieces still work *together*, so the whole user journey was run against a clean `python -m venv` + `pip install .` of the tree — the same check v0.2.157 established as the bar after a large change.
+
+- **Install and schema**: clean venv install reports v0.2.169; the DB reaches **schema version 9** (migrations 7/8/9 applied in order on a database created from scratch).
+- **The session's own fixes, live rather than unit-tested**:
+  - *Width/script bridging* (v0.2.144): `shoin eval` on a document written with halfwidth kana `ﾃﾞｰﾀﾍﾞｰｽ` and fullwidth `ＧＰＵ`, queried as `データベース` and `GPU` — **recall 1.000, MRR 1.000**.
+  - *Norm cache + reindex* (v0.2.164/167/168): cached norms present after ingest, and **2/2 still cached after `shoin reindex`** — the exact regression v0.2.168 fixed, confirmed on real machinery rather than in a fixture.
+  - *Studio export legend* (v0.2.161): the Markdown export carries `*引用元: S1=doc.md (§ 和紙の研究ノート), S2=doc2.md (§ 活版印刷)*` above the Studio card, next to its status line.
+  - *serve startup i18n* (v0.2.161): `SHOIN_LANG=en shoin serve` prints `No data leaves this machine. Ctrl+C to stop.`
+- **Both answer modes**: LLM-unreachable degraded mode returns the cited passage with the search-only notice; against a minimal OpenAI-compatible mock endpoint the CLI answer came back `✓根拠確認済み` with the section breadcrumb, and the Web path streamed `meta → delta ×4 → done` with a report carrying `confirmed [1]`, `coverage 0.5` and per-source sections.
+- **Also exercised**: `notebook new`, `add` (file), `health` (both reachable and unreachable), `eval`, `studio`, `note add`, `export --format md`, `reindex`, `serve`, `GET /api/health`.
+
+No defect found. Recorded as the verification that the session's eleven rounds compose, not merely pass in isolation. No code changed beyond the version bump; `scripts/verify.sh` all gates pass.
 
 ### v0.2.168 (2026-09-02)
 **Fixed — the previous version's fix, by the same method that found the previous version's bug**: v0.2.167's trigger recognised an old binary's write by *"the norm did not change in this statement"*. That condition also matches a case it must not.
