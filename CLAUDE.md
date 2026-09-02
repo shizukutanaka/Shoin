@@ -311,7 +311,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.162
+## Version History: v0.1.37 → v0.2.163
+
+### v0.2.163 (2026-09-02)
+**Fixed (memory)**: `vector_search()` allocated the whole notebook to return 8 hits. Found by carrying v0.2.162's question — *does this work at the limit it documents?* — from time to space, the dimension that benchmark had not looked at.
+
+- **Measured**: peak allocation during a **single** `vector_search()` call, 768-dim vectors, `tracemalloc`: 17.4 MB at 5,000 chunks and 70.3 MB at 20,000 — a flat **3,683 bytes per chunk**, so ~**184 MB for one query** at `MAX_CHUNKS_PER_NOTEBOOK`. The README sizes the target machine at 4–8 GB *including* the local LLM (2–3 GB for a 4B model), so a large notebook could push a query into swap on exactly the hardware this project exists for.
+- **Root cause, and Musk's "delete the part"**: the function called `.fetchall()` (every row, every 3 KB BLOB, alive at once), built a `Hit` for **all** n chunks, sorted all of them, then returned `[:k]`. Nothing needs the other n−k. Streaming the cursor into `heapq.nlargest(k, …)` makes the working set O(k) instead of O(n).
+- **Output is identical, not merely equivalent**: `nlargest` is specified as `sorted(iterable, key=key, reverse=True)[:k]`, so equal scores still resolve in row order. Pinned by a test that builds the *old* algorithm (fetchall → Hit list → sort → slice) as a reference inside the test, with deliberate score ties (every third chunk shares a vector), and asserts equality at k = 1, 5, 12, 40.
+- **Measured after**: peak allocation during one call is **constant** — 0.0 MB at both 5,000 and 20,000 chunks (≈1–3 bytes/chunk of noise, down from 3,683). Process peak RSS across the whole benchmark fell from 92 MB to 20 MB and no longer grows with notebook size. Latency is unchanged (20,000 chunks: 767 ms → 748 ms, within noise) — this round buys space, and says so rather than claiming a speedup it did not measure.
+
+`bm25_search()` was checked and needs no equivalent change: both its branches already bound the result in SQL (`ORDER BY bm25(...) LIMIT ?` on the FTS path, an explicit `LIMIT` on the LIKE scan since v0.2.25).
+
+1 regression test added (705 total); `scripts/verify.sh` all gates pass.
 
 ### v0.2.162 (2026-09-02)
 **Measured + Fixed (performance)**: A Socratic question nobody had asked in 162 versions — *does the product actually work at the limit it documents?* `MAX_CHUNKS_PER_NOTEBOOK = 50_000` (the spec.md STRIDE DoS control) has been a number in `config.py` with no measurement behind it. Benchmarked, it turned out to buy a query latency the user pays before the LLM even starts.
