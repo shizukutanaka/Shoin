@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.161")
+        self.assertEqual(VERSION, "0.2.162")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5369,6 +5369,49 @@ class TestExport(unittest.TestCase):
             any("根拠確認済み" in ln for ln in md.splitlines()),
             f"exported studio output must surface confirmed status: {md!r}",
         )
+
+    def test_vector_search_scores_are_bit_identical_to_cosine(self) -> None:
+        """vector_search hoists the query norm and skips the per-chunk list build
+        (v0.2.162). The scores must stay exactly what cosine() computes — the
+        speedup is allowed to change cost, never a single ranking."""
+        import random
+
+        from shoin.search import cosine, vector_search
+        from shoin.store import pack_vector, unpack_vector
+
+        random.seed(11)
+        dim = 32
+        with make_store() as s:
+            nb = s.create_notebook("vec-parity")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            ids = s.add_chunks(src.id, [f"本文{i}" for i in range(25)])
+            blobs = {}
+            for cid in ids:
+                v = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+                blobs[cid] = pack_vector(v)
+                s.set_embedding(cid, v)
+            q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+            hits = vector_search(s, nb.id, q, k=25)
+            self.assertEqual(len(hits), len(ids))
+            for h in hits:
+                self.assertEqual(
+                    h.vec,
+                    cosine(q, unpack_vector(blobs[h.chunk_id])),
+                    "hoisted cosine must be bit-identical to cosine()",
+                )
+
+    def test_cosine_edge_cases_unchanged(self) -> None:
+        """The refactor keeps cosine()'s guards: empty, length-mismatch, zero
+        vector and non-finite results all still yield 0.0."""
+        from shoin.search import cosine
+
+        self.assertEqual(cosine([], [1.0]), 0.0)
+        self.assertEqual(cosine([1.0], []), 0.0)
+        self.assertEqual(cosine([1.0, 2.0], [1.0]), 0.0)
+        self.assertEqual(cosine([0.0, 0.0], [1.0, 1.0]), 0.0)
+        self.assertEqual(cosine([1.0, 1.0], [0.0, 0.0]), 0.0)
+        self.assertEqual(cosine([float("nan"), 1.0], [1.0, 1.0]), 0.0)
+        self.assertEqual(cosine([1.0, 0.0], [1.0, 0.0]), 1.0)
 
     def test_export_markdown_studio_output_carries_source_legend(self) -> None:
         """Studio outputs cite [S#] like chat answers, and their persisted report

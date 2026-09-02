@@ -12,16 +12,19 @@ Design (Plan.md / Hako v0.10.2 lineage):
 
 from __future__ import annotations
 
+import array
 import math
+import operator
 import os
 import re
 import sys
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
 from .config import TOP_K
-from .store import Store, unpack_vector
+from .store import Store
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 # Built from chunk._CJK_RANGES (the same table is_cjk()/query_terms()/fts_query()
@@ -485,16 +488,40 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     return out
 
 
+_MUL = operator.mul  # bound once: map(operator.mul, ...) beats a generator expression
+
+
+def _vec_norm(v: Sequence[float]) -> float:
+    return math.sqrt(sum(map(_MUL, v, v)))
+
+
+def _cosine_prepared(query: Sequence[float], query_norm: float, vec: Sequence[float]) -> float:
+    """cosine() with the QUERY's norm already computed.
+
+    vector_search compares one query against every chunk in the notebook, so the
+    query's norm is loop-invariant — recomputing it per chunk spent len(query)
+    multiply-adds per row for a value that never changes (768 * 50,000 = 38.4M
+    wasted operations at the documented MAX_CHUNKS_PER_NOTEBOOK). Same
+    hoist-the-invariant fix as v0.2.145 did for the NFKC folds in rerank().
+
+    Results are bit-identical to cosine(): the same dot / (|q| * |v|), only with
+    |q| supplied. Accepts any float Sequence so callers can pass an array('f')
+    straight from the BLOB instead of materializing a 768-element list per chunk.
+    """
+    if not query_norm or len(query) != len(vec):
+        return 0.0
+    dot = sum(map(_MUL, query, vec))
+    vn = math.sqrt(sum(map(_MUL, vec, vec)))
+    if vn == 0.0:
+        return 0.0
+    result = dot / (query_norm * vn)
+    return result if math.isfinite(result) else 0.0
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    result = dot / (na * nb)
-    return result if math.isfinite(result) else 0.0
+    return _cosine_prepared(a, _vec_norm(a), b)
 
 
 def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None, k: int) -> list[Hit]:
@@ -506,17 +533,24 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
         " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
         (notebook_id,),
     ).fetchall()
-    hits = [
-        Hit(
-            r["id"],
-            r["source_id"],
-            r["text"],
-            0.0,
-            vec=cosine(query_vec, unpack_vector(r["embedding"])),
-            context=str(r["context"] or ""),
+    # Hoisted out of the per-chunk loop: the query's norm is the same for every
+    # row, and unpacking straight into an array('f') avoids building a 768-float
+    # Python list per chunk. Scores are unchanged (see _cosine_prepared).
+    query_norm = _vec_norm(query_vec)
+    hits = []
+    for r in rows:
+        vec = array.array("f")
+        vec.frombytes(r["embedding"])
+        hits.append(
+            Hit(
+                r["id"],
+                r["source_id"],
+                r["text"],
+                0.0,
+                vec=_cosine_prepared(query_vec, query_norm, vec),
+                context=str(r["context"] or ""),
+            )
         )
-        for r in rows
-    ]
     hits.sort(key=lambda h: h.vec, reverse=True)
     return hits[:k]
 
