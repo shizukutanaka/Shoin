@@ -311,7 +311,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.165
+## Version History: v0.1.37 → v0.2.166
+
+### v0.2.166 (2026-09-02)
+**Measured (three null results) + user-facing sizing guidance**: With ingest (v0.2.165) and retrieval (v0.2.162–164) both characterized, the remaining question was whether anything *else* in the local pipeline is a constraint. Three candidates were measured; **none is**, and that is recorded so nobody optimizes them on suspicion later — the counterpart of Musk's "don't optimize a part that shouldn't exist" is "don't optimize a part that isn't the constraint".
+
+- **Citation verification**: `make_report()` over 8 sources totalling 132,396 characters with a 60-sentence answer takes **14.7 ms** (17,684 chars / 10 sentences: 3.1 ms). It runs once per answer, after generation — invisible next to any LLM.
+- **Per-request `Store()`**: `server.py` opens a fresh store (and runs `migrate()`) on **19** handler paths, once per HTTP request. Open + migrate + close costs **0.28 ms** mean, 0.21 ms best. The design is fine as it stands; connection pooling would add shared mutable state to a `ThreadingHTTPServer` for a quarter of a millisecond.
+- **Notebook page-load payload**: `GET /api/notebooks/{id}` for a notebook with 300 sources, 200 messages and 50 notes is **192.6 KB in 8.9 ms**. The combined-payload design (v0.2.75) holds at that size.
+
+**Shipped from the numbers, not just recorded**: README gained a Performance section with the measured retrieval and ingest tables and the one piece of guidance a user can act on — *retrieval time is roughly proportional to chunk count, so keep a notebook near 5,000 chunks to stay under ~100 ms; several notebooks split by topic beat one large one, and cite better too.* Sizing advice is only honest with numbers behind it, and until this session there were none.
+
+No code changed; `pytest tests/` unchanged at 710; `scripts/verify.sh` all gates pass.
 
 ### v0.2.165 (2026-09-02)
 **Fixed (performance, ingest)**: The same question v0.2.162–164 asked of retrieval — *does this work at the limit it documents?* — turned on the **other half of the product**. `MAX_UPLOAD_BYTES` is 10 MB; indexing a document near it took **~25 seconds**, synchronously, inside the upload handler.
