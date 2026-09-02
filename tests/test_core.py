@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.167")
+        self.assertEqual(VERSION, "0.2.168")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5516,6 +5516,50 @@ class TestExport(unittest.TestCase):
             self.assertAlmostEqual(stored_norm(), 1.0, places=6)
             s.set_embedding(cid, [3.0, 4.0, 0.0])
             self.assertAlmostEqual(stored_norm(), 5.0, places=6)
+
+    def test_reindexing_unchanged_content_keeps_the_cached_norms(self) -> None:
+        """Migration 8's WHEN clause also matched a case it must not: re-embedding
+        unchanged content with the same model yields the same vector and therefore
+        the same norm, so `shoin reindex` — the repair action the docs point at —
+        discarded every correct cache and left search on the slow path forever.
+        Migration 9 drops the condition; set_embedding writes the two columns as
+        two statements so the trigger cannot be confused by a value coincidence."""
+        from shoin.pipeline import _embed_chunks, _embed_input, reindex_notebook
+
+        dim = 8
+
+        class _Deterministic:
+            embedding_model = "det"
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                raise AssertionError("chat must not be called")
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[float(len(t) % 7) + 1.0] + [0.5] * (dim - 1) for t in texts]
+
+            def embed_one(self, text: str) -> list[float]:
+                return self.embed([text])[0]
+
+        with make_store() as s:
+            nb = s.create_notebook("reindex-cache")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            s.add_chunks(src.id, [f"本文{i}" for i in range(10)], contexts=[""] * 10)
+            rows = s.id_context_text_chunks_for_source(src.id)
+            llm = _Deterministic()
+            _embed_chunks(s, llm, [r[0] for r in rows], [_embed_input(r[1], r[2]) for r in rows])
+
+            def cached() -> int:
+                return int(
+                    s.conn.execute(
+                        "SELECT COUNT(*) c FROM chunks WHERE embedding_norm IS NOT NULL"
+                    ).fetchone()["c"]
+                )
+
+            self.assertEqual(cached(), 10)
+            reindex_notebook(s, llm, nb.id)
+            self.assertEqual(
+                cached(), 10, "reindexing identical content must not discard the cache"
+            )
 
     def test_old_binary_embedding_write_invalidates_the_cached_norm(self) -> None:
         """Migration 7's cache is only safe if a writer that does not know about it
