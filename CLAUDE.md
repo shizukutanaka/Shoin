@@ -311,7 +311,15 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.169
+## Version History: v0.1.37 → v0.2.170
+
+### v0.2.170 (2026-09-02)
+**Simplified (the deliverable itself)**: The goal of these rounds was to *enumerate* strengths, weaknesses and improvements — and `docs/product-review.md`, the artifact of that enumeration, had become unreadable as one. Twelve rows carried strikethrough, the weakness table ran 1, 8, 2, 3, 4, 5, 9, 11, 10, 6, 7, and four genuinely open items sat buried among twelve resolved ones. A ledger whose job is to say what is open, that a reader must decode to find out, has stopped doing its job.
+
+- **Restructured, not truncated**: open weaknesses are now five rows numbered 1–5 in a sensible order; open backlog items are four, and every one of them is a credential- or admin-console-bound delivery action, stated as such. Everything resolved moved to compact "解決済み(記録)" tables — one line each, keeping the version and the reason, so no history is lost and none of it competes with the open items for attention. Strikethrough count: **12 → 0**.
+- **The conclusion was rewritten to match the evidence**, summarising what v0.2.158–169 actually established: the strengths ledger falsification-tested, the last engineering weakness closed, the backlog's own staleness found, performance measured end to end for the first time, two defects found by re-reading this session's own fixes, and the whole thing verified on a fresh install.
+
+No code changed. `pytest tests/` unchanged at 712; `scripts/verify.sh` all gates pass.
 
 ### v0.2.169 (2026-09-02)
 **Verified end-to-end on a fresh install (no defect found)**: v0.2.160–168 changed `search.py`, `store.py` (three migrations), `chunk.py`, `pipeline.py`, `export.py`, `server.py` and `cli.py`. 712 green unit tests do not prove those pieces still work *together*, so the whole user journey was run against a clean `python -m venv` + `pip install .` of the tree — the same check v0.2.157 established as the bar after a large change.
