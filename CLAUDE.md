@@ -311,7 +311,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.164
+## Version History: v0.1.37 → v0.2.165
+
+### v0.2.165 (2026-09-02)
+**Fixed (performance, ingest)**: The same question v0.2.162–164 asked of retrieval — *does this work at the limit it documents?* — turned on the **other half of the product**. `MAX_UPLOAD_BYTES` is 10 MB; indexing a document near it took **~25 seconds**, synchronously, inside the upload handler.
+
+- **Measured, then profiled** (markdown of mixed CJK/ASCII prose): splitting cost ~2.7 s per MB — 1 MB in 2.77 s, 5 MB in 13.62 s. `cProfile` was unambiguous: **98% of it was `estimate_tokens`**, and inside that, `is_cjk()` — 3.87M calls on a 1 MB document, each running `any(lo <= cp <= hi …)` over the ~20 entries of `_CJK_RANGES`, for 34.3M generator steps.
+- **Two independent wastes**: the range table was scanned **linearly per character**, and the scan was driven by a **Python-level function call per character** when the same set membership is a regex character class the C engine can evaluate in one pass. `search.py` already builds `_NEG_RE`'s classes from `_CJK_RANGES` the same way, so the technique was in-repo precedent, not invention.
+- **The obvious implementation was the worst one, and only measuring showed it**: counting with `re.findall` is 96.3 ms and **70.5 MB** of peak allocation on a 1 M-character document, because it materializes one string object per matched character. `subn` is 44.1 ms / 7.9 MB. Stripping the complement and measuring the remainder — `len(_NON_CJK_RE.sub("", text))` — is **12.4 ms / 4.1 MB**, and is what shipped. The per-character Python loop it replaces was ~730 ms.
+- **`is_cjk()` keeps its exact semantics** for its other callers (`search.py`'s tokenizer) and now bisects a flattened boundary list: ~4 comparisons instead of a linear scan. Ranges are **merged first** — checked, and `_CJK_RANGES` is *not* written sorted or disjoint, so the parity test would have been wrong without it. A future range added anywhere, overlapping anything, still classifies correctly.
+- **Measured after**, same documents: split **2.77 s → 0.12 s at 1 MB (23×)** and **13.62 s → 0.59 s at 5 MB (23×)**. End to end at 9.4 MB, just under the documented cap: `index_source` **~25 s → 3.03 s**.
+
+2 regression tests added, both cross-checks rather than fixed expectations: `is_cjk` must agree with the original linear-scan definition at every range edge plus 20,000 random code points, and the regex class must select exactly the set `is_cjk` accepts (so the class and the table can never drift apart). `pytest tests/` now runs 710 tests; `scripts/verify.sh` all gates pass.
+
+**Verified while here**: the 10 MB upload guard genuinely fires — a 10.4 MB file is rejected with `INGEST_TOO_LARGE`, which is how the first benchmark run ended.
 
 ### v0.2.164 (2026-09-02)
 **Fixed (performance) + corrected my own reasoning**: v0.2.162 measured that the chunk's own L2 norm was **54% of the remaining per-chunk cost** in `vector_search()` (16.9 µs of norm vs 14.1 µs of dot product) and then *deferred* caching it, on the stated ground that it "makes a DB written by two versions silently mixed-semantics". Re-questioned this round — Musk's step 1 applies to one's own conclusions too — that objection was **wrong**: it describes *pre-normalizing the stored vector* (where an unnormalized row would rank by `dot * |v|`), not *caching the norm*, where both paths still divide by the same true norm. Two different changes had been conflated into one deferral.

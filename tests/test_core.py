@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.164")
+        self.assertEqual(VERSION, "0.2.165")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -1158,6 +1158,56 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(is_cjk("　"))   # U+3000 ideographic space
         self.assertEqual(estimate_tokens("書院。"), 3)
         self.assertEqual(estimate_tokens("猫、犬。"), 4)
+
+    def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
+        """is_cjk now bisects merged range boundaries instead of scanning every
+        range (v0.2.165). The classification must be identical to the original
+        definition at every range edge and across a wide random sample — the
+        merge step matters because _CJK_RANGES is not written sorted or disjoint,
+        and parity over boundaries is only correct on disjoint ordered intervals.
+        """
+        import random
+
+        from shoin.chunk import _CJK_RANGES, is_cjk
+
+        def reference(cp: int) -> bool:
+            return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
+
+        points: set[int] = set()
+        for lo, hi in _CJK_RANGES:
+            points.update((lo - 1, lo, lo + 1, hi - 1, hi, hi + 1))
+        random.seed(0)
+        points.update(random.randrange(0, 0x110000) for _ in range(20000))
+        for cp in points:
+            if not 0 <= cp < 0x110000 or 0xD800 <= cp <= 0xDFFF:
+                continue  # surrogates are not valid standalone characters
+            self.assertEqual(
+                is_cjk(chr(cp)), reference(cp), f"U+{cp:04X} classified differently"
+            )
+
+    def test_estimate_tokens_cjk_class_selects_exactly_what_is_cjk_does(self) -> None:
+        """estimate_tokens counts CJK with a regex class built from the same table
+        (a C-level scan, ~59x faster than calling is_cjk per character). The class
+        and the table must therefore never diverge: this pins them together."""
+        import random
+
+        from shoin.chunk import _CJK_RANGES, _NON_CJK_RE, is_cjk
+
+        points: set[int] = set()
+        for lo, hi in _CJK_RANGES:
+            points.update((lo - 1, lo, hi, hi + 1))
+        random.seed(1)
+        points.update(random.randrange(0, 0x110000) for _ in range(5000))
+        sample = "".join(
+            chr(cp)
+            for cp in sorted(points)
+            if 0 <= cp < 0x110000 and not 0xD800 <= cp <= 0xDFFF
+        )
+        self.assertEqual(
+            len(_NON_CJK_RE.sub("", sample)),
+            sum(1 for ch in sample if is_cjk(ch)),
+            "the regex class and is_cjk must select the same character set",
+        )
 
     def test_is_cjk_thai(self) -> None:
         self.assertTrue(is_cjk("ส"))   # U+0E2A Thai
