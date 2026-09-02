@@ -311,7 +311,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.170
+## Version History: v0.1.37 → v0.2.171
+
+### v0.2.171 (2026-09-02)
+**Re-tested the four remaining blockers instead of restating them (docs only)**: an earlier round of this work was rightly pushed back on for parking items as "maintainer-only" without testing the blocker. The backlog's last four entries are all delivery actions; each was re-attempted or its tool surface re-inspected here, so every one now carries its own measured evidence rather than a belief.
+
+- **CI to GitHub Actions — blocked on two independent paths.** v0.2.153 measured `git push` being refused (`refusing to allow a GitHub App to create or update workflow ... without 'workflows' permission`). The REST path had never been tried; `create_or_update_file` on `.github/workflows/ci.yml` returns **`403 Resource not accessible by integration`**. Two mechanisms, same wall — and the requirement itself ("every commit verified before it lands") is already met by `scripts/verify.sh` + `.githooks/pre-push`.
+- **PyPI — no credentials exist here.** `~/.pypirc` absent, no `TWINE_*`/`PYPI_*` environment variables, `twine` not installed. Nothing to attempt.
+- **Default-branch setting — no such API in reach.** The available GitHub tools cover files, branches, PRs, issues, releases (read) and repository *creation*; there is no repository-settings update. The setting flip is a console action. Its *harm* was removed at the content level in v0.2.159 and every version since keeps the default branch byte-identical to `main`.
+- **Release / tag — no creation surface.** Tag push is rejected by the environment's git proxy (403, measured earlier), and the release tools present are read-only (`get_release_by_tag`, `list_releases`, `get_tag`).
+
+That closes the enumeration honestly: the backlog holds four items, all delivery, none of them missing engineering, and each blocker verified by attempt rather than assumption.
+
+No code changed; `pytest tests/` unchanged at 712; `scripts/verify.sh` all gates pass.
 
 ### v0.2.170 (2026-09-02)
 **Simplified (the deliverable itself)**: The goal of these rounds was to *enumerate* strengths, weaknesses and improvements — and `docs/product-review.md`, the artifact of that enumeration, had become unreadable as one. Twelve rows carried strikethrough, the weakness table ran 1, 8, 2, 3, 4, 5, 9, 11, 10, 6, 7, and four genuinely open items sat buried among twelve resolved ones. A ledger whose job is to say what is open, that a reader must decode to find out, has stopped doing its job.
