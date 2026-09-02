@@ -1,4 +1,4 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.170 時点、2026-09-02 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.171 時点、2026-09-02 更新)
 
 shoin/ 15モジュール + 単一HTML UI・テスト712件・ドキュメント一式の精査結果。
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
@@ -71,10 +71,12 @@ CHANGELOG.md(〜v0.1.55)にバグ単位で残っているため、ここでは�
 
 | # | 改善案 | 担当 | 備考 |
 |---|--------|------|------|
-| 1 | GitHub Actions への CI 移設 | リポジトリ管理者 | `git mv ci/ci.yml .github/workflows/ci.yml`。急ぎではない(要件は pre-push フックで達成済) |
-| 2 | PyPI 発行 | リポジトリ管理者(認証) | ビルド・install・static同梱は検証済。残るは `twine upload` |
-| 3 | デフォルトブランチ名を `main` へ | リポジトリ管理者(1クリック) | 内容は既に同一なので無害 |
-| 4 | リリースタグ / Release 作成 | リポジトリ管理者 | エージェントのタグ push はプロキシが403で拒否(実測) |
+| 1 | GitHub Actions への CI 移設 | リポジトリ管理者 | `git mv ci/ci.yml .github/workflows/ci.yml`。**二経路で実測拒否**: git push は `refusing to allow a GitHub App to ... without 'workflows' permission`(v0.2.153)、REST API は `403 Resource not accessible by integration`(v0.2.171)。急ぎではない — 要件「landする前の自動検証」は pre-push フックで達成済 |
+| 2 | PyPI 発行 | リポジトリ管理者(認証) | ビルド・install・static同梱は検証済。**実測**: `~/.pypirc` 不在、`TWINE_*`/`PYPI_*` 環境変数なし、twine 未インストール。残るは `twine upload` の認証情報のみ |
+| 3 | デフォルトブランチ名を `main` へ | リポジトリ管理者(1クリック) | 内容は既に同一なので無害。**実測**: 利用可能な GitHub ツール群にリポジトリ設定更新APIは存在しない |
+| 4 | リリースタグ / Release 作成 | リポジトリ管理者 | **実測**: タグ push はプロキシが403、GitHub ツール群は release 参照のみで作成APIなし |
+
+いずれも「たぶん無理」ではなく、**このセッションで直接試すかツール面を確認した結果**である。
 
 ### 完了・決着済み(記録)
 
