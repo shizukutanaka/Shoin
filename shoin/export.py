@@ -81,6 +81,31 @@ def _parse_report(raw: object) -> dict[str, object]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _legend(report: dict[str, object]) -> str:
+    """"S1=title (§ section), S2=…" from a citation_report, or "" when it has none.
+
+    Shared by the chat and Studio sections of export_markdown so the two can
+    never drift in how they name a source. The section breadcrumb (v0.2.130)
+    shows WHICH section each citation is grounded in — the same provenance the
+    app's seal viewer surfaces, preserved once the answer leaves the app.
+    Old reports without either field yield "" and render exactly as before.
+    """
+    raw_map = report.get("source_map")
+    if not isinstance(raw_map, dict) or not raw_map:
+        return ""
+    raw_ctx = report.get("source_contexts")
+    section_map: dict[str, str] = (
+        {k: str(v) for k, v in raw_ctx.items()} if isinstance(raw_ctx, dict) else {}
+    )
+    return ", ".join(
+        f"{k}={v}" + (f" (§ {section_map[k]})" if section_map.get(k) else "")
+        for k, v in sorted(
+            ((str(k), str(v)) for k, v in raw_map.items()),
+            key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,
+        )
+    )
+
+
 def export_markdown(store: Store, notebook_id: int) -> str:
     nb = store.get_notebook(notebook_id)
     parts: list[str] = [f"# {_md_line(nb.name)}", ""]
@@ -103,8 +128,17 @@ def export_markdown(store: Store, notebook_id: int) -> str:
         parts.append(f"## {_t('studio_section')}")
         for o in outputs:
             parts.append(f"### {o['kind']}")
+            report = _parse_report(o["citation_report"])
+            # Studio outputs cite [S#] exactly like chat answers do, and their
+            # persisted report carries the same source_map/source_contexts, but
+            # the export only ever rendered the legend for chat — so an archived
+            # briefing's [S2] pointed at nothing. Same "3 surfaces, same
+            # provenance" rule as v0.2.130-132, applied to the surface it missed.
+            legend = _legend(report)
+            if legend:
+                parts.append(f"*{_t('source_label')}: {legend}*")
             parts.append(str(o["body"] or ""))
-            status = _status_line(_parse_report(o["citation_report"]))
+            status = _status_line(report)
             if status:
                 parts.append(f"*{status}*")
             parts.append("")
@@ -120,31 +154,8 @@ def export_markdown(store: Store, notebook_id: int) -> str:
                 parts.append("")
             else:
                 report = _parse_report(m["citation_report"])
-                raw_map = report.get("source_map")
-                source_map: dict[str, str] = (
-                    {k: str(v) for k, v in raw_map.items()}
-                    if isinstance(raw_map, dict)
-                    else {}
-                )
-                # Section breadcrumb per S-number (v0.2.130), so the exported
-                # legend shows WHICH section each citation is grounded in — the
-                # same provenance the app's seal viewer now surfaces, preserved
-                # once the answer leaves the app (mirrors v0.2.66 bringing the
-                # citation-verification status into the export).
-                raw_ctx = report.get("source_contexts")
-                section_map: dict[str, str] = (
-                    {k: str(v) for k, v in raw_ctx.items()}
-                    if isinstance(raw_ctx, dict)
-                    else {}
-                )
-                if source_map:
-                    legend = ", ".join(
-                        f"{k}={v}" + (f" (§ {section_map[k]})" if section_map.get(k) else "")
-                        for k, v in sorted(
-                            source_map.items(),
-                            key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,
-                        )
-                    )
+                legend = _legend(report)
+                if legend:
                     parts.append(f"**Assistant** ({_t('source_label')}: {legend}):")
                 else:
                     parts.append("**Assistant**:")

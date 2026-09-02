@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.160")
+        self.assertEqual(VERSION, "0.2.161")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5369,6 +5369,66 @@ class TestExport(unittest.TestCase):
             any("根拠確認済み" in ln for ln in md.splitlines()),
             f"exported studio output must surface confirmed status: {md!r}",
         )
+
+    def test_export_markdown_studio_output_carries_source_legend(self) -> None:
+        """Studio outputs cite [S#] like chat answers, and their persisted report
+        carries the same source_map/source_contexts — but the export rendered the
+        legend only for chat, so an archived briefing's [S2] pointed at nothing.
+        Same 3-surfaces-same-provenance rule as v0.2.130-132 (backlog #9)."""
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-studio-legend")
+            a = s.add_source(nb.id, "txt", "生物ノート", "mem://a", "sha-a")
+            b = s.add_source(nb.id, "txt", "化学ノート", "mem://b", "sha-b")
+            s.add_chunks(a.id, ["光合成は光からエネルギーを作る。"])
+            s.add_chunks(b.id, ["酸化とは電子を失う反応である。"])
+            report = make_report(
+                "光合成は光からエネルギーを作る[S1]。酸化とは電子を失う反応である[S2]。",
+                ["生物ノート", "化学ノート"],
+                [a.id, b.id],
+                ["光合成は光からエネルギーを作る。", "酸化とは電子を失う反応である。"],
+                ["光合成のしくみ", ""],
+            )
+            s.add_studio_output(nb.id, "briefing", "本文[S1][S2]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        studio = md.split("\n## Studio")[1].split("\n## ")[0]
+        self.assertIn("S1=生物ノート (§ 光合成のしくみ)", studio)
+        self.assertIn("S2=化学ノート", studio)
+        self.assertNotIn("S2=化学ノート (§", studio, "no section -> no stray §")
+
+    def test_export_markdown_studio_output_without_map_has_no_legend(self) -> None:
+        """No-regression control: an old report with no source_map renders as before."""
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-studio-nolegend")
+            s.add_studio_output(nb.id, "briefing", "本文。", "{}")
+            md = export_markdown(s, nb.id)
+        studio = md.split("\n## Studio")[1].split("\n## ")[0]
+        self.assertIn("### briefing", studio, "slice must actually contain the card")
+        self.assertNotIn("引用元", studio)
+        self.assertNotIn("sources:", studio)
+
+    def test_serve_startup_strings_are_localized(self) -> None:
+        """serve()'s two human-facing lines were hardcoded Japanese regardless of
+        SHOIN_LANG (backlog #8). serve() itself is a blocking loop (pragma: no
+        cover), so the string table is exercised directly."""
+        import os
+
+        from shoin import server as srv
+
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            self.assertEqual(srv._t("serve.no_egress"), "No data leaves this machine. Ctrl+C to stop.")
+            self.assertEqual(srv._t("serve.stopped"), "Stopped.")
+        with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+            self.assertEqual(srv._t("serve.no_egress"), "外部送信なし。Ctrl+C で終了。")
+            self.assertEqual(srv._t("serve.stopped"), "停止。")
+        with patch.dict(os.environ, {"SHOIN_LANG": "xx"}):
+            self.assertEqual(srv._t("serve.stopped"), "Stopped.", "unknown locale falls back to en")
 
     def test_export_markdown_degraded_message_shows_search_only(self) -> None:
         import json
