@@ -311,7 +311,20 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.163
+## Version History: v0.1.37 → v0.2.164
+
+### v0.2.164 (2026-09-02)
+**Fixed (performance) + corrected my own reasoning**: v0.2.162 measured that the chunk's own L2 norm was **54% of the remaining per-chunk cost** in `vector_search()` (16.9 µs of norm vs 14.1 µs of dot product) and then *deferred* caching it, on the stated ground that it "makes a DB written by two versions silently mixed-semantics". Re-questioned this round — Musk's step 1 applies to one's own conclusions too — that objection was **wrong**: it describes *pre-normalizing the stored vector* (where an unnormalized row would rank by `dot * |v|`), not *caching the norm*, where both paths still divide by the same true norm. Two different changes had been conflated into one deferral.
+
+- **Safe by construction, and checked**: `grep` confirms `set_embedding()` is the **only** writer of `chunks.embedding` in the codebase (its single production caller is `_embed_chunks`). It now writes `embedding` and `embedding_norm` in one UPDATE, so the pair cannot drift — the staleness class of v0.2.160 is structurally excluded rather than merely avoided.
+- **Migration 7** adds a nullable `chunks.embedding_norm REAL`. NULL means "written before this migration": `vector_search` falls back to computing it, so an un-reindexed notebook keeps **identical scores**, just at the old speed. No forced reindex, matching how migration 5 handled `context`.
+- **A float-width trap, avoided deliberately**: the norm is computed from `array("f", vec)` — the float32 round-trip — not from the float64 input list, because search reads back float32. A float64 norm would shift scores in the last bits and break the bit-identity the v0.2.162/163 tests pin.
+- **Measured, on the real write path**: 20,000 chunks, 768-dim, embeddings written through `set_embedding` as production does — vector search **749 ms → 376 ms** (1.99×). Cumulative across v0.2.162–164: **1,489 ms → 376 ms, 3.96×**; the documented `MAX_CHUNKS_PER_NOTEBOOK` extrapolates from ~3.7 s to ~0.94 s per query.
+- **The benchmark lied first, and that was the useful part**: the initial re-measurement showed *no* gain, because the benchmark seeded vectors with a raw `UPDATE chunks SET embedding=?` — bypassing `set_embedding`, so every row took the NULL fallback. Fixing the benchmark to use the real write path is what produced the number above. A benchmark that does not go through production's own code path measures nothing.
+
+3 regression tests added: cached and NULL-norm rows in one notebook must both score exactly `cosine()` on the same BLOB (half the rows deliberately seeded as legacy); `set_embedding` must refresh the norm when a vector is overwritten (1.0 → 5.0); and a DB built at schema 6 by hand gains the column on reopen. Two existing tests asserted the latest schema version as a literal `6` — updated to derive it from `MIGRATIONS[-1][0]`, so a schema addition can no longer break them (the same "write it so it cannot go stale" rule v0.2.151 applied to the CHANGELOG note).
+
+`pytest tests/` now runs 708 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.163 (2026-09-02)
 **Fixed (memory)**: `vector_search()` allocated the whole notebook to return 8 hits. Found by carrying v0.2.162's question — *does this work at the limit it documents?* — from time to space, the dimension that benchmark had not looked at.
