@@ -311,7 +311,26 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.161
+## Version History: v0.1.37 → v0.2.162
+
+### v0.2.162 (2026-09-02)
+**Measured + Fixed (performance)**: A Socratic question nobody had asked in 162 versions — *does the product actually work at the limit it documents?* `MAX_CHUNKS_PER_NOTEBOOK = 50_000` (the spec.md STRIDE DoS control) has been a number in `config.py` with no measurement behind it. Benchmarked, it turned out to buy a query latency the user pays before the LLM even starts.
+
+- **Measured first** (768-dim vectors, the `nomic-embed-text` width this project recommends): retrieval scales linearly in chunk count, entirely inside `vector_search()` — BM25 is flat by comparison (SQLite does that work in C).
+
+  | chunks | BM25 | vector | retrieve() |
+  |---|---|---|---|
+  | 1,000 | 6.8 ms | 78.6 ms | 108 ms |
+  | 5,000 | 18.8 ms | 366.6 ms | 417 ms |
+  | 20,000 | 43.4 ms | 1,488.9 ms | 1,530 ms |
+
+  Extrapolated to the documented cap: **~3.7 s of pure Python cosine per query**, on a machine faster than the 4–8 GB targets in the README.
+- **Three wastes found in the hot loop, all loop-invariant or gratuitous**: (1) `cosine()` recomputed the **query's** norm for every chunk — 768 × 50,000 = 38.4M multiply-adds per query for a value that never changes (the same hoist-the-invariant defect v0.2.145 fixed for the NFKC folds); (2) `unpack_vector()` materialized a 768-element Python **list** per chunk purely to be iterated once; (3) the dot product used a generator expression where `map(operator.mul, …)` runs the same arithmetic in C.
+- **Fix**: `_vec_norm()` + `_cosine_prepared(query, query_norm, vec)` (accepts any float `Sequence`, so `vector_search` feeds it an `array('f')` straight off the BLOB); public `cosine()` keeps its exact signature and semantics by delegating — the v0.2.145 pattern, where the tested public function stays the single source of truth. **Measured 1.94× on the vector path** (20,000 chunks: 1,489 ms → 767 ms; the cap extrapolates to ~1.9 s), with scores **bit-identical** — pinned by a test asserting every `vector_search` hit's `.vec` equals `cosine()` on the same BLOB.
+
+2 regression tests added. Both correctly pass before and after: this is a performance change whose entire contract is that output does not move, so the tests are behavior pins, not fail-then-pass — stated plainly rather than dressed up. `pytest tests/` now runs 704 tests; `scripts/verify.sh` all gates pass.
+
+**Noted (not actioned), with the number**: the remaining per-chunk cost splits 14.1 µs dot / 16.9 µs **chunk norm** (0.24 µs unpack). The chunk norm is invariant across *queries*, not just within one, so caching it (a `chunks.embedding_norm` column, or storing pre-normalized vectors) would remove ~54% of what is left. It is deliberately not done here: pre-normalizing makes a DB written by two versions silently mixed-semantics (unnormalized rows would rank by `dot * |v|`), and a nullable norm column adds a second scoring path plus a backfill story for every existing notebook. That is a data-migration decision, not a hot-loop one, and it now has a measured size attached for whoever takes it.
 
 ### v0.2.161 (2026-09-01)
 **Fixed + Verified (backlog audit)**: The third ledger — the improvement backlog in `docs/product-review.md` — was put through the same Socratic pass as the strengths (v0.2.158) and weaknesses (v0.2.160): *is each item actually still open, and still worth doing?* Read against the code, the ledger itself had drifted.
