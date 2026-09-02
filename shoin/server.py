@@ -20,6 +20,7 @@ from typing import Any
 
 from .citation import make_report
 from .config import (
+    ui_lang,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
@@ -45,6 +46,24 @@ from .qa import (
 )
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
+
+# Startup-log strings for serve(). Kept module-local (same minimal pattern as
+# export.py) rather than imported from cli.py, which imports THIS module.
+# Everything else the server emits is machine-facing JSON; these two lines are
+# the only human-facing text it prints, and they were hardcoded Japanese, so a
+# SHOIN_LANG=en user's very first interaction with the product was untranslated.
+_STRINGS: dict[str, dict[str, str]] = {
+    "serve.no_egress": {
+        "ja": "外部送信なし。Ctrl+C で終了。",
+        "en": "No data leaves this machine. Ctrl+C to stop.",
+    },
+    "serve.stopped": {"ja": "停止。", "en": "Stopped."},
+}
+
+
+def _t(key: str) -> str:
+    lang = ui_lang()
+    return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
 _STATIC = Path(__file__).resolve().parent / "static" / "index.html"
 
@@ -796,10 +815,10 @@ def serve(port: int, db: str | None = None) -> None:  # pragma: no cover (blocki
     server = make_server(port=port, db=db)
     actual = server.server_address[1]
     print(f"Shoin (書院) v{VERSION} — http://127.0.0.1:{actual}/")
-    print("外部送信なし。Ctrl+C で終了。")
+    print(_t("serve.no_egress"))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n停止。")
+        print("\n" + _t("serve.stopped"))
     finally:
         server.server_close()

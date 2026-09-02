@@ -311,7 +311,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.160
+## Version History: v0.1.37 → v0.2.161
+
+### v0.2.161 (2026-09-01)
+**Fixed + Verified (backlog audit)**: The third ledger — the improvement backlog in `docs/product-review.md` — was put through the same Socratic pass as the strengths (v0.2.158) and weaknesses (v0.2.160): *is each item actually still open, and still worth doing?* Read against the code, the ledger itself had drifted.
+
+- **Already done, never closed**: backlog #4 / 短所#3 (CHANGELOG note) — `CHANGELOG.md`'s header note has pointed at CLAUDE.md as the canonical history and been version-agnostic since v0.2.151; the ledger still listed it as open work. Closed. The ledger being stale is the same "a doc claim is either verified or corrected" class this project has fixed for CLAUDE.md and spec.md — this time it was the review's own bookkeeping.
+- **Real, small, fixed — backlog #8**: `serve()`'s two human-facing startup lines (`外部送信なし。Ctrl+C で終了。` / `停止。`) were hardcoded Japanese; `server.py` had no i18n at all, so a `SHOIN_LANG=en` user's very first interaction with the product was untranslated. Added the minimal `_STRINGS`/`_t` pattern `export.py` already uses (module-local — `cli.py` imports `server.py`, so it cannot be borrowed from there). `serve()` keeps its `pragma: no cover`; the string table is tested directly (ja / en / unknown-locale fallback).
+- **Real asymmetry, fixed — backlog #9**: the Markdown export rendered the `S1=title (§ section)` legend for chat answers only. Studio outputs cite `[S#]` the same way and their persisted report carries the same `source_map`/`source_contexts` (`studio.generate` → `make_report`), so an archived briefing's `[S2]` pointed at nothing — the one surface v0.2.130–132's "same provenance on every surface" rule missed. Legend construction is extracted to `_legend(report)` and shared by both loops, so they can no longer drift; chat output is byte-identical (existing legend tests unchanged).
+- **Deleted — backlog #10** "continue audit rounds": a working habit, not a deliverable; it lives in `docs/agents/opus.md` §5. A backlog that lists habits never empties.
+- **Decided, not left open — backlog #11** Playwright in CI: recorded as a deliberate no (the cheap 80% is covered by `tests/test_ui_contract.py`; a browser download for the remaining 20% contradicts the zero-dependency principle), with the condition that would reopen it.
+
+3 regression tests added (Studio legend present with section / absent for an old report / startup strings localized), fail-then-pass verified via `git stash` on `shoin/export.py`+`shoin/server.py` (2 fail pre-fix; the no-legend control correctly passes on both sides). `pytest tests/` now runs 702 tests; `scripts/verify.sh` all gates pass. With this, every row of the review's weakness table and backlog is either resolved, a recorded decision, or a credential-bound maintainer action — none is open engineering.
 
 ### v0.2.160 (2026-09-01)
 **Fixed**: Renaming a source left its **embeddings** encoding the OLD title — the last open engineering defect in `docs/product-review.md` (短所#5 / backlog#7), and the same *half-repaired index* shape this project fixed three times for other fields (v0.2.142/143/144). Found by turning the Socratic pass that verified the strengths ledger (v0.2.158) onto the weaknesses ledger instead.
