@@ -311,7 +311,19 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.167
+## Version History: v0.1.37 → v0.2.168
+
+### v0.2.168 (2026-09-02)
+**Fixed — the previous version's fix, by the same method that found the previous version's bug**: v0.2.167's trigger recognised an old binary's write by *"the norm did not change in this statement"*. That condition also matches a case it must not.
+
+- **Reproduced**: re-embedding **unchanged** content with the same model produces the same vector, hence the same norm, so the `WHEN` clause was true and the trigger nulled a **correct** cache. After `reindex_notebook` on a 10-chunk notebook, **0 of 10** rows kept their cached norm — and since a later write only re-fires the same condition, they never come back. `shoin reindex` is the repair action the docs point at, and it silently disabled the v0.2.164 optimization permanently. Correctness was never at risk (the fallback recomputes); the speedup was.
+- **The condition is deleted, not refined** — every guess about "did this writer know about the norm column?" has a case it gets wrong, and migration 8's did. Migration 9 makes the trigger unconditional, and `set_embedding` now writes the two columns as **two statements in one transaction**: the first (`SET embedding=?`) fires the trigger and clears the cache, the second (`SET embedding_norm=?`) writes the norm for the vector just stored. No value coincidence can confuse it, and an old binary still issues only the first statement, so it lands on NULL and the correct fallback.
+- **Measured before assuming it was free**: the split costs nothing — 29.1 µs per chunk versus 32.5 µs for the single combined statement (the second UPDATE touches one REAL column while the first writes the BLOB either way).
+- **Both properties now hold together**, verified end to end: after a reindex of identical content, 10/10 rows keep their cache; after an old-binary-style `UPDATE chunks SET embedding=?`, the norm is NULL and `vector_search` scores the vector actually stored.
+
+1 regression test added (712 total), fail-then-pass verified via `git stash` on `shoin/store.py` (pre-fix: `0 != 10`). `scripts/verify.sh` all gates pass.
+
+**Method note**: three consecutive rounds — v0.2.164's defect found in v0.2.167, v0.2.167's found here — came from re-reading this session's own diffs adversarially rather than from new ideas. A fix is a change like any other and deserves the same suspicion as the code it replaces.
 
 ### v0.2.167 (2026-09-02)
 **Fixed — a defect I introduced three versions ago**: v0.2.164's cached embedding norm silently narrowed the **downgrade-safety property** v0.2.158 had verified and recorded as a strength ("an older binary opening a newer-schema DB keeps working"). Found by re-reading my own recent diff adversarially rather than by a new feature idea — the v0.1.4/0.1.5 discipline turned on this session's own output.

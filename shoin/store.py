@@ -246,6 +246,30 @@ MIGRATIONS: list[tuple[int, str]] = [
         END;
         """,
     ),
+    (
+        9,
+        # Migration 8's WHEN clause tried to recognise an old binary's write by
+        # "the norm did not change in this statement". It also matched a case it
+        # must not: re-embedding UNCHANGED content with the same model produces the
+        # same vector and therefore the same norm, so `shoin reindex` — the very
+        # repair action the docs point at — discarded every correct cached norm and
+        # left search permanently on the slow fallback path (measured: 10/10 rows
+        # NULL after a reindex).
+        #
+        # The condition is deleted instead of refined. set_embedding now writes the
+        # embedding and the norm as two statements in one transaction, so the
+        # trigger can fire unconditionally on the first and the second restores the
+        # cache — no value coincidence can confuse it. An old binary issues only the
+        # first statement, so it still lands on NULL and the correct fallback.
+        """
+        DROP TRIGGER IF EXISTS chunks_norm_invalidate;
+        CREATE TRIGGER IF NOT EXISTS chunks_norm_invalidate
+        AFTER UPDATE OF embedding ON chunks
+        BEGIN
+          UPDATE chunks SET embedding_norm = NULL WHERE id = new.id;
+        END;
+        """,
+    ),
 ]
 
 
@@ -731,12 +755,21 @@ class Store:
         # it reads back — a float64 norm would shift scores in the last bits.
         packed = array.array("f", vec)
         norm = math.sqrt(sum(map(operator.mul, packed, packed)))
+        # Two statements, one transaction, and the order matters: writing the
+        # embedding fires the migration-9 trigger, which clears the cached norm
+        # unconditionally; the second statement then writes the norm that belongs
+        # to the vector just stored. Doing both in ONE statement would need the
+        # trigger to guess whether a writer knew about the norm column, and every
+        # guess has a case it gets wrong (migration 8's did — see its note).
+        # Measured: the split costs nothing (29.1 us vs 32.5 us per chunk).
         cur = self.conn.execute(
-            "UPDATE chunks SET embedding=?, embedding_norm=? WHERE id=?",
-            (packed.tobytes(), norm, chunk_id),
+            "UPDATE chunks SET embedding=? WHERE id=?", (packed.tobytes(), chunk_id)
         )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
+        self.conn.execute(
+            "UPDATE chunks SET embedding_norm=? WHERE id=?", (norm, chunk_id)
+        )
         if commit:
             self.conn.commit()
 
