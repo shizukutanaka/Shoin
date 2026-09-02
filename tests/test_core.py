@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.162")
+        self.assertEqual(VERSION, "0.2.163")
 
     def test_migrate_idempotent(self) -> None:
         with make_store() as s:
@@ -5398,6 +5398,59 @@ class TestExport(unittest.TestCase):
                     h.vec,
                     cosine(q, unpack_vector(blobs[h.chunk_id])),
                     "hoisted cosine must be bit-identical to cosine()",
+                )
+
+    def test_vector_search_matches_sort_then_slice_including_ties(self) -> None:
+        """vector_search streams the cursor into a bounded heap instead of
+        materializing every row and Hit (v0.2.163). heapq.nlargest is defined as
+        sorted(key=..., reverse=True)[:k], so the result — tie order included —
+        must equal the old sort-then-slice reference computed here."""
+        import random
+
+        from shoin.search import Hit, _cosine_prepared, _vec_norm, vector_search
+        from shoin.store import unpack_vector
+
+        random.seed(29)
+        dim = 8
+        with make_store() as s:
+            nb = s.create_notebook("vec-order")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            ids = s.add_chunks(src.id, [f"本文{i}" for i in range(40)])
+            # Deliberate ties: every third chunk shares one vector, so several
+            # chunks score identically and only a stable order can match.
+            shared = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+            for n, cid in enumerate(ids):
+                v = shared if n % 3 == 0 else [random.uniform(-1.0, 1.0) for _ in range(dim)]
+                s.set_embedding(cid, v)
+            q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+
+            rows = s.conn.execute(
+                "SELECT c.id, c.source_id, c.text, c.context, c.embedding FROM chunks c"
+                " JOIN sources s ON s.id = c.source_id"
+                " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
+                (nb.id,),
+            ).fetchall()
+            qn = _vec_norm(q)
+            reference = [
+                Hit(
+                    r["id"],
+                    r["source_id"],
+                    r["text"],
+                    0.0,
+                    vec=_cosine_prepared(q, qn, unpack_vector(r["embedding"])),
+                    context=str(r["context"] or ""),
+                )
+                for r in rows
+            ]
+            reference.sort(key=lambda h: h.vec, reverse=True)
+
+            for k in (1, 5, 12, 40):
+                got = vector_search(s, nb.id, q, k)
+                want = reference[:k]
+                self.assertEqual(
+                    [(h.chunk_id, h.vec) for h in got],
+                    [(h.chunk_id, h.vec) for h in want],
+                    f"streamed top-{k} must equal sort-then-slice, ties included",
                 )
 
     def test_cosine_edge_cases_unchanged(self) -> None:

@@ -13,13 +13,14 @@ Design (Plan.md / Hako v0.10.2 lineage):
 from __future__ import annotations
 
 import array
+import heapq
 import math
 import operator
 import os
 import re
 import sys
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
@@ -527,22 +528,29 @@ def cosine(a: list[float], b: list[float]) -> float:
 def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None, k: int) -> list[Hit]:
     if not query_vec:
         return []
-    rows = store.conn.execute(
+    # Streamed, not fetchall(): only the top k survive, so there is no reason to
+    # hold every row and every Hit in memory at once. At the documented
+    # MAX_CHUNKS_PER_NOTEBOOK that materialization cost ~184 MB of allocation for
+    # a single query (measured, 768-dim vectors) on machines the README sizes at
+    # 4-8 GB total while also hosting the LLM. heapq.nlargest keeps k items and is
+    # defined as sorted(..., key=..., reverse=True)[:k], so ties still resolve in
+    # row order and the returned list is identical to the previous sort-then-slice.
+    cur = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.context, c.embedding FROM chunks c"
         " JOIN sources s ON s.id = c.source_id"
         " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
         (notebook_id,),
-    ).fetchall()
+    )
     # Hoisted out of the per-chunk loop: the query's norm is the same for every
     # row, and unpacking straight into an array('f') avoids building a 768-float
     # Python list per chunk. Scores are unchanged (see _cosine_prepared).
     query_norm = _vec_norm(query_vec)
-    hits = []
-    for r in rows:
-        vec = array.array("f")
-        vec.frombytes(r["embedding"])
-        hits.append(
-            Hit(
+
+    def _scored() -> Iterator[Hit]:
+        for r in cur:
+            vec = array.array("f")
+            vec.frombytes(r["embedding"])
+            yield Hit(
                 r["id"],
                 r["source_id"],
                 r["text"],
@@ -550,9 +558,8 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
                 vec=_cosine_prepared(query_vec, query_norm, vec),
                 context=str(r["context"] or ""),
             )
-        )
-    hits.sort(key=lambda h: h.vec, reverse=True)
-    return hits[:k]
+
+    return heapq.nlargest(k, _scored(), key=lambda h: h.vec)
 
 
 # --- fusion ---------------------------------------------------------------
