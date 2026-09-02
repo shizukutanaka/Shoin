@@ -7,6 +7,8 @@ that CJK text is searchable without external tokenizers (SQLite >= 3.34).
 from __future__ import annotations
 
 import array
+import math
+import operator
 import sqlite3
 import time
 from collections.abc import Callable
@@ -199,6 +201,22 @@ MIGRATIONS: list[tuple[int, str]] = [
           INSERT INTO chunks_fts(rowid, context, text)
           VALUES (new.id, new.context, new.text);
         END;
+        """,
+    ),
+    (
+        7,
+        # Cache each embedding's own L2 norm next to it. vector_search compares one
+        # query against every chunk, and recomputing sqrt(sum(v*v)) per row was 54%
+        # of the remaining per-chunk cost (measured, v0.2.162) for a value that never
+        # changes between queries. Safe to cache because set_embedding() is the ONLY
+        # writer of chunks.embedding in the codebase and now writes both columns in
+        # the same UPDATE, so the pair cannot drift. NULL means "not computed yet"
+        # (rows written before this migration): vector_search falls back to computing
+        # it, so an un-reindexed notebook keeps identical scores, just slower.
+        # ALTER TABLE has no IF NOT EXISTS in SQLite; _migrate_once() handles the
+        # concurrent "duplicate column name" case (v0.2.128).
+        """
+        ALTER TABLE chunks ADD COLUMN embedding_norm REAL;
         """,
     ),
 ]
@@ -681,8 +699,14 @@ class Store:
     def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
         if not vec:
             raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
+        # Norm computed from the float32 round-trip (array("f", vec)), not from the
+        # float64 input, so it is bit-identical to what search computes on the BLOB
+        # it reads back — a float64 norm would shift scores in the last bits.
+        packed = array.array("f", vec)
+        norm = math.sqrt(sum(map(operator.mul, packed, packed)))
         cur = self.conn.execute(
-            "UPDATE chunks SET embedding=? WHERE id=?", (pack_vector(vec), chunk_id)
+            "UPDATE chunks SET embedding=?, embedding_norm=? WHERE id=?",
+            (packed.tobytes(), norm, chunk_id),
         )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")

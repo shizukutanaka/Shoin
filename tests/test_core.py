@@ -38,7 +38,7 @@ from shoin.search import (
 from shoin.llm import LLMError
 from shoin.pipeline import _embed_chunks, _embed_input, rename_source
 from shoin.search import Hit, _char_bigrams, _fallback_needles, vector_search
-from shoin.store import Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
+from shoin.store import MIGRATIONS, Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
 EN = "Shoin is a local notebook. Citations are machine verified."
@@ -59,12 +59,15 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.163")
+        self.assertEqual(VERSION, "0.2.164")
 
     def test_migrate_idempotent(self) -> None:
+        # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
+        # hand-edited on every schema addition, which is how it goes stale.
+        latest = MIGRATIONS[-1][0]
         with make_store() as s:
-            self.assertEqual(s.migrate(), 6)
-            self.assertEqual(s.migrate(), 6)
+            self.assertEqual(s.migrate(), latest)
+            self.assertEqual(s.migrate(), latest)
 
     def test_migration_schema_version_and_tables_always_consistent(self) -> None:
         """After migrate() on a fresh file DB, all version records and their corresponding
@@ -834,7 +837,9 @@ class TestStore(unittest.TestCase):
 
             loser.conn = _StaleFirstReadConn()
             result = loser._migrate_once()
-            self.assertEqual(result, 6, "must recover and reach the latest version, not raise")
+            self.assertEqual(
+                result, MIGRATIONS[-1][0], "must recover and reach the latest version, not raise"
+            )
 
     def test_migrate_duplicate_column_reraises_when_not_actually_won(self) -> None:
         """The exception handler must NOT silently swallow a duplicate-column
@@ -5398,6 +5403,99 @@ class TestExport(unittest.TestCase):
                     h.vec,
                     cosine(q, unpack_vector(blobs[h.chunk_id])),
                     "hoisted cosine must be bit-identical to cosine()",
+                )
+
+    def test_cached_and_legacy_norm_rows_score_identically(self) -> None:
+        """Migration 7 caches each embedding's own norm beside the BLOB (v0.2.164).
+        Rows written before it have embedding_norm NULL and must fall back to
+        computing it — both paths divide by the same true norm, so every row must
+        still score exactly what cosine() gives on the same BLOB."""
+        import random
+
+        from shoin.search import cosine, vector_search
+        from shoin.store import pack_vector, unpack_vector
+
+        random.seed(5)
+        dim = 64
+        with make_store() as s:
+            nb = s.create_notebook("norm-cache")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            ids = s.add_chunks(src.id, [f"t{i}" for i in range(30)])
+            blobs = {}
+            for i, cid in enumerate(ids):
+                v = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+                blobs[cid] = pack_vector(v)
+                if i % 2:
+                    # Simulate a pre-migration row: embedding written, norm absent.
+                    s.conn.execute(
+                        "UPDATE chunks SET embedding=?, embedding_norm=NULL WHERE id=?",
+                        (pack_vector(v), cid),
+                    )
+                else:
+                    s.set_embedding(cid, v)
+            s.conn.commit()
+            n_null = s.conn.execute(
+                "SELECT COUNT(*) c FROM chunks WHERE embedding IS NOT NULL AND embedding_norm IS NULL"
+            ).fetchone()["c"]
+            self.assertEqual(n_null, 15, "half the rows must exercise the fallback path")
+
+            q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+            for h in vector_search(s, nb.id, q, 30):
+                self.assertEqual(
+                    h.vec,
+                    cosine(q, unpack_vector(blobs[h.chunk_id])),
+                    "cached and computed norms must give bit-identical scores",
+                )
+
+    def test_set_embedding_refreshes_the_cached_norm(self) -> None:
+        """The cache is only safe because set_embedding is the sole writer of
+        chunks.embedding and writes both columns in one UPDATE. Overwriting a
+        vector must therefore never leave the old norm behind."""
+        with make_store() as s:
+            nb = s.create_notebook("norm-refresh")
+            src = s.add_source(nb.id, "md", "d", "mem://d", "sha-d")
+            (cid,) = s.add_chunks(src.id, ["t"])
+
+            def stored_norm() -> float:
+                row = s.conn.execute(
+                    "SELECT embedding_norm n FROM chunks WHERE id=?", (cid,)
+                ).fetchone()
+                return float(row["n"])
+
+            s.set_embedding(cid, [1.0, 0.0, 0.0])
+            self.assertAlmostEqual(stored_norm(), 1.0, places=6)
+            s.set_embedding(cid, [3.0, 4.0, 0.0])
+            self.assertAlmostEqual(stored_norm(), 5.0, places=6)
+
+    def test_migration_7_adds_embedding_norm_to_an_existing_db(self) -> None:
+        """Upgrade path: a DB created at schema 6 gains the column on reopen."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "old.sqlite3")
+            # Apply migrations 1..6 by hand, exactly as an older binary would have.
+            import sqlite3 as _sq
+
+            conn = _sq.connect(path)
+            conn.executescript("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
+            for version, sql in MIGRATIONS:
+                if version > 6:
+                    break
+                conn.executescript(
+                    f"BEGIN;\n{sql.strip()}\n"
+                    f"INSERT OR IGNORE INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
+                )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(chunks)")}
+            self.assertNotIn("embedding_norm", cols, "precondition: schema 6 has no norm column")
+            conn.close()
+
+            with Store(path) as s:  # current code migrates it forward
+                cols = {r[1] for r in s.conn.execute("PRAGMA table_info(chunks)")}
+                self.assertIn("embedding_norm", cols)
+                self.assertEqual(
+                    s.conn.execute("SELECT MAX(version) v FROM schema_migrations").fetchone()["v"],
+                    MIGRATIONS[-1][0],
                 )
 
     def test_vector_search_matches_sort_then_slice_including_ties(self) -> None:
