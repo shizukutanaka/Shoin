@@ -219,6 +219,33 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE chunks ADD COLUMN embedding_norm REAL;
         """,
     ),
+    (
+        8,
+        # Invalidate the cached norm whenever the embedding is rewritten WITHOUT
+        # the norm being rewritten in the same statement — which is exactly what a
+        # binary older than v0.2.164 does, since it does not know the column exists.
+        # Reproduced before this trigger existed: an old binary's write left the
+        # previous vector's norm in place and vector_search returned 3.0 for a pair
+        # whose true cosine is 0.6 — outside cosine's range, so it would dominate
+        # every ranking. CLAUDE.md records downgrade safety (an older binary opening
+        # a newer schema keeps working) as a property of this project; migration 7
+        # narrowed it, and this restores it.
+        #
+        # The guard lives in the DATABASE precisely because the offending writer is
+        # a binary that knows nothing about any of this. set_embedding (the only
+        # in-repo writer) updates both columns, so new.embedding_norm differs and
+        # the trigger stays quiet; in the one case where a new vector happens to
+        # have the identical norm, the trigger fires, the norm goes NULL, and
+        # vector_search recomputes it — still correct, merely uncached.
+        """
+        CREATE TRIGGER IF NOT EXISTS chunks_norm_invalidate
+        AFTER UPDATE OF embedding ON chunks
+        WHEN new.embedding_norm IS old.embedding_norm
+        BEGIN
+          UPDATE chunks SET embedding_norm = NULL WHERE id = new.id;
+        END;
+        """,
+    ),
 ]
 
 

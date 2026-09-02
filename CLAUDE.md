@@ -311,7 +311,18 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 
 ---
 
-## Version History: v0.1.37 → v0.2.166
+## Version History: v0.1.37 → v0.2.167
+
+### v0.2.167 (2026-09-02)
+**Fixed — a defect I introduced three versions ago**: v0.2.164's cached embedding norm silently narrowed the **downgrade-safety property** v0.2.158 had verified and recorded as a strength ("an older binary opening a newer-schema DB keeps working"). Found by re-reading my own recent diff adversarially rather than by a new feature idea — the v0.1.4/0.1.5 discipline turned on this session's own output.
+
+- **Reproduced against a real `Store`**: a binary older than v0.2.164 does not know `chunks.embedding_norm` exists, so its `set_embedding` writes `UPDATE chunks SET embedding=?` alone. The cached norm then describes the **previous** vector. Replacing a unit vector with `[3,4,0…]` (true norm 5) left the cache at 1.0, and `vector_search` returned **3.0 for a pair whose true cosine is 0.6** — outside cosine's range, so that chunk would outrank every correctly-scored one in the notebook. Not a rounding error; a ranking-destroying one.
+- **Fix — migration 8, and it lives in the database on purpose**: a trigger, because the offending writer is a binary that knows nothing about any of this. `AFTER UPDATE OF embedding ON chunks WHEN new.embedding_norm IS old.embedding_norm` nulls the cache — precisely the old-binary signature, since `set_embedding` (the only in-repo writer) always updates both columns in one statement so the norms differ and the trigger stays quiet. In the single case where a replacement vector happens to have the identical norm the trigger fires anyway, the norm goes NULL, and `vector_search` recomputes it: still correct, merely uncached. Staleness is now structurally impossible rather than avoided by convention.
+- **Verified**: post-fix the same reproduction scores 0.600000 against a true 0.600000, and a subsequent normal write re-populates the cache (2.0). Fail-then-pass confirmed via `git stash` on `shoin/store.py` — pre-fix the test fails with `1.0 is not None`.
+
+**Considered and deliberately not added**: a `shoin health` line reporting how many chunks carry a cached norm. It would need `_cmd_health` to open a `Store`, and that command is deliberately special-cased **above** the `Store()` construction (v0.2.127) so it still reports something useful when the data directory itself is what is broken. Trading that property for a hint about a performance detail — one that resolves itself as sources are added, refreshed or reindexed, and never affects correctness — is a bad exchange. Recorded so the idea is not re-litigated.
+
+1 regression test added (711 total); `scripts/verify.sh` all gates pass.
 
 ### v0.2.166 (2026-09-02)
 **Measured (three null results) + user-facing sizing guidance**: With ingest (v0.2.165) and retrieval (v0.2.162–164) both characterized, the remaining question was whether anything *else* in the local pipeline is a constraint. Three candidates were measured; **none is**, and that is recorded so nobody optimizes them on suspicion later — the counterpart of Musk's "don't optimize a part that shouldn't exist" is "don't optimize a part that isn't the constraint".
