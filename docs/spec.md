@@ -66,7 +66,7 @@
 ```
 notebooks(id, name, created_at, updated_at)
 sources(id, notebook_id FK, kind, title, origin, sha256, added_at)
-chunks(id, source_id FK, seq, text, context, embedding BLOB?)  -- context=節文脈(v0.2.123)。FTS5は(context,text)2列で併設
+chunks(id, source_id FK, seq, text, context, embedding BLOB?, embedding_norm REAL?)  -- context=節文脈(v0.2.123)。FTS5は(context,text)2列で併設。embedding_normはL2ノルムのキャッシュ(v0.2.164, migration 7)。set_embedding()が唯一の書き手でembeddingと同一トランザクション内に書くが、その書き手を知らない旧バイナリの単独UPDATEを検知して無条件に無効化するトリガをmigration 9で追加済み(v0.2.167/168)。NULLは「未計算」を意味し検索時に都度計算へフォールバック——スコアは常に同一、速度のみ異なる
 notes(id, notebook_id FK, title, body, created_at)
 studio_outputs(id, notebook_id FK, kind, body, citation_report JSON, created_at)
 messages(id, notebook_id FK, role, body, citation_report JSON, created_at)
