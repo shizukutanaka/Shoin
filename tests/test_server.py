@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -14,6 +15,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -853,6 +855,47 @@ class ServerTest(unittest.TestCase):
             status, data = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
         self.assertTrue(data["multi_query"])
+
+    def test_ui_lang_meta_reflects_shoin_lang(self) -> None:
+        """README documents SHOIN_LANG as controlling "UI言語", but the Web UI
+        is served as pure static bytes and previously ignored it entirely,
+        deciding its language from navigator.language/localStorage alone —
+        the CLI and export.py already respected it, so this was a real
+        cross-surface inconsistency in the same documented setting, not just
+        an incomplete doc. _h_ui() now injects the configured language into
+        the page's <meta name="shoin-lang"> tag; index.html's own bootstrap
+        JS treats it as the default, below an explicit user toggle
+        (localStorage) but above the browser's own locale."""
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}, clear=False):
+            status, _, page = self._req("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<meta name="shoin-lang" content="en">', page)
+        self.assertNotIn(b"__SHOIN_LANG__", page)
+
+        with patch.dict(os.environ, {"SHOIN_LANG": "ja"}, clear=False):
+            status, _, page = self._req("GET", "/")
+        self.assertIn(b'<meta name="shoin-lang" content="ja">', page)
+
+    def test_ui_lang_meta_sanitizes_unrecognized_or_malicious_values(self) -> None:
+        """CSP already allows inline scripts (script-src 'unsafe-inline'), so an
+        unsanitized SHOIN_LANG value substituted into the <meta> tag's content
+        attribute could break out of it. Only a bare "ja"/"en" is ever
+        substituted verbatim; anything else — including something shaped like
+        an attribute-breakout attempt — must fall back to "ja" untouched."""
+        malicious = '"><script>window.x=1</script><meta content="'
+        with patch.dict(os.environ, {"SHOIN_LANG": malicious}, clear=False):
+            status, _, page = self._req("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<meta name="shoin-lang" content="ja">', page)
+        self.assertNotIn(b"<script>window.x=1</script>", page)
+
+        with patch.dict(os.environ, {"SHOIN_LANG": "fr"}, clear=False):
+            status, _, page = self._req("GET", "/")
+        self.assertIn(
+            b'<meta name="shoin-lang" content="ja">',
+            page,
+            "an unsupported-but-harmless language code must also fall back to ja",
+        )
 
 
 class NonStreamingLLMTest(unittest.TestCase):
