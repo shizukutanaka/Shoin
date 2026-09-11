@@ -354,7 +354,25 @@ class _Handler(BaseHTTPRequestHandler):
     # --- handlers -------------------------------------------------------
 
     def _h_ui(self) -> None:
-        body = _STATIC.read_bytes()
+        # README documents SHOIN_LANG as controlling "UI言語" without qualifying
+        # it to server-side text only, but the Web UI is served as pure static
+        # bytes and previously ignored it entirely, deciding its own language
+        # from navigator.language/localStorage alone -- the exact "documented
+        # but half-true" gap this project keeps finding (v0.2.75/112/129/148/173).
+        # Seed the page's default via the single "__SHOIN_LANG__" placeholder in
+        # the static file's meta tag, substituted here -- not the user's own
+        # explicit in-browser toggle choice (localStorage), which must keep
+        # winning once set; see index.html's precedence comment.
+        # test_ui_contract.py pins that the placeholder appears exactly once in
+        # the shipped file, so a future edit can't silently reintroduce a second
+        # occurrence for this blind byte replace to also corrupt.
+        # Strictly allowlisted (not merely escaped): CSP already permits inline
+        # scripts (script-src 'unsafe-inline'), so an unsanitized value in the
+        # replaced attribute could break out of it; only a bare "ja"/"en" is
+        # ever substituted, anything else silently falls back to "ja".
+        lang = ui_lang()
+        safe_lang = lang if lang in ("ja", "en") else "ja"
+        body = _STATIC.read_bytes().replace(b"__SHOIN_LANG__", safe_lang.encode("ascii"))
         self._headers(
             200,
             "text/html; charset=utf-8",
