@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.172
+## Version History: v0.1.37 → v0.2.173
+
+### v0.2.173 (2026-09-11)
+**Fixed (docs)**: `docs/spec.md`'s データモデル section — the schema sketch for `chunks` still read `chunks(id, source_id FK, seq, text, context, embedding BLOB?)`, missing `embedding_norm REAL` entirely. Migration 7 (v0.2.164) added the column and migration 9 (v0.2.168) hardened its invalidation trigger, but nobody had checked the requirements-doc data model against the schema since — the same "doc claim vs. code reality" class this project has fixed repeatedly (v0.2.75/112/113/129/148, most recently for this exact file at v0.2.148, before the norm-cache work existed).
+
+- Verified directly against `store.py`'s actual `CREATE TABLE chunks` + migrations 7/8/9, not from memory.
+- Fix: added `embedding_norm REAL?` to the schema sketch, with a one-line note on what it is (cached L2 norm, v0.2.164), why it's safe (`set_embedding()` is the sole writer, same transaction as `embedding`), and what makes it safe against a writer that doesn't know about it (the migration-9 invalidation trigger, v0.2.167/168) — condensed from the full account in `docs/HISTORY.md`'s own v0.2.164/167/168 entries, not duplicating them.
+- Checked the rest of `docs/spec.md` for the same class of drift while here: REQ-002/109's DoS numbers (10MB upload cap, `MAX_CHUNKS_PER_NOTEBOOK`, single-generation lock) match `config.py` exactly; the 引用検証仕様 section's four-stage description is still accurate at the requirements level (v0.2.140's sub-sentence attribution refined *which text* gets compared, not the stated confirm/misattribute criteria themselves, so it needed no change); `SECURITY.md` and `ADR-001` were spot-checked and found accurate.
+
+No production code changed; `pytest tests/` unchanged at 712; `scripts/verify.sh` all gates pass.
 
 ### v0.2.172 (2026-09-11)
 **Simplified (docs, a new target for the same discipline)**: This exact file is the fix. `CLAUDE.md` had grown to 1869 lines / 370KB — 174 dated Version History entries accounting for 344.5KB (93%) of it — and `CLAUDE.md` is loaded **in full, unconditionally, as project instructions on every session that touches this repo**. That mechanism is not a guess: it is what wrapped this exact session's own continuation prompt, dumping all 370KB into context before a single tool call. Every prior round of this project's own performance work (v0.2.162–166) established the rule "measure before optimizing, and don't optimize a part that isn't the constraint" for *retrieval CPU*; nobody had asked the same question about the *documentation's own size*, even though the mechanism (unconditional full-file injection, confirmed empirically) makes it the direct token-budget analogue of the exact anti-pattern that work was about.
