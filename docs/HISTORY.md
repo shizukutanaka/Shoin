@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.175
+## Version History: v0.1.37 → v0.2.176
+
+### v0.2.176 (2026-09-11)
+**Verified (no defect found)**: `SHOIN_MULTI_QUERY=1` — the multi-query RAG-Fusion path added in v0.2.125 — sits directly on top of `bm25_search()`'s width-variant expansion (v0.2.144), `vector_search()`'s norm caching (v0.2.162–168), and `rrf_fuse_lists()`, all of which this session heavily rewrote for the first time since v0.2.125 shipped. Nothing in the intervening 50 versions exercised the rewrite-then-fuse path live; every mock LLM journey run this session (v0.2.157/169/175) left `SHOIN_MULTI_QUERY` at its default (off).
+
+- **Reproduced the exact v0.2.125 unit-test shape through the real CLI, not a fixture**: a fresh venv install, a single-chunk source ("多頭注意機構の解説がここにある。"), and a question ("セルフアテンションの仕組み") deliberately chosen to share **zero trigram** with the chunk's vocabulary — against a real HTTP mock endpoint, not `FakeLLM`.
+- **Single-query** (`SHOIN_MULTI_QUERY` unset): correctly returns the "no relevant content" message — the chunk is genuinely unreachable by the original wording, confirming the test setup isn't accidentally trivial.
+- **Multi-query** (`SHOIN_MULTI_QUERY=1`), identical question: the rewrite call fires, returns phrasing that matches the chunk's actual vocabulary, and the answer comes back correctly cited and confirmed (`✓根拠確認済み`) — the RAG-Fusion recall win, live, through every retrieval layer this session modified, composing correctly together.
+
+No defect found; no code changed. `pytest tests/` unchanged at 712; `scripts/verify.sh` all gates pass.
 
 ### v0.2.175 (2026-09-11)
 **Verified end-to-end on a fresh install (no defect found)**: v0.2.172–174 touched only `CLAUDE.md`, `docs/HISTORY.md`, `docs/spec.md`, `docs/agents/*.md`, `CHANGELOG.md`, and `scripts/verify.sh` — no production code. That is exactly the kind of change a "surely it's fine, it's just docs and a shell script" assumption gets skipped for, so it was verified instead, per this project's own v0.2.157/v0.2.169 precedent of re-running the whole journey after a run of changes rather than trusting the diff by inspection alone.
