@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.174
+## Version History: v0.1.37 → v0.2.175
+
+### v0.2.175 (2026-09-11)
+**Verified end-to-end on a fresh install (no defect found)**: v0.2.172–174 touched only `CLAUDE.md`, `docs/HISTORY.md`, `docs/spec.md`, `docs/agents/*.md`, `CHANGELOG.md`, and `scripts/verify.sh` — no production code. That is exactly the kind of change a "surely it's fine, it's just docs and a shell script" assumption gets skipped for, so it was verified instead, per this project's own v0.2.157/v0.2.169 precedent of re-running the whole journey after a run of changes rather than trusting the diff by inspection alone.
+
+- **Clean venv install at v0.2.174** (the version at the start of this round): reports the correct version; schema reaches **version 9** on a fresh DB (migrations 7/8/9 still apply in order).
+- **Degraded mode, health, reindex-with-nothing-embedded**: `shoin ask` with an unreachable LLM returns the cited passage with the search-only notice; `shoin health` reports correctly; `shoin reindex` on a notebook with zero embedded chunks reports `0/1` cleanly rather than erroring.
+- **Full LLM-connected path against a minimal mock endpoint**: `shoin add` with `SHOIN_EMBED_MODEL` set embeds and **caches the norm** (`embedding_norm` populated, migration 7); `shoin ask` returns `✓根拠確認済み` with the section breadcrumb; `shoin reindex` afterward **preserves** the existing cached norm and adds the newly-embedded chunk's (1 → 2, matching v0.2.168's fix, confirmed on real machinery rather than a fixture this time); `shoin source rename` re-embeds and updates the chunk's context breadcrumb correctly (v0.2.160); `shoin export --format md` carries the Studio legend (v0.2.161) and the chat legend/status lines together, unbroken by three doc-only releases in between.
+- **Web path**: `GET /api/health` correct; the SSE `ask` endpoint against this round's deliberately minimal (non-streaming-aware) mock returned `meta → done` with **zero** delta events and an empty persisted assistant message — traced to the test mock itself (it ignores the request's `stream` flag and always returns a single JSON blob, not SSE `data:` lines), not a product defect: `git diff --stat` between this round's starting commit and HEAD confirms `shoin/llm.py` and `shoin/server.py` are **byte-identical**, so nothing in the streaming path could have regressed. What this incidentally re-confirmed live is more interesting than what it set out to check: a non-SSE response from a misbehaving endpoint degrades to an empty assistant message rather than a crash or an orphaned user turn — exactly the v0.2.55 fix, still holding under a genuinely malformed real response rather than a mocked-up one.
+
+No defect found; no code changed. `pytest tests/` unchanged at 712; `scripts/verify.sh` all gates pass.
 
 ### v0.2.174 (2026-09-11)
 **Fixed**: `scripts/verify.sh` — the sole verification gate this project has (GitHub Actions cannot run here, verified two independent ways: v0.2.153 `git push`, v0.2.171 the REST API) — reported `verify: ALL GATES PASSED` with exit code 0 even when lint, type-checking, AND the coverage threshold were all SKIPPED because the tools weren't installed. Its own header comment claims "a missing linter must not masquerade as a passing one," but the aggregate banner did exactly that.
