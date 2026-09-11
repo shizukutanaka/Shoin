@@ -123,6 +123,21 @@ class TestUIContract(unittest.TestCase):
                 f"index.html calls {raw!r} (as {concrete!r}) but no server route matches it",
             )
 
+    def test_lang_placeholder_appears_exactly_once(self) -> None:
+        """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
+        safe only because the token appears exactly once in the shipped file
+        (the <meta> tag it's meant for). A second occurrence anywhere else
+        (e.g. in a comment quoting the token, as an earlier draft of this
+        feature briefly had) would be silently corrupted by that replace too."""
+        html = _html()
+        self.assertEqual(
+            html.count("__SHOIN_LANG__"),
+            1,
+            "the placeholder must appear exactly once, or _h_ui()'s replace() "
+            "will corrupt every occurrence, not just the intended <meta> tag",
+        )
+        self.assertIn('<meta name="shoin-lang" content="__SHOIN_LANG__">', html)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

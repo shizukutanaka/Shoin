@@ -69,7 +69,7 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 | `SHOIN_EMBED_MODEL` | `nomic-embed-text` | 埋め込みモデル(空でBM25のみ) |
 | `SHOIN_DATA_DIR` | `~/.local/share/shoin` | SQLiteデータ保存先 |
 | `SHOIN_PORT` | `7440` | リッスンポート(127.0.0.1固定) |
-| `SHOIN_LANG` | `ja` | UI言語(ja/en) |
+| `SHOIN_LANG` | `ja` | UI言語(ja/en)。CLI・エクスポート・Web UI 全てに適用。Web UI は初回表示時の既定値としてのみ使う — ヘッダーの言語切替ボタンを押すとブラウザに記憶され、以後はその選択が優先される(v0.2.177) |
 | `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
 | `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
 | `SHOIN_CHUNK_TOKENS` | `512` | チャンク分割の目安トークン数。`shoin eval` の前後で変えて自分の文書での効果を測定できる(次回の取込/再インデックスから有効) |

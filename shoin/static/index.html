@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="shoin-lang" content="__SHOIN_LANG__">
 <title>Shoin 書院</title>
 <style>
 :root{
@@ -340,7 +341,18 @@ const I18N = {
     "a11y.citation":"Citation S","a11y.delnote":"Delete note"
   }
 };
-let lang = localStorage.getItem("shoin.lang") || (navigator.language||"ja").slice(0,2);
+// Precedence: an explicit toggle click (persisted to localStorage) always wins;
+// otherwise the operator's SHOIN_LANG (server-injected into the meta tag below
+// as a real 2-letter code — see server.py's _h_ui; an unsubstituted build-time
+// placeholder is longer than 2 chars and is deliberately rejected by the
+// length check, not a literal-string comparison, so this can't be fooled by
+// the placeholder text appearing anywhere else in this file) is the
+// configured default; otherwise the browser's own locale; "ja" is the final
+// fallback if nothing else applies.
+const _serverLang = document.querySelector('meta[name="shoin-lang"]')?.content;
+let lang = localStorage.getItem("shoin.lang")
+  || (_serverLang && _serverLang.length === 2 ? _serverLang : null)
+  || (navigator.language||"ja").slice(0,2);
 if (!I18N[lang]) lang = "en";
 const t = k => (I18N[lang] && I18N[lang][k]) || I18N.ja[k] || k;
 function applyI18n(){
