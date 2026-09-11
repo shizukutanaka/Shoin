@@ -5,8 +5,10 @@
 > **Note**: This file is frozen at v0.1.55. The project has continued well beyond
 > it (see `shoin.config.VERSION` / `pyproject.toml` for the current version) with
 > the same bug-by-bug discipline, but the canonical history from v0.1.56 onward
-> lives in `CLAUDE.md`'s "Version History" section (and as a one-line summary per
-> version in `git log`), not here — back-porting 90+ versions is not worthwhile.
+> lives in `docs/HISTORY.md` (pointed to by `CLAUDE.md`'s "Version History"
+> section; the full record moved there at v0.2.172 so it stops dominating every
+> session's loaded project instructions) and as a one-line summary per version in
+> `git log` — not here, since back-porting 90+ versions is not worthwhile.
 > This note is intentionally version-agnostic so it does not itself go stale (it
 > previously named a specific version that was overtaken within days).
 

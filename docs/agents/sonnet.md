@@ -5,8 +5,10 @@
 一見冗長に見えるコード・コメントの多くが実バグの再発防止である。
 **既存の挙動を「単純化」「改善」したくなっても、本書の許可範囲外なら手を出さない。**
 
-まず読むもの: `CLAUDE.md` のアーキテクチャ節（Version History は必要箇所のみ）→
-本書 → `docs/product-review.md` の改善案バックログ（「Sonnet可」の項目が着手候補）。
+まず読むもの: `CLAUDE.md` のアーキテクチャ節 → 本書 →
+`docs/product-review.md` の改善案バックログ（「Sonnet可」の項目が着手候補）。
+詳細な bug-by-bug 履歴は `docs/HISTORY.md`（v0.2.172 で CLAUDE.md から分離、
+必要な時だけ grep/Read で参照 — CLAUDE.md は毎セッション全文注入されるため）。
 
 ## 1. 必読の儀式（省略禁止 — Opus 用と同一内容）
 
@@ -14,8 +16,9 @@
    - `shoin/config.py` の `VERSION`
    - `pyproject.toml` の `version`
    - `tests/test_core.py` の `test_version` のアサーション
-   さらに `CLAUDE.md` の Version History 節の**先頭**にエントリを追記し、
-   見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端も更新する。
+   さらに `docs/HISTORY.md` の Version History 節の**先頭**にエントリを追記し
+   （v0.2.172 以降、詳細な bug-by-bug エントリはここに書く — CLAUDE.md 本体には書かない）、
+   `CLAUDE.md` 側の一行ポインタ("Current version: **v0.2.NNN**")も更新する。
    書式は直近エントリに倣う。
 2. **fail-then-pass 検証** — バグ修正には必ず回帰テストを書き、
    `git stash push <修正ファイル>` で修正前コードに戻して**テストが落ちる**ことを
@@ -84,7 +87,8 @@
 5. python -m unittest <新テスト> で「通る」ことを確認
 6. git stash push shoin/<修正ファイル> → 新テスト再実行 → 落ちることを確認 → git stash pop
 7. バージョンbump三点（config.py / pyproject.toml / test_version）
-8. CLAUDE.md Version History 先頭にエントリ追記（§5のテンプレート）
+8. docs/HISTORY.md の Version History 先頭にエントリ追記（§5のテンプレート）、
+   CLAUDE.md 側のポインタ行も更新
 9. python -m unittest discover -s tests   # 全緑が完了条件
 10. python -m ruff check shoin/<変更ファイル> && python -m mypy shoin/
 11. commit → push 指定ブランチ → git push origin HEAD:main
@@ -114,14 +118,15 @@
 `pytest tests/` now runs NNN tests. `mypy shoin/` and `ruff check <files>` remain clean.
 ```
 
-（機能追加は `**Fixed**` を `**Added**` に。見出し行
-`## Version History: v0.1.37 → v0.2.NNN` の終端更新を忘れない。）
+（機能追加は `**Fixed**` を `**Added**` に。追記先は `docs/HISTORY.md`。
+見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端更新と、
+`CLAUDE.md` 側の一行ポインタ更新を忘れない。）
 
 ## 6. エスカレーション手順
 
 禁止領域や確信の持てない箇所で問題を**発見**したら、修正せずに記録する:
 
-- `CLAUDE.md` の Version History の自分のエントリ内に
+- `docs/HISTORY.md` の Version History の自分のエントリ内に
   `**Noted (not actioned)**:` 段落として、①何を見つけたか ②なぜ問題と考えるか
   ③再現手順または該当行 を書く（v0.2.72 / v0.2.133 の前例書式）。
 - 修正パッチを「提案」としてエントリに書くのは可。適用はしない。
