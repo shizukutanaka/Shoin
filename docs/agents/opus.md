@@ -4,8 +4,10 @@
 このリポジトリで**自律的に**設計・実装・監査まで行ってよい。判断に迷う点が
 なければユーザー確認を待たずに進めてよいが、下記の儀式と設計原則は絶対。
 
-まず読むもの: `CLAUDE.md`（アーキテクチャ・Version History）→ 本書 →
+まず読むもの: `CLAUDE.md`（アーキテクチャ）→ 本書 →
 `docs/product-review.md` の改善案バックログ（着手候補の台帳）。
+詳細な bug-by-bug 履歴は `docs/HISTORY.md`（v0.2.172 で CLAUDE.md から分離、
+必要な時だけ grep/Read で参照 — CLAUDE.md は毎セッション全文注入されるため）。
 
 ## 1. 必読の儀式（省略禁止）
 
@@ -13,8 +15,10 @@
    - `shoin/config.py` の `VERSION`
    - `pyproject.toml` の `version`
    - `tests/test_core.py` の `test_version` のアサーション
-   さらに `CLAUDE.md` の Version History 節の**先頭**にエントリを追記し、
-   見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端も更新する。
+   さらに `docs/HISTORY.md` の Version History 節の**先頭**にエントリを追記し
+   （v0.2.172 以降、詳細な bug-by-bug エントリはここに書く — CLAUDE.md 本体には書かない）、
+   見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端と、`CLAUDE.md` 側の
+   一行ポインタ（"Current version: **v0.2.NNN**"）を両方更新する。
    エントリの書式は直近のエントリ群に倣う（何を・なぜ・再現・修正・テスト・
    検証コマンド結果まで1エントリで完結させる）。
 2. **fail-then-pass 検証** — バグ修正には必ず回帰テストを書き、
@@ -89,7 +93,8 @@ v0.2.128 で 8 件（うち HIGH 1 件）を検出・修正した実績パター
    検証者は判断に迷ったら `refuted=true`（懐疑側にデフォルト）。
 4. **fix** — 生き残った発見を severity 順に修正。各修正に §1 の儀式をフルで適用
    （回帰テスト + fail-then-pass、HIGH なら並行テストを数十回連続実行して確認）。
-5. **記録** — Version History に検出数・確定数・各修正を1エントリで残す。
+5. **記録** — `docs/HISTORY.md` の Version History に検出数・確定数・各修正を
+   1エントリで残し、`CLAUDE.md` 側のポインタを更新する。
 
 Workflow ツールが使える場合は pipeline（find→verify を item 毎に流す）で実装できるが、
 明示的な opt-in（ultracode / ユーザー依頼）が無ければ Agent ツールの個別 subagent か
