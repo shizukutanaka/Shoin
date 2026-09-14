@@ -613,6 +613,12 @@ function renderNotebook(){
     $("#studioOut").replaceChildren();
     $("#noteList").replaceChildren();
     $("#qs").replaceChildren();
+    // Export links keep their href from the last-open notebook otherwise:
+    // a stale /api/notebooks/{deleted-id}/export link stays visible and
+    // clickable, 404ing silently on click with no explanation to the user.
+    $("#exMd").removeAttribute("href");
+    $("#exBib").removeAttribute("href");
+    $("#exRis").removeAttribute("href");
   }
 }
 
