@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.179
+## Version History: v0.1.37 → v0.2.180
+
+### v0.2.180 (2026-09-14)
+**Fixed (docs)**: `docs/product-review.md` had itself gone stale in exactly the way it warns readers to check for — its header pinned "v0.2.171 時点" and its own stated convention ("以後は変更のあった項目のみ追記" — from then on, only changed items get appended) implied it would track real changes, but nothing was appended through v0.2.172–179 despite genuine changes in that span: the `docs/HISTORY.md` split, a fix to `scripts/verify.sh`'s own silent-pass gate, a fresh-install re-verification, a live multi-query verification, and — most relevant to this document's own 短所#5 ("no automated browser rendering tests") — two real UI bugs (v0.2.177, v0.2.179) found by live Playwright verification specifically because the static contract tests (`tests/test_ui_contract.py`) do not and cannot cover runtime state transitions. This is the same "a doc claim is either verified or corrected" discipline this project has already applied to this exact document once before (v0.2.161's audit found completed items still listed as open).
+
+- Updated the header version/date/test-count to the current v0.2.179 state.
+- Extended 短所#5's row with the two concrete instances of its own limitation actually causing missed defects — not hypothetical, both reproduced and fixed this session — since a documented limitation is more useful with its actual cost attached rather than left abstract.
+- Added a summary of the v0.2.172–179 span to the conclusion, explicitly framed as filling the gap this document's own header left implicit.
+
+No code changed. `pytest tests/` unchanged; `scripts/verify.sh` all gates pass.
 
 ### v0.2.179 (2026-09-14)
 **Fixed**: The three export links (`#exMd`/`#exBib`/`#exRis`, Markdown/BibTeX/RIS) in the Studio pane kept a stale `href` pointing at a deleted notebook after that notebook was removed — found by re-reading `renderNotebook()`'s own `else` branch (the "no notebook selected" case) against the `if` branch immediately above it that sets these hrefs, the same "does every dependent surface get reset together" question that has caught several prior UI-state bugs this session (v0.2.21/88/122).
