@@ -64,9 +64,15 @@ Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions
 
 **7. Degeneration Check** (`degenerate_spans`, v0.2.188): verbatim ≥3× repetition in the answer itself — the repeat-loop failure small local LLMs are prone to; the only check that inspects the answer rather than its citations.
 
-**8. Unit-Consistency Check** (`unit_mismatches`, v0.2.190): a number present in the source but asserted under an incompatible unit ("100km" vs "100m", "100億円" vs "100万円") — invisible to check 5's presence test.
+**8. Unit-Consistency Check** (`unit_mismatches`, v0.2.190-191): a number present in the source but asserted under an incompatible unit ("100km" vs "100m", "100億円" vs "100万円") — invisible to check 5's presence test.
 
-**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, and `uncited` lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
+**9. Negation-Flip Check** (`negation_mismatches`, v0.2.201-202): a cited claim that mirrors the source's wording with its polarity inverted or an antonym/degree word swapped — "Xは有効である" → "Xは有効ではない". Number-true but assertion-false, invisible to every presence-based check.
+
+**10. Self-Contradiction Check** (`self_contradictions`, v0.2.204/215): two sentences in the same answer asserting opposite polarities of the same claim (single-diff structural check); with `history=` it also catches cross-turn flips where the model contradicts its own previous answer.
+
+**Supporting machinery** (v0.2.203-229): framing/structural lines, enumeration items under a cited lead-in, fenced *and* indented code blocks are exempted from uncited/degen/contra checks (CommonMark blank-line rules, shared `_strip_fences`); `uncited_supported` splits grounded uncited sentences (citation omission) from ungrounded ones (the dangerous kind) and `uncited_supported_source`/`misattributed_suggested` name the likely right source; numeric expansion bridges magnitude shorthand, kanji numerals, spelled-out English, 歩合, rate notation and era-name years (令和6年 ≡ 2024年) so equal values aren't flagged. `source_detail` carries retrieval provenance (which RRF channel surfaced each source) through the report to the viewer/CLI/export.
+
+**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, `uncited`, numeric/unit/negation/quote/self-contradiction/degenerate lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
 
 ### History Management: Stripping Stale Citations, Deduplicating Roles
 
@@ -246,7 +252,8 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `verify_grounding()`: sentence-by-sentence comparison (source text vs. claim)
 - `uncited_sentences()`: sentences with zero [S#] anywhere in them — catches unsupported assertions `verify_grounding()` never looks at (v0.2.65)
 - `make_report()`: construct CitationReport with confirmed/misattributed/uncited lists
-- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed, uncited
+- `found_bits()`: ordered (channel, value) pairs from a source_detail map — the single extraction CLI and export share (v0.2.229)
+- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed (+misattributed_suggested), uncited (+uncited_supported, +uncited_supported_source), numeric_mismatch, quote_mismatch, unit_mismatch, negation_mismatch, self_contradiction, degenerate, degraded, source_excerpts, source_contexts, source_chunk_ids, source_detail
 
 **`chunk.py`** (Text Chunking & Tokenization)
 - `is_cjk()`: Unicode range check (East Asian blocks + Thai/Lao/Myanmar/Khmer)
@@ -315,7 +322,8 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - Formats: Markdown (full notebook dump), BibTeX, RIS
 - Handles malformed JSON in citation_report gracefully
 - Escapes special characters (backslash, newlines) per format spec
-- `_status_line()`: renders confirmed/misattributed/uncited/degraded status inline for chat messages and Studio outputs in the Markdown export, so citation verification survives outside the app (v0.2.66)
+- `_status_line()`: renders the full warning surface — confirmed/misattributed(+suggested)/numeric/unit/negation/uncited(+supported hints)/degenerate/contradict/degraded/coverage — inline for chat messages and Studio outputs in the Markdown export, so citation verification survives outside the app (v0.2.66, suggested hints v0.2.223)
+- `_legend()`: `S#=title (§ section) [検出: 全文 #2 + 意味 #5]` — section breadcrumb + retrieval provenance shared by chat and Studio sections (v0.2.130/229)
 
 ---
 
@@ -334,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.230** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.231** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 
