@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.227
+## Version History: v0.1.37 → v0.2.228
+
+### v0.2.228 (2026-09-22)
+**Fixed (explainability, retrieval provenance)**: the report already carried *what* a citation retrieved (excerpts), *where* it sat (section breadcrumb, cited chunk ids), and *how it verified* — but never *why* the source surfaced at all. `Hit.detail` already records exactly that (rrf_bm25_rank / rrf_vec_rank say which channel — full-text vs semantic — ranked it, `lex` records term presence) and was being dropped. `GroundedContext.source_detail` now carries each source's top-hit detail through to `report["source_detail"]` ("S1" → detail map, wired through all four `make_report` call sites: ask×2, SSE, studio), and the source viewer shows a "検出: 全文 #2 + 意味 #5" line under the section label. The signal matters: a source surfaced **only** semantically (no BM25 rank) is exactly the class unsupported claims come from, so provenance belongs next to the excerpt the citation leans on. Absent on old persisted reports — consumers guard.
 
 ### v0.2.227 (2026-09-22)
 **Fixed (retrieval, kyūjitai↔shinjitai bridge)**: "學校" and "学校" share ZERO trigrams — a query in modern orthography could never find a source written (or quoting) pre-reform characters, and vice versa. This is the last large kanji-mismatch class after width/kana/numeric/rate/skeleton/era: `_SHIN_TO_KYU` (≈200 common jōyō simplification pairs) emits the fully-converted counterpart of whichever script a term arrives in, for both directions. Two-char terms like 學校 stay below the trigram floor, so they pull the query into the LIKE path where the needle bridges the orthography — same activation mechanism as v0.2.224's skeleton. Ambiguous simplifications (弁, 台, 与) pick the most common predecessor; a wrong old form is harmless since a variant only ever *adds* a needle/gram, never suppresses a document the term itself matched. Three pins updated to variant-free kanji terms — the "no alternate for pure kanji" invariant is now "no alternate for chars with no variants".

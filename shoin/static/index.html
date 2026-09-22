@@ -297,7 +297,7 @@ const I18N = {
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
     "reindex.ok":"{n}/{total} チャンクを再埋め込みしました",
-    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所",
+    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所","viewer.match_label":"検出:","viewer.match_fts":"全文","viewer.match_vec":"意味","viewer.match_lex":"語彙",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
@@ -330,7 +330,7 @@ const I18N = {
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
     "reindex.ok":"Re-embedded {n}/{total} chunks",
-    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here",
+    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here","viewer.match_label":"found:","viewer.match_fts":"full-text","viewer.match_vec":"semantic","viewer.match_lex":"lexical",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
@@ -641,6 +641,7 @@ function renderWithSeals(container, text, report){
   const excerpts = (report && report.source_excerpts) || {};
   const contexts = (report && report.source_contexts) || {};
   const chunkIds = (report && report.source_chunk_ids) || {};
+  const details = (report && report.source_detail) || {};
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -664,22 +665,23 @@ function renderWithSeals(container, text, report){
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
         : nameSec;
       chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
-      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds);
+      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds){
+function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
   const excerpt = (excerpts && excerpts[`S${n}`]) || null;
   const section = (contexts && contexts[`S${n}`]) || null;
   const cited = (chunkIds && chunkIds[`S${n}`]) || null;
-  if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section, cited); return; } }
+  const detail = (details && details[`S${n}`]) || null;
+  if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited, detail); return; }
+  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section, cited, detail); return; } }
   if (title) toast(title);
 }
 let _srcAbort = null, _viewerOpener = null;
@@ -710,7 +712,7 @@ function renderFullSource(container, chunks, citedIds){
   // manual scanning. Guarded: no cited chunks (or an old report) → no scroll.
   if (first) first.scrollIntoView({block:"nearest"});
 }
-async function showSource(id, title, excerpt, section, citedIds){
+async function showSource(id, title, excerpt, section, citedIds, detail){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
   const sig = _srcAbort.signal;
@@ -723,6 +725,18 @@ async function showSource(id, title, excerpt, section, citedIds){
   // persisted reports or sources with no heading structure.
   if (section){
     vt.append(el("div","section-label", t("viewer.section") + " " + section));
+  }
+  // Retrieval provenance (v0.2.228): which channel surfaced this source —
+  // BM25 rank and/or vector rank, plus the term-presence signal. A source
+  // found only semantically (no full-text rank) is exactly the class where
+  // unsupported claims live, so the why-it-surfaced signal sits next to the
+  // what-it-said excerpt. Absent on old persisted reports.
+  if (detail){
+    const found = [];
+    if (detail.rrf_bm25_rank) found.push(t("viewer.match_fts") + " #" + detail.rrf_bm25_rank);
+    if (detail.rrf_vec_rank) found.push(t("viewer.match_vec") + " #" + detail.rrf_vec_rank);
+    if (detail.lex) found.push(t("viewer.match_lex") + " " + Number(detail.lex).toFixed(2));
+    if (found.length) vt.append(el("div","section-label", t("viewer.match_label") + " " + found.join(" + ")));
   }
   if (excerpt){
     // Show the retrieved passage immediately — no network round-trip needed.
