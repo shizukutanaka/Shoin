@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.221")
+        self.assertEqual(VERSION, "0.2.222")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3663,11 +3663,12 @@ class TestQA(unittest.TestCase):
         self.assertGreaterEqual(nxt, MIN_PER_SOURCE_TOKENS - 5,
                                 "the floor must still hold for the lower-ranked source")
 
-    def test_build_context_shows_section_in_prompt_header(self) -> None:
-        """v0.2.221: the breadcrumb was indexed (v0.2.123) and ranked (v0.2.218)
-        but the prompt never showed it — the model saw "Doc" and a torn-out
-        excerpt, never "Doc (§ 免疫の基礎)". The header must carry the top
-        hit's section; absent context leaves the header unchanged."""
+    def test_build_context_labels_each_segment_section(self) -> None:
+        """v0.2.222: v0.2.221 put the § label in the source header — but a
+        source whose hits span several sections got one label that is
+        misinformation for every other segment. Labels are per segment now:
+        each excerpt block names the section its own leading chunk came from.
+        Absent context leaves the block unchanged."""
         from shoin.qa import build_context
         from shoin.search import Hit
 
@@ -3676,13 +3677,17 @@ class TestQA(unittest.TestCase):
             src = s.add_source(nb.id, "txt", "免疫レポート", "o", "sha1")
             ctx = build_context(s, [
                 Hit(chunk_id=1, source_id=src.id, text="防御機構の説明である。",
-                    score=1.0, context="免疫レポート > 免疫の基礎"),
+                    score=1.0, seq=0, context="免疫レポート > 免疫の基礎"),
+                Hit(chunk_id=2, source_id=src.id, text="投与量の注意点である。",
+                    score=0.9, seq=9, context="免疫レポート > 副作用"),
             ])
             bare = build_context(s, [
-                Hit(chunk_id=2, source_id=src.id, text="防御機構の説明である。",
+                Hit(chunk_id=3, source_id=src.id, text="防御機構の説明である。",
                     score=1.0),
             ])
-        self.assertIn("[S1] 免疫レポート (§ 免疫の基礎)", ctx.block)
+        self.assertIn("§ 免疫の基礎\n防御機構の説明である。", ctx.block)
+        self.assertIn("§ 副作用\n投与量の注意点である。", ctx.block)
+        self.assertNotIn("§ 免疫の基礎\n投与量", ctx.block)
         self.assertIn("[S1] 免疫レポート\n", bare.block)
 
     def test_build_context_merges_consecutive_seq_hits(self) -> None:

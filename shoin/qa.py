@@ -243,6 +243,19 @@ def _section_from_context(context: str, title: str) -> str:
     return ""
 
 
+def _sec_label(section: str) -> str:
+    """`§ section\n` prefix for one excerpt segment (v0.2.222).
+
+    v0.2.221 put the label in the source header — but a single source can
+    contribute hits from SEVERAL sections (top-k picks non-adjacent chunks),
+    and one header label is then misinformation for every other segment.
+    Labels live per segment instead: each excerpt block names the section its
+    own leading chunk came from. Unbilled (~10 chars/segment): attaching it
+    outside the token accounting keeps the label honest even on a truncated
+    segment — a cut body still gets to say where it came from."""
+    return f"§ {section}\n" if section else ""
+
+
 def build_context(
     store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
 ) -> GroundedContext:
@@ -317,6 +330,7 @@ def build_context(
         # Ordering the budget consumption by document position rather than hit
         # rank is deliberate: a coherent excerpt beats a more-relevant fragment.
         seg_parts: list[list[tuple[int, str]]] = []  # (chunk_id, contributed text)
+        seg_secs: list[str] = []  # section of each segment's leading chunk
         prev_seq = -2  # sentinel distinct from any real seq and the -1 unknown
         for h in sorted(grouped[source_id], key=lambda h: (h.seq < 0, h.seq)):
             piece = h.text
@@ -327,6 +341,7 @@ def build_context(
                 seg_parts[-1].append((h.chunk_id, piece))
             else:
                 seg_parts.append([(h.chunk_id, h.text)])
+                seg_secs.append(_section_from_context(h.context, title))
             prev_seq = h.seq
         used = 0
         texts: list[str] = []
@@ -336,7 +351,7 @@ def build_context(
         # (visual source attribution, cf. VISA arXiv:2412.14457). Collected in
         # lock-step with `texts` so a chunk dropped by the budget is never marked.
         chunk_ids: list[int] = []
-        for seg in seg_parts:
+        for i, seg in enumerate(seg_parts):
             seg_text = "".join(p for _, p in seg)
             cost = estimate_tokens(seg_text)
             # Zero-token text (Arabic, Cyrillic, Hebrew, pure punctuation — scripts
@@ -364,7 +379,7 @@ def build_context(
                     # complete — without it a mid-sentence fragment looks like a
                     # whole passage and can be quoted as such (v0.2.211).
                     if truncated:
-                        texts.append(truncated + "…")
+                        texts.append(_sec_label(seg_secs[i]) + truncated + "…")
                     off = 0
                     for cid, piece in seg:
                         if off < len(truncated):
@@ -373,21 +388,13 @@ def build_context(
                         if off >= len(truncated):
                             break
                 break
-            texts.append(seg_text)
+            texts.append(_sec_label(seg_secs[i]) + seg_text)
             chunk_ids.extend(cid for cid, _ in seg)
             used += effective_cost
         body = "\n…\n".join(texts)
         bodies.append(body)
         chunk_id_lists.append(chunk_ids)
-        # Show the section in the prompt too (v0.2.221): the breadcrumb was
-        # computed for the INDEX in v0.2.123 and weighted for RANKING in
-        # v0.2.218, but the model never saw it — a chunk torn out of its
-        # section loses exactly the heading context that identifies what it
-        # is about. ~8 tokens per source buys the model the same topicality
-        # signal the ranker uses. (Label is the top hit's section; a segment
-        # spanning several sections may contain others.)
-        sec = f" (§ {section})" if section else ""
-        parts.append(f"[S{idx}] {title}{sec}\n<<<SOURCE S{idx}\n{body}\n>>>")
+        parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
     return GroundedContext(
         titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts,
