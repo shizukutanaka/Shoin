@@ -286,7 +286,7 @@ const I18N = {
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
-    "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.confirmed":"根拠確認済み",
+    "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.negation":"出典と逆の主張の可能性","chat.confirmed":"根拠確認済み",
     "chat.uncited":"無出典の断定文","chat.degenerate":"繰り返し生成の疑い",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
@@ -319,7 +319,7 @@ const I18N = {
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
-    "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.confirmed":"grounding confirmed",
+    "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.negation":"possible contradiction with source","chat.confirmed":"grounding confirmed",
     "chat.uncited":"uncited assertions","chat.degenerate":"possible generation loop",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
@@ -634,6 +634,7 @@ function renderWithSeals(container, text, report){
   const misattr = new Set((report && report.misattributed) || []);
   const numeric = new Set((report && report.numeric_mismatch) || []);
   const unit = new Set((report && report.unit_mismatch) || []);
+  const negation = new Set((report && report.negation_mismatch) || []);
   const confirmed = new Set((report && report.confirmed) || []);
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
@@ -659,6 +660,7 @@ function renderWithSeals(container, text, report){
         : misattr.has(n) ? t("chat.misattr") + (name ? " — " + nameSec : "")
         : numeric.has(n) ? t("chat.numeric") + (name ? " — " + nameSec : "")
         : unit.has(n) ? t("chat.unit") + (name ? " — " + nameSec : "")
+        : negation.has(n) ? t("chat.negation") + (name ? " — " + nameSec : "")
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
         : nameSec;
       chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
@@ -794,6 +796,9 @@ function addMsg(role, body, report){
     if (report.unit_mismatch && report.unit_mismatch.length){
       c.append(el("span","badge err", `⚠ ${t("chat.unit")}: ` + report.unit_mismatch.map(i=>"S"+i).join(", ")));
     }
+    if (report.negation_mismatch && report.negation_mismatch.length){
+      c.append(el("span","badge err", `⚠ ${t("chat.negation")}: ` + report.negation_mismatch.map(i=>"S"+i).join(", ")));
+    }
     if (report.confirmed && report.confirmed.length){
       c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
     }
@@ -891,6 +896,8 @@ $("#askForm").onsubmit = async e=>{
             c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: `+rpt.numeric_mismatch.map(x=>"S"+x).join(", ")));
           if (rpt.unit_mismatch?.length)
             c.append(el("span","badge err", `⚠ ${t("chat.unit")}: `+rpt.unit_mismatch.map(x=>"S"+x).join(", ")));
+          if (rpt.negation_mismatch?.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.negation")}: `+rpt.negation_mismatch.map(x=>"S"+x).join(", ")));
           if (rpt.confirmed?.length)
             c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
           if (rpt.uncited?.length){

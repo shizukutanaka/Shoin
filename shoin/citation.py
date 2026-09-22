@@ -32,6 +32,10 @@ every generated text:
    whether a digit string exists; a number present under a DIFFERENT unit
    ("100km" vs "100m", "100億円" vs "100万円") is the same magnitude of
    fabrication and invisible to it (v0.2.190).
+9. Negation-polarity check (`negation_mismatches`): a claim mirroring a
+   source sentence with the negation flipped ("効果はない" citing "効果は
+   ある") scores high bigram overlap and is CONFIRMED by check 2 — only a
+   parity count catches the inversion (v0.2.201).
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -148,6 +152,10 @@ class CitationReport(TypedDict):
     numeric_mismatch: NotRequired[list[int]]
     quote_mismatch: NotRequired[list[int]]
     unit_mismatch: NotRequired[list[int]]
+    #   negation_mismatch -> S-numbers whose cited claim mirrors a source
+    #                        sentence with the negation polarity flipped
+    #                        (present only when non-empty)
+    negation_mismatch: NotRequired[list[int]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
@@ -918,6 +926,103 @@ def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     return sorted(out)
 
 
+# --- negation-polarity check (v0.2.201) ---------------------------------------
+
+# Negation markers for parity counting (odd = the clause negates, even = it
+# doesn't — "なくはない" counts 2 and reads positive). Japanese: ない/なかっ/
+# なく/ません plus the single-kanji negative morphs 未/不/無, which only fire
+# the parity check when the mirrored source sentence lacks them — "無料" vs
+# "有料" is a real polarity flip worth flagging. English: word-bounded
+# not/never/no/neither/nor/without + the n't contraction.
+_NEG_JP_RUN = re.compile(r"ない|なかっ|なく|ません|未|不|無")
+_NEG_EN_RE = re.compile(r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b", re.IGNORECASE)
+# Contrastive-negation constructions are agreement, not contradiction:
+# "AではなくB" explicitly asserts the same B the source asserts — exempt.
+_NEG_SAFE_RE = re.compile(r"ではな|のではな|じゃな")
+# The claim must mirror the source sentence symmetrically (each side covers
+# >=50% of the other's bigrams): a claim that only restates one clause of a
+# longer bipolar source sentence ("Aは効果があるがBはない") is a subset, not
+# a flip.
+_NEG_OVERLAP_MIN = 0.5
+
+
+def _neg_parity(norm: str) -> int:
+    """Negation parity of NFKC-normalised text with whitespace collapsed to
+    single spaces (not stripped — English markers need the word boundaries)."""
+    if _NEG_SAFE_RE.search(norm):
+        return 0
+    return (len(_NEG_JP_RUN.findall(norm)) + len(_NEG_EN_RE.findall(norm))) & 1
+
+
+def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim inverts the polarity of a mirrored sentence.
+
+    The last uncovered cell of the citation-failure taxonomy: the claim is a
+    near-verbatim mirror of a source sentence — except the negation is
+    flipped ("効果はない" citing "効果はある"). Bigram checks CONFIRM such a
+    claim (~0.5+ overlap) precisely because the wording matches; only a
+    parity check catches the inversion (LLM polarity-flip is a documented
+    faithfulness failure class).
+
+    A claim flags when its bigrams cover >= _NEG_OVERLAP_MIN of a source
+    sentence AND that sentence covers >= _NEG_OVERLAP_MIN of the claim's —
+    both directions required so a claim restating only half of a bipolar
+    source sentence stays silent — and the negation parities differ.
+    Contrastive constructions ("AではなくB") are exempt: they assert the
+    same B the source asserts.
+    """
+    src_sents = {
+        n: [
+            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).lower().strip()
+            for s in _SENTENCE_SPLIT_RE.split(t)
+            if s.strip()
+        ]
+        for n, t in source_texts.items()
+    }
+    # _bigrams() strips whitespace itself, so the space-collapsed form serves
+    # both the mirror check and the parity count.
+    src_bg = {n: [_bigrams(s) for s in sents] for n, sents in src_sents.items()}
+    src_par = {n: [_neg_parity(s) for s in sents] for n, sents in src_sents.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_norm = re.sub(
+                r"\s+", " ", unicodedata.normalize("NFKC", segments.get(n, claim_text))
+            ).lower().strip()
+            cb = _bigrams(claim_norm)
+            if not cb:
+                continue
+            best_i, best_o = -1, 0.0
+            for i, sb in enumerate(src_bg[n]):
+                o = _overlap(cb, sb)
+                if o > best_o:
+                    best_o, best_i = o, i
+            if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
+                continue
+            sb = src_bg[n][best_i]
+            if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
+                continue  # claim is only a subset of a longer source sentence
+            if _neg_parity(claim_norm) != src_par[n][best_i]:
+                out.add(n)
+    return sorted(out)
+
+
 # --- generation-degeneration signals (v0.2.188) --------------------------------
 
 # Minimum normalised length of a repeated unit for it to count as degeneration:
@@ -1086,6 +1191,9 @@ def make_report(
         unit_mis = unit_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
         if unit_mis:
             report["unit_mismatch"] = unit_mis
+        neg_mis = negation_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if neg_mis:
+            report["negation_mismatch"] = neg_mis
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}

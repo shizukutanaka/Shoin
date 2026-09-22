@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.200
+## Version History: v0.1.37 → v0.2.201
+
+### v0.2.201 (2026-09-22)
+**Improved (citation verification, negation polarity)**: a NINTH mechanical check — `negation_mismatches()` — flags claims that mirror a source sentence with the negation flipped ("効果はない" citing "効果はある"). Bigram overlap *confirms* such a claim (~0.5+ shared) precisely because the wording matches; only a parity count catches the inversion — a documented LLM faithfulness failure class no previous check could see.
+
+- **Symmetric mirror bound**: flags only when each side's bigrams cover ≥50% of the other — a claim restating half of a bipolar source sentence ("Aは効果があるがBはない") is a subset, not a flip, and stays silent.
+- **Parity counting, not presence**: markers are ない/なかっ/なく/ません + the single-kanji negative morphs 未/不/無, and English not/never/no/neither/nor/without/n't — an *odd* count means the clause negates ("なくはない" = 2 = positive). Contrastive constructions (ではなく/じゃな) are exempt: "AではなくB" asserts the same B the source does.
+- **Wired like the other flags**: `negation_mismatch` field flows to the UI badge + seal tooltip, CLI `cite.negation`, and the export status line (ja/en) — a new check the user has to *see*, so display-surface additions with the reason recorded here.
+
+9 tests added: JP flip both directions, bipolar-subset guard, contrastive exemption, double-negation parity, English flip, low-overlap silence, report wiring. `tests/` now runs 802 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.200 (2026-09-22)
 **Changed (context building, rank-proportional source budgets)**: `build_context()` divided `budget_tokens` **uniformly** across sources — the #8-ranked source got the same prompt share as #1 even though retrieval already produced the ranking. The budget now splits as **floor + rank-weighted surplus**: every source keeps `MIN_PER_SOURCE_TOKENS`(64), and the remaining surplus distributes by harmonic weight `1/i` over the ranked order.
