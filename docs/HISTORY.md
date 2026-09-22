@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.196
+## Version History: v0.1.37 → v0.2.197
+
+### v0.2.197 (2026-09-22)
+**Fixed (citation verification, 歩合 notation)**: `_numbers_expanded()` now expands the 割/分/厘 percentage convention — "6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8%. The conversion is deterministic (割=10%, 分=1%, 厘=0.1%), so a claim asserting the percent value no longer false-flags — the last numeral-equivalence FP class.
+
+- **割 is required**: bare "五分" reads as minutes or half of "五分五分" (50-50 odds), never a percentage alone — the pattern only fires with 割 present, and totals above 100% ("十二割" is nonsense) stay unchecked rather than registering a phantom value.
+
+1 test added: 歩合↔percent silence both directions (6割3分, 五割, 2割5分8厘); a differing percentage and the "五分五分" idiom still flag. `tests/` now runs 787 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.196 (2026-09-22)
 **Fixed (citation verification, spelled-out English numerals)**: `_numbers_expanded()` now expands English numeral words — "three million" ↔ "3000000", "twenty-one" ↔ "21". English-language sources assert the same values in words, and the digit-string presence check false-flagged the correct restatement — the same FP class the kanji and digit-shorthand fixes closed, one orthography over.

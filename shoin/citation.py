@@ -405,6 +405,12 @@ _EN_NUM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 歩合 notation (v0.2.197): "6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8%.
+# 割 = 10%, 分 = 1%, 厘 = 0.1% — deterministic, so a claim asserting the
+# percent value no longer false-flags. 割 is required: bare "五分" reads as
+# minutes or as half of "五分五分" (50-50 odds), never a percentage alone.
+_WARI_RE = re.compile(rf"({_NUM_PART})割(?:({_NUM_PART})分)?(?:({_NUM_PART})厘)?")
+
 
 def _en_value(run: str) -> int | None:
     """Value of a spelled-out English numeral run, or None when ambiguous.
@@ -511,6 +517,17 @@ def _numbers_expanded(text: str) -> set[str]:
         ev = _en_value(m.group(0))
         if ev is not None and ev > 0:
             nums.add(str(ev))
+    for m in _WARI_RE.finditer(t):
+        wari = _part_value(m.group(1))
+        fun = _part_value(m.group(2)) if m.group(2) else 0.0
+        rin = _part_value(m.group(3)) if m.group(3) else 0.0
+        if wari is None or fun is None or rin is None:
+            continue
+        v = wari * 10 + fun + rin * 0.1
+        # >100% is not a real 歩合 value ("十二割" is nonsense) — leave
+        # inconclusive text unchecked rather than registering a phantom.
+        if 0 < v <= 100:
+            nums.add(str(round(v)) if abs(v - round(v)) < 1e-6 else str(round(v, 1)))
     return nums - suffixed
 
 
