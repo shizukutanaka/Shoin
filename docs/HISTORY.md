@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.216
+## Version History: v0.1.37 → v0.2.217
+
+### v0.2.217 (2026-09-22)
+**Fixed (citation verification, indented code blocks)**: v0.2.206/209 taught the structure-aware checks to ignore fenced code — but only the ``` / ~~~ form. The other Markdown code form, the **4-space indented block**, still fed every check, producing three demonstrated false positives: `port = 1234` / `port = 5678` in an indented listing were flagged as uncited assertions AND as a self-contradiction (the exact reassignment shape v0.2.209 fixed for fences), and repeated indented lines as a degeneration loop.
+
+- **`_INDENT_CODE_RE`** (`^(?: {4}|\t)`) applied with the CommonMark rule: an indented line is code only when the previous line is blank or the block is already open — otherwise it's a lazy paragraph continuation and stays prose. Blank lines inside the block keep it open; it ends at the first non-indented non-blank line.
+- **`_strip_fences`** now strips indented blocks too (single pass, `in_code`+`prev_blank` state), so `degenerate_spans`/`self_contradictions` get the coverage for free; `uncited_sentences` tracks the same state inline — the splitter emits one `'\n'` fragment per line ending, so a real blank line = **two consecutive separator fragments** (one fragment alone is just a line break, not a blank line — the bug caught and fixed in the first implementation).
+- Verified silent: indented reassignment (contra/uncited/degen), fence-adjacent prose still flags, indented prose after a non-blank line still flags (lazy continuation).
 
 ### v0.2.216 (2026-09-22)
 **Changed (citation report, actionable uncited_supported)**: `uncited_supported` told the user *that* a grounded claim was missing its citation but not *which* source to cite — the fix was "re-read every source". The report now also emits **`uncited_supported_source`**: sentence → best-matching `"S#"` (the argmax bigram overlap already computed for the split, just kept instead of discarded).

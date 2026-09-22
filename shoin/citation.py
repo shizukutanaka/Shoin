@@ -141,22 +141,44 @@ _STRUCTURAL_LINE_RE = re.compile(
 # Fence open/close markers. `in_fence` in uncited_sentences() toggles on these;
 # everything between a pair is code, not prose sentences.
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# Indented code blocks (v0.2.217): a 4-space/tab-indented line is ALSO code —
+# but only when the previous line is blank (or the block is already open).
+# Otherwise the indent is a lazy continuation of a wrapped paragraph
+# (CommonMark), so prose with incidental leading spaces stays visible.
+_INDENT_CODE_RE = re.compile(r"^(?: {4}|\t)")
 
 
 def _strip_fences(text: str) -> str:
-    """Remove fenced code blocks and their contents — code is not prose, so
-    repeated statements or reassigned values inside a fence must not feed the
-    degeneration/self-contradiction signals (uncited_sentences() tracks the
-    same boundary inline for its pending-resolution logic). An unterminated
-    fence runs to end-of-file, matching Markdown."""
+    """Remove code blocks and their contents — fenced and indented alike,
+    since code is not prose: repeated statements or reassigned values inside
+    either must not feed the degeneration/self-contradiction signals
+    (uncited_sentences() tracks the same boundaries inline for its
+    pending-resolution logic). An unterminated fence runs to end-of-file,
+    matching Markdown."""
     out: list[str] = []
     in_fence = False
+    in_code = False
+    prev_blank = True
     for line in text.split("\n"):
         if _FENCE_RE.match(line):
             in_fence = not in_fence
+            in_code = False
+            prev_blank = False
             continue
-        if not in_fence:
+        if in_fence:
+            continue
+        if not line.strip():
+            # Blank lines keep an open indented block alive and are kept in
+            # the output — every consumer ignores them anyway.
+            prev_blank = True
             out.append(line)
+            continue
+        if _INDENT_CODE_RE.match(line) and (in_code or prev_blank):
+            in_code = True
+            continue
+        in_code = False
+        prev_blank = False
+        out.append(line)
     return "\n".join(out)
 
 # Common English question-starter words. LLMs asked for "no decoration" often
@@ -1411,10 +1433,22 @@ def uncited_sentences(text: str) -> list[str]:
     prev_bare, prev_cited = "", False  # previous non-empty sentence's bare text / citation state
     list_scope = False  # inside a list block opened by a cited enumeration lead-in
     in_fence = False  # inside a fenced code block — its content is not prose
+    in_code = False  # inside an indented code block (v0.2.217) — same rule
+    # The splitter emits one ''/'\n' fragment per line ending, so a BLANK
+    # line shows up as two consecutive separator fragments — that is what
+    # `prev_blank` must detect for the CommonMark "indent after blank =
+    # code, indent after content = lazy continuation" rule.
+    nls = 0  # consecutive newline-separator fragments
+    prev_blank = True  # file start counts as blank for the CommonMark rule
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
+            if "\n" in raw:
+                nls += 1
+                if nls >= 2:
+                    prev_blank = True  # a real blank line keeps in_code alive
             continue
+        nls = 0
         nums = extract_citations(sentence)
         bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
         has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
@@ -1428,7 +1462,19 @@ def uncited_sentences(text: str) -> list[str]:
         prev_bare, prev_cited = bare, bool(nums)
         if _FENCE_RE.match(sentence):
             in_fence = not in_fence
+            in_code = False
+            prev_blank = False
             continue
+        if not in_fence and _INDENT_CODE_RE.match(raw) and (in_code or prev_blank):
+            # Indented code line — code, not a prose sentence. Same
+            # not-prose treatment as in_fence: skipped without flushing a
+            # pending trailing citation. (`not in_fence` so indented lines
+            # inside a ``` block don't leave a stale in_code behind.)
+            in_code = True
+            prev_blank = False
+            continue
+        in_code = False
+        prev_blank = False
         if in_fence or _STRUCTURAL_LINE_RE.match(sentence):
             # Code, headings, table rows, rules, quotes — markdown structure,
             # not a sentence asserting source content. Invisible to the claim
