@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.196")
+        self.assertEqual(VERSION, "0.2.197")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4109,6 +4109,19 @@ class TestNumericMismatches(unittest.TestCase):
         self.assertEqual(numeric_mismatches("21 participants joined. [S1]", {1: "Twenty-one participants joined."}), [])
         self.assertEqual(numeric_mismatches("Sales hit 325000 yen. [S1]", {1: "Sales hit three hundred twenty five thousand yen."}), [])
         self.assertEqual(numeric_mismatches("The city has 4000000 people. [S1]", {1: "The city has three million people."}), [1])
+
+    def test_wari_percentage_notation(self) -> None:
+        """"6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8% — 歩合 notation
+        expands to the percent value (v0.2.197). "五分五分" is 50-50 odds,
+        not a percentage, and stays unchecked."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}), [])
+        self.assertEqual(numeric_mismatches("確率は50%だった。[S1]", {1: "確率は五割だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}), [1])
+        self.assertEqual(numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}), [1])
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
