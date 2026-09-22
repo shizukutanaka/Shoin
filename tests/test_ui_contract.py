@@ -526,6 +526,15 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_no_dead_sse_meta_store(self) -> None:
+        """v0.2.242: the dispatch once stored `meta = j` in a variable that was
+        never read — the meta frame's payload (sources {s,title,source_id}) is
+        fully redundant with the done frame's report (source_map /
+        source_id_map). Guards against reintroducing a dead meta store; the
+        frame itself is still consumed-and-advanced by the parser above."""
+        src = _script_body(_html())
+        self.assertNotIn('ev==="meta"', src)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

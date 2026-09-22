@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.241
+## Version History: v0.1.37 → v0.2.242
+
+### v0.2.242 (2026-09-22)
+**Fixed (UI, dead SSE meta store)**: the reader dispatch stored each `meta` frame into `let meta = j` and then **never read the variable** — the last unread signal in the dispatch after v0.2.240-241 wired the previously-dead `degraded`/`error` paths. The meta frame's payload (`sources: [{s, title, source_id}]`) is fully redundant with the `done` frame's `report` (`source_map`, `source_id_map`), so there is nothing the stored value could add — the honest fix is dropping the dead store rather than inventing a consumer. The frame itself is still parsed (advancing the SSE buffer); only the unread assignment is gone. New `test_no_dead_sse_meta_store` guards against the dead branch returning. Verified fail-then-pass (old code keeps `ev==="meta"` → test fails).
 
 ### v0.2.241 (2026-09-22)
 **Fixed (UI, dropped SSE error frame)**: the server emits `ev==="error"` with `{"code","message"}` when it fails mid-stream — but the client dispatch only handled `meta`/`delta`/`done`, so a mid-stream failure left a **partial answer frozen with zero signal**: no toast, no error text, spinner already gone. The outer `catch` only sees network-level errors, not an error frame that arrived cleanly. The dispatch now handles it: `toast(j.message || j.code || "")`. New `test_sse_error_event_is_surfaced` extracts the real error branch and runs it under node — message-bearing frames toast the message, code-only frames toast the code. Verified fail-then-pass (pre-change: no handler branch existed).
