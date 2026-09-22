@@ -35,7 +35,12 @@ every generated text:
 9. Negation-polarity check (`negation_mismatches`): a claim mirroring a
    source sentence with the negation flipped ("効果はない" citing "効果は
    ある") scores high bigram overlap and is CONFIRMED by check 2 — only a
-   parity count catches the inversion (v0.2.201).
+   parity count catches the inversion (v0.2.201, extended to antonym/degree
+   swaps in v0.2.202).
+10. Self-contradiction check (`self_contradictions`): the same flip inside
+   the answer itself — "効果はある" early, "効果はない" later. A single-
+   contiguous-span difference is required so a different-subject contrast
+   ("Aは効果がある。Bは効果がない") stays silent (v0.2.204).
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -52,6 +57,7 @@ signal — concrete evidence the user can inspect, not a single opaque number.
 
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from typing import NotRequired, TypedDict
@@ -172,6 +178,9 @@ class CitationReport(TypedDict):
     #                        sentence with the negation polarity flipped
     #                        (present only when non-empty)
     negation_mismatch: NotRequired[list[int]]
+    #   self_contradiction -> sentences contradicting an earlier sentence of
+    #                        the same answer (present only when non-empty)
+    self_contradiction: NotRequired[list[str]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
@@ -1125,6 +1134,73 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     return sorted(out)
 
 
+# --- self-contradiction signals (v0.2.204) ------------------------------------
+
+# Leading list/bullet markers on a sentence line are layout, not content —
+# strip them before comparing so a numbered list renumbering doesn't hide a
+# flip ("1. 効果はある" vs "2. 効果はない"). Covers ・, -, *, digits with a
+# closing marker, and numbered CJK parens.
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:[・•\-\*◦▪]|\d+[\.、\)）]|\([0-9]+\))\s*")
+
+
+def self_contradictions(text: str) -> list[str]:
+    """Sentences contradicting an earlier sentence in the same answer.
+
+    The answer-internal counterpart of the polarity check: an LLM that
+    asserts "効果はある" early and "効果はない" later contradicts itself
+    regardless of sources. Pairwise comparison uses a strict precision rule
+    — the sentences must differ in EXACTLY ONE contiguous span (difflib
+    opcodes: one non-equal block), so a different-subject contrast like
+    "Aは効果がある。Bは効果がない。" (two differing spans: subject AND
+    predicate) stays silent. Within that single difference a flag fires
+    when the negation parity flips, a shared antonym class nets opposite
+    signs, or the swapped digits assert different values.
+    """
+    sents: list[tuple[str, str]] = []
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        bare = _LIST_PREFIX_RE.sub(
+            "", _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence))
+        )
+        norm = re.sub(r"\s+", " ", bare).lower().strip()
+        if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
+            continue
+        sents.append((norm, sentence))
+    out: list[str] = []
+    flagged: set[int] = set()
+    for i, (a, _) in enumerate(sents):
+        par_a = _neg_parity(a)
+        ant_a = _ant_signs(a)
+        for j in range(i + 1, len(sents)):
+            b, raw_b = sents[j]
+            if j in flagged or a == b:
+                continue
+            ops = [
+                op
+                for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+                if op[0] != "equal"
+            ]
+            if len(ops) != 1:
+                continue  # multi-span difference — contrast, not a flip
+            flip = par_a != _neg_parity(b)
+            if not flip:
+                ant_b = _ant_signs(b)
+                flip = any(
+                    ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()
+                )
+            if not flip:
+                _, i1, i2, j1, j2 = ops[0]
+                num_a = _numbers_expanded(a[i1:i2])
+                num_b = _numbers_expanded(b[j1:j2])
+                flip = bool(num_a) and bool(num_b) and num_a != num_b
+            if flip:
+                out.append(raw_b)
+                flagged.add(j)
+    return out
+
+
 # --- generation-degeneration signals (v0.2.188) --------------------------------
 
 # Minimum normalised length of a repeated unit for it to count as degeneration:
@@ -1326,4 +1402,7 @@ def make_report(
     deg = degenerate_spans(text)
     if deg:
         report["degenerate"] = deg
+    contra = self_contradictions(text)
+    if contra:
+        report["self_contradiction"] = contra
     return report
