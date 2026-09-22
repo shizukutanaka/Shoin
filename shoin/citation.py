@@ -410,6 +410,91 @@ _UNIT_KANA = r"[ァ-ヶー]+"
 _UNIT_KANJI = "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千"
 _UNIT_NUM_RE = re.compile(rf"(\d+(?:\.\d+)?)({_UNIT_ASCII}|{_UNIT_KANA}|[{_UNIT_KANJI}]+)")
 
+# Same-unit spellings across scripts (v0.2.191). NFKC already folds the
+# composed forms (㎞→km, ℓ→l, ％→%), so what remains are genuine aliases:
+# katakana spellings of SI/imperial units, and counter kanji that name the
+# same thing (歳/才, 名/人, 軒/棟/戸). ASCII units keep their
+# case — MW vs mW and B vs b are real distinctions, so no case-folding.
+# Directional on purpose: ambiguous colloquial tokens point at ALL their
+# possible readings (キロ→{km,kg}, ミリ→{mm,ml}) while the precise readings
+# never list each other — "100km" vs "100kg" still flags. The check is
+# `a ∈ aliases(b) or b ∈ aliases(a)`, so a bare ambiguous token can only
+# under-flag, never over-flag.
+_UNIT_ALIASES: dict[str, frozenset[str]] = {
+    "km": frozenset({"キロメートル"}),
+    "キロメートル": frozenset({"km"}),
+    "キロ": frozenset({"km", "kg", "キロメートル", "キログラム"}),
+    "m": frozenset({"メートル"}),
+    "メートル": frozenset({"m"}),
+    "cm": frozenset({"センチ", "センチメートル"}),
+    "センチ": frozenset({"cm"}),
+    "センチメートル": frozenset({"cm"}),
+    "mm": frozenset({"ミリメートル"}),
+    "ミリメートル": frozenset({"mm"}),
+    "ミリ": frozenset({"mm", "ml", "ミリメートル", "ミリリットル"}),
+    "ml": frozenset({"ミリリットル"}),
+    "ミリリットル": frozenset({"ml"}),
+    "kg": frozenset({"キログラム"}),
+    "キログラム": frozenset({"kg"}),
+    "g": frozenset({"グラム"}),
+    "グラム": frozenset({"g"}),
+    "mg": frozenset({"ミリグラム"}),
+    "ミリグラム": frozenset({"mg"}),
+    "t": frozenset({"トン"}),
+    "トン": frozenset({"t"}),
+    "l": frozenset({"リットル"}),
+    "リットル": frozenset({"l"}),
+    "%": frozenset({"パーセント"}),
+    "パーセント": frozenset({"%"}),
+    "$": frozenset({"ドル"}),
+    "ドル": frozenset({"$"}),
+    "€": frozenset({"ユーロ"}),
+    "ユーロ": frozenset({"€"}),
+    "lb": frozenset({"ポンド"}),
+    "ポンド": frozenset({"lb"}),
+    "W": frozenset({"ワット"}),
+    "ワット": frozenset({"W"}),
+    "kW": frozenset({"キロワット"}),
+    "キロワット": frozenset({"kW"}),
+    "V": frozenset({"ボルト"}),
+    "ボルト": frozenset({"V"}),
+    "A": frozenset({"アンペア"}),
+    "アンペア": frozenset({"A"}),
+    "Hz": frozenset({"ヘルツ"}),
+    "ヘルツ": frozenset({"Hz"}),
+    "kHz": frozenset({"キロヘルツ"}),
+    "キロヘルツ": frozenset({"kHz"}),
+    "MHz": frozenset({"メガヘルツ"}),
+    "メガヘルツ": frozenset({"MHz"}),
+    "GHz": frozenset({"ギガヘルツ"}),
+    "ギガヘルツ": frozenset({"GHz"}),
+    "B": frozenset({"バイト"}),
+    "バイト": frozenset({"B"}),
+    "KB": frozenset({"キロバイト"}),
+    "キロバイト": frozenset({"KB"}),
+    "MB": frozenset({"メガバイト"}),
+    "メガバイト": frozenset({"MB"}),
+    "GB": frozenset({"ギガバイト"}),
+    "ギガバイト": frozenset({"GB"}),
+    "TB": frozenset({"テラバイト"}),
+    "テラバイト": frozenset({"TB"}),
+    "hp": frozenset({"馬力"}),
+    "馬力": frozenset({"hp"}),
+    "ha": frozenset({"ヘクタール"}),
+    "ヘクタール": frozenset({"ha"}),
+    # counter-kanji equivalents: same count, different spelling. Deliberately
+    # excludes 本/冊 (long objects vs bound volumes — different semantics) and
+    # 番/位 (serial position vs rank — can differ); only pairs that mean the
+    # same count for every referent qualify.
+    "歳": frozenset({"才"}),
+    "才": frozenset({"歳"}),
+    "名": frozenset({"人"}),
+    "人": frozenset({"名"}),
+    "軒": frozenset({"棟", "戸"}),
+    "棟": frozenset({"軒", "戸"}),
+    "戸": frozenset({"軒", "棟"}),
+}
+
 
 def _unit_pairs(text: str) -> list[tuple[str, str]]:
     """(number, unit) pairs for significant numbers (same threshold as _numbers)."""
@@ -422,9 +507,16 @@ def _unit_pairs(text: str) -> list[tuple[str, str]]:
 
 
 def _units_compat(a: str, b: str) -> bool:
-    """Same unit, or one extending the other — '100年' vs '100年版' and
-    '1億' vs '1億円' are consistent elaboration, not a mismatch."""
-    return a == b or a.startswith(b) or b.startswith(a)
+    """Same unit, one extending the other ('1億' vs '1億円' are consistent
+    elaboration, not a swap), or a known cross-script alias (km↔キロメートル,
+    歳↔才) via _UNIT_ALIASES."""
+    return (
+        a == b
+        or a.startswith(b)
+        or b.startswith(a)
+        or a in _UNIT_ALIASES.get(b, frozenset())
+        or b in _UNIT_ALIASES.get(a, frozenset())
+    )
 
 
 def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
