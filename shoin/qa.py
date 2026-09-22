@@ -639,6 +639,12 @@ def ask(
                     context.source_bodies,
                     context.source_contexts,
                     context.source_chunk_ids,
+                    # Prior assistant text lets degenerate_spans catch a
+                    # cross-turn parrot loop (same paragraph re-emitted every
+                    # turn) that a per-message check structurally cannot see.
+                    history="\n".join(
+                        m["content"] for m in history if m["role"] == "assistant"
+                    ),
                 ),
             )
         except LLMError:

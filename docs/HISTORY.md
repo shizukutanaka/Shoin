@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.209
+## Version History: v0.1.37 → v0.2.210
+
+### v0.2.210 (2026-09-22)
+**Improved (citation verification, cross-turn degeneration)**: every check until now analysed one message at a time, which structurally cannot see the **cross-turn parrot loop** — a classic small-LLM failure where the model gets stuck re-emitting the SAME paragraph every turn (one occurrence per message, so each message passes the ≥3 repeat rule individually).
+
+- `degenerate_spans(text, *, history="")` now takes prior assistant text: history sentences count toward the ≥3 threshold, but only the current answer's own repeated sentences are flagged (a sentence repeated only in history is not this answer's degeneration).
+- `make_report(..., history="")` plumbs it; `qa.ask()` passes the prior assistant messages' joined contents. Studio outputs stay single-shot — no conversation to loop across.
+- The consecutive stuck-tail span scan stays text-only (history adjacency is meaningless there).
+
+2 tests added: cross-turn loop flags at the 3rd occurrence / 2 total stays silent / history-only repeats stay silent. `tests/` now runs 834 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.209 (2026-09-22)
 **Fixed (citation verification, fence awareness)**: completes the structural-line work of v0.2.206 — `degenerate_spans()` and `self_contradictions()` still analysed fenced-code contents as prose, producing two real false positives:
