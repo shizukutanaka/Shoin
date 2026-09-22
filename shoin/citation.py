@@ -268,6 +268,13 @@ class CitationReport(TypedDict):
     # instead of trusting a detached excerpt (visual source attribution).
     # Absent on old persisted reports — consumers must guard.
     source_chunk_ids: NotRequired[dict[str, list[int]]]
+    # Maps "S1" -> the retrieval-provenance detail of that source's top hit
+    # (rrf_bm25_rank / rrf_vec_rank / lex) — WHICH retrieval channel surfaced it.
+    # A source found only by vector recall (no bm25 rank, lex==0) is exactly the
+    # class unsupported claims come from, so the why-it-surfaced signal belongs
+    # next to the what-it-said excerpts. Absent on old persisted reports and
+    # degraded reports built without a context — consumers must guard.
+    source_detail: NotRequired[dict[str, dict[str, float]]]
     # Sentences that assert content with zero [S#] citations anywhere in them —
     # invisible to verify_grounding(), which only checks already-cited sentences.
     # Present only when n_sources > 0 (nothing to cite against otherwise).
@@ -1586,6 +1593,7 @@ def make_report(
     source_bodies: list[str] | None = None,
     source_contexts: list[str] | None = None,
     source_chunk_ids: list[list[int]] | None = None,
+    source_detail: list[dict[str, float]] | None = None,
     *,
     check_uncited: bool = True,
     history: str = "",
@@ -1668,6 +1676,15 @@ def make_report(
         sci = {f"S{i + 1}": ids for i, ids in enumerate(source_chunk_ids) if ids}
         if sci:
             report["source_chunk_ids"] = sci
+    if source_detail is not None:
+        if len(source_detail) != n:
+            raise ValueError(
+                f"source_detail length {len(source_detail)} must match"
+                f" source_titles length {n}"
+            )
+        sd = {f"S{i + 1}": d for i, d in enumerate(source_detail) if d}
+        if sd:
+            report["source_detail"] = sd
     if n and check_uncited:
         uncited = uncited_sentences(text)
         if uncited:

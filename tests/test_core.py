@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.227")
+        self.assertEqual(VERSION, "0.2.228")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3747,6 +3747,37 @@ class TestQA(unittest.TestCase):
         self.assertIn("§ 副作用\n投与量の注意点である。", ctx.block)
         self.assertNotIn("§ 免疫の基礎\n投与量", ctx.block)
         self.assertIn("[S1] 免疫レポート\n", bare.block)
+
+    def test_build_context_records_source_detail(self) -> None:
+        """v0.2.228: the report should be able to say WHICH retrieval channel
+        surfaced a citation, so each source's top-hit detail is carried
+        through alongside the excerpt bodies."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-detail")
+            src = s.add_source(nb.id, "txt", "T", "o", "sha1")
+            ctx = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text="説明。", score=1.0,
+                    detail={"rrf_bm25_rank": 2.0, "lex": 0.4}),
+            ])
+        self.assertEqual(ctx.source_detail, [{"rrf_bm25_rank": 2.0, "lex": 0.4}])
+
+    def test_report_carries_source_detail(self) -> None:
+        """v0.2.228: source_detail lands in the report keyed per S#; reports
+        built without it (old persisted, no-context paths) omit the field."""
+        from shoin.citation import make_report
+
+        rep = make_report(
+            "x [S1]", ["T"], source_ids=[1],
+            source_detail=[{"rrf_bm25_rank": 2.0, "lex": 0.4}],
+        )
+        self.assertEqual(
+            rep["source_detail"]["S1"], {"rrf_bm25_rank": 2.0, "lex": 0.4}
+        )
+        rep2 = make_report("x [S1]", ["T"])
+        self.assertNotIn("source_detail", rep2)
 
     def test_build_context_merges_consecutive_seq_hits(self) -> None:
         """v0.2.207: adjacent-chunk hits share a ~CHUNK_OVERLAP boundary, so a

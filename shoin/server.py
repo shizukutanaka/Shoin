@@ -784,6 +784,7 @@ class _Handler(BaseHTTPRequestHandler):
                 context.source_bodies,
                 context.source_contexts,
                 context.source_chunk_ids,
+                context.source_detail,
                 check_uncited=not degraded,
                 # Same history join qa.ask() passes — without it the
                 # cross-turn checks (degenerate_spans/self_contradictions)

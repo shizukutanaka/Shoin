@@ -164,6 +164,11 @@ class GroundedContext:
     # grounded in — the last mile of "verifiable citation": the reader can see the
     # cited text in its original position, not just as a detached excerpt.
     source_chunk_ids: list[list[int]] = field(default_factory=list)
+    # Retrieval-provenance detail of each source's TOP hit (S1..Sn order):
+    # rrf_bm25_rank / rrf_vec_rank say WHICH channel surfaced the source and
+    # `lex` records term presence — the "why it was retrieved" half of
+    # explainable citation, complementing source_excerpts' "what it said".
+    source_detail: list[dict[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -302,6 +307,7 @@ def build_context(
     titles: list[str] = []
     bodies: list[str] = []
     contexts: list[str] = []
+    details: list[dict[str, float]] = []
     chunk_id_lists: list[list[int]] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
@@ -316,6 +322,7 @@ def build_context(
         # preserves the relevance order hits arrived in, so [0] is the best match.
         section = _section_from_context(grouped[source_id][0].context, title)
         contexts.append(section)
+        details.append(dict(grouped[source_id][0].detail))
         snums[source_id] = idx
         # Merge consecutive-seq hits into one continuous segment (v0.2.207),
         # assembled in DOCUMENT order (v0.2.208): adjacent chunks share a
@@ -398,7 +405,7 @@ def build_context(
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
     return GroundedContext(
         titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts,
-        chunk_id_lists,
+        chunk_id_lists, details,
     )
 
 
@@ -659,6 +666,7 @@ def ask(
                     context.source_bodies,
                     context.source_contexts,
                     context.source_chunk_ids,
+                    context.source_detail,
                     # Prior assistant text lets degenerate_spans catch a
                     # cross-turn parrot loop (same paragraph re-emitted every
                     # turn) that a per-message check structurally cannot see.
@@ -676,6 +684,7 @@ def ask(
                 context.source_bodies,
                 context.source_contexts,
                     context.source_chunk_ids,
+                    context.source_detail,
                 check_uncited=False,
             )
             report["degraded"] = True
