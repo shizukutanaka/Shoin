@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.203")
+        self.assertEqual(VERSION, "0.2.204")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4552,6 +4552,60 @@ class TestNegationMismatches(unittest.TestCase):
         sources = {1: "この機能は重要である。"}
         text = "この機能は重要だ[S1]。"
         self.assertEqual(negation_mismatches(text, sources), [])
+
+
+class TestSelfContradictions(unittest.TestCase):
+    """self_contradictions() (v0.2.204): the answer asserts both polarities
+    of the same claim — the answer-internal counterpart of negation_mismatches.
+    Only fires on a single contiguous difference so different-subject
+    contrasts stay silent."""
+
+    def test_flags_negation_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "治療の効果はあることが分かった。治療の効果はないことが分かった。"
+        self.assertEqual(self_contradictions(text), ["治療の効果はないことが分かった。"])
+
+    def test_flags_antonym_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "この治療の効果は高かった。一方でこの治療の効果は低かったと述べている。"
+        # prefix "一方で" adds a second diff span — the single-difference rule
+        # correctly keeps this silent (attribution contrast, not a bare flip)
+        self.assertEqual(self_contradictions(text), [])
+        text = "この治療の効果は高かった。この治療の効果は低かった。"
+        self.assertEqual(self_contradictions(text), ["この治療の効果は低かった。"])
+
+    def test_flags_numeric_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "成長率は15%だった。成長率は20%だった。"
+        self.assertEqual(self_contradictions(text), ["成長率は20%だった。"])
+
+    def test_different_subject_contrast_stays_silent(self) -> None:
+        """"A社の治療は効果がある。B社の治療は効果がない。" differs in TWO
+        spans (subject + predicate) — a legitimate contrast, not a flip."""
+        from shoin.citation import self_contradictions
+
+        text = "A社の治療は効果がある。B社の治療は効果がない。"
+        self.assertEqual(self_contradictions(text), [])
+
+    def test_list_prefix_stripped_before_comparing(self) -> None:
+        """Numbered/bulleted lines compare on content, not the marker."""
+        from shoin.citation import self_contradictions
+
+        text = "1. 治療の効果はある。\n2. 治療の効果はない。"
+        self.assertEqual(len(self_contradictions(text)), 1)
+
+    def test_report_records_self_contradiction(self) -> None:
+        from shoin.citation import make_report
+
+        report = make_report(
+            "治療の効果はある[S1]。治療の効果はない[S1]。",
+            ["調査A"],
+            source_bodies=["治療の効果があるかどうかは不明である。"],
+        )
+        self.assertEqual(report.get("self_contradiction"), ["治療の効果はない[S1]。"])
 
 
 class TestDegenerateSpans(unittest.TestCase):

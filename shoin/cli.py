@@ -53,6 +53,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.negation": " ⚠出典と逆の主張の可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
         "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
+        "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
@@ -98,6 +99,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.negation": " ⚠ possible contradiction with source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
         "cite.degenerate": "⚠ Possible generation loop ({n}):",
+        "cite.contradict": "⚠ Contradictory statements ({n}):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
@@ -261,6 +263,11 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.degenerate", n=str(len(degenerate))))
         for snippet in degenerate:
             print(f"  - {snippet}")
+    contradict = report.get("self_contradiction") or []
+    if contradict:
+        print(_t("cite.contradict", n=str(len(contradict))))
+        for sentence in contradict:
+            print(f"  - {sentence}")
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. The Web UI has warned
     # about this since early on; the CLI silently dropped it despite REQ-103

@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.203
+## Version History: v0.1.37 → v0.2.204
+
+### v0.2.204 (2026-09-22)
+**Improved (citation verification, self-contradiction)**: a TENTH mechanical check — `self_contradictions()` — the answer-internal counterpart of the polarity check: an answer asserting "効果はある" early and "効果はない" later contradicts itself regardless of sources. Self-contradiction is a documented hallucination class (SelfCheckGPT literature) the previous nine checks cannot see — every other check compares claim-vs-source, never claim-vs-claim.
+
+- **Single-difference precision rule**: sentences are compared pairwise via difflib opcodes and a flag requires EXACTLY ONE contiguous differing span. "A社の治療は効果がある。B社の治療は効果がない。" differs in two spans (subject AND predicate) — a legitimate contrast, silent. "一方で効果は低かったと述べている" adds an attribution span — also silent. Only a bare flip fires.
+- **Three flip shapes within the single difference**: negation parity inversion (same machinery as v0.2.201), antonym-class sign reversal (v0.2.202), or a bare number swap asserting different values ("成長率は15%" … "成長率は20%" — `_numbers_expanded` so 3.2万↔32000 stays silent). List/bullet prefixes are stripped before comparing so renumbering can't hide a flip.
+- **Wired like the answer-internal flags**: `self_contradiction` field flows to the UI badge + tooltip (`chat.contradict`), CLI `cite.contradict`, and the export status line (`status_contradict`), ja + en — the flag names the later sentence (the error is almost always the second assertion).
+
+6 tests added: negation flip, antonym flip (+attribution-span silence), numeric flip, different-subject silence, list-prefix stripping, report wiring. `tests/` now runs 816 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.203 (2026-09-22)
 **Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **framing sentences** — "以下に要点を示します", "要点は以下の通りです", "the following summarizes the sources" — as unsupported assertions. These lines describe the answer's own structure and assert nothing about the sources, so every well-organized answer produced false-positive uncited warnings.
