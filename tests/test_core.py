@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.185")
+        self.assertEqual(VERSION, "0.2.186")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2954,6 +2954,67 @@ class TestSearch(unittest.TestCase):
         hits = [Hit(1, 1, "免疫は免疫である。", 0.8)]
         rerank("免疫", hits)
         self.assertNotIn("prox", hits[0].detail)
+        self.assertAlmostEqual(hits[0].score, 0.7 * 0.8 + 0.3 * hits[0].detail["lex"])
+
+    # --- pool-local IDF weighting (v0.2.186) ----------------------------------
+
+    def test_pool_idf_common_term_weighs_less_than_rare(self) -> None:
+        """A term present in most candidates is what got them retrieved — it
+        must carry less rerank weight than a term few candidates contain."""
+        from shoin.search import _norm_query_terms, _pool_idf
+
+        terms = _norm_query_terms("共通 希少")
+        idf = _pool_idf(terms, ["共通だけ。", "共通のみ。", "共通と希少。"])
+        self.assertLess(idf["共通"], idf["希少"])
+
+    def test_pool_idf_absent_term_finite_and_harmless(self) -> None:
+        """df=0 gives the largest weight, but every saturated tf for that term
+        is 0, so it contributes nothing to any hit's score."""
+        from shoin.search import _norm_query_terms, _pool_idf
+
+        idf = _pool_idf(_norm_query_terms("実在 不在語"), ["実在だけ。"])
+        self.assertGreater(idf["不在語"], idf["実在"])
+
+    def test_rerank_idf_rare_term_hit_beats_repetitive_common(self) -> None:
+        """The discriminating case: chunk A repeats only the common term
+        (uniform lex high), chunk B holds the rare term once (uniform lex
+        low).  Uniform overlap preferred A; pool-IDF weighting must flip it."""
+        from shoin.search import rerank
+
+        query = "共有語 希少語"
+        hits = [
+            Hit(1, 1, "共有語共有語共有語共有語共有語。", 0.5),
+            Hit(2, 1, "希少語が一度出る。", 0.5),
+            Hit(3, 1, "共有語が一度出る。", 0.5),  # makes 共有語 df=2/3
+        ]
+        a_lex = lexical_overlap(query, hits[0].text)
+        b_lex = lexical_overlap(query, hits[1].text)
+        self.assertGreater(a_lex, b_lex, "uniform overlap must prefer A — else no flip")
+        result = rerank(query, hits)
+        self.assertEqual(result[0].chunk_id, 2, "pool-IDF must promote the rare-term hit")
+        self.assertIn("lexw", result[0].detail)
+        self.assertGreater(hits[1].detail["lexw"], hits[0].detail["lexw"])
+
+    def test_rerank_idf_equal_df_matches_uniform_overlap(self) -> None:
+        """Every query term in the same number of candidates → the weighted
+        mean degenerates to the uniform mean exactly."""
+        from shoin.search import rerank
+
+        hits = [
+            Hit(1, 1, "気候変動の影響。", 0.5),
+            Hit(2, 1, "気候変動と影響の関係。", 0.5),
+        ]
+        rerank("気候変動 影響", hits)
+        for h in hits:
+            self.assertAlmostEqual(h.detail["lexw"], h.detail["lex"], places=12)
+
+    def test_rerank_single_term_no_lexw(self) -> None:
+        """One-term queries skip the machinery: no lexw key, pure blend score."""
+        from shoin.search import rerank
+
+        hits = [Hit(1, 1, "免疫は免疫である。", 0.8)]
+        rerank("免疫", hits)
+        self.assertNotIn("lexw", hits[0].detail)
         self.assertAlmostEqual(hits[0].score, 0.7 * 0.8 + 0.3 * hits[0].detail["lex"])
 
     def test_sim_empty_text_returns_zero(self) -> None:

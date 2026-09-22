@@ -749,16 +749,53 @@ def _norm_query_terms(query: str) -> list[str]:
     return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
 
 
-def _overlap_from_norm(norm_terms: list[str], text: str) -> float:
-    """lexical_overlap's core, given already-normalised terms (see rerank())."""
+def _overlap_from_norm(
+    norm_terms: list[str], text: str, idf: dict[str, float] | None = None
+) -> float:
+    """lexical_overlap's core, given already-normalised terms (see rerank()).
+
+    With ``idf`` the uniform mean becomes a weighted one: each term's
+    saturated tf is scaled by its pool-local IDF, normalised by the sum of
+    weights so the result stays in [0,1] — and, because equal weights reduce
+    the weighted mean to the plain mean, identical to the uniform score
+    whenever every query term is equally (un)informative across the pool.
+    """
     if not norm_terms:
         return 0.0
     low = unicodedata.normalize("NFKC", text).lower()
-    score = 0.0
+    if idf is None:
+        score = 0.0
+        for t in norm_terms:
+            tf = low.count(t)
+            score += tf / (tf + 1.0)  # saturate repeated occurrences
+        return score / len(norm_terms)
+    num = den = 0.0
     for t in norm_terms:
+        w = idf.get(t, 0.0)
         tf = low.count(t)
-        score += tf / (tf + 1.0)  # saturate repeated occurrences
-    return score / len(norm_terms)
+        num += w * (tf / (tf + 1.0))
+        den += w
+    return num / den if den else 0.0
+
+
+def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
+    """BM25-style IDF of each query term over the candidate pool itself.
+
+    A term present in every candidate got them all retrieved in the first
+    place — it carries no discriminative power for the rerank — while a term
+    appearing in only a few hits is decisive (Robertson & Zaragoza 2009's IDF
+    rationale, applied to the retrieved set the way PRF statistics are).
+    idf = ln(1 + (N - df + 0.5)/(df + 0.5)) stays positive and finite even
+    when a term is absent from every hit (df=0): its saturated tf is 0
+    everywhere then, so the large weight is multiplied by zero.
+    """
+    n = len(texts)
+    lows = [unicodedata.normalize("NFKC", t).lower() for t in texts]
+    out: dict[str, float] = {}
+    for t in dict.fromkeys(norm_terms):
+        df = sum(1 for s in lows if t in s)
+        out[t] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+    return out
 
 
 # --- term proximity (SDM-style unordered window) ----------------------------
@@ -854,24 +891,34 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     lexical_overlap: the term set is identical across the whole hit list, only the
     text being scored changes.
 
-    For multi-term queries an unordered-window term-proximity bonus
-    (_proximity_from_norm) is added inside the same lexical weight — BM25 has
-    no positional signal at all, so without this a chunk where the terms sit a
-    paragraph apart ranks identically to one where they co-occur in a phrase.
-    detail["lex"] stays the pure overlap measure (existing consumers and the
-    hoisted-terms contract pin that), and prox is additive: a bonus on top of
-    the blend, never a replacement for it.
+    For multi-term queries two extra signals refine the lexical side.  An
+    unordered-window term-proximity bonus (_proximity_from_norm) is added
+    inside the same lexical weight — BM25 has no positional signal at all, so
+    without this a chunk where the terms sit a paragraph apart ranks
+    identically to one where they co-occur in a phrase.  And the overlap
+    itself is weighted by pool-local IDF (_pool_idf): a term present in every
+    candidate is what got them retrieved, so it carries no discriminative
+    power here, while a rare term is decisive.  detail["lex"] stays the pure
+    uniform overlap measure (existing consumers and the hoisted-terms
+    contract pin that), detail["lexw"] records the weighted signal, and prox
+    is additive: a bonus on top of the blend, never a replacement for it.
+    Equal-IDF pools make lexw == lex exactly, and single-term queries skip
+    the machinery entirely — every such scoring path is identical to before.
     """
     norm_terms = _norm_query_terms(query)
     multi = len(set(norm_terms)) >= 2
-    for h in hits:
-        scored = f"{h.text}\n{h.context}" if h.context else h.text
+    scored_texts = [f"{h.text}\n{h.context}" if h.context else h.text for h in hits]
+    idf = _pool_idf(norm_terms, scored_texts) if multi else None
+    for h, scored in zip(hits, scored_texts):
         lex = _overlap_from_norm(norm_terms, scored)
         h.detail["lex"] = lex
+        lexw = _overlap_from_norm(norm_terms, scored, idf) if multi else lex
+        if multi:
+            h.detail["lexw"] = lexw
         prox = _proximity_from_norm(norm_terms, scored) if multi else 0.0
         if multi:
             h.detail["prox"] = prox
-        h.score = (1 - weight) * h.score + weight * lex + weight * PROX_WEIGHT * prox
+        h.score = (1 - weight) * h.score + weight * lexw + weight * PROX_WEIGHT * prox
     return sorted(hits, key=lambda h: h.score, reverse=True)
 
 

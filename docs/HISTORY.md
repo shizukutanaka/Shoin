@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.185
+## Version History: v0.1.37 → v0.2.186
+
+### v0.2.186 (2026-09-22)
+**Improved (retrieval precision)**: `rerank()`'s lexical signal now weights query terms by pool-local IDF (`_pool_idf`). The uniform mean treated every term as equally informative — but a term present in *every* candidate is what got them retrieved in the first place, so it carries zero discriminative power for the rerank, while a term few candidates contain is decisive. This is Robertson & Zaragoza's (2009) IDF rationale applied to the retrieved set — the same class of pool statistics the v0.2.182 PRF pass uses for expansion. Measured failure shape: a chunk that merely repeats the common term several times could outscore the chunk actually containing the query's rare, decisive term.
+
+- **Mechanism**: for each query term, `idf = ln(1 + (N - df + 0.5)/(df + 0.5))` over the rerank candidate texts (BM25-style, always positive and finite — df=0 terms get the largest weight but multiply by a saturated tf of 0, contributing nothing). Each term's `tf/(tf+1)` saturation is weighted by its idf and normalised by the weight sum, so the score stays in [0,1].
+- **Degeneracy-safe by construction**: a *weighted* mean reduces to the *uniform* mean exactly when all weights are equal — so pools where every term is equally (un)informative score identically to before, and single-term queries skip the machinery entirely (`idf=None`, byte-identical path). Only multi-term pools with differing discriminability move at all.
+- **Contract preserved**: `detail["lex"]` remains the pure uniform overlap (the hoisted-terms contract test pins `lexical_overlap` to 12 places); the new signal is recorded as `detail["lexw"]` and used in the score — `score = (1-w)*score + w*lexw + w*PROX_WEIGHT*prox` — visible via `SHOIN_DEBUG` alongside lex/prox.
+
+5 tests added: rare-term flip (uniform overlap prefers the repetitive chunk, IDF promotes the rare-term chunk — the flip is asserted both directions), equal-df degeneration to the uniform mean, absent-term weight safety, common<rare ordering, single-term skip. `pytest tests/` now runs 738 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.185 (2026-09-22)
 **Fixed (test-suite flake, root cause)**: `InputValidationSecurityTest` connections used `timeout=5` on localhost HTTP requests. Under full-suite CPU load a request can legitimately take several seconds — the socket timeout fired a `TimeoutError` even though both the server and the code under test were healthy (`test_add_note_with_non_string_body_returns_400` flaked once this way). Root cause: the timeout conflated two different jobs. A client socket timeout can only ever catch "server hung forever" — it must never act as a latency SLA on a shared-CPU test host, because slowness under load is a property of the machine, not a defect in the code under test.
