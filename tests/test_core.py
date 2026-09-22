@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.222")
+        self.assertEqual(VERSION, "0.2.223")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -6886,6 +6886,26 @@ class TestExport(unittest.TestCase):
         self.assertIn("S2", line)
         self.assertIn("S1", line)
         self.assertIn("1", line)  # uncited count
+
+    def test_status_line_carries_suggested_source_hints(self) -> None:
+        """v0.2.223: the CLI/UI append '→S<right>' to misattributed numbers and
+        '→S#' to grounded-uncited warnings; the export silently dropped both,
+        leaving an archived 'S3 is wrong' with no hint that S1 was right."""
+        from shoin.export import _status_line
+
+        report: dict[str, object] = {
+            "misattributed": [3],
+            "misattributed_suggested": {"S3": "S1"},
+            "uncited": ["猫は液体である。", "猫は固体である。"],
+            "uncited_supported": ["猫は液体である。", "猫は固体である。"],
+            "uncited_supported_source": {
+                "猫は液体である。": "S2",
+                "猫は固体である。": "S2",
+            },
+        }
+        line = _status_line(report)
+        self.assertIn("S3\u2192S1", line)
+        self.assertIn("(2)\u2192S2", line)  # deduped target hint
 
     def test_status_line_empty_when_report_has_nothing_to_report(self) -> None:
         from shoin.export import _status_line

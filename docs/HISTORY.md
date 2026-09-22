@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.222
+## Version History: v0.1.37 → v0.2.223
+
+### v0.2.223 (2026-09-22)
+**Fixed (export parity)**: the Markdown `_status_line` listed `misattributed` as bare `S3` and `uncited_supported` as a bare count — while the CLI and Web UI have carried the fix hint since v0.2.216/220 (`→S<right>`, `→S#`). An exported "S3 is wrong" made the reader re-verify every source by hand; now it reads `S3→S1`, and grounded uncited shows `(N)→S2,S5` with deduped targets in first-seen order.
 
 ### v0.2.222 (2026-09-22)
 **Changed (prompt, per-segment section labels)**: v0.2.221's `§` label sat in the source *header*, but a single source can contribute hits from several sections (top-k picks non-adjacent chunks) — one header label was then misinformation for every other segment. Labels now live **per segment**: each excerpt block is prefixed `§ <section>` naming the section its own leading chunk came from, so a multi-section excerpt reads `§ 免疫の基礎\n<text>\n…\n§ 副作用\n<more text>` instead of one header claiming a single origin.
