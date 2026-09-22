@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.204")
+        self.assertEqual(VERSION, "0.2.205")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4772,6 +4772,53 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "上記の治療は効果がある。"
         self.assertEqual(uncited_sentences(text), ["上記の治療は効果がある。"])
+
+    def test_cited_colon_lead_in_scopes_list_items(self) -> None:
+        """"以下の通り[S1]：" cites S1 over the enumeration it introduces —
+        flagging each item is a false positive on the most common list style."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り[S1]：\n・効果は高い\n・副作用は少ない"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_cited_toori_lead_in_scopes_list_items(self) -> None:
+        """A 。-terminated "…の通り[S1]。" lead-in scopes its block too."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り[S1]。\n・効果は高い\n・副作用は少ない"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_period_terminated_claim_lead_in_does_not_scope(self) -> None:
+        """"効果は高い[S1]。" is a claim, not an enumeration intro — the list
+        items after it assert new content and still need their own citations,
+        matching the strict per-sentence rule prose already applies."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は高い[S1]。\n・副作用は少ない\n・低コストである"
+        self.assertEqual(
+            uncited_sentences(text), ["・副作用は少ない", "・低コストである"]
+        )
+
+    def test_uncited_lead_in_does_not_scope(self) -> None:
+        """Scope requires the lead-in to carry a citation — an uncited one
+        leaves every item exposed."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り：\n・効果は高い"
+        self.assertIn("・効果は高い", uncited_sentences(text))
+
+    def test_scope_ends_at_first_non_item_line(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "以下の通り[S1]：\n・効果は高い\n別の話題である。\n・低コスト"
+        self.assertEqual(uncited_sentences(text), ["別の話題である。", "・低コスト"])
+
+    def test_comparison_toori_is_not_an_intro(self) -> None:
+        """"思った通りだった[S1]。" is a comparison, not an enumeration."""
+        from shoin.citation import uncited_sentences
+
+        text = "結果は思った通りだった[S1]。\n・効果は高い"
+        self.assertEqual(uncited_sentences(text), ["・効果は高い"])
 
     def test_ignores_formal_japanese_question_ending_in_ka_period(self) -> None:
         """Formal written Japanese ends a question in か。 with no "?" at all —

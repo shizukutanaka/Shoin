@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.204
+## Version History: v0.1.37 → v0.2.205
+
+### v0.2.205 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged every item of a **cited enumeration** — "効果は以下の通り[S1]：\n・効果は高い\n・副作用は少ない" produced two false-positive uncited warnings even though the lead-in's citation introduces and scopes the whole list, the most common LLM list style.
+
+- **List-block citation scoping**: a contiguous run of `_LIST_PREFIX_RE` items is covered when the line immediately preceding the block carries a citation AND ends in an enumeration-introducing shape — a closing colon, or the 通り-enumeration forms (`以下/次/上記/前項/前述の通り・とおり`). Scope persists while items continue and ends at the first non-item line.
+- **Strict boundaries**: a 。-terminated *claim* ("効果は高い[S1]。") does NOT introduce a list — items after it still need their own citations, matching the strict per-sentence rule prose already applies. An uncited lead-in scopes nothing. And "思った通り"-style comparisons don't enumerate — the 通り branch requires the same enumeration words as `_FRAMING_RE`, not just the suffix.
+
+6 tests added: cited colon/通り lead-ins cover, 。-claim lead-in doesn't, uncited lead-in doesn't, scope ends at non-item, comparison 通り excluded. `tests/` now runs 822 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.204 (2026-09-22)
 **Improved (citation verification, self-contradiction)**: a TENTH mechanical check — `self_contradictions()` — the answer-internal counterpart of the polarity check: an answer asserting "効果はある" early and "効果はない" later contradicts itself regardless of sources. Self-contradiction is a documented hallucination class (SelfCheckGPT literature) the previous nine checks cannot see — every other check compares claim-vs-source, never claim-vs-claim.

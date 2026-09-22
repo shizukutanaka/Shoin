@@ -116,6 +116,19 @@ _FRAMING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A line ending in an enumeration-introducing shape scopes the list block that
+# follows it: "効果は以下の通り[S1]：\n・効果は高い" cites S1 over the whole
+# enumeration, so flagging each item as an unsupported assertion is a false
+# positive on the most common LLM list style. Two shapes qualify — a closing
+# colon, or the 通り-enumeration forms already recognised by _FRAMING_RE. A
+# 。-terminated claim ("効果は高い[S1]。") does NOT introduce a list, and
+# "思った通り"-style comparisons don't enumerate either, so the 通り branch
+# requires the same enumeration words as _FRAMING_RE.
+_LIST_INTRO_RE = re.compile(
+    r"(?:[:：]|(?:以下|次|上記|前項|前述)の(?:通り|とおり)(?:です|である|だ|でした)?)"
+    r"\s*[。．.、,：:]?\s*$"
+)
+
 # Common English question-starter words. LLMs asked for "no decoration" often
 # omit trailing "?" in list form; these words reliably identify questions.
 _EN_QUESTION_STARTERS = frozenset(
@@ -1275,6 +1288,8 @@ def uncited_sentences(text: str) -> list[str]:
     """
     out: list[str] = []
     pending: str | None = None  # most recent uncited sentence, awaiting a trailing citation
+    prev_bare, prev_cited = "", False  # previous non-empty sentence's bare text / citation state
+    list_scope = False  # inside a list block opened by a cited enumeration lead-in
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
@@ -1282,6 +1297,14 @@ def uncited_sentences(text: str) -> list[str]:
         nums = extract_citations(sentence)
         bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
         has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+        is_item = _LIST_PREFIX_RE.match(sentence) is not None
+        # A cited enumeration lead-in ("…[S1]：" or "…の通り[S1]。") scopes the
+        # contiguous list block it introduces — its citation covers every item.
+        # Scope persists while items continue and ends at the first non-item line.
+        list_scope = is_item and (
+            list_scope or (prev_cited and _LIST_INTRO_RE.search(prev_bare) is not None)
+        )
+        prev_bare, prev_cited = bare, bool(nums)
         if nums and not has_claim:
             # Citation-only fragment (e.g. the "[S1]" tail of "Sentence. [S1]") —
             # resolves whatever sentence it trails; that sentence is not uncited.
@@ -1294,6 +1317,8 @@ def uncited_sentences(text: str) -> list[str]:
             pending = None
         if nums:
             continue  # this fragment carries its own citation — not uncited
+        if list_scope:
+            continue  # enumeration item covered by the cited lead-in
         if not has_claim:
             continue  # too short/trivial to carry a claim worth flagging
         if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
