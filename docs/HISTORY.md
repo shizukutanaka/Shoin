@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.214
+## Version History: v0.1.37 → v0.2.215
+
+### v0.2.215 (2026-09-22)
+**Fixed (citation verification, cross-turn contradiction)**: `self_contradictions` only compared sentences *within* one answer — every check still analyzed a single message, so a small model that answered **"効果はある"** last turn and silently reversed to **"効果はない"** this turn produced no warning anywhere. The cross-turn mirror of v0.2.210's parrot-loop fix, completing the contradiction-detection coverage (intra-turn done in v0.2.204).
+
+- **`history` kwarg** (same shape as `degenerate_spans`): prior assistant text supplies the "earlier" side of the comparison. The CURRENT answer's sentence is the one flagged — the later claim is the suspect, same convention as within a message. History sentences are never flagged; they are already emitted.
+- **Shared flip predicate** `_single_diff_flip(a, b)`: the strict single-contiguous-span rule (difflib opcodes: exactly one non-equal block) + negation parity / antonym sign / swapped-number checks, extracted so the intra-answer pass and the cross-turn pass apply one identical precision rule. Same protections: "A社は効果がある" → "B社は効果がない" stays silent (two differing spans), an explicit "以前は〜と述べたが" revision adds an attribution span → silent, and identical restatement is silent (repetition is `degenerate_spans`' job, not a contradiction).
+- Shared sentence normalization extracted to `_claim_sents()` so history sentences get identical NFKC/list-prefix/min-length handling — no parallel code path to drift.
+- Wired in `make_report(text, history=...)`; `qa.ask()` already joins prior assistant messages into `history` for the degeneration check, so the same parameter serves both — Studio output stays per-message (no turns to contradict).
+- Example now flagged: history "治療の効果はある。" + answer "治療の効果はない。" → `self_contradiction` = `["治療の効果はない。"]` (⚠ badge, CLI, export — no new surface).
 
 ### v0.2.214 (2026-09-22)
 **Fixed (citation verification, rate notation)**: `numeric_mismatches` false-flagged the most common rate restatement — a claim asserting **"0.5"** against a source writing **"50%"** (and the reverse) fired a numeric-mismatch warning, because the presence check compared literal digit strings and `0.5` never occurs in `50%`. Same rate, different notation — a correct restatement accused.

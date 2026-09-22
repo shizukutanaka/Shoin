@@ -1236,20 +1236,8 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[・•\-\*◦▪]|\d+[\.、\)）]|\([0-9]+\))\s*")
 
 
-def self_contradictions(text: str) -> list[str]:
-    """Sentences contradicting an earlier sentence in the same answer.
-
-    The answer-internal counterpart of the polarity check: an LLM that
-    asserts "効果はある" early and "効果はない" later contradicts itself
-    regardless of sources. Pairwise comparison uses a strict precision rule
-    — the sentences must differ in EXACTLY ONE contiguous span (difflib
-    opcodes: one non-equal block), so a different-subject contrast like
-    "Aは効果がある。Bは効果がない。" (two differing spans: subject AND
-    predicate) stays silent. Within that single difference a flag fires
-    when the negation parity flips, a shared antonym class nets opposite
-    signs, or the swapped digits assert different values.
-    """
-    text = _strip_fences(text)  # reassigned values inside code aren't contradictions
+def _claim_sents(text: str) -> list[tuple[str, str]]:
+    """(normalised, raw) sentence pairs for claim-vs-claim comparison."""
     sents: list[tuple[str, str]] = []
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
@@ -1262,36 +1250,73 @@ def self_contradictions(text: str) -> list[str]:
         if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
             continue
         sents.append((norm, sentence))
+    return sents
+
+
+def _single_diff_flip(a: str, b: str) -> bool:
+    """a and b differ in exactly one contiguous span carrying a flip —
+    the contradiction precision rule shared by the intra-answer and
+    cross-turn comparisons."""
+    if a == b:
+        return False
+    ops = [
+        op
+        for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+        if op[0] != "equal"
+    ]
+    if len(ops) != 1:
+        return False  # multi-span difference — contrast, not a flip
+    if _neg_parity(a) != _neg_parity(b):
+        return True
+    ant_a, ant_b = _ant_signs(a), _ant_signs(b)
+    if any(ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()):
+        return True
+    _, i1, i2, j1, j2 = ops[0]
+    num_a = _numbers_expanded(a[i1:i2])
+    num_b = _numbers_expanded(b[j1:j2])
+    return bool(num_a) and bool(num_b) and num_a != num_b
+
+
+def self_contradictions(text: str, *, history: str = "") -> list[str]:
+    """Sentences contradicting an earlier sentence — in this answer or a
+    prior assistant turn.
+
+    The answer-internal counterpart of the polarity check: an LLM that
+    asserts "効果はある" early and "効果はない" later contradicts itself
+    regardless of sources. ``history`` (v0.2.215) carries prior assistant
+    text so the same flip ACROSS turns is caught too — a small model that
+    silently reverses last turn's claim shows one differing span exactly
+    like the intra-turn case; the current answer's sentence is flagged
+    (the later claim is the suspect, same convention as within a message).
+    History sentences are never flagged — they are already emitted.
+
+    Pairwise comparison uses a strict precision rule — the sentences must
+    differ in EXACTLY ONE contiguous span (difflib opcodes: one non-equal
+    block), so a different-subject contrast like
+    "Aは効果がある。Bは効果がない。" (two differing spans: subject AND
+    predicate) stays silent. Within that single difference a flag fires
+    when the negation parity flips, a shared antonym class nets opposite
+    signs, or the swapped digits assert different values.
+    """
+    sents = _claim_sents(_strip_fences(text))
+    # reassigned values inside code aren't contradictions
+    hist = [n for n, _ in _claim_sents(_strip_fences(history))] if history else []
     out: list[str] = []
     flagged: set[int] = set()
     for i, (a, _) in enumerate(sents):
-        par_a = _neg_parity(a)
-        ant_a = _ant_signs(a)
         for j in range(i + 1, len(sents)):
             b, raw_b = sents[j]
-            if j in flagged or a == b:
+            if j in flagged:
                 continue
-            ops = [
-                op
-                for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
-                if op[0] != "equal"
-            ]
-            if len(ops) != 1:
-                continue  # multi-span difference — contrast, not a flip
-            flip = par_a != _neg_parity(b)
-            if not flip:
-                ant_b = _ant_signs(b)
-                flip = any(
-                    ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()
-                )
-            if not flip:
-                _, i1, i2, j1, j2 = ops[0]
-                num_a = _numbers_expanded(a[i1:i2])
-                num_b = _numbers_expanded(b[j1:j2])
-                flip = bool(num_a) and bool(num_b) and num_a != num_b
-            if flip:
+            if _single_diff_flip(a, b):
                 out.append(raw_b)
                 flagged.add(j)
+    for i, (a, raw_a) in enumerate(sents):
+        if i in flagged:
+            continue
+        if any(_single_diff_flip(h, a) for h in hist):
+            out.append(raw_a)
+            flagged.add(i)
     return out
 
 
@@ -1543,7 +1568,7 @@ def make_report(
     deg = degenerate_spans(text, history=history)
     if deg:
         report["degenerate"] = deg
-    contra = self_contradictions(text)
+    contra = self_contradictions(text, history=history)
     if contra:
         report["self_contradiction"] = contra
     return report
