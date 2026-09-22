@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.237")
+        self.assertEqual(VERSION, "0.2.238")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3218,6 +3218,40 @@ class TestSearch(unittest.TestCase):
                              "underscore must not act as LIKE wildcard (false positive)")
             self.assertFalse(any("exactmatch no separator" in t for t in texts),
                              "chunk without underscore must not match")
+
+    def test_neg_filter_ascii_word_boundary(self) -> None:
+        """ASCII negated terms must exclude whole-word matches only.
+
+        Before v0.2.238 the neg filter used plain substring matching on the
+        folded text: `-api` also suppressed "capital", `-net` suppressed
+        "network", `-ai` suppressed "train" — silent false exclusion, the
+        asymmetric harm of positive-match overreach.  ASCII negs now require
+        word boundaries (query_terms' [0-9A-Za-z_]); CJK negs keep substring
+        semantics since CJK text has no word boundaries.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-boundary").id
+            src = s.add_source(nb_id, "txt", "boundary", "t", "sha-negb")
+            s.add_chunks(src.id, [
+                "api design patterns with data",
+                "capital markets and data",
+                "train your data daily",
+            ])
+            hits = bm25_search(s, nb_id, "data -api", k=5)
+            texts = [h.text for h in hits]
+            self.assertFalse(
+                any("api design" in t for t in texts),
+                "chunk containing the word 'api' must be excluded",
+            )
+            self.assertTrue(
+                any("capital markets" in t for t in texts),
+                "'capital' must survive — 'api' inside it is not the word",
+            )
+            hits = bm25_search(s, nb_id, "data -ai", k=5)
+            self.assertTrue(
+                any("train your data daily" in t for t in [h.text for h in hits]),
+                "'-ai' must not suppress 'train/daily' — no standalone 'ai' word",
+            )
 
     def test_fallback_needles_drops_single_ascii_chars(self) -> None:
         """Single-char ASCII terms must be excluded from LIKE needles.

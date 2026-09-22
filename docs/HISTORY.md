@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.237
+## Version History: v0.1.37 → v0.2.238
+
+### v0.2.238 (2026-09-22)
+**Fixed (search, negated-term false exclusion)**: `_apply_neg_filter` matched every negated term by substring — so `-api` silently suppressed "capital", `-net` suppressed "network", `-ai` suppressed "train/email/main". Exclusion is the asymmetric harm direction: positive-match overreach merely widens recall the reranker absorbs downstream, but a wrongly-dropped chunk is gone for good and the user sees a confident "found nothing relevant". ASCII negated terms now require word boundaries (the same `[0-9A-Za-z_]` character set `query_terms` tokenizes with, so the exclusion boundary is the same boundary that produced the term); CJK-containing terms keep substring semantics since CJK text has no word boundaries — `書院 -儒学` behaves identically. Verified fail-then-pass: the old code dropped the "capital markets" chunk under `-api` (`test_neg_filter_ascii_word_boundary`).
 
 ### v0.2.237 (2026-09-22)
 **Fixed (search, LIKE pool cap ranking)**: the LIKE fallback's 2000-row pool cap was applied in **insertion order** — `WHERE ... LIMIT 2000` with no `ORDER BY` — so on a notebook with more matching chunks than the cap, the densest late-added chunk was silently dropped before Python scoring ever saw it. For a JA-first tool this is the common path: every two-character compound (総説, 経済, 免疫 …) skips the trigram index and lands here, and "found nothing" is the answer shape that produces hallucinated answers. The query now `ORDER BY`s the exact `_needle_score` formula inside SQL — text occurrence count (REPLACE-based, non-overlapping like `str.count`; `LOWER()` matching LIKE's ASCII folding) plus `_CTX_BM25_WEIGHT` for context presence — so the cap keeps the *best* 2000 candidates instead of the first 2000. Verified fail-then-pass: 2005 single-`猫` fillers + a final `猫×20` chunk — the old code returned `行0`, the new code returns the dense chunk (`test_fallback_cap_picks_best_pool`).

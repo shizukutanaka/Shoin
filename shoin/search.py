@@ -713,13 +713,39 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     Each hit's text and context are NFKC-folded once, not once per negated term:
     the fold is the expensive part (a full chunk body) and does not depend on
     which needle it is tested against.
+
+    ASCII negated terms match as whole WORDS, not substrings: exclusion is
+    irreversible, so its overreach is the asymmetric harm of positive-match
+    overreach (which broad recall absorbs downstream).  `-api` must drop an
+    "api design" chunk but keep a "capital" one; `-ai` must keep "train" and
+    "email".  CJK-containing terms keep substring semantics — CJK text has no
+    word boundaries and `-儒学` is meant to suppress every chunk containing
+    those characters.  The word-char set mirrors query_terms' [0-9A-Za-z_]
+    tokenization so the exclusion boundary is the same boundary that produced
+    the term.
     """
     folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
+    checks: list[tuple[str | None, re.Pattern[str] | None]] = []
+    for n in folded_negs:
+        if re.fullmatch(r"[0-9A-Za-z_]+", n):
+            checks.append(
+                (None, re.compile(rf"(?<![0-9A-Za-z_]){re.escape(n)}(?![0-9A-Za-z_])"))
+            )
+        else:
+            checks.append((n, None))
     out: list[Hit] = []
     for h in hits:
         folded_text = unicodedata.normalize("NFKC", h.text).lower()
         folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
-        if not any(n in folded_text or n in folded_ctx for n in folded_negs):
+        drop = False
+        for s, w in checks:
+            if w is not None:
+                drop = bool(w.search(folded_text)) or bool(w.search(folded_ctx))
+            elif s is not None and (s in folded_text or s in folded_ctx):
+                drop = True
+            if drop:
+                break
+        if not drop:
             out.append(h)
     return out
 
