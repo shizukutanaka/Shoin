@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.223
+## Version History: v0.1.37 → v0.2.224
+
+### v0.2.224 (2026-09-22)
+**Fixed (retrieval, JA conjugation recall)**: a query "泳いだ" shared **zero trigrams** with a document saying "泳ぐ" — every inflected verb/adjective query was invisible to every other inflection of the same stem (same for okurigana: "切り替える"/"切替える"). `term_variants` now emits a **kanji skeleton** — the term with hiragana stripped ("泳", "切替") — which is <3 chars, so it pulls the query into the LIKE path where '%泳%' bridges every inflection. A dictionary-free stem bridge: Sudachi/Kuromoji solve this via inflection to dictionary form, which requires a morphological dictionary Shoin deliberately doesn't carry.
+
+- Emitted from the NFKC-normalised form only (hiragana and katakana spellings share one skeleton — kana is what gets stripped).
+- Skeleton must still contain a kanji (`0x3400–0x9FFF`): pure-kana residue ("みーつ" → "ー") would otherwise emit a '%ー%' needle matching every long-vowel word.
+- Both paths reach it for free: fts_query drops <3 variants (skeleton stays a LIKE-only signal), `_fallback_needles` keeps 1-char CJK needles already.
+- LIKE-path activation is the mechanism, not a side effect: the <3 skeleton fails the all-variants-covered check, exactly as the design intends for terms FTS can't index.
 
 ### v0.2.223 (2026-09-22)
 **Fixed (export parity)**: the Markdown `_status_line` listed `misattributed` as bare `S3` and `uncited_supported` as a bare count — while the CLI and Web UI have carried the fix hint since v0.2.216/220 (`→S<right>`, `→S#`). An exported "S3 is wrong" made the reader re-verify every source by hand; now it reads `S3→S1`, and grounded uncited shows `(N)→S2,S5` with deduped targets in first-seen order.

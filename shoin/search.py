@@ -204,6 +204,28 @@ def _to_hiragana(s: str) -> str:
     return "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in s)
 
 
+def _kanji_skeleton(s: str) -> str:
+    """*s* with every hiragana character removed (v0.2.224).
+
+    Japanese conjugation and okurigana variance hide the shared kanji stem:
+    a query "走った" shares ZERO trigrams with a document saying "走る", and
+    "切り替える" vs "切替える" differ inside the word. Both collapse to the
+    same skeleton ("走", "切替"), which LIKE needles and FTS grams then match
+    — a dictionary-free stem bridge (Sudachi/Kuromoji solve this by inflecting
+    to dictionary form; we cannot afford a morphological dictionary, and the
+    skeleton covers the *vocabulary-level* mismatch without one).
+
+    Returns "" unless the skeleton still contains a kanji — a pure-kana
+    residue ("みーつ" → "ー") would emit a '%ー%' needle that LIKE-matches
+    every long-vowel word in the notebook.  Also "" when nothing was removed
+    (no hiragana in *s*); the term_variants dedup then drops it.
+    """
+    skel = "".join(c for c in s if not (0x3041 <= ord(c) <= 0x3096))
+    if not any(0x3400 <= ord(c) <= 0x9FFF for c in skel):
+        return ""
+    return skel
+
+
 def _to_halfwidth(s: str) -> str:
     """Fullwidth katakana → halfwidth, via the inverted-NFKC table."""
     return "".join(_FW_TO_HW.get(c, c) for c in s)
@@ -315,6 +337,7 @@ def term_variants(term: str) -> list[str]:
     norm = unicodedata.normalize("NFKC", term)
     katakana = _to_katakana(norm)
     candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    candidates.append(_kanji_skeleton(norm))
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))
     candidates.extend(_numeric_variants(norm))
