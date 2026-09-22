@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.182")
+        self.assertEqual(VERSION, "0.2.183")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2899,6 +2899,62 @@ class TestSearch(unittest.TestCase):
         self.assertNotIn("学問", terms)
         self.assertNotIn("問所", terms)
         self.assertEqual(terms, [], "every df>=2 gram is already in the query")
+
+    # --- term proximity (v0.2.183) -------------------------------------------
+
+    def test_proximity_single_term_returns_zero(self) -> None:
+        """One-term queries have no pair to be near: prox must be 0.0 and the
+        score path byte-identical to before the signal existed."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        self.assertEqual(
+            _proximity_from_norm(_norm_query_terms("免疫"), "免疫は免疫である。"), 0.0
+        )
+
+    def test_proximity_tight_window_scores_above_scattered(self) -> None:
+        """Terms co-occurring in one phrase must outscore the same terms
+        scattered far apart in the text."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        terms = _norm_query_terms("気候変動 影響")
+        tight = "気候変動の影響について述べる。"
+        scattered = "気候変動。" + "補足の長文。" * 30 + "影響も考察した。"
+        p_tight = _proximity_from_norm(terms, tight)
+        p_scattered = _proximity_from_norm(terms, scattered)
+        self.assertGreater(p_tight, p_scattered)
+        self.assertGreater(p_tight, 0.5)
+
+    def test_proximity_zero_when_fewer_than_two_terms_present(self) -> None:
+        """A chunk containing only one of the query terms has no co-occurrence."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        self.assertEqual(
+            _proximity_from_norm(_norm_query_terms("気候変動 影響"), "気候変動について。"),
+            0.0,
+        )
+
+    def test_rerank_proximity_bonus_multi_term(self) -> None:
+        """rerank() must prefer the hit whose terms co-occur tightly when the
+        retrieval scores are otherwise equal."""
+        from shoin.search import rerank
+
+        hits = [
+            Hit(1, 1, "気候変動。" + "余白。" * 40 + "影響。", 0.5),
+            Hit(2, 1, "気候変動の影響について。", 0.5),
+        ]
+        result = rerank("気候変動 影響", hits)
+        self.assertEqual(result[0].chunk_id, 2)
+        self.assertIn("prox", result[0].detail)
+        self.assertGreater(result[0].detail["prox"], result[1].detail["prox"])
+
+    def test_rerank_single_term_scores_unchanged_by_prox(self) -> None:
+        """prox=0 for single-term queries — score must equal the pure blend."""
+        from shoin.search import rerank
+
+        hits = [Hit(1, 1, "免疫は免疫である。", 0.8)]
+        rerank("免疫", hits)
+        self.assertNotIn("prox", hits[0].detail)
+        self.assertAlmostEqual(hits[0].score, 0.7 * 0.8 + 0.3 * hits[0].detail["lex"])
 
     def test_sim_empty_text_returns_zero(self) -> None:
         """_sim() must return 0.0 when a Hit has empty text (no bigrams to compare)."""
