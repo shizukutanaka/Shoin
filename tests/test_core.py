@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.183")
+        self.assertEqual(VERSION, "0.2.184")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3807,6 +3807,79 @@ class TestCitation(unittest.TestCase):
         # Two chars must still produce exactly one bigram
         self.assertEqual(_bigrams("ab"), {"ab"})
         self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
+
+
+class TestNumericMismatches(unittest.TestCase):
+    """numeric_mismatches() (v0.2.184): a cited claim asserting a number the
+    source never contains — the fabricated-statistic failure shape the
+    citation literature flags as dominant (arXiv:2510.20303, CiteFix)."""
+
+    def test_flags_number_absent_from_source(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        text = "採用率は37%だった。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [1])
+
+    def test_no_flag_when_number_present(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        text = "採用率は63%だった。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_single_digit_never_flagged(self) -> None:
+        """Bare single digits are ubiquitous (第3版, 3月) — noise, not signal."""
+        from shoin.citation import numeric_mismatches
+
+        text = "第3版の内容である。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "第5版の内容である。"}), [])
+
+    def test_comma_and_fullwidth_digits_compare_equal(self) -> None:
+        """"1,234" and "1234" and "１２３４" must all match the same source number."""
+        from shoin.citation import numeric_mismatches
+
+        src = "導入数は1234件だった。"
+        self.assertEqual(numeric_mismatches("導入数は1,234件だった。[S1]", {1: src}), [])
+        self.assertEqual(numeric_mismatches("導入数は１２３４件だった。[S1]", {1: src}), [])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the citation whose clause carries the absent
+        number is flagged — the correctly-numbered clause stays clean."""
+        from shoin.citation import numeric_mismatches
+
+        sources = {
+            1: "売上は100億円だった。",
+            2: "従業員数は40人だった。",
+        }
+        text = "売上は100億円であり[S1]、従業員数は80人だった[S2]。"
+        self.assertEqual(numeric_mismatches(text, sources), [2])
+
+    def test_trailing_citation_fragment_inherits_claim(self) -> None:
+        """"Claim. [S1]" splits to a citation-only fragment — the previous
+        sentence's numbers are still checked against it."""
+        from shoin.citation import numeric_mismatches
+
+        text = "The model reached 92 percent accuracy. [S1]"
+        self.assertEqual(
+            numeric_mismatches(text, {1: "The model reached 95 percent accuracy."}), [1]
+        )
+
+    def test_spelled_out_numbers_silent(self) -> None:
+        """Word-form numbers (三, three) are deliberately unchecked — ambiguous."""
+        from shoin.citation import numeric_mismatches
+
+        text = "三つの理由がある。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "四つの理由がある。"}), [])
+
+    def test_report_carries_numeric_mismatch_field(self) -> None:
+        """make_report() must attach numeric_mismatch when the check fires."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "採用率は37%だった。[S1]",
+            ["調査"],
+            source_bodies=["採用率は63%だった。"],
+        )
+        self.assertEqual(report.get("numeric_mismatch"), [1])
 
 
 class TestUncitedSentences(unittest.TestCase):
