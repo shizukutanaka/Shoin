@@ -694,13 +694,21 @@ function closeViewer(){
 // to the first one. This is the last mile of "verifiable citation": the reader
 // sees the cited wording in its original position, not just a detached excerpt.
 // citedIds absent (old persisted report / Studio output) → plain text, unmarked.
-function renderFullSource(container, chunks, citedIds){
+function renderFullSource(container, chunks, citedIds, excerpt){
   container.replaceChildren();
   const marked = new Set(citedIds || []);
+  // chunks.id is a plain rowid (no AUTOINCREMENT) — a refreshed source's new
+  // chunks can REUSE the ids an old report stored, so an id match alone can
+  // pin the "cited here" mark on text the citation never saw (silent
+  // misattribution). When the report's stored excerpt is available, only mark
+  // a chunk whose head actually appears in it (v0.2.230); without an excerpt
+  // there is nothing to verify against, so the old id-only behavior stays.
+  const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
   chunks.forEach((c, i) => {
     if (i) container.append(el("div","chunk-sep","⋯"));
-    const isCited = marked.has(c.id);
+    const isCited = marked.has(c.id) &&
+      (!provable || excerpt.includes(String(c.text).slice(0, 24)));
     const block = el("div", isCited ? "src-chunk cited-chunk" : "src-chunk", c.text);
     if (isCited){
       block.prepend(el("div","cited-label", t("viewer.cited_chunk")));
@@ -754,7 +762,7 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
       try{
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
-        renderFullSource(body, j.chunks, citedIds);
+        renderFullSource(body, j.chunks, citedIds, excerpt);
       }catch(e){ if (!sig.aborted) body.textContent = e.message; }
     });
     vt.append(det);

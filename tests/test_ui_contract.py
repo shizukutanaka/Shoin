@@ -123,6 +123,53 @@ class TestUIContract(unittest.TestCase):
                 f"index.html calls {raw!r} (as {concrete!r}) but no server route matches it",
             )
 
+    def test_renderFullSource_verifies_chunk_against_excerpt(self) -> None:
+        """v0.2.230: chunks.id is a plain rowid — after refresh_source() replaces
+        a source's chunks, new chunks can reuse the ids an old report stored, so
+        an id match alone can pin the 'cited here' mark on text the citation
+        never saw. renderFullSource must only mark a chunk whose head appears in
+        the stored excerpt — and keep the old id-only behavior without one."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        start = src.index("function renderFullSource")
+        depth, end = 0, start
+        for i in range(start, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        fn = src[start:end]
+        harness = """\
+let appended = [];
+function el(tag, cls, text){ return {tag, cls, text, children: [],
+  prepend(x){this.children.unshift(x)}, append(x){this.children.push(x)},
+  scrollIntoView(){}} }
+function t(k){ return k }
+const container = { replaceChildren(){ appended = [] }, append(x){ appended.push(x) } }
+""" + fn + """
+renderFullSource(container,
+  [{id:5, text:"全く別の文。"}, {id:6, text:"甲。乙。"}], [5, 6], "甲。乙。")
+const marked = appended.filter(b => b.cls === "src-chunk cited-chunk").map(b => b.text)
+if (JSON.stringify(marked) !== JSON.stringify(["甲。乙。"]))
+  { console.error("stale-id marking: " + JSON.stringify(marked)); process.exit(1) }
+renderFullSource(container, [{id:5, text:"全く別の文。"}], [5], null)
+if (!appended.some(b => b.cls === "src-chunk cited-chunk"))
+  { console.error("id marking lost without excerpt"); process.exit(1) }
+console.log("ok")
+"""
+        with tempfile.TemporaryDirectory() as d:
+            js = Path(d) / "ui.mjs"
+            js.write_text(harness, encoding="utf-8")
+            proc = subprocess.run(
+                [node, str(js)], capture_output=True, text=True, timeout=60
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
