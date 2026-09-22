@@ -351,10 +351,15 @@ def _numbers(text: str) -> set[str]:
 # Japanese shorthand arithmetic is read constantly — a model legitimately
 # expands "3.2万円" to "32000円" — so a digit-string presence check alone
 # flags a correct restatement. "千万"/"百万" precede "万" in the alternation
-# (ordered leftmost matching). Spelled-out numerals and multi-suffix chains
-# (1億2000万) stay unchecked — ambiguous, per the module's silent principle.
+# (ordered leftmost matching). Spelled-out numerals stay unchecked —
+# ambiguous, per the module's silent principle.
 _MAG_SUFFIX = {"千": 1_000, "万": 10_000, "百万": 1_000_000, "千万": 10_000_000, "億": 100_000_000}
 _MAG_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(千万|百万|億|万|千)")
+# Chained magnitudes (v0.2.194): "1億2000万" = 120,000,000 — an extremely
+# common Japanese form the single-suffix pass splits into {1e8, 2e7}, so a
+# claim saying the summed value still false-flagged. A chain is ≥2 adjacent
+# digit+suffix pairs; the sum is added alongside the per-part values.
+_MAG_CHAIN_RE = re.compile(r"(?:\d+(?:\.\d+)?(?:千万|百万|億|万|千)){2,}")
 
 # Single-kanji numeral + magnitude suffix (v0.2.193): "一万" → 10000, "十億" →
 # 10^9. Bounded to ONE kanji digit (一…九, 十) — multi-character kanji numerals
@@ -384,12 +389,26 @@ def _numbers_expanded(text: str) -> set[str]:
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
     nums = _numbers(t)
     suffixed: set[str] = set()
+    # Digit+suffix pairs INSIDE a chain are components, not asserted values:
+    # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
+    # separate members would flag a claim spelling the summed value out.
+    chain_spans = [m.span() for m in _MAG_CHAIN_RE.finditer(t)]
     for m in _MAG_NUM_RE.finditer(t):
         num, suf = m.group(1), m.group(2)
         suffixed.add(num)
+        if any(cs <= m.start() < ce for cs, ce in chain_spans):
+            continue
         v = float(num) * _MAG_SUFFIX[suf]
         r = round(v)
         if abs(v - r) < 1e-6:
+            nums.add(str(r))
+    for m in _MAG_CHAIN_RE.finditer(t):
+        total = sum(
+            float(mm.group(1)) * _MAG_SUFFIX[mm.group(2)]
+            for mm in _MAG_NUM_RE.finditer(m.group(0))
+        )
+        r = round(total)
+        if abs(total - r) < 1e-6:
             nums.add(str(r))
     for m in _KANJI_MAG_NUM_RE.finditer(t):
         nums.add(str(_KANJI_NUM[m.group(1)] * _MAG_SUFFIX[m.group(2)]))

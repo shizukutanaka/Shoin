@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.193")
+        self.assertEqual(VERSION, "0.2.194")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4080,6 +4080,21 @@ class TestNumericMismatches(unittest.TestCase):
         # the guards must not have registered a bogus 10億 expansion either.
         self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
         self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
+
+    def test_chained_magnitudes_sum(self) -> None:
+        """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
+        value, so a claim spelling it out no longer false-flags (v0.2.194)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}), [])
+        self.assertEqual(numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}), [])
+
+    def test_chained_magnitudes_wrong_value_still_flags(self) -> None:
+        """A claim chain whose sum differs from the source's still flags."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
 
 
 class TestUnitMismatches(unittest.TestCase):

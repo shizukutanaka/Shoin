@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.193
+## Version History: v0.1.37 → v0.2.194
+
+### v0.2.194 (2026-09-22)
+**Fixed (citation verification, chained magnitudes)**: `_numbers_expanded()` now sums chained magnitude suffixes — "1億2000万" = 120,000,000. The chained form is extremely common in Japanese source text, and the single-suffix pass split it into `{1e8, 2e7}` so a claim spelling out "120000000人" still false-flagged — the last known FP class in the magnitude family.
+
+- **Chain-internal parts are components, not asserted values**: pairs inside a ≥2-pair chain (`_MAG_CHAIN_RE`) still get their raw digits stripped, but their per-part expansions are withheld — the claim "1億2000万" asserts 120,000,000, not "1億" and "2000万" separately, and keeping the parts would flag the correct spelling. A standalone "1億" elsewhere in the same text still expands normally (span-guarded, not global removal).
+- **Sum is integral-only**: non-integral chain totals (rare) leave the chain silent rather than registering a value nobody wrote.
+
+2 tests added: chain↔digits silence both directions (1億2000万, 13億5000万); a chain whose sum differs still flags. `tests/` now runs 783 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.193 (2026-09-22)
 **Fixed (citation verification, kanji numerals)**: `_numbers_expanded()` now also expands single-kanji-digit shorthand — "一万" ↔ "10000", "十億" ↔ "1000000000". The v0.2.192 expansion covered digit shorthand only, so a source written "一万円" still false-flagged a claim saying "10000円" — the same FP class one notation over.
