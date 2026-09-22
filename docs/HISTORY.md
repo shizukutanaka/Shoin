@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.192
+## Version History: v0.1.37 → v0.2.193
+
+### v0.2.193 (2026-09-22)
+**Fixed (citation verification, kanji numerals)**: `_numbers_expanded()` now also expands single-kanji-digit shorthand — "一万" ↔ "10000", "十億" ↔ "1000000000". The v0.2.192 expansion covered digit shorthand only, so a source written "一万円" still false-flagged a claim saying "10000円" — the same FP class one notation over.
+
+- **Lookaround guards, not just a digit class**: the digit kanji must not touch another numeral kanji on either side — "二十億" (20億) would otherwise mis-expand its tail as 十億 (10億), and "百三万" (103万) as 三万. Both stay unchecked → silent, which is correct for genuinely ambiguous forms. Date/unit adjacency is no match since the magnitude suffix is required ("一月"/"十日" never expand).
+- **Additive only**: kanji expansion adds to the set (no digits exist to remove); real value mismatches still flag — "1000000000" against a guarded "二十億" correctly flags because no bogus expansion was registered.
+
+2 tests added: kanji shorthand↔digits silence (一万/十億, both directions); multi-kanji guards (二十億, 百三万 leave unchecked and still flag a differing claim value). `pytest tests/` now runs 781 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.192 (2026-09-22)
 **Fixed (citation verification, magnitude shorthand)**: `_numbers_expanded()` — Japanese shorthand magnitudes no longer false-flag in `numeric_mismatches()`. The check compared digit strings for presence only, so a model restating "3.2万円" as "32000円" (or vice versa) was flagged as an absent number — the same value written in the notation readers actually use. A number carrying a 千/万/百万/千万/億 suffix is now represented by its canonical value instead of the raw digits: `"3.2万" → {"32000"}`.

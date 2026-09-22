@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.192")
+        self.assertEqual(VERSION, "0.2.193")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4061,6 +4061,25 @@ class TestNumericMismatches(unittest.TestCase):
         from shoin.citation import numeric_mismatches
 
         self.assertEqual(numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}), [])
+
+    def test_kanji_numeral_shorthand_matches(self) -> None:
+        """"一万" and "10000" assert the same value — single-kanji shorthand
+        expands like digit shorthand (v0.2.193)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}), [])
+        self.assertEqual(numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}), [])
+        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}), [])
+
+    def test_multi_kanji_numerals_stay_unchecked(self) -> None:
+        """"二十億"/"百三万" are ambiguous multi-kanji forms — the guards must
+        leave them unchecked rather than mis-expand (silent, not wrong)."""
+        from shoin.citation import numeric_mismatches
+
+        # 2000000000 is NOT the value of 二十億 written as digits (that IS 20億);
+        # the guards must not have registered a bogus 10億 expansion either.
+        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
+        self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
 
 
 class TestUnitMismatches(unittest.TestCase):
