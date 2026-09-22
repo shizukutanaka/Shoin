@@ -1449,7 +1449,7 @@ class LLMErrorDispatchTest(unittest.TestCase):
 
             def chat_stream(self, messages: list[dict[str, str]], temperature: float = 0.2) -> Iterator[str]:
                 raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
-                yield  # noqa: unreachable
+                yield  # unreachable; keeps the mock a generator like real chat_stream
 
             def embed_one(self, text: str) -> list[float]:
                 return [1.0, 0.0]
@@ -2118,14 +2118,35 @@ class GenerationSerializationTest(unittest.TestCase):
                 self.stream_intervals: list[tuple[float, float]] = []
                 self.chat_stream_violations = 0
                 self._stream_active = False
+                # Event pair that makes the overlap window deterministic: the
+                # SECOND rewrite call holds itself open until the FIRST stream
+                # has actually started, and that stream does not begin until a
+                # second rewrite is in-flight. Before this, the test relied on a
+                # 0.1s fire stagger producing a scheduler window — under load
+                # the post-rewrite work between the calls takes longer than the
+                # stagger, the windows pass each other by, and the assertion
+                # fails even though the code never serialized anything.
+                self.rewrite_inflight = threading.Event()
+                self.stream_started = threading.Event()
 
             def available(self) -> bool:
                 return True
 
             def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
                 if temperature > 0.5:  # the rewrite_queries() call
+                    with self._lock:
+                        nth = len(self.rewrite_intervals) + 1
                     start = time.monotonic()
-                    time.sleep(0.2)
+                    if nth == 2:
+                        # The other request's rewrite: announce it is in-flight
+                        # so the first stream call knows a rewrite is active,
+                        # then stay open until that stream has started —
+                        # guaranteeing the intervals overlap regardless of when
+                        # either thread next gets scheduled.
+                        self.rewrite_inflight.set()
+                        self.stream_started.wait(timeout=10)
+                    else:
+                        time.sleep(0.05)
                     with self._lock:
                         self.rewrite_intervals.append((start, time.monotonic()))
                     return "書院の仕組みとは\n書院についての説明"
@@ -2138,9 +2159,17 @@ class GenerationSerializationTest(unittest.TestCase):
                     if self._stream_active:
                         self.chat_stream_violations += 1
                     self._stream_active = True
+                    first = len(self.stream_intervals) == 0
+                if first:
+                    # First generation call: wait until the other request's
+                    # rewrite is actually in-flight, so its interval provably
+                    # overlaps this one.
+                    self.rewrite_inflight.wait(timeout=10)
                 start = time.monotonic()
+                if first:
+                    self.stream_started.set()
                 try:
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                     yield "回答"
                     yield "[S1]。"
                 finally:
@@ -2196,14 +2225,11 @@ class GenerationSerializationTest(unittest.TestCase):
                         errors.append(exc)
 
                 with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
-                    # Stagger the two requests: without this, both unlocked
-                    # rewrite calls start at ~the same instant, run
-                    # concurrently with EACH OTHER, and finish at ~the same
-                    # instant too -- leaving no natural window where one
-                    # request is generating while the other is still
-                    # rewriting. Starting the second request partway through
-                    # the first's rewrite call (0.2s) lands its rewrite call
-                    # squarely inside the first request's generation window.
+                    # A small stagger keeps the firing order intuitive, but the
+                    # overlap itself is guaranteed by the mock's
+                    # rewrite_inflight/stream_started event pair — the second
+                    # rewrite cannot close until the first stream has opened,
+                    # so no scheduler timing is left to chance.
                     threads = [threading.Thread(target=fire)]
                     threads[0].start()
                     time.sleep(0.1)
