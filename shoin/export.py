@@ -53,7 +53,15 @@ def _status_line(report: dict[str, object]) -> str:
         bits.append(f"{_t('status_invalid')}: " + ", ".join(f"S{i}" for i in invalid))
     misattr = report.get("misattributed")
     if isinstance(misattr, list) and misattr:
-        bits.append(f"{_t('status_misattr')}: " + ", ".join(f"S{i}" for i in misattr))
+        # v0.2.223: carry the right-source hint like the CLI/UI do — an
+        # exported 'S3 is wrong' without 'S1 is right' makes the reader
+        # re-verify every source by hand.
+        sugg_raw = report.get("misattributed_suggested")
+        sugg = sugg_raw if isinstance(sugg_raw, dict) else {}
+        bits.append(
+            f"{_t('status_misattr')}: "
+            + ", ".join(f"S{i}" + (f"\u2192{sugg[f'S{i}']}" if sugg.get(f"S{i}") else "") for i in misattr)
+        )
     numeric = report.get("numeric_mismatch")
     if isinstance(numeric, list) and numeric:
         bits.append(f"{_t('status_numeric')}: " + ", ".join(f"S{i}" for i in numeric))
@@ -73,7 +81,14 @@ def _status_line(report: dict[str, object]) -> str:
         # dangerous ungrounded kind (v0.2.212).
         supported = report.get("uncited_supported")
         if isinstance(supported, list) and supported:
-            bits.append(f"{_t('status_uncited_supported')} ({len(supported)})")
+            # v0.2.223: same parity — name the source each grounded sentence
+            # should cite (deduped, first-seen order).
+            sup_raw = report.get("uncited_supported_source")
+            sup_src = sup_raw if isinstance(sup_raw, dict) else {}
+            targets = [t for s in supported if isinstance((t := sup_src.get(s, "")), str)]
+            targets = list(dict.fromkeys(targets))
+            hint = "\u2192" + ",".join(targets) if targets else ""
+            bits.append(f"{_t('status_uncited_supported')} ({len(supported)}){hint}")
     degenerate = report.get("degenerate")
     if isinstance(degenerate, list) and degenerate:
         bits.append(f"{_t('status_degenerate')} ({len(degenerate)})")
