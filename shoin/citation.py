@@ -353,65 +353,114 @@ def _numbers(text: str) -> set[str]:
 # flags a correct restatement. "千万"/"百万" precede "万" in the alternation
 # (ordered leftmost matching). Spelled-out numerals stay unchecked —
 # ambiguous, per the module's silent principle.
-_MAG_SUFFIX = {"千": 1_000, "万": 10_000, "百万": 1_000_000, "千万": 10_000_000, "億": 100_000_000}
-_MAG_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(千万|百万|億|万|千)")
-# Chained magnitudes (v0.2.194): "1億2000万" = 120,000,000 — an extremely
-# common Japanese form the single-suffix pass splits into {1e8, 2e7}, so a
-# claim saying the summed value still false-flagged. A chain is ≥2 adjacent
-# digit+suffix pairs; the sum is added alongside the per-part values.
-_MAG_CHAIN_RE = re.compile(r"(?:\d+(?:\.\d+)?(?:千万|百万|億|万|千)){2,}")
+_MAG_SUFFIX = {
+    "千": 1_000,
+    "万": 10_000,
+    "百万": 1_000_000,
+    "千万": 10_000_000,
+    "億": 100_000_000,
+    "兆": 1_000_000_000_000,
+}
+# Kanji numerals are NOT ambiguous — they follow positional notation
+# (digit chars 一…九 plus place chars 十/百/千): "二十億" is unambiguously
+# 20億, "百三万" is 103万, "一億二千万" is 120,000,000 (v0.2.195, replacing
+# the v0.2.193 single-kanji-only approximation). Runs exclude the group
+# separators 万/億/兆, which attach to the run as suffixes.
+_KANJI_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_KANJI_PLACE = {"十": 10, "百": 100, "千": 1_000}
+_KANJI_RUN = r"[一二三四五六七八九十百千]+"
+_NUM_PART = rf"(?:\d+(?:\.\d+)?|{_KANJI_RUN})"
+_MAG_SUF = r"(?:千万|百万|億|万|千|兆)"
+_MAG_NUM_RE = re.compile(rf"({_NUM_PART})(千万|百万|億|万|千|兆)")
+# Chained magnitudes (v0.2.194): "1億2000万" — or kanji "一億二千万", or mixed
+# "一億2000万" — = 120,000,000. A chain is ≥2 adjacent numeral+suffix pairs;
+# the sum is added alongside the per-part values.
+_MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
+# Bare kanji-numeral runs (v0.2.195): "十二人" ↔ "12人". The lookahead keeps
+# the run maximal — a run ending right before another numeral or suffix char
+# is a component of a larger form, not a standalone value.
+_KANJI_BARE_RE = re.compile(r"([一二三四五六七八九十百千]{2,})(?![一二三四五六七八九十百千万億兆])")
 
-# Single-kanji numeral + magnitude suffix (v0.2.193): "一万" → 10000, "十億" →
-# 10^9. Bounded to ONE kanji digit (一…九, 十) — multi-character kanji numerals
-# (十二万, 百三万) are genuinely ambiguous to parse and stay unchecked per the
-# silent-when-inconclusive principle. A single kanji before a date/unit is no
-# match because the magnitude suffix is required ("一月"/"十日" never expand).
-_KANJI_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-# Lookaround guards keep multi-character kanji numerals out: the digit char
-# must not touch another numeral kanji on either side — "二十億" (10億×2) and
-# "百三万" (103万) would otherwise mis-expand as 十億 / 三万. Unchecked →
-# silent, which is correct for genuinely ambiguous forms.
-_KANJI_MAG_NUM_RE = re.compile(r"(?<![一二三四五六七八九十百千])([一二三四五六七八九十])(?![一二三四五六七八九十])(千万|百万|億|万|千)")
+
+def _kanji_value(run: str) -> int | None:
+    """Positional value of a kanji-numeral run, or None when ambiguous.
+
+    Digits (一…九) apply to the place char (十/百/千) that follows them, or
+    add to the running total at the end: "百三" → 100+3, "二十" → 2×10.
+    A pure digit run like "二三" ("a few") carries no place char and is a
+    counting sequence, not a numeral — inconclusive → None.
+    """
+    total = 0
+    digit = 0
+    seen_place = False
+    for ch in run:
+        if ch in _KANJI_DIGIT:
+            if digit:
+                return None  # consecutive digits ("一二三") — not a numeral
+            digit = _KANJI_DIGIT[ch]
+        else:
+            total += (digit or 1) * _KANJI_PLACE[ch]
+            digit = 0
+            seen_place = True
+    if not seen_place:
+        return digit if len(run) == 1 else None
+    return total + digit
+
+
+def _part_value(part: str) -> float | None:
+    if part[0].isdigit():
+        return float(part)
+    v = _kanji_value(part)
+    return float(v) if v is not None else None
 
 
 def _numbers_expanded(text: str) -> set[str]:
     """_numbers() plus canonical values for magnitude-suffixed shorthand.
 
-    A number carrying a 千/万/百万/千万/億 suffix is represented by its
+    A number carrying a 千/万/百万/千万/億/兆 suffix is represented by its
     expanded value INSTEAD of the raw digits: "3.2万" → {"32000"}. The raw
     string is removed because the written digits literally do not occur in a
     source that spelled the value out ("32000"), and keeping it would flag a
-    correct restatement. Kanji-numeral shorthand ("一万") expands additively —
-    no digit string exists to remove. Only integral expansions are added
-    (non-integral values like 1.2345万 have no canonical spelling —
+    correct restatement. Kanji numerals (一万, 十二万, 一億二千万) expand
+    additively — no digit string exists to remove. Only integral expansions
+    are added (non-integral values like 1.2345万 have no canonical spelling —
     inconclusive).
     """
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
     nums = _numbers(t)
     suffixed: set[str] = set()
-    # Digit+suffix pairs INSIDE a chain are components, not asserted values:
+    # Numeral+suffix pairs INSIDE a chain are components, not asserted values:
     # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
     # separate members would flag a claim spelling the summed value out.
     chain_spans = [m.span() for m in _MAG_CHAIN_RE.finditer(t)]
     for m in _MAG_NUM_RE.finditer(t):
-        num, suf = m.group(1), m.group(2)
-        suffixed.add(num)
+        part, suf = m.group(1), m.group(2)
+        if part[0].isdigit():
+            suffixed.add(part)
         if any(cs <= m.start() < ce for cs, ce in chain_spans):
             continue
-        v = float(num) * _MAG_SUFFIX[suf]
+        pv = _part_value(part)
+        if pv is None:
+            continue
+        v = pv * _MAG_SUFFIX[suf]
         r = round(v)
         if abs(v - r) < 1e-6:
             nums.add(str(r))
     for m in _MAG_CHAIN_RE.finditer(t):
-        total = sum(
-            float(mm.group(1)) * _MAG_SUFFIX[mm.group(2)]
-            for mm in _MAG_NUM_RE.finditer(m.group(0))
-        )
-        r = round(total)
-        if abs(total - r) < 1e-6:
-            nums.add(str(r))
-    for m in _KANJI_MAG_NUM_RE.finditer(t):
-        nums.add(str(_KANJI_NUM[m.group(1)] * _MAG_SUFFIX[m.group(2)]))
+        total = 0.0
+        for p in _MAG_NUM_RE.finditer(m.group(0)):
+            pv = _part_value(p.group(1))
+            if pv is None:
+                break
+            total += pv * _MAG_SUFFIX[p.group(2)]
+        else:
+            r = round(total)
+            if abs(total - r) < 1e-6:
+                nums.add(str(r))
+    for m in _KANJI_BARE_RE.finditer(t):
+        kv = _kanji_value(m.group(1))
+        if kv is not None and kv > 0:
+            nums.add(str(kv))
     return nums - suffixed
 
 

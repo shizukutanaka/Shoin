@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.194
+## Version History: v0.1.37 → v0.2.195
+
+### v0.2.195 (2026-09-22)
+**Fixed (citation verification, full kanji numerals)**: kanji numerals now parse positionally — the v0.2.193 claim that multi-character forms were "ambiguous" was wrong; "二十億" is unambiguously 20億, "百三万" is 103万, and "一億二千万" is 120,000,000. Every remaining kanji FP class is now covered: multi-char numerals (十二万), kanji and mixed chains (一億二千万, 一億2000万), and bare numerals with no magnitude suffix (十二人 ↔ 12人).
+
+- **Replaces special-casing with a general parser**: `_kanji_value()` applies digits to the place char that follows them (十/百/千) or adds them at the end — the v0.2.193 single-kanji guard regex is gone, absorbed into `_NUM_PART` which now accepts either decimal digits or a kanji run for every pair and chain component. `_kanji_value` returns None for pure digit runs ("二三" = "a few", a counting sequence, not a numeral) and consecutive digits ("一二三") — inconclusive forms still stay silent.
+- **Bare-run pass is conservative**: `_KANJI_BARE_RE` requires ≥2 chars ending before a non-numeral char, so a run that's a component of a larger form (十二 before 万) never double-registers.
+
+3 tests added/updated: multi-kanji parse (二十億, 百三万 — equal silent, differing flags), kanji+mixed chains, bare numerals with the counting-sequence guard. `tests/` now runs 785 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.194 (2026-09-22)
 **Fixed (citation verification, chained magnitudes)**: `_numbers_expanded()` now sums chained magnitude suffixes — "1億2000万" = 120,000,000. The chained form is extremely common in Japanese source text, and the single-suffix pass split it into `{1e8, 2e7}` so a claim spelling out "120000000人" still false-flagged — the last known FP class in the magnitude family.
