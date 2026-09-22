@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.198")
+        self.assertEqual(VERSION, "0.2.199")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4341,6 +4341,46 @@ class TestQuoteMismatches(unittest.TestCase):
         }
         text = "売上は100億円だった[S1]、そして「従業員数は40人だった」と引用している[S2]。"
         self.assertEqual(quote_mismatches(text, sources), [2])
+
+    def test_doctored_quote_cited_source(self) -> None:
+        """v0.2.199: a ≥12-char span sharing ≥60% bigrams with the CITED source
+        while matching none verbatim is a paraphrase wearing quotes — flag."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "ハイブリッド検索は両手法の長所を組み合わせる手法である。"}
+        # One-word swap inside the quote: ~70%+ bigram overlap, not verbatim.
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_doctored_quote_other_source(self) -> None:
+        """Near-verbatim of a DIFFERENT source cited to n is the same error
+        shape as the verbatim-in-m case — flag n."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く関係のない記述だけが書かれている。",
+            2: "ハイブリッド検索は両手法の長所を組み合わせる手法である。",
+        }
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_loose_paraphrase_quote_stays_silent(self) -> None:
+        """Below the 0.6 overlap bound a quoted span could be a legitimate
+        quote-adjacent paraphrase — inconclusive, stays silent."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "ハイブリッド検索は両手法の長所を組み合わせる手法である。"}
+        text = "出典の考え方は「意味検索と語彙検索を融合させた方式」だ[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
+    def test_short_doctored_span_stays_silent(self) -> None:
+        """Under 12 chars a near-verbatim span could still be a topic-term
+        emphasis — the doctored check stays silent (verbatim rules unchanged)."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "重要な設計原則という概念が文書にある。"}
+        text = "「重要な設計原理」が鍵だ[S1]。"  # 8 chars, near-miss of 原則 — silent
+        self.assertEqual(quote_mismatches(text, sources), [])
 
     def test_trailing_citation_fragment_inherits_claim(self) -> None:
         """"Claim. [S1]" splits to a citation-only fragment — the previous

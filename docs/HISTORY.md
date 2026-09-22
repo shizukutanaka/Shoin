@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.198
+## Version History: v0.1.37 → v0.2.199
+
+### v0.2.199 (2026-09-22)
+**Improved (citation verification, doctored quotes)**: `quote_mismatches()` now flags near-verbatim spans, not just verbatim ones. A 「…」/"…" span ≥ `_DOCTORED_MIN_LEN`=12 chars sharing ≥ `_DOCTORED_MIN_OVERLAP`=60% of its bigrams with some source — while matching no source verbatim — is a doctored quote: the assertive quote marks claim wording the source never wrote, yet the text clearly derives from a source.
+
+- **Both error shapes flag**: high overlap with the *cited* source is a paraphrase wearing quotes; high overlap with a *different* source is the same near-verbatim misattribution the verbatim rule already catches — either way the citation is wrong.
+- **Bounds stay asymmetric**: below 12 chars a topic-term emphasis-「」 can coincidentally share 60% of its bigrams; below 0.6 the span could be a legitimately loose paraphrase — both stay silent (unchanged behaviour for quotes that either match verbatim or match nothing).
+
+4 tests added: doctored quote of the cited source flags; near-verbatim of a different source flags; a low-overlap quoted paraphrase and a sub-12-char near-miss stay silent. `tests/` now runs 792 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.198 (2026-09-22)
 **Fixed (citation verification, unit conversions)**: `numeric_mismatches()` no longer false-flags when the claim and source state the same quantity in different units — "180分" against "3時間", "1.5km" against "1500m", "0.5kg" against "500g". Conversion is deterministic within each dimension family (time, length, mass, volume); months and years stay out (28–31-day months, 365–366-day years are genuinely ambiguous).
