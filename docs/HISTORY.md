@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.231
+## Version History: v0.1.37 → v0.2.232
+
+### v0.2.232 (2026-09-22)
+**Docs (product-review ledger sync)**: the ledger itself had been missed by v0.2.231's spec sync and was ~50 versions stale — it still named the flagship "引用の機械検証(四段)", listed weakness #5 as "no behavioral UI tests" even though v0.2.230 had added the first node-executed one, and stopped its summary at v0.2.179. Synced the header (v0.2.231, 869 tests), rewrote strength #1 as the ten-check suite + provenance, qualified weakness #5 with the v0.2.230 mechanism (runtime-state transitions are now coverable; real-browser rendering/interaction remains the hole), and added the v0.2.180-231 summary paragraph. Docs-only — a stale ledger misdirects every future cycle's priority pick, and it is the file consulted to pick them.
 
 ### v0.2.231 (2026-09-22)
 **Docs (verification-suite sync)**: the public spec of the flagship feature had drifted ~45 versions behind the code — README still advertised "四段の引用検証", spec.md §引用検証仕様 listed the original four checks plus one, and CLAUDE.md's check list stopped at unit consistency (v0.2.190) while the suite had grown to ten checks plus the exemption/suggestion/provenance machinery around them. All three surfaces now describe the actual suite: range, grounding, misattribution (+suggested right source), uncited (+supported split, +named source, structural exemptions), numeric (magnitude/kanji/English/歩合/rate/era), quote (verbatim proof + doctored quotes), unit, negation, self-contradiction (incl. cross-turn), degeneration (incl. cross-turn) — plus the `source_detail` retrieval provenance and the full `CitationReport` field list. Also refreshed CLAUDE.md's export `_status_line`/`_legend` description. Docs-only; the release criterion's "docs updated" was failing before this.
