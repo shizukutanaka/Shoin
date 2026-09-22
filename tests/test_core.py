@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.212")
+        self.assertEqual(VERSION, "0.2.213")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -8879,6 +8879,43 @@ class TestWidthVariants(unittest.TestCase):
                 ("こー", {ids["kata"]}),                    # 2-char kana: LIKE path only
             ):
                 got = {h.source_id for h in bm25_search(st, nb_id, query, 9)}
+                self.assertEqual(got, want, query)
+        finally:
+            st.close()
+
+    def test_term_variants_numeric_spellings(self) -> None:
+        """v0.2.213: a digit term should also retrieve its shorthand spellings."""
+        v = term_variants("32000")
+        for want in ("32,000", "3.2万", "32千", "三万二千", "3万2000"):
+            self.assertIn(want, v)
+        # Non-digit and non-numeric terms emit no numeric spellings.
+        self.assertEqual(term_variants("python"), ["python", "ｐｙｔｈｏｎ"])
+        self.assertEqual(term_variants("研究"), ["研究"])
+
+    def test_numeric_retrieval_both_directions(self) -> None:
+        """Digit query finds shorthand sources; shorthand query finds digit sources."""
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        docs = {
+            "shorthand": "売上は3.2万円であった。",      # shorthand body
+            "digits": "売上は32000円であった。",         # digit body
+            "kanji": "売上は三万二千円であった。",       # kanji numeral body
+            "wari": "達成率は50%を記録した。",          # percent body
+            "other": "猫が窓辺で眠っている。",
+        }
+        ids: dict[str, int] = {}
+        for name, text in docs.items():
+            s = st.add_source(nb.id, "md", name, f"{name}.md", name)
+            st.add_chunks(s.id, [text], contexts=[name])
+            ids[name] = s.id
+        try:
+            for query, want in (
+                ("32000", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("3.2万", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("三万二千", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("五割", {ids["wari"]}),   # 歩合 -> 50 -> digit body
+            ):
+                got = {h.source_id for h in bm25_search(st, nb.id, query, 9)}
                 self.assertEqual(got, want, query)
         finally:
             st.close()

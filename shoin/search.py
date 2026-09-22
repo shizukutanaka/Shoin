@@ -24,6 +24,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
+from .citation import _KANJI_DIGIT, _numbers_expanded
 from .config import TOP_K
 from .store import Store
 
@@ -213,6 +214,82 @@ def _to_fullwidth_ascii(s: str) -> str:
     return "".join(chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s)
 
 
+_KANJI_DIGIT_REV = {v: k for k, v in _KANJI_DIGIT.items()}
+
+
+def _kanji_group(n: int, omit_one: bool) -> str:
+    """Sub-10000 kanji numeral: place chars 千/百/十 with optional 一-omission."""
+    out: list[str] = []
+    for place, ch in ((1000, "千"), (100, "百"), (10, "十")):
+        d, n = divmod(n, place)
+        if d:
+            out.append(ch if d == 1 and omit_one else _KANJI_DIGIT_REV[d] + ch)
+    if n:
+        out.append(_KANJI_DIGIT_REV[n])
+    return "".join(out)
+
+
+def _int_to_kanji(v: int) -> str:
+    """Positional kanji numeral for 0 < v < 1e8 — the inverse of
+    citation._kanji_value (1000 → 千, 32000 → 三万二千, 12000000 → 千二百万).
+
+    一 is omitted inside the trailing sub-10000 group (1000 = 千, not 一千)
+    but kept on magnitude groups (一万, 一億 are the standard spellings)."""
+    parts: list[str] = []
+    for mag, suf in ((100_000_000, "億"), (10_000, "万")):
+        q, v = divmod(v, mag)
+        if q:
+            parts.append(_kanji_group(q, omit_one=False) + suf)
+    if v:
+        parts.append(_kanji_group(v, omit_one=True))
+    return "".join(parts)
+
+
+def _numeric_variants(term: str) -> list[str]:
+    """Magnitude/kanji spellings an all-digit term should also retrieve.
+
+    FTS5 and LIKE match literal characters, so "32000" cannot find a source
+    that wrote the value as "3.2万", "32,000", or "三万二千" — the same
+    vocabulary-mismatch class term_variants already bridges for kana/width,
+    for numeric shorthand this time.  Emitted spellings: comma grouping,
+    千/万/億/兆 shorthand (exact and 1-2 decimals), the X万Y split form, and
+    the positional kanji numeral (< 1e8 — 億 numerals are rare enough as
+    queries that emitting them stays out of scope).
+    """
+    if not (term.isascii() and term.isdigit()):
+        return []
+    v = int(term)
+    out: list[str] = []
+    grouped = f"{v:,}"
+    if grouped != term:
+        out.append(grouped)
+    for mag, suf in ((10**12, "兆"), (10**8, "億"), (10**4, "万"), (10**3, "千")):
+        q = v / mag
+        if q >= 1 and v % (mag // 100) == 0:
+            out.append(f"{q:g}{suf}")
+    if v and v < 100_000_000:
+        out.append(_int_to_kanji(v))
+    if 10_000 <= v < 100_000_000 and v % 10_000:
+        out.append(f"{v // 10_000}万{v % 10_000}")
+    return [o for o in out if o]
+
+
+def _numeric_query_terms(query: str) -> list[str]:
+    """Digit values the query's shorthand numerals assert — the reverse
+    direction of _numeric_variants.
+
+    Resolved at raw-query level because suffix and punctuation characters
+    fragment "3.2万" into the meaningless term pieces "3", "2", "万" before
+    term_variants can see it.  citation._numbers_expanded already knows every
+    equivalence the citation checks use (3.2万→32000, 三万二千→32000,
+    1億2000万→120000000, 五割→50, three million→3000000), so the query bridge
+    reuses the same canonical values rather than a second table that could
+    drift.  Raw digit terms the query already carries come along too —
+    fts_query's `seen` dedups the grams they would emit twice.
+    """
+    return sorted(n for n in _numbers_expanded(query) if n.isascii() and n.isdigit())
+
+
 def term_variants(term: str) -> list[str]:
     """Width/script spellings of *term* that should all retrieve each other.
 
@@ -240,6 +317,7 @@ def term_variants(term: str) -> list[str]:
     candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))
+    candidates.extend(_numeric_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
@@ -270,7 +348,7 @@ def fts_query(query: str) -> str:
     """
     groups: list[str] = []
     seen: set[str] = set()
-    for raw_term in query_terms(query):
+    for raw_term in query_terms(query) + _numeric_query_terms(query):
         # Trigram-vs-whole-term is a property of the TERM, not of each spelling:
         # a fullwidth ASCII variant is is_cjk()-true (fullwidth Latin lives in
         # _CJK_RANGES), so branching per variant would shred ｗｅａｔｈｅｒ into five
@@ -313,7 +391,7 @@ def _fallback_needles(query: str) -> list[str]:
     that short never reach FTS5's trigram tokeniser in the first place.
     """
     needles: list[str] = []
-    for raw_term in query_terms(query):
+    for raw_term in query_terms(query) + _numeric_query_terms(query):
         # Drop a single-character ASCII term before expanding it: is_cjk('Ａ') is
         # true (fullwidth Latin lives in _CJK_RANGES), so its fullwidth variant
         # would otherwise fall into the CJK branch's keep-1-char path and
