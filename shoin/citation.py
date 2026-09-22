@@ -247,6 +247,12 @@ class CitationReport(TypedDict):
     # Present only when n_sources > 0 (nothing to cite against otherwise).
     # Absent on old persisted reports — consumers must guard.
     uncited: NotRequired[list[str]]
+    #   uncited_supported -> subset of `uncited` whose claim DOES lexically
+    #                        match some source (bigram >= CONFIRM_MIN) — a
+    #                        missing-[S#] citation omission, NOT an unsupported
+    #                        assertion; the ungrounded remainder is the
+    #                        dangerous kind (present only when non-empty)
+    uncited_supported: NotRequired[list[str]]
     # Snippets of verbatim repetition signalling an LLM degeneration loop —
     # answer-internal, so present whenever it fires (no sources needed).
     # Absent on old persisted reports — consumers must guard.
@@ -1476,6 +1482,20 @@ def make_report(
         uncited = uncited_sentences(text)
         if uncited:
             report["uncited"] = uncited
+            # Split citation-omission from hallucination (v0.2.212): an uncited
+            # claim that DOES lexically match a source is a missing-[S#] fix,
+            # not an unsupported assertion — only the ungrounded ones are the
+            # dangerous kind the badge should alarm about. Same CONFIRM_MIN
+            # bigram evidence verify_grounding() uses to confirm citations.
+            body_bigrams = [_bigrams(b) for b in source_bodies or []]
+            supported = [
+                s for s in uncited
+                if (cb := _bigrams(s)) and any(
+                    _overlap(cb, sb) >= CONFIRM_MIN for sb in body_bigrams
+                )
+            ]
+            if supported:
+                report["uncited_supported"] = supported
     deg = degenerate_spans(text, history=history)
     if deg:
         report["degenerate"] = deg

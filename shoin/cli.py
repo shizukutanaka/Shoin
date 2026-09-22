@@ -52,6 +52,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.unit": " ⚠単位が出典と不一致",
         "cite.negation": " ⚠出典と逆の主張の可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
+        "cite.uncited_supported": "出典内一致=引用欠落の疑い",
         "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
         "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
@@ -98,6 +99,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.unit": " ⚠ unit differs from source",
         "cite.negation": " ⚠ possible contradiction with source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
+        "cite.uncited_supported": "matches a source — missing citation",
         "cite.degenerate": "⚠ Possible generation loop ({n}):",
         "cite.contradict": "⚠ Contradictory statements ({n}):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
@@ -255,9 +257,12 @@ def _print_report(report: CitationReport) -> None:
         print(f"  [S{c}] {title}{sec}{marker}")
     uncited = report.get("uncited") or []
     if uncited:
+        supported = set(report.get("uncited_supported") or [])
         print(_t("cite.uncited", n=str(len(uncited))))
         for sentence in uncited:
-            print(f"  - {sentence}")
+            # Grounded uncited = citation omission; ungrounded = the dangerous kind.
+            mark = f" [{_t('cite.uncited_supported')}]" if sentence in supported else ""
+            print(f"  - {sentence}{mark}")
     degenerate = report.get("degenerate") or []
     if degenerate:
         print(_t("cite.degenerate", n=str(len(degenerate))))

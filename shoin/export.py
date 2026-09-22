@@ -22,6 +22,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_negation": {"ja": "⚠出典と逆の主張の可能性", "en": "⚠ possible contradiction with source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
+    "status_uncited_supported": {"ja": "⚠出典内一致=引用欠落", "en": "⚠ source match — missing citation"},
     "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
     "status_contradict": {"ja": "⚠前後の記述が矛盾", "en": "⚠ contradictory statements"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
@@ -68,6 +69,11 @@ def _status_line(report: dict[str, object]) -> str:
     uncited = report.get("uncited")
     if isinstance(uncited, list) and uncited:
         bits.append(f"{_t('status_uncited')} ({len(uncited)})")
+        # Grounded uncited = citation omission, distinguishable from the
+        # dangerous ungrounded kind (v0.2.212).
+        supported = report.get("uncited_supported")
+        if isinstance(supported, list) and supported:
+            bits.append(f"{_t('status_uncited_supported')} ({len(supported)})")
     degenerate = report.get("degenerate")
     if isinstance(degenerate, list) and degenerate:
         bits.append(f"{_t('status_degenerate')} ({len(degenerate)})")

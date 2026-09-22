@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.211
+## Version History: v0.1.37 → v0.2.212
+
+### v0.2.212 (2026-09-22)
+**Improved (citation verification, uncited triage)**: the `uncited` list lumped two very different severities identically — an uncited claim that lexically matches a source is a **citation omission** (minor: the evidence exists, the marker is missing) while one matching nothing is the dangerous **unsupported assertion**. The warning gave the user no way to triage.
+
+- **`uncited_supported`**: new report field = subset of `uncited` whose claim reaches `CONFIRM_MIN` (0.30) bigram overlap against some source body — the same evidence `verify_grounding()` uses to confirm citations. `uncited` keeps all flagged sentences; the split annotates, it does not remove.
+- **Display wiring**: CLI suffixes matching lines `[出典内一致=引用欠落の疑い]` / `[matches a source — missing citation]`; the Web badge tooltip annotates matching sentences; Markdown exports append a `⚠出典内一致=引用欠落 (n)` status bit.
+- Ungrounded uncited stays the alarm signal; supported-uncited tells the user the fix is adding `[S#]`, not rewriting.
+
+2 tests added: grounded-vs-ungrounded split + field absent when nothing matches. `tests/` now runs 837 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.211 (2026-09-22)
 **Fixed (qa, truncation honesty)**: a segment cut by the per-source token budget was appended verbatim — the excerpt ends mid-sentence with no continuation marker, so the model (and the UI excerpt view) could present a truncated fragment as a COMPLETE passage.
