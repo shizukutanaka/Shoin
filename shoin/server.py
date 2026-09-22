@@ -785,6 +785,12 @@ class _Handler(BaseHTTPRequestHandler):
                 context.source_contexts,
                 context.source_chunk_ids,
                 check_uncited=not degraded,
+                # Same history join qa.ask() passes — without it the
+                # cross-turn checks (degenerate_spans/self_contradictions)
+                # silently never fire on the streamed path.
+                history="\n".join(
+                    m["content"] for m in history if m["role"] == "assistant"
+                ),
             )
             if degraded:
                 report["degraded"] = True

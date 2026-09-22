@@ -38,6 +38,8 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 - `uncited_supported` itself is unchanged (still the list of sentences) — the map is a separate `NotRequired` field, so old consumers and old persisted reports stay valid.
 - Field contract: present iff `uncited_supported` is present; only sentences in that list appear as keys; ties resolve to the lowest source index (deterministic argmax).
 
+**Fixed (server, report drift)**: the streamed `/ask` path built its `make_report()` call separately from `qa.ask()` and omitted `history=` — so the cross-turn checks added in v0.2.210/v0.2.215 (`degenerate_spans` parrot loops, `self_contradictions` flip detection) fired on the CLI path but silently never fired on the web SSE path, the primary user surface. Same duplicated-call-site drift class as the v0.2.77-79 lesson: the stream now passes the identical `history` join `qa.ask()` uses.
+
 ### v0.2.215 (2026-09-22)
 **Fixed (citation verification, cross-turn contradiction)**: `self_contradictions` only compared sentences *within* one answer — every check still analyzed a single message, so a small model that answered **"効果はある"** last turn and silently reversed to **"効果はない"** this turn produced no warning anywhere. The cross-turn mirror of v0.2.210's parrot-loop fix, completing the contradiction-detection coverage (intra-turn done in v0.2.204).
 
