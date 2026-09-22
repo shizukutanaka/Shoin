@@ -1259,7 +1259,7 @@ _DEGEN_SNIP = 40
 _DEGEN_SPAN_RE = re.compile(rf"(.{{{_DEGEN_SPAN_MIN},}}?)\1{{{_DEGEN_REPEAT - 1},}}")
 
 
-def degenerate_spans(text: str) -> list[str]:
+def degenerate_spans(text: str, *, history: str = "") -> list[str]:
     """Snippets of repeated content signalling an LLM degeneration loop.
 
     Two orthogonal shapes, both mechanical and dependency-free:
@@ -1267,6 +1267,12 @@ def degenerate_spans(text: str) -> list[str]:
       answer — the "parroting" loop;
     - any ≥6-char span repeating ≥3 times *consecutively* anywhere in the
       text — the "stuck tail" loop sampling guards exist to prevent.
+
+    ``history`` (v0.2.210) carries prior assistant text so a cross-turn loop
+    is caught too: small models can get stuck re-emitting the SAME paragraph
+    every turn, which a per-message check structurally cannot see (one
+    occurrence per message). Sentences in ``history`` count toward the ≥3
+    threshold; only the current answer's own repeated sentences are flagged.
 
     Deliberately asymmetric like the other checks: nothing is flagged below
     these bounds — parallel structures ("Aである。Bである。") and honest
@@ -1280,6 +1286,10 @@ def degenerate_spans(text: str) -> list[str]:
         s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
         if len(s) >= _DEGEN_SENT_MIN:
             counts[s] = counts.get(s, 0) + 1
+    for raw in _SENTENCE_SPLIT_RE.split(history):
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        if s in counts:
+            counts[s] += 1
     for s, c in counts.items():
         if c >= _DEGEN_REPEAT:
             out.add(s[:_DEGEN_SNIP])
@@ -1388,6 +1398,7 @@ def make_report(
     source_chunk_ids: list[list[int]] | None = None,
     *,
     check_uncited: bool = True,
+    history: str = "",
 ) -> CitationReport:
     """Build the citation_report attached to every generated answer/output.
 
@@ -1465,7 +1476,7 @@ def make_report(
         uncited = uncited_sentences(text)
         if uncited:
             report["uncited"] = uncited
-    deg = degenerate_spans(text)
+    deg = degenerate_spans(text, history=history)
     if deg:
         report["degenerate"] = deg
     contra = self_contradictions(text)

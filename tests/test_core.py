@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.209")
+        self.assertEqual(VERSION, "0.2.210")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4785,6 +4785,28 @@ class TestDegenerateSpans(unittest.TestCase):
         )
         # …while the same repetition in prose still fires.
         self.assertTrue(degenerate_spans("result=compute(x)" * 3))
+
+    def test_cross_turn_loop_flagged_via_history(self) -> None:
+        """v0.2.210: a sentence repeated across conversation turns reaches the
+        ≥3 threshold through `history` — the parrot loop a per-message check
+        structurally cannot see (one occurrence per message)."""
+        from shoin.citation import degenerate_spans
+
+        para = "治療の効果は確立されている。多くの研究が支持している。"
+        # Said twice before, said again now → loop detected.
+        self.assertTrue(degenerate_spans(para, history=para + "\n" + para))
+        # Only 2 total occurrences → below the threshold, stays silent.
+        self.assertEqual(degenerate_spans(para, history=para), [])
+
+    def test_history_only_repeats_stay_silent(self) -> None:
+        """Sentences repeated only in `history` (never in this answer) are not
+        the answer's degeneration — only its own repeated sentences flag."""
+        from shoin.citation import degenerate_spans
+
+        para = "治療の効果は確立されている。多くの研究が支持している。"
+        self.assertEqual(
+            degenerate_spans("全く別の回答です。", history=(para + " ") * 3), []
+        )
 
 
 class TestUncitedSentences(unittest.TestCase):
