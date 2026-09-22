@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.213")
+        self.assertEqual(VERSION, "0.2.214")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4278,6 +4278,31 @@ class TestNumericMismatches(unittest.TestCase):
         from shoin.citation import numeric_mismatches
 
         self.assertEqual(numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+
+    def test_rate_notation_equivalence(self) -> None:
+        """v0.2.214: percent ↔ fraction ↔ wari restatements of one rate stay
+        silent — a cited claim asserting "0.5" against a source writing "50%"
+        asserted the same value."""
+        from shoin.citation import numeric_mismatches
+
+        # Claim fraction <-> source rate-marked value.
+        self.assertEqual(numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}), [])
+        self.assertEqual(numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}), [])
+        # Claim rate-marked <-> source bare fraction.
+        self.assertEqual(numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("成長率は50パーセントであった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+
+    def test_rate_notation_asymmetry_still_flags(self) -> None:
+        """The bridge is directional: unmarked "50" does not match a bare "0.5",
+        and a fraction claim only reaches a RATE-marked source value."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}), [1])
+        self.assertEqual(numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}), [1])
+        # "percentile" is not a rate marker.
+        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}), [1])
 
 
 class TestUnitMismatches(unittest.TestCase):
