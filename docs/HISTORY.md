@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.220
+## Version History: v0.1.37 → v0.2.221
+
+### v0.2.221 (2026-09-22)
+**Changed (prompt, contextual retrieval completion)**: the section breadcrumb was computed for the **index** (v0.2.123) and weighted for **ranking** (v0.2.218) — but the prompt never showed it. A source header read `[S1] 免疫レポート` and the excerpt beneath was a chunk torn out of its section, stripped of exactly the heading context that says what the passage is about. The model now sees `[S1] 免疫レポート (§ 免疫の基礎)` — the third and final stage of contextual retrieval: index → rank → prompt.
+
+- Label is the top hit's section (same one `source_contexts` shows the user — model and UI now describe the same location).
+- ~8 tokens per source buys the model the topicality signal v0.2.218 proved matters for ranking.
+- Sources without a stored context (pre-v0.2.123 chunks) leave the header byte-identical.
 
 ### v0.2.220 (2026-09-22)
 **Changed (citation report, actionable misattributed)**: `misattributed` told the user *that* an S-number was wrong but not *which* source was right — same gap v0.2.216 fixed for `uncited_supported`. The report now emits **`misattributed_suggested`**: `"S<wrong>" → "S<right>"` from the argmax already computed for the flag, kept instead of discarded.

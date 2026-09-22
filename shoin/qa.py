@@ -301,7 +301,8 @@ def build_context(
         titles.append(title)
         # Section breadcrumb from this source's TOP (most-relevant) hit — grouped[]
         # preserves the relevance order hits arrived in, so [0] is the best match.
-        contexts.append(_section_from_context(grouped[source_id][0].context, title))
+        section = _section_from_context(grouped[source_id][0].context, title)
+        contexts.append(section)
         snums[source_id] = idx
         # Merge consecutive-seq hits into one continuous segment (v0.2.207),
         # assembled in DOCUMENT order (v0.2.208): adjacent chunks share a
@@ -378,7 +379,15 @@ def build_context(
         body = "\n…\n".join(texts)
         bodies.append(body)
         chunk_id_lists.append(chunk_ids)
-        parts.append(f"[S{idx}] {title}\n<<<SOURCE S{idx}\n{body}\n>>>")
+        # Show the section in the prompt too (v0.2.221): the breadcrumb was
+        # computed for the INDEX in v0.2.123 and weighted for RANKING in
+        # v0.2.218, but the model never saw it — a chunk torn out of its
+        # section loses exactly the heading context that identifies what it
+        # is about. ~8 tokens per source buys the model the same topicality
+        # signal the ranker uses. (Label is the top hit's section; a segment
+        # spanning several sections may contain others.)
+        sec = f" (§ {section})" if section else ""
+        parts.append(f"[S{idx}] {title}{sec}\n<<<SOURCE S{idx}\n{body}\n>>>")
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
     return GroundedContext(
         titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts,
