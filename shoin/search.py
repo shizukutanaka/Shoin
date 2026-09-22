@@ -590,13 +590,32 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
     # score in Python, and take the top k.  Without the cap a common CJK bigram
     # on a large notebook can pull tens of thousands of rows into memory.
+    # The cap is applied AFTER ordering by the same formula _needle_score()
+    # computes — text occurrence count + _CTX_BM25_WEIGHT for context presence —
+    # so the pool holds the best 2000 candidates rather than the first 2000 in
+    # insertion order.  Without ORDER BY a common short needle on a >cap
+    # notebook silently drops the densest late-added chunks before Python ever
+    # sees them.  REPLACE-based counting matches str.count's non-overlapping
+    # semantics; LOWER() folds ASCII exactly like LIKE and str.lower() do.
+    score_terms = [
+        "((LENGTH(LOWER(c.text)) - LENGTH(REPLACE(LOWER(c.text), LOWER(?), ''))) / ?"
+        " + CASE WHEN c.context LIKE ? ESCAPE '|' THEN ? ELSE 0.0 END)"
+        for _ in needles
+    ]
+    score_expr = " + ".join(score_terms)
+    score_params = [
+        p
+        for n in needles
+        for p in (n, len(n), f"%{_esc_like(n)}%", _CTX_BM25_WEIGHT)
+    ]
     like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
         f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
+        f" ORDER BY {score_expr} DESC"
         f" LIMIT ?",
-        [notebook_id, *like_params, like_cap],
+        [notebook_id, *like_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []
     for r in rows:
