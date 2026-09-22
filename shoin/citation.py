@@ -381,6 +381,52 @@ _MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
 # is a component of a larger form, not a standalone value.
 _KANJI_BARE_RE = re.compile(r"([一二三四五六七八九十百千]{2,})(?![一二三四五六七八九十百千万億兆])")
 
+# Spelled-out English numerals (v0.2.196): "three million" ↔ "3000000",
+# "twenty-one" ↔ "21" — English sources assert the same values in words and
+# the digit-string presence check flagged the correct restatement. "and" is
+# deliberately not a separator ("one and two" is a list, not a sum), so the
+# BrE "three hundred and twenty" splits into two runs — a documented miss,
+# not a wrong expansion.
+_EN_SMALL = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_EN_BIG = {"thousand": 1_000, "million": 1_000_000, "billion": 1_000_000_000}
+_EN_NUM_RE = re.compile(
+    r"(?<![a-zA-Z])("
+    + "|".join([*_EN_SMALL, "hundred", *_EN_BIG])
+    + r")(?:[ -]("
+    + "|".join([*_EN_SMALL, "hundred", *_EN_BIG])
+    + r"))*(?![a-zA-Z])",
+    re.IGNORECASE,
+)
+
+
+def _en_value(run: str) -> int | None:
+    """Value of a spelled-out English numeral run, or None when ambiguous.
+
+    Accumulates small numbers, multiplies by hundred/thousand/million/billion:
+    "three hundred twenty five" → 325, "two million" → 2,000,000. An empty
+    local reads as one ("a hundred" → 100, "million" → 1,000,000).
+    """
+    total = 0
+    local = 0
+    used = False
+    for tok in re.split(r"[ -]+", run.lower()):
+        if tok in _EN_SMALL:
+            local += _EN_SMALL[tok]
+        elif tok == "hundred":
+            local = (local or 1) * 100
+        else:
+            total += (local or 1) * _EN_BIG[tok]
+            local = 0
+        used = True
+    return total + local if used else None
+
 
 def _kanji_value(run: str) -> int | None:
     """Positional value of a kanji-numeral run, or None when ambiguous.
@@ -461,6 +507,10 @@ def _numbers_expanded(text: str) -> set[str]:
         kv = _kanji_value(m.group(1))
         if kv is not None and kv > 0:
             nums.add(str(kv))
+    for m in _EN_NUM_RE.finditer(t):
+        ev = _en_value(m.group(0))
+        if ev is not None and ev > 0:
+            nums.add(str(ev))
     return nums - suffixed
 
 
