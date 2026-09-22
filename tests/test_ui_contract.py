@@ -455,6 +455,43 @@ const excerpt = "前文。引用箇所のテキストはここにある。後続
         rc, out = _run_node(harness + _js_block(src, "async function openSeal"))
         self.assertEqual(rc, 0, out)
 
+    def test_done_handler_toggles_degraded_pane_badge(self) -> None:
+        """v0.2.240: #degBadge ("検索のみ" pane-head indicator) was dead UI —
+        never unhidden, while the SSE done frame carried `degraded` all along.
+        Executes the real `else if (ev==="done")` block under node and asserts
+        the badge tracks j.degraded in both directions."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        harness = (
+            """\
+const degBadge = {hidden: true};
+const chatEl = {scrollTop: 0, scrollHeight: 0};
+const $ = s => s === "#degBadge" ? degBadge : s === "#chat" ? chatEl : {};
+function el(t2, c, txt){ return {tag:t2, cls:c, text:txt, children:[],
+  append(x){this.children.push(x)}} }
+function t(k){ return k }
+function renderWithSeals(){}
+function reportBadges(){}
+const bd = {parentElement: {kids: [], append(x){this.kids.push(x)}}};
+const acc = "回答テキスト";
+function runDone(j){ let ev = "done"; if (false) {}
+"""
+            + _js_block(src, 'else if (ev==="done")')
+            + """
+}
+runDone({report: {degraded: true}, degraded: true});
+if (degBadge.hidden !== false)
+  { console.error("badge not shown on degraded done"); process.exit(1) }
+runDone({report: {}, degraded: false});
+if (degBadge.hidden !== true)
+  { console.error("badge not hidden on normal done"); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

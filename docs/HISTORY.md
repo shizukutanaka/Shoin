@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.239
+## Version History: v0.1.37 → v0.2.240
+
+### v0.2.240 (2026-09-22)
+**Fixed (UI, dead degraded badge)**: the pane-head `#degBadge` ("検索のみ") was dead UI — present in the markup with `hidden`, reset in two places, and **never unhidden** — while the SSE `done` frame has carried a `degraded` flag all along (False on the no-hit path, the real bool otherwise). The badge's evident purpose is the *per-answer* retrieval-only signal — the case where the LLM is nominally on but errored mid-answer, distinct from the global banner's "LLM off" — and the per-message `badge dim` scrolls away in a long thread. The `done` handler now sets `$("#degBadge").hidden = !j.degraded`. New `test_done_handler_toggles_degraded_pane_badge` extracts the real `else if (ev==="done")` block and runs it under node — badge shows on a degraded done and hides on a normal one. Verified fail-then-pass.
 
 ### v0.2.239 (2026-09-22)
 **Fixed (UI, seal-click title collision)**: on reports predating `source_id_map` the seal click fell back to a title scan and opened the **first** same-titled source — with two same-titled sources (identical `<title>` pages, duplicate file names) the reader verifies the citation against the wrong document: silent misattribution on the very surface built to prevent it. When the stored excerpt is available, `openSeal` now probes each candidate's chunks and opens the source whose text actually contains the excerpt head — the same provable check `renderFullSource` applies to chunk ids (v0.2.230), one level up. A `_sealSeq` counter guards the async probes against a second seal click racing in; single-match and no-excerpt paths are unchanged (no extra fetches). `openSeal` is now async — the `onclick` callers never awaited it anyway. New `test_openSeal_disambiguates_title_collision` executes the real function under node: collision → opens the excerpt-containing source (not the first), single match → no probe fetches, no excerpt → first-match fallback. Verified fail-then-pass (old code picked source 1).

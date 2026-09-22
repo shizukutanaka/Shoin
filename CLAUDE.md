@@ -342,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.239** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.240** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 
