@@ -259,9 +259,14 @@ def _print_report(report: CitationReport) -> None:
     if uncited:
         supported = set(report.get("uncited_supported") or [])
         print(_t("cite.uncited", n=str(len(uncited))))
+        sup_src = report.get("uncited_supported_source") or {}
         for sentence in uncited:
             # Grounded uncited = citation omission; ungrounded = the dangerous kind.
-            mark = f" [{_t('cite.uncited_supported')}]" if sentence in supported else ""
+            mark = (
+                f" [{_t('cite.uncited_supported')}→{sup_src.get(sentence, '')}]"
+                if sentence in supported
+                else ""
+            )
             print(f"  - {sentence}{mark}")
     degenerate = report.get("degenerate") or []
     if degenerate:

@@ -253,6 +253,9 @@ class CitationReport(TypedDict):
     #                        assertion; the ungrounded remainder is the
     #                        dangerous kind (present only when non-empty)
     uncited_supported: NotRequired[list[str]]
+    #   uncited_supported_source -> sentence -> best-matching "S#" the
+    #   citation was most likely omitted from
+    uncited_supported_source: NotRequired[dict[str, str]]
     # Snippets of verbatim repetition signalling an LLM degeneration loop —
     # answer-internal, so present whenever it fires (no sources needed).
     # Absent on old persisted reports — consumers must guard.
@@ -1557,14 +1560,25 @@ def make_report(
             # dangerous kind the badge should alarm about. Same CONFIRM_MIN
             # bigram evidence verify_grounding() uses to confirm citations.
             body_bigrams = [_bigrams(b) for b in source_bodies or []]
-            supported = [
-                s for s in uncited
-                if (cb := _bigrams(s)) and any(
-                    _overlap(cb, sb) >= CONFIRM_MIN for sb in body_bigrams
-                )
-            ]
+            supported: list[str] = []
+            supported_src: dict[str, str] = {}
+            for s in uncited:
+                cb = _bigrams(s)
+                if not cb:
+                    continue
+                best_i, best_o = -1, 0.0
+                for i, sb in enumerate(body_bigrams):
+                    o = _overlap(cb, sb)
+                    if o > best_o:
+                        best_o, best_i = o, i
+                if best_o >= CONFIRM_MIN:
+                    supported.append(s)
+                    # Name the best-matching source so the fix is "add [S#]",
+                    # not "re-read every source" (v0.2.216).
+                    supported_src[s] = f"S{best_i + 1}"
             if supported:
                 report["uncited_supported"] = supported
+                report["uncited_supported_source"] = supported_src
     deg = degenerate_spans(text, history=history)
     if deg:
         report["degenerate"] = deg

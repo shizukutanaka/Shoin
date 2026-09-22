@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.215
+## Version History: v0.1.37 → v0.2.216
+
+### v0.2.216 (2026-09-22)
+**Changed (citation report, actionable uncited_supported)**: `uncited_supported` told the user *that* a grounded claim was missing its citation but not *which* source to cite — the fix was "re-read every source". The report now also emits **`uncited_supported_source`**: sentence → best-matching `"S#"` (the argmax bigram overlap already computed for the split, just kept instead of discarded).
+
+- CLI marker now reads `[出典内一致=引用欠落の疑い→S2]` / `[matches a source — missing citation→S2]`; both UI badge tooltips append `→S#` the same way. Export's count-only status bit is untouched (no per-sentence surface to carry it).
+- `uncited_supported` itself is unchanged (still the list of sentences) — the map is a separate `NotRequired` field, so old consumers and old persisted reports stay valid.
+- Field contract: present iff `uncited_supported` is present; only sentences in that list appear as keys; ties resolve to the lowest source index (deterministic argmax).
 
 ### v0.2.215 (2026-09-22)
 **Fixed (citation verification, cross-turn contradiction)**: `self_contradictions` only compared sentences *within* one answer — every check still analyzed a single message, so a small model that answered **"効果はある"** last turn and silently reversed to **"効果はない"** this turn produced no warning anywhere. The cross-turn mirror of v0.2.210's parrot-loop fix, completing the contradiction-detection coverage (intra-turn done in v0.2.204).
