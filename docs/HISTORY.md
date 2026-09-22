@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.221
+## Version History: v0.1.37 → v0.2.222
+
+### v0.2.222 (2026-09-22)
+**Changed (prompt, per-segment section labels)**: v0.2.221's `§` label sat in the source *header*, but a single source can contribute hits from several sections (top-k picks non-adjacent chunks) — one header label was then misinformation for every other segment. Labels now live **per segment**: each excerpt block is prefixed `§ <section>` naming the section its own leading chunk came from, so a multi-section excerpt reads `§ 免疫の基礎\n<text>\n…\n§ 副作用\n<more text>` instead of one header claiming a single origin.
+
+- Header is back to `[S#] title` — strictly accurate at every granularity; the information moved rather than being duplicated.
+- Label is tracked alongside each `seg_parts` entry during merge assembly (leading chunk's section), so the v0.2.207/208 merge and doc-order logic is untouched.
+- Unbilled (~10 chars/segment, outside token accounting): a truncated segment still gets to say where it came from — `§ sec\ntext…`.
+- `source_contexts` (the UI tooltip) is unchanged — still the top hit's section.
 
 ### v0.2.221 (2026-09-22)
 **Changed (prompt, contextual retrieval completion)**: the section breadcrumb was computed for the **index** (v0.2.123) and weighted for **ranking** (v0.2.218) — but the prompt never showed it. A source header read `[S1] 免疫レポート` and the excerpt beneath was a chunk torn out of its section, stripped of exactly the heading context that says what the passage is about. The model now sees `[S1] 免疫レポート (§ 免疫の基礎)` — the third and final stage of contextual retrieval: index → rank → prompt.
