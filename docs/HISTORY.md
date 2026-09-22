@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.230
+## Version History: v0.1.37 → v0.2.231
+
+### v0.2.231 (2026-09-22)
+**Docs (verification-suite sync)**: the public spec of the flagship feature had drifted ~45 versions behind the code — README still advertised "四段の引用検証", spec.md §引用検証仕様 listed the original four checks plus one, and CLAUDE.md's check list stopped at unit consistency (v0.2.190) while the suite had grown to ten checks plus the exemption/suggestion/provenance machinery around them. All three surfaces now describe the actual suite: range, grounding, misattribution (+suggested right source), uncited (+supported split, +named source, structural exemptions), numeric (magnitude/kanji/English/歩合/rate/era), quote (verbatim proof + doctored quotes), unit, negation, self-contradiction (incl. cross-turn), degeneration (incl. cross-turn) — plus the `source_detail` retrieval provenance and the full `CitationReport` field list. Also refreshed CLAUDE.md's export `_status_line`/`_legend` description. Docs-only; the release criterion's "docs updated" was failing before this.
 
 ### v0.2.230 (2026-09-22)
 **Fixed (UI, stale cited-passage mark after refresh)**: `chunks.id` is a plain SQLite rowid (no AUTOINCREMENT) — after `refresh_source()` replaces a URL source's chunks, the new rows can **reuse** the exact ids an old report's `source_chunk_ids` stored, so `renderFullSource` could pin the "引用箇所" mark on a chunk the citation never saw. That's a silent misattribution — the one display the app must never get wrong, since the mark is the visual proof of grounding. The stored `source_excerpts[S#]` already carries the text the citation actually used, so the renderer now marks a chunk only when its 24-char head appears in that excerpt; a refreshed source's recycled id whose text diverges marks nothing (honest absence over wrong claim). Without a stored excerpt there is nothing to verify against — old reports keep id-only marking. New contract test extracts `renderFullSource` into node with a stubbed DOM and asserts both directions (stale-id rejection + no-excerpt fallback), the suite's first behavioral UI check beyond syntax/i18n/routes.

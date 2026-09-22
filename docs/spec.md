@@ -87,16 +87,22 @@ query → [BM25 (FTS5)] ─┐
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
 - プロンプト: ソースを `[S1]..[Sn]` で番号付け、各ソースへ公平なトークン予算配分
 
-## 引用検証仕様 (差別化の核、四段検証)
+## 引用検証仕様 (差別化の核、機械検証スイート)
 
 根拠: hallucinated attributionは機械検出可能(arXiv:2412.18004)、answer-level指標はpartial failureを隠すためclaim-level検証が必要。
 
 1. **範囲チェック**: 生成完了後 `\[S(\d+)\]` を全抽出、実在ソース数 n と照合 → 範囲外引用を `invalid` としてフラグ
 2. **根拠確認**: 引用文とソース本文の文字bigram重複が閾値(0.30)以上なら `confirmed`
-3. **誤帰属検出**: 引用文が引用元ではなく**別の**ソースに強く一致(gap 0.20以上)する場合 `misattributed` としてフラグ
-4. **無出典断定検出**(v0.2.65): 引用が一切ない断定文を `uncited` としてフラグ。「ソースに記載なし」等の明示的免責文は除外
-5. `citation_report`: `{cited, invalid, coverage, source_map, confirmed, misattributed, uncited}`。集約スコアは持たない(同義語言い換えと誤帰属を字句信号だけでは区別できないため、確信できる場合のみ提示)
-6. UI: invalid引用は赤表示、coverage<50%は注意バッジ、uncited断定文は警告バッジ
+3. **誤帰属検出**: 引用文が引用元ではなく**別の**ソースに強く一致(gap 0.20以上)する場合 `misattributed` としてフラグ + 最尤の正出典を `misattributed_suggested` で提示
+4. **無出典断定検出**: 引用が一切ない断定文を `uncited` としてフラグ。出典内一致する文は引用欠落 `uncited_supported` として区別し最尤出典を `uncited_supported_source` で提示。「ソースに記載なし」等の明示的免責文・構造行・列挙導入・フェンス/インデントコードは除外
+5. **数値一致** `numeric_mismatch`: 出典に無い数値の主張を検出。倍率/漢数字/英数詞/歩合/率表記/同族単位換算/元号(令和6年≡2024年)を展開して等価値は非フラグ
+6. **逐語引用** `quote_mismatch`: 「…」/"…" の引用が**別の**ソースに逐語一致=誤帰属の文字列証明。引用元自身の言い換えに引用符を被せた改竄引用も検出
+7. **単位一致** `unit_mismatch`: 数値は出典にあるが単位が非互換(100km vs 100m等)
+8. **否定反転** `negation_mismatch`: 出典文言を極性反転/反義語・程度語すり替えた主張
+9. **自己矛盾** `self_contradiction`: 同一回答内(および history= でターン横断)の極性矛盾
+10. **繰返し退化** `degenerate`: 回答内の逐語≥3回反復——小規模LLM特有のループ失敗
+11. `citation_report`: `{cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed(+misattributed_suggested), uncited(+uncited_supported, +uncited_supported_source), numeric_mismatch, quote_mismatch, unit_mismatch, negation_mismatch, self_contradiction, degenerate, degraded, source_excerpts, source_contexts, source_chunk_ids, source_detail}`。集約スコアは持たない(同義語言い換えと誤帰属を字句信号だけでは区別できないため、確信できる場合のみ提示)
+12. UI/CLI/export: invalid引用は赤表示、coverage<50%は注意バッジ、各警告はバッジ/行/ステータス行で表示。ソースビューアは抜粋・節・引用チャンク・検出経路(`source_detail`: 全文/意味のどちらが拾ったか)を表示し、CLIの`[S#]`行とexport凡例も同じ出自を保持
 
 ## セキュリティ (STRIDE要点)
 
