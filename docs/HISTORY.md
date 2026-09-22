@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.191
+## Version History: v0.1.37 → v0.2.192
+
+### v0.2.192 (2026-09-22)
+**Fixed (citation verification, magnitude shorthand)**: `_numbers_expanded()` — Japanese shorthand magnitudes no longer false-flag in `numeric_mismatches()`. The check compared digit strings for presence only, so a model restating "3.2万円" as "32000円" (or vice versa) was flagged as an absent number — the same value written in the notation readers actually use. A number carrying a 千/万/百万/千万/億 suffix is now represented by its canonical value instead of the raw digits: `"3.2万" → {"32000"}`.
+
+- **Value replaces raw digits, deliberately**: keeping the raw "3.2" alongside would flag it against a source that spelled the value out — the shorthand digits literally do not occur there. Only integral expansions are added (non-integral values have no canonical spelling → inconclusive → silent).
+- **Two-sided comparison**: the flag now requires a claim number to fail BOTH the expanded-set membership AND the original substring test (`num not in src_nums[n] and num not in src_norm[n]`). Set membership catches `32000 ↔ 3.2万`; the substring fallback preserves v0.2.184's rounding tolerance (`"63"` stays silent inside `"63.5%"`) — no behavioural regression, only new silence for magnitude equivalents.
+- **Bounded**: single suffix only — 千万/百万 precede 万 in the alternation (ordered leftmost matching); spelled-out numerals and multi-suffix chains (`1億2000万`) stay unchecked per the silent-when-ambiguous principle.
+
+4 tests added: shorthand↔spelled-out silence both directions; 億/万-scale expansion; real value swap still flags (3.2万 vs 3.4万 both notations); rounding tolerance preserved (63 vs 63.5%). `pytest tests/` now runs 779 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.191 (2026-09-22)
 **Fixed (citation verification, unit aliases)**: `_UNIT_ALIASES` — cross-script same-unit spellings no longer false-flag. v0.2.190's `_units_compat` only accepted identical or prefix-extending units, so `100キロ` vs `100km`, `3歳` vs `3才`, `12名` vs `12人` — the same count written in another script — were flagged as mismatches. Found while shipping the check: same-unit synonyms are a documented blind spot it produced itself.

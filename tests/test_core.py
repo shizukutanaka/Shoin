@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.191")
+        self.assertEqual(VERSION, "0.2.192")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4033,6 +4033,34 @@ class TestNumericMismatches(unittest.TestCase):
             source_bodies=["採用率は63%だった。"],
         )
         self.assertEqual(report.get("numeric_mismatch"), [1])
+
+    def test_magnitude_shorthand_matches_spelled_out(self) -> None:
+        """"3.2万" and "32000" assert the same value — expanding shorthand
+        must not flag a correct restatement in either direction (v0.2.192)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}), [])
+        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}), [])
+
+    def test_magnitude_expansion_oku_and_sen(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}), [])
+        self.assertEqual(numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}), [])
+
+    def test_real_value_swap_still_flags(self) -> None:
+        """Expansion must not mask a genuine error: 3.2万 ≠ 3.4万."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}), [1])
+        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}), [1])
+
+    def test_rounding_tolerance_preserved(self) -> None:
+        """"63" inside "63.5%" stays silent — substring tolerance is kept so
+        a rounded restatement does not flag (v0.2.184 behaviour)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}), [])
 
 
 class TestUnitMismatches(unittest.TestCase):
