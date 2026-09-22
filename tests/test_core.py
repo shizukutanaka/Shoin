@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.207")
+        self.assertEqual(VERSION, "0.2.208")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3659,9 +3659,10 @@ class TestQA(unittest.TestCase):
         self.assertNotIn("…", body)
         self.assertEqual(ctx.source_chunk_ids[0], [1, 2, 3])
 
-    def test_build_context_no_merge_without_seq_or_order(self) -> None:
-        """Unknown seq (-1, test-constructed) and descending seqs never merge —
-        only ascending doc-order runs are continuous text."""
+    def test_build_context_doc_order_merges_reversed_hits(self) -> None:
+        """v0.2.208: hits are assembled in document order — a pair that arrives
+        reversed (rank k+1 above rank k) merges too, and unknown-seq hits
+        (-1, test-constructed) sort last and never merge."""
         from shoin.qa import build_context
         from shoin.search import Hit
 
@@ -3669,18 +3670,22 @@ class TestQA(unittest.TestCase):
         c0 = "最初のチャンクです。" + tail
         c1 = tail + "と、隣接チャンクの新規部分が続きます。"
         with make_store() as s:
-            nb = s.create_notebook("ctx-nomerge")
+            nb = s.create_notebook("ctx-docorder")
             src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
-            unknown = build_context(s, [
-                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0),
-                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9),
-            ])
             reversed_ = build_context(s, [
                 Hit(chunk_id=2, source_id=src.id, text=c1, score=1.0, seq=1),
                 Hit(chunk_id=1, source_id=src.id, text=c0, score=0.9, seq=0),
             ])
+            unknown = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9),
+            ])
+        body = reversed_.source_bodies[0]
+        # Reversed arrival still merges: boundary deduplicated, doc order kept.
+        self.assertEqual(body.count(tail), 1)
+        self.assertIn(tail + "と、隣接チャンク", body)
+        self.assertNotIn("…", body)
         self.assertIn("…", unknown.source_bodies[0])
-        self.assertIn("…", reversed_.source_bodies[0])
 
     def test_build_context_truncated_segment_marks_only_surviving_chunks(self) -> None:
         """A merged segment truncated by the budget marks only the chunk ids

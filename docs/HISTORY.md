@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.207
+## Version History: v0.1.37 → v0.2.208
+
+### v0.2.208 (2026-09-22)
+**Improved (qa, document-order excerpts)**: completes the adjacent-chunk merge — v0.2.207 only merged hits arriving in ascending seq order, so a pair that arrived reversed (rank k+1 above rank k) kept a false "…" discontinuity and presented the source body out of document order.
+
+- **Document-order assembly**: hits within a source group are now sorted by `seq` before segment assembly — unknown seqs (-1, test-constructed) sort last and stay in relevance order. Every adjacent run merges regardless of retrieval order, and the excerpt for a source is document-ordered text (a source's body IS its document layout).
+- **Deliberate ordering trade-off**: budget consumption now follows document position rather than hit rank — a coherent excerpt beats a slightly-more-relevant fragment. `grouped[]` keeps relevance order untouched for `contexts[0]` (section breadcrumb still comes from the top hit) and `snums`.
+- Replaces v0.2.207's "descending pairs never merge" boundary with the complete behavior; the no-merge boundary is now only unknown seq.
+
+1 test rewritten (reversed pair merges + unknown-seq gap kept). `tests/` now runs 830 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.207 (2026-09-22)
 **Improved (qa, prompt continuity + budget dedup)**: when retrieval surfaces adjacent chunks of the same source (the common case — a topic spanning a chunk boundary), `build_context()` presented them joined by the `"\n…\n"` gap marker. That claims a discontinuity that does not exist AND bills the shared ~CHUNK_OVERLAP-token boundary to the token budget twice (once per chunk).
