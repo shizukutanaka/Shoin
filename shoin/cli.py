@@ -50,6 +50,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.misattr": " ⚠番号取り違えの可能性",
         "cite.numeric": " ⚠数値が出典に無し",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
+        "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
@@ -92,6 +93,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.misattr": " ⚠ possible wrong source",
         "cite.numeric": " ⚠ number not in source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
+        "cite.degenerate": "⚠ Possible generation loop ({n}):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
@@ -244,6 +246,11 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.uncited", n=str(len(uncited))))
         for sentence in uncited:
             print(f"  - {sentence}")
+    degenerate = report.get("degenerate") or []
+    if degenerate:
+        print(_t("cite.degenerate", n=str(len(degenerate))))
+        for snippet in degenerate:
+            print(f"  - {snippet}")
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. The Web UI has warned
     # about this since early on; the CLI silently dropped it despite REQ-103

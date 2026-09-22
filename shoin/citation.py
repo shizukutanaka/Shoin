@@ -157,6 +157,10 @@ class CitationReport(TypedDict):
     # Present only when n_sources > 0 (nothing to cite against otherwise).
     # Absent on old persisted reports — consumers must guard.
     uncited: NotRequired[list[str]]
+    # Snippets of verbatim repetition signalling an LLM degeneration loop —
+    # answer-internal, so present whenever it fires (no sources needed).
+    # Absent on old persisted reports — consumers must guard.
+    degenerate: NotRequired[list[str]]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -452,6 +456,48 @@ def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     return sorted(out)
 
 
+# --- generation-degeneration signals (v0.2.188) --------------------------------
+
+# Minimum normalised length of a repeated unit for it to count as degeneration:
+# short phrases recur legitimately ("である。", "for example"), while a ≥6-char
+# span repeating ≥3 times consecutively — or a ≥10-char sentence appearing ≥3
+# times in one answer — is the classic repeat-loop failure shape of small LLMs
+# (the reason llama.cpp/Ollama ship repeat-penalty sampling guards).
+_DEGEN_SPAN_MIN = 6
+_DEGEN_SENT_MIN = 10
+_DEGEN_REPEAT = 3
+_DEGEN_SNIP = 40
+_DEGEN_SPAN_RE = re.compile(rf"(.{{{_DEGEN_SPAN_MIN},}}?)\1{{{_DEGEN_REPEAT - 1},}}")
+
+
+def degenerate_spans(text: str) -> list[str]:
+    """Snippets of repeated content signalling an LLM degeneration loop.
+
+    Two orthogonal shapes, both mechanical and dependency-free:
+    - the same normalised sentence (≥10 chars) appearing ≥3 times in the
+      answer — the "parroting" loop;
+    - any ≥6-char span repeating ≥3 times *consecutively* anywhere in the
+      text — the "stuck tail" loop sampling guards exist to prevent.
+
+    Deliberately asymmetric like the other checks: nothing is flagged below
+    these bounds — parallel structures ("Aである。Bである。") and honest
+    emphasis repeat *differently*, never verbatim-normed ≥3 times.
+    """
+    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).lower()
+    out: set[str] = set()
+    counts: dict[str, int] = {}
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        if len(s) >= _DEGEN_SENT_MIN:
+            counts[s] = counts.get(s, 0) + 1
+    for s, c in counts.items():
+        if c >= _DEGEN_REPEAT:
+            out.add(s[:_DEGEN_SNIP])
+    for m in _DEGEN_SPAN_RE.finditer(low):
+        out.add(m.group(1)[:_DEGEN_SNIP])
+    return sorted(out)
+
+
 # Minimum non-whitespace character count in a sentence's citation-stripped body for
 # it to count as a "claim" worth flagging. Filters trivial acknowledgments ("はい。",
 # "そう。") without needing an LLM to classify sentence intent. Higher than the
@@ -600,4 +646,7 @@ def make_report(
         uncited = uncited_sentences(text)
         if uncited:
             report["uncited"] = uncited
+    deg = degenerate_spans(text)
+    if deg:
+        report["degenerate"] = deg
     return report
