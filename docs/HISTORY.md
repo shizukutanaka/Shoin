@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.201
+## Version History: v0.1.37 → v0.2.202
+
+### v0.2.202 (2026-09-22)
+**Improved (citation verification, antonym polarity)**: the polarity check now covers the second inversion shape — a mirrored claim that swaps a **scale term for its opposite** while negation parity stays equal ("効果は高い" citing "効果は低い", "sales increased" citing "sales decreased"). Negation parity alone cannot see this: both sides are affirmative; the contradiction lives in the degree word.
+
+- **`_ant_signs()`**: ~30 curated antonym classes (JP degree adjectives + inflections, trend verbs, win/lose, succeed/fail, safe/danger, easy/hard; EN increase/decrease, better/worse, more/less/fewer, faster/slower, stronger/weaker, larger/smaller, longer/shorter, easier/harder, success/fail). Each surface maps to (class, sign); the claim flags when a class present in BOTH sides nets opposite signs — a class on only one side is a lexical difference, not an inversion.
+- **Ordering safety**: longest-surface-first regex so 低下/下落 feed the rise/fall class, never the 高/低 adjective class; English surfaces are word-bounded; Japanese past-tense stems (〜かっ) are enumerated explicitly.
+- Same flag, same surfaces: `negation_mismatch` is the polarity-inversion flag (documented scope extension — the check's name covers negation, its semantic is polarity); no new UI/CLI/export wiring needed.
+
+5 tests added: JP degree swap (高↔低), trend inversion (増加↔減少), English swap (increased↔decreased), matching-sign silence, unshared-class silence. `tests/` now runs 807 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.201 (2026-09-22)
 **Improved (citation verification, negation polarity)**: a NINTH mechanical check — `negation_mismatches()` — flags claims that mirror a source sentence with the negation flipped ("効果はない" citing "効果はある"). Bigram overlap *confirms* such a claim (~0.5+ shared) precisely because the wording matches; only a parity count catches the inversion — a documented LLM faithfulness failure class no previous check could see.

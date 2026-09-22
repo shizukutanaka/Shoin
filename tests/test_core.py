@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.201")
+        self.assertEqual(VERSION, "0.2.202")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4513,6 +4513,45 @@ class TestNegationMismatches(unittest.TestCase):
             source_bodies=["治療の効果はあることが分かった。"],
         )
         self.assertEqual(report.get("negation_mismatch"), [1])
+
+    def test_flags_antonym_swap_japanese(self) -> None:
+        """v0.2.202: same mirror, same negation parity, but a scale term is
+        swapped for its opposite — a polarity inversion bigrams confirm."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療の効果は低かった。"}
+        text = "この治療の効果は高かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_trend_inversion(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "今年の売上は減少した。"}
+        text = "今年の売上は増加した[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_english_antonym_swap(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the treatment decreased survival rates."}
+        text = "the treatment increased survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_matching_antonym_stays_silent(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療の効果は高かった。"}
+        text = "この治療の効果は高かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_unshared_antonym_class_stays_silent(self) -> None:
+        """A class present on only one side is a lexical difference, not an
+        inversion — the claim may just phrase the scale differently."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この機能は重要である。"}
+        text = "この機能は重要だ[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
 
 
 class TestDegenerateSpans(unittest.TestCase):

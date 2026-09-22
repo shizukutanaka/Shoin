@@ -945,6 +945,85 @@ _NEG_SAFE_RE = re.compile(r"ではな|のではな|じゃな")
 # a flip.
 _NEG_OVERLAP_MIN = 0.5
 
+# Antonym/degree classes (v0.2.202): the second polarity-inversion shape —
+# same mirror sentence, same negation parity, but a scale term swapped for
+# its opposite ("効果は高い" citing "効果は低い", "sales increased" citing
+# "sales decreased"). Each surface maps to (class, sign); a claim flags when
+# a class present in BOTH sides nets a different sign. Entries are full
+# inflected forms, longest first so 低下 (rise/fall) never feeds the 高/低
+# adjective class.
+_ANT: dict[str, tuple[str, int]] = {
+    **{s: ("rise", 1) for s in ("上昇", "上が", "向上", "高ま")},
+    **{s: ("rise", -1) for s in ("低下", "下降", "下が", "下落")},
+    **{s: ("inc", 1) for s in ("増加", "増大", "増幅", "拡大", "増え")},
+    **{s: ("inc", -1) for s in ("減少", "縮小", "減量", "減っ", "減り")},
+    **{s: ("better", 1) for s in ("改善", "改良", "好転")},
+    **{s: ("better", -1) for s in ("悪化",)},
+    **{s: ("win", 1) for s in ("勝利", "勝ち", "勝つ", "勝った")},
+    **{s: ("win", -1) for s in ("敗北", "負け", "負けた")},
+    **{s: ("succeed", 1) for s in ("成功",)},
+    **{s: ("succeed", -1) for s in ("失敗",)},
+    **{s: ("safe", 1) for s in ("安全",)},
+    **{s: ("safe", -1) for s in ("危険",)},
+    **{s: ("easy", 1) for s in ("簡単", "容易", "易しい")},
+    **{s: ("easy", -1) for s in ("困難", "難しい", "難しく", "難しかっ")},
+    **{s: ("high", 1) for s in ("高い", "高く", "高さ", "最高", "高かっ")},
+    **{s: ("high", -1) for s in ("低い", "低く", "低さ", "最低", "低かっ")},
+    **{s: ("big", 1) for s in ("大きい", "大きく", "大きさ", "大きかっ")},
+    **{s: ("big", -1) for s in ("小さい", "小さく", "小ささ", "小さかっ")},
+    **{s: ("many", 1) for s in ("多い", "多く", "多さ", "多かっ")},
+    **{s: ("many", -1) for s in ("少ない", "少なく", "少なさ", "少なかっ")},
+    **{s: ("strong", 1) for s in ("強い", "強く", "強かっ")},
+    **{s: ("strong", -1) for s in ("弱い", "弱く", "弱かっ")},
+    **{s: ("long", 1) for s in ("長い", "長く", "長かっ")},
+    **{s: ("long", -1) for s in ("短い", "短く", "短かっ")},
+    **{s: ("wide", 1) for s in ("広い", "広く", "広かっ")},
+    **{s: ("wide", -1) for s in ("狭い", "狭く", "狭かっ")},
+    **{s: ("fast", 1) for s in ("早い", "早く", "速い", "速く", "早かっ", "速かっ")},
+    **{s: ("fast", -1) for s in ("遅い", "遅く", "遅かっ")},
+    **{s: ("new", 1) for s in ("新しい", "新しく", "新しかっ")},
+    **{s: ("new", -1) for s in ("古い", "古く", "古かっ")},
+    **{s: ("deep", 1) for s in ("深い", "深く", "深かっ")},
+    **{s: ("deep", -1) for s in ("浅い", "浅く", "浅かっ")},
+    **{s: ("heavy", 1) for s in ("重い", "重く", "重かっ")},
+    **{s: ("heavy", -1) for s in ("軽い", "軽く", "軽かっ")},
+    **{s: ("thick", 1) for s in ("厚い", "厚く", "厚かっ")},
+    **{s: ("thick", -1) for s in ("薄い", "薄く", "薄かっ")},
+    **{s: ("en_inc", 1) for s in ("increase", "increased", "increases", "increasing", "rose", "risen", "rises", "higher", "growth", "grew")},
+    **{s: ("en_inc", -1) for s in ("decrease", "decreased", "decreases", "decreasing", "decline", "declined", "declines", "dropped", "fell", "fallen", "falls", "lower", "shrank")},
+    **{s: ("en_bet", 1) for s in ("better", "improved", "improves", "improvement")},
+    **{s: ("en_bet", -1) for s in ("worse", "worsened", "deteriorated")},
+    **{s: ("en_amt", 1) for s in ("more", "greater")},
+    **{s: ("en_amt", -1) for s in ("less", "fewer")},
+    **{s: ("en_spd", 1) for s in ("faster", "quicker")},
+    **{s: ("en_spd", -1) for s in ("slower",)},
+    **{s: ("en_str", 1) for s in ("stronger",)},
+    **{s: ("en_str", -1) for s in ("weaker",)},
+    **{s: ("en_siz", 1) for s in ("larger", "bigger")},
+    **{s: ("en_siz", -1) for s in ("smaller",)},
+    **{s: ("en_len", 1) for s in ("longer",)},
+    **{s: ("en_len", -1) for s in ("shorter",)},
+    **{s: ("en_eas", 1) for s in ("easier",)},
+    **{s: ("en_eas", -1) for s in ("harder",)},
+    **{s: ("en_win", 1) for s in ("success", "succeeded", "successful")},
+    **{s: ("en_win", -1) for s in ("failed", "failure", "fails")},
+}
+_ANT_RE = re.compile(
+    "|".join(
+        rf"\b{s}\b" if s.isascii() else s
+        for s in sorted(_ANT, key=len, reverse=True)
+    )
+)
+
+
+def _ant_signs(norm: str) -> dict[str, int]:
+    """Net sign per antonym class present in the text."""
+    signs: dict[str, int] = {}
+    for m in _ANT_RE.finditer(norm):
+        cls, sign = _ANT[m.group(0)]
+        signs[cls] = signs.get(cls, 0) + sign
+    return signs
+
 
 def _neg_parity(norm: str) -> int:
     """Negation parity of NFKC-normalised text with whitespace collapsed to
@@ -967,9 +1046,11 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     A claim flags when its bigrams cover >= _NEG_OVERLAP_MIN of a source
     sentence AND that sentence covers >= _NEG_OVERLAP_MIN of the claim's —
     both directions required so a claim restating only half of a bipolar
-    source sentence stays silent — and the negation parities differ.
-    Contrastive constructions ("AではなくB") are exempt: they assert the
-    same B the source asserts.
+    source sentence stays silent — and the polarity inverts: either the
+    negation parities differ, or an antonym class shared by both sides nets
+    opposite signs ("効果は高い" citing "効果は低い"). Contrastive
+    constructions ("AではなくB") are exempt: they assert the same B the
+    source asserts.
     """
     src_sents = {
         n: [
@@ -983,6 +1064,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     # both the mirror check and the parity count.
     src_bg = {n: [_bigrams(s) for s in sents] for n, sents in src_sents.items()}
     src_par = {n: [_neg_parity(s) for s in sents] for n, sents in src_sents.items()}
+    src_ant = {n: [_ant_signs(s) for s in sents] for n, sents in src_sents.items()}
     out: set[int] = set()
     prev_claim = ""
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -1018,7 +1100,11 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             sb = src_bg[n][best_i]
             if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
                 continue  # claim is only a subset of a longer source sentence
-            if _neg_parity(claim_norm) != src_par[n][best_i]:
+            claim_ant = _ant_signs(claim_norm)
+            if _neg_parity(claim_norm) != src_par[n][best_i] or any(
+                claim_ant[c] != src_ant[n][best_i][c]
+                for c in claim_ant.keys() & src_ant[n][best_i].keys()
+            ):
                 out.add(n)
     return sorted(out)
 
