@@ -324,6 +324,52 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_reportBadges_covers_every_flag(self) -> None:
+        """v0.2.235: reportBadges is the single badge chain shared by the live
+        SSE path and the persisted-history path (the duplication is how
+        negation_mismatch warned in badges while the seal stayed unstyled).
+        Executes the real function under node and asserts every flag lands a
+        badge of the right class — plus the coverage badge only fires on a
+        real number, not a missing/null coverage field."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function reportBadges")
+        harness = """\
+function el(tag, cls, text){ return {tag, cls, text, children:[],
+  append(x){this.children.push(x)}, setAttribute(){}} }
+function t(k){ return k }
+const COVERAGE_LOW = 0.5;
+function mkc(){ return {children: [], append(x){ this.children.push(x) }} }
+""" + fn + """
+const c = mkc();
+reportBadges(c, {
+  degraded: true, invalid: [9], misattributed: [4],
+  misattributed_suggested: {S4: "S1"}, numeric_mismatch: [5],
+  unit_mismatch: [6], negation_mismatch: [7], confirmed: [1, 2],
+  uncited: ["句a", "句b"], uncited_supported: ["句b"],
+  uncited_supported_source: {"句b": "S3"}, degenerate: ["x","x","x"],
+  self_contradiction: ["y","z"], cited: [1], coverage: 0.3});
+const classes = c.children.map(b => b.cls);
+const want = ["badge dim","badge err","badge err","badge err","badge err",
+              "badge err","badge dim","badge warn","badge warn","badge warn",
+              "badge warn"];
+if (JSON.stringify(classes) !== JSON.stringify(want))
+  { console.error("badges: " + JSON.stringify(classes)); process.exit(1) }
+const cbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("coverage"));
+if (cbadges.length !== 1) { console.error("coverage badge missing"); process.exit(1) }
+const c2 = mkc();
+reportBadges(c2, {cited: [1], coverage: null});
+if (c2.children.length !== 0)
+  { console.error("null coverage fired a badge"); process.exit(1) }
+const c3 = mkc();
+reportBadges(c3, {});
+if (c3.children.length !== 0) { console.error("empty report made badges"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
