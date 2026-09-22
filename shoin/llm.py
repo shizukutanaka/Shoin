@@ -17,6 +17,17 @@ from typing import Any
 from .config import embed_model, llm_model, llm_url
 
 CHAT_TIMEOUT_SEC = 180
+
+# Upper bound on generated tokens per request (v0.2.219).  Without it the
+# only stop is the endpoint's own default — llama.cpp's n_predict=-1 and
+# Ollama's num_predict=-1 both generate until context exhaustion, so the
+# degeneration loops the citation report *detects* also *consume* the whole
+# remaining context window (minutes of garbage on CPU-scale hardware).
+# max_tokens is a core OpenAI field accepted by llama.cpp, Ollama, vLLM and
+# llamafile alike.  4096 is deliberately generous — far above any legitimate
+# answer or Studio output for a ~2400-token context budget — so the cap
+# bounds runaway generation without shaping real output.
+MAX_TOKENS = 4096
 EMBED_TIMEOUT_SEC = 60
 HEALTH_TIMEOUT_SEC = 3
 
@@ -133,6 +144,7 @@ class LLMClient:
                 "messages": messages,
                 "temperature": temperature,
                 "stream": False,
+                "max_tokens": MAX_TOKENS,
             },
             CHAT_TIMEOUT_SEC,
         )
@@ -154,6 +166,7 @@ class LLMClient:
                     "messages": messages,
                     "temperature": temperature,
                     "stream": True,
+                    "max_tokens": MAX_TOKENS,
                 }
             ).encode("utf-8"),
             headers={"Content-Type": "application/json"},

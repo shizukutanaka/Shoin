@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.218")
+        self.assertEqual(VERSION, "0.2.219")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5428,6 +5428,60 @@ class TestLLMClient(unittest.TestCase):
         with self.assertRaises(LLMError) as cm:
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_chat_sends_max_tokens_bound(self) -> None:
+        """chat() must bound generation with max_tokens (v0.2.219): without it
+        endpoints default to n_predict=-1 and a degeneration loop generates
+        until context exhaustion — minutes of garbage on local hardware."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, MAX_TOKENS
+
+        sent: list[bytes] = []
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode()
+
+        def _fake_urlopen(req, **kw):
+            sent.append(req.data)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(_json.loads(sent[0])["max_tokens"], MAX_TOKENS)
+
+    def test_chat_stream_sends_max_tokens_bound(self) -> None:
+        """chat_stream() must carry the same bound — the SSE /ask path is the
+        one a parrot loop actually hits in the UI."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, MAX_TOKENS
+
+        sent: list[bytes] = []
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"}}]}',
+            b"data: [DONE]",
+        ])
+
+        def _fake_urlopen(req, **kw):
+            sent.append(req.data)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        self.assertEqual(_json.loads(sent[0])["max_tokens"], MAX_TOKENS)
 
     def test_available_returns_false_for_invalid_url_scheme(self) -> None:
         """available() must return False (not raise ValueError) for unknown URL schemes.
