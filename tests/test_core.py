@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.236")
+        self.assertEqual(VERSION, "0.2.237")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3168,6 +3168,30 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb_id, "猫", k=5)
             self.assertTrue(hits, "LIKE fallback must find the needle chunk")
             self.assertTrue(any("猫" in h.text for h in hits))
+
+    def test_fallback_cap_picks_best_pool(self) -> None:
+        """The LIKE pool cap must keep the BEST 2000 candidates, not the first.
+
+        like_cap bounds the SQL scan pool; before v0.2.237 the LIMIT applied in
+        insertion order, so on a notebook with >cap matching chunks the densest
+        late-added chunk was silently dropped before Python ever scored it.
+        ORDER BY the _needle_score formula inside SQL fixes which rows enter
+        the pool.  2005 filler chunks each matching "猫" once fill the cap; a
+        final chunk containing "猫" 20× must still rank first.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("pool-test").id
+            src = s.add_source(nb_id, "txt", "big pool", "t", "sha-pool")
+            texts = [f"猫を含む行{i}" for i in range(2005)] + ["猫" * 20]
+            s.add_chunks(src.id, texts)
+            # "猫" is 1 char → FTS5 trigram can't match → LIKE fallback fires
+            hits = bm25_search(s, nb_id, "猫", k=5)
+            self.assertTrue(hits, "LIKE fallback must return hits")
+            self.assertEqual(
+                hits[0].text,
+                "猫" * 20,
+                "densest chunk beyond the row cap must still win",
+            )
 
     def test_fallback_like_wildcards_escaped(self) -> None:
         """Underscore in a needle must be escaped so LIKE treats it as a literal.

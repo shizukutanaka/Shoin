@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.236
+## Version History: v0.1.37 → v0.2.237
+
+### v0.2.237 (2026-09-22)
+**Fixed (search, LIKE pool cap ranking)**: the LIKE fallback's 2000-row pool cap was applied in **insertion order** — `WHERE ... LIMIT 2000` with no `ORDER BY` — so on a notebook with more matching chunks than the cap, the densest late-added chunk was silently dropped before Python scoring ever saw it. For a JA-first tool this is the common path: every two-character compound (総説, 経済, 免疫 …) skips the trigram index and lands here, and "found nothing" is the answer shape that produces hallucinated answers. The query now `ORDER BY`s the exact `_needle_score` formula inside SQL — text occurrence count (REPLACE-based, non-overlapping like `str.count`; `LOWER()` matching LIKE's ASCII folding) plus `_CTX_BM25_WEIGHT` for context presence — so the cap keeps the *best* 2000 candidates instead of the first 2000. Verified fail-then-pass: 2005 single-`猫` fillers + a final `猫×20` chunk — the old code returned `行0`, the new code returns the dense chunk (`test_fallback_cap_picks_best_pool`).
 
 ### v0.2.236 (2026-09-22)
 **Fixed (UI, Studio badge parity) + test**: the Studio card heading had its **own third badge chain** — and it silently dropped `numeric_mismatch`, `unit_mismatch`, `negation_mismatch`, `misattributed_suggested`, `degraded` and `confirmed`. A fabricated statistic inside a briefing warned in chat but showed **nothing** on the Studio card whose whole job is surfacing exactly that. Its coverage guard was the weak `coverage < LOW` form too (`null < 0.5` → true in JS). The heading now calls the single `reportBadges()` extracted in v0.2.235, so all three surfaces (chat SSE, chat history, Studio) warn identically — the uncited/degenerate/contradict tooltips are preserved by the shared chain. New `test_renderStudio_shows_all_warning_badges` executes the real `renderStudio` + `reportBadges` under node and asserts the full class matrix on the card heading; verified fail-then-pass (the pre-change code emitted only 6 of 10 badges).
