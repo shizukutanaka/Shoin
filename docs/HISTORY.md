@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.189
+## Version History: v0.1.37 → v0.2.190
+
+### v0.2.190 (2026-09-22)
+**Added (citation verification, check 8)**: `unit_mismatches()` — the eighth machine check, closing the hole in `numeric_mismatches()`' presence test. That check asks only whether a digit string exists in the cited source; a number that IS present but carries a different unit is the same magnitude of fabrication and structurally invisible to it — "100km" vs "100m", "25ppm" vs "25%", "100億円" vs "100万円" all pass the presence check while being wrong. Here each cited clause's (number, unit) pairs are compared against the units the source attaches to that same number.
+
+- **Bounded unit extraction**: three suffix classes after a significant number (same ≥2-digit-or-decimal threshold as `_numbers`): ASCII unit runs (kg, km, GB, kWh, ppm, %, °C, μg), katakana unit runs (キロ, メートル, ドル, パーセント), and a fixed counter-kanji set (人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千 — persons/items/machines/currency/magnitudes). Time counters (年月日時分秒) are deliberately excluded: date chains like "2024年3月" make a bare 年 ambiguous between "year count" and "date part", so checking it would be noise, not signal.
+- **Deliberately asymmetric**: fires only when the source attaches a *different, incompatible* unit to the same number. A source occurrence with no unit is inconclusive (the unit may live in surrounding text); a claim number absent entirely is `numeric_mismatches()`' signal; and prefix-extending units ("1億"→"1億円", "3回"→"3回目") are elaboration, not a swap — `_units_compat` treats them as consistent.
+- **Same attribution machinery**: shares `_segment_claims` with `verify_grounding()`/`numeric_mismatches()`/`quote_mismatches()` — the unit claim in a co-cited sentence is judged against the clause it annotates.
+- **Wired like the numeric signal it extends**: `citation_report.unit_mismatch` (NotRequired, present only when non-empty) renders as an `err` badge + `mis`-class seal tooltip at both Web UI badge sites and in `renderWithSeals` (`chat.unit`, ja/en), as a `cite.unit` CLI marker (ja/en), and as `status_unit` in the Markdown export status line (ja/en). Display surfaces added for a new verification signal — reason documented here.
+- **No spec/schema change**: additive optional field, `.get()`-guarded everywhere.
+
+10 tests added: metric swap flag; matching-unit silence; magnitude-counter swap (億円 vs 万円); unitless-source-occurrence silence; absent-number silence (stays numeric's job); prefix-extension compatibility (2 cases); katakana swap; single-digit exclusion; clause-level attribution; report wiring. `pytest tests/` now runs 769 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.189 (2026-09-22)
 **Changed (retrieval, adaptive-k)**: `_tail_cut()` — score-gap (elbow) cutoff on the reranked candidate pool, applied before `mmr()` in both `retrieve()` and `retrieve_multi()`. Vector search ranks semantically-near chunks that may share zero query terms; RRF then hands that flat tail to MMR, which padded it into the prompt context and the `[S#]` source list whenever the genuinely-relevant set was smaller than k. The cut drops the tail at the first `ADAPTIVE_GAP = 0.25` adjacent score drop that lands on a chunk with `detail["lex"] == 0`.

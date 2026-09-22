@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.189")
+        self.assertEqual(VERSION, "0.2.190")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4033,6 +4033,89 @@ class TestNumericMismatches(unittest.TestCase):
             source_bodies=["採用率は63%だった。"],
         )
         self.assertEqual(report.get("numeric_mismatch"), [1])
+
+
+class TestUnitMismatches(unittest.TestCase):
+    """unit_mismatches() (v0.2.190): a cited claim asserting a number the source
+    DOES carry — but under a different unit ("100km" vs "100m"). Same magnitude
+    of fabrication as an absent number, structurally invisible to
+    numeric_mismatches()' presence check."""
+
+    def test_flags_metric_unit_swap(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "距離は100kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は100mだった。"}), [1])
+
+    def test_no_flag_when_unit_matches(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "採用率は63%だった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_magnitude_counter_swap_flagged(self) -> None:
+        """100億円 vs 100万円 — a real 1000× error, not a unit spelling variant."""
+        from shoin.citation import unit_mismatches
+
+        text = "売上は100億円だった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "売上は100万円だった。"}), [1])
+
+    def test_silent_when_source_occurrence_has_no_unit(self) -> None:
+        """A bare "100" in the source proves nothing about its unit — the unit
+        may live in the surrounding text. Inconclusive → silent."""
+        from shoin.citation import unit_mismatches
+
+        text = "距離は100kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は100あった。"}), [])
+
+    def test_silent_when_number_absent_entirely(self) -> None:
+        """Number not in source at all → numeric_mismatches()' signal, not ours."""
+        from shoin.citation import unit_mismatches
+
+        text = "荷重は37kgだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_prefix_extension_units_compatible(self) -> None:
+        """'1億' → '1億円' and '3回' → '3回目' are elaboration, not a swap."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("資産は12億円あった。[S1]", {1: "資産は12億あった。"}), [])
+        self.assertEqual(unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}), [])
+
+    def test_katakana_unit_swap_flagged(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "速度は40キロだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "速度は40メートルだった。"}), [1])
+
+    def test_single_digit_never_checked(self) -> None:
+        """Same ≥2-digit threshold as numeric_mismatches — '5km' vs '5m' silent."""
+        from shoin.citation import unit_mismatches
+
+        text = "距離は5kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は5mだった。"}), [])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the clause carrying the swapped unit flags."""
+        from shoin.citation import unit_mismatches
+
+        sources = {
+            1: "売上は100億円だった。",
+            2: "従業員数は40人だった。",
+        }
+        text = "売上は100億円であり[S1]、従業員数は40台だった[S2]。"
+        self.assertEqual(unit_mismatches(text, sources), [2])
+
+    def test_report_carries_unit_mismatch_field(self) -> None:
+        """make_report() must attach unit_mismatch when the check fires."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "距離は100kmだった。[S1]",
+            ["調査"],
+            source_bodies=["距離は100mだった。"],
+        )
+        self.assertEqual(report.get("unit_mismatch"), [1])
 
 
 class TestQuoteMismatches(unittest.TestCase):
