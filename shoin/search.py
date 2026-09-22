@@ -422,7 +422,8 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
-            "SELECT c.id, c.source_id, c.text, c.context, c.seq, bm25(chunks_fts) AS rank"
+            "SELECT c.id, c.source_id, c.text, c.context, c.seq,"
+            f" bm25(chunks_fts, {_CTX_BM25_WEIGHT}, 1.0) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
@@ -527,20 +528,44 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     return result
 
 
+# Field weight for the context breadcrumb column, applied identically in the
+# FTS path (bm25 column weights — column order is (context, text)) and the
+# LIKE path (_needle_score).  A query term appearing in a chunk's section
+# breadcrumb is a stronger topicality signal than a body occurrence — the
+# standard field-weighting result (BM25F titles get 2-4x); without it the
+# v0.2.123 contextual-retrieval investment pays off in recall only, never in
+# ranking.  2.0 is the conservative end of the literature range.
+# _needle_score must use the SAME weight: the LIKE path's whole point is to
+# rank identically to the FTS path for the terms it covers, and an equal-1.0
+# fallback would quietly un-rank exactly the heading-matched chunks this
+# weight exists to surface (the v0.2.77-79 duplicated-heuristic drift lesson).
+_CTX_BM25_WEIGHT = 2.0
+
+
 def _needle_score(text: str, context: str, needles: list[str]) -> float:
     """Count LIKE-fallback needle occurrences across a chunk's text and context.
 
-    Both fields count at weight 1.0, which is deliberately the same weighting the
-    FTS path gets: SQLite's bm25(chunks_fts) defaults every column to 1.0, and the
-    point of scoring context here is to remove the divergence between the two
-    branches, not to introduce a new tuning knob on one of them.  A section's
-    breadcrumb is identical across all of that section's chunks, so a context match
-    lifts the whole section uniformly and never reorders chunks within it.
+    The breadcrumb answers a binary question — "does this section's heading
+    name the term?" — so its contribution is per-term PRESENCE
+    (_CTX_BM25_WEIGHT when present, else 0), not a linear count.  That both
+    mirrors FTS5's bm25 saturation (repeated occurrences in the same column
+    yield diminishing returns) and keeps the intended ordering: a chunk whose
+    body discusses the term three times still outranks one whose breadcrumb
+    merely names it once.  The weight itself is deliberately identical to the
+    FTS path's bm25(chunks_fts, w, 1.0): the point of scoring context here is
+    to remove divergence between the two branches, not to introduce a new
+    knob on one of them.  A section's breadcrumb is identical across all of
+    that section's chunks, so a context match lifts the whole section
+    uniformly and never reorders chunks within it.
     """
     low_text = text.lower()
     low_ctx = context.lower()
     return float(
-        sum(low_text.count(n.lower()) + low_ctx.count(n.lower()) for n in needles)
+        sum(
+            low_text.count(n.lower())
+            + (_CTX_BM25_WEIGHT if n.lower() in low_ctx else 0.0)
+            for n in needles
+        )
     )
 
 

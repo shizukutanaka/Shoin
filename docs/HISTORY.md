@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.217
+## Version History: v0.1.37 → v0.2.218
+
+### v0.2.218 (2026-09-22)
+**Changed (retrieval, BM25 field weighting)**: the `context` column — the section breadcrumb added by v0.2.123's contextual retrieval — counted toward *recall* but not *ranking*: `bm25(chunks_fts)` defaults every column to 1.0, so a query term in a chunk's heading lifted it exactly as much as a body occurrence. A heading match is the stronger topicality signal (standard BM25F field-weighting result; titles typically get 2–4×).
+
+- **`_CTX_BM25_WEIGHT = 2.0`** (conservative end of the literature range), applied via `bm25(chunks_fts, 2.0, 1.0)` — column order `(context, text)`.
+- **`_needle_score` applies the SAME weight, as per-term presence** (heading names it → +2.0, once) rather than a linear count: the breadcrumb answers a binary question, the cap mirrors FTS5's tf saturation, and it preserves the intended ordering — a body that discusses the term three times still outranks a breadcrumb that names it once. An equal-1.0 fallback would instead have un-ranked exactly the heading matches this weight surfaces for the most common JA query shape (every 2-char compound lands in the LIKE path; the v0.2.77-79 drift lesson).
+- Intra-section order is unaffected: a section's breadcrumb is identical across its chunks, so a context match lifts the whole section uniformly.
 
 ### v0.2.217 (2026-09-22)
 **Fixed (citation verification, indented code blocks)**: v0.2.206/209 taught the structure-aware checks to ignore fenced code — but only the ``` / ~~~ form. The other Markdown code form, the **4-space indented block**, still fed every check, producing three demonstrated false positives: `port = 1234` / `port = 5678` in an indented listing were flagged as uncited assertions AND as a self-contradiction (the exact reassignment shape v0.2.209 fixed for fences), and repeated indented lines as a degeneration loop.
