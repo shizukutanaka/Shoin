@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.184
+## Version History: v0.1.37 → v0.2.185
+
+### v0.2.185 (2026-09-22)
+**Fixed (test-suite flake, root cause)**: `InputValidationSecurityTest` connections used `timeout=5` on localhost HTTP requests. Under full-suite CPU load a request can legitimately take several seconds — the socket timeout fired a `TimeoutError` even though both the server and the code under test were healthy (`test_add_note_with_non_string_body_returns_400` flaked once this way). Root cause: the timeout conflated two different jobs. A client socket timeout can only ever catch "server hung forever" — it must never act as a latency SLA on a shared-CPU test host, because slowness under load is a property of the machine, not a defect in the code under test.
+
+- **Fix**: all six `HTTPConnection(..., timeout=5)` sites in the class now share `_CONN_TIMEOUT = 30`, a liveness bound generous enough to distinguish a dead server from a merely loaded one; a documented comment marks it as a hang guard, not a response-time assertion.
+- **Audit** (the "remaining wall-clock tests" sweep): every other wall-clock dependency in the suite was checked and left intentionally — `_OverlapDetectingLLM.chat_stream`'s `time.sleep(0.15)` widens the mock's critical section so a serialization violation can only ever produce a *missed* detection, never a false failure; `urlopen(timeout=10)`, `t.join(timeout=15)`, and `Event.wait(10)` are already generous bounded liveness guards. No other tight socket timeouts exist.
+- Rollback: revert the `timeout` literals; no production code touched.
+
+`pytest tests/` still runs 733 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.184 (2026-09-22)
 **Added (citation verification, check 5)**: `numeric_mismatches()` — a fifth machine check in `citation.py`'s verification layer. Checks 2–3 (`verify_grounding`) compare *wording* between a cited sentence and its source, which structurally misses the failure shape the citation literature documents as dominant: a correctly-attributed sentence carrying a fabricated statistic. arXiv:2510.20303's audit of real RAG answers found numeric errors at the top of the citation-failure taxonomy, and ACL-industry CiteFix ships the same mechanical check. A claim citing [S1] that asserts a digit string S1 never contains is now flagged.
