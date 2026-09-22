@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.212
+## Version History: v0.1.37 → v0.2.213
+
+### v0.2.213 (2026-09-22)
+**Improved (retrieval, numeric vocabulary mismatch)**: citation checks have known numeric equivalence since v0.2.194 (`_numbers_expanded`: 3.2万=32000, 三万二千=32000, 五割=50, three million=3000000) — but the retrieval path never did. A query for "32000" missed every source that wrote the value as shorthand, and a query for "3.2万" missed every source that spelled it out in digits. FTS5 and LIKE match literal characters, so the gap was structural — the same vocabulary-mismatch class `term_variants` already bridges for kana and width.
+
+- **Digit → spelling** (`_numeric_variants`, inside `term_variants`): an all-digit term emits comma-grouped ("32,000"), 千/万/億/兆 shorthand ("3.2万", "32千", "1.2億"), the `X万Y` split form ("3万2000"), and the positional kanji numeral ("三万二千", via a new `_int_to_kanji` — the inverse of `citation._kanji_value`, with standard 一-omission rules: 千 not 一千, but 一万/一億 keep it).
+- **Spelling → digit** (`_numeric_query_terms`): suffixed, chained, kanji, wari, and spelled-out numerals in the raw query resolve to canonical digit strings through `citation._numbers_expanded` — reuse, not a second table that could drift. Resolved at query level because the suffix/punctuation characters fragment "3.2万" into meaningless term pieces before `query_terms` can see them; the digit terms are OR'd into both `fts_query` and the LIKE fallback's needle list, where they pick up the full variant expansion above.
+- Verified end-to-end through `bm25_search`: a "32000" query finds the 3.2万, 32000, and 三万二千 sources; a "三万二千" query finds all three back; "五割" finds "50%".
+
+2 tests added (variant spellings + bidirectional seeded-store retrieval). `tests/` now runs 839 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.212 (2026-09-22)
 **Improved (citation verification, uncited triage)**: the `uncited` list lumped two very different severities identically — an uncited claim that lexically matches a source is a **citation omission** (minor: the evidence exists, the marker is missing) while one matching nothing is the dangerous **unsupported assertion**. The warning gave the user no way to triage.
