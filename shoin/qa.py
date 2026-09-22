@@ -303,17 +303,21 @@ def build_context(
         # preserves the relevance order hits arrived in, so [0] is the best match.
         contexts.append(_section_from_context(grouped[source_id][0].context, title))
         snums[source_id] = idx
-        # Merge consecutive-seq hits into one continuous segment (v0.2.207):
-        # adjacent chunks share a ~CHUNK_OVERLAP-token boundary, so presenting
-        # them with the "\n…\n" gap marker claims a discontinuity that does not
-        # exist AND bills the shared overlap region to the token budget twice.
-        # Merging deduplicates the shared boundary so the prompt reads as the
-        # document reads and the saved tokens serve further hits. Hits with an
-        # unknown seq (-1, test-constructed) never merge, and a descending pair
-        # (k+1 then k) is never reordered — only ascending doc-order runs merge.
+        # Merge consecutive-seq hits into one continuous segment (v0.2.207),
+        # assembled in DOCUMENT order (v0.2.208): adjacent chunks share a
+        # ~CHUNK_OVERLAP-token boundary, so presenting them with the "\n…\n"
+        # gap marker claims a discontinuity that does not exist AND bills the
+        # shared overlap region to the token budget twice. Merging deduplicates
+        # the shared boundary so the prompt reads as the document reads and the
+        # saved tokens serve further hits. Sorting by seq (unknown -1 sorts
+        # last, stably) also merges pairs that arrived reversed (rank k+1 above
+        # rank k) — the excerpt for a source is document-ordered text, while
+        # grouped[] itself keeps relevance order for contexts[0] and snums.
+        # Ordering the budget consumption by document position rather than hit
+        # rank is deliberate: a coherent excerpt beats a more-relevant fragment.
         seg_parts: list[list[tuple[int, str]]] = []  # (chunk_id, contributed text)
         prev_seq = -2  # sentinel distinct from any real seq and the -1 unknown
-        for h in grouped[source_id]:
+        for h in sorted(grouped[source_id], key=lambda h: (h.seq < 0, h.seq)):
             piece = h.text
             if seg_parts and h.seq >= 0 and h.seq == prev_seq + 1:
                 prev_text = "".join(p for _, p in seg_parts[-1])
