@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.226
+## Version History: v0.1.37 → v0.2.227
+
+### v0.2.227 (2026-09-22)
+**Fixed (retrieval, kyūjitai↔shinjitai bridge)**: "學校" and "学校" share ZERO trigrams — a query in modern orthography could never find a source written (or quoting) pre-reform characters, and vice versa. This is the last large kanji-mismatch class after width/kana/numeric/rate/skeleton/era: `_SHIN_TO_KYU` (≈200 common jōyō simplification pairs) emits the fully-converted counterpart of whichever script a term arrives in, for both directions. Two-char terms like 學校 stay below the trigram floor, so they pull the query into the LIKE path where the needle bridges the orthography — same activation mechanism as v0.2.224's skeleton. Ambiguous simplifications (弁, 台, 与) pick the most common predecessor; a wrong old form is harmless since a variant only ever *adds* a needle/gram, never suppresses a document the term itself matched. Three pins updated to variant-free kanji terms — the "no alternate for pure kanji" invariant is now "no alternate for chars with no variants".
 
 ### v0.2.226 (2026-09-22)
 **Fixed (eval harness, A/B comparison)**: `shoin eval` measured recall/MRR — but the harness exists to answer "does toggling X help MY notebook?", which requires comparing two runs, and there was no baseline: the user had to run twice and eyeball two printouts. `eval --save baseline.json` now persists a run (scores + per-case results + the `k` it was measured at), and `eval --diff baseline.json` prints the delta — aggregate Δrecall/ΔMRR plus per-case movements. Cases pair by question text, not position (the case file may be reordered between runs — index matching would mislabel edits as regressions); questions present in only one run are listed as new/dropped rather than silently treated as score changes; a `k` mismatch between baseline and current run prints a warning instead of comparing unlike depths.

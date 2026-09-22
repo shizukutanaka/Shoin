@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.226")
+        self.assertEqual(VERSION, "0.2.227")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2610,6 +2610,34 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(_kanji_skeleton("泳いだ"), "泳")
         self.assertEqual(_kanji_skeleton("切り替える"), "切替")
 
+    def test_kyujitai_retrieval_both_directions(self) -> None:
+        """v0.2.227: "學校" and "学校" share ZERO trigrams — a modern query could
+        not find a pre-war/classically-styled quotation and vice versa.  The
+        2-char variants stay below the trigram floor, so they pull the query
+        into the LIKE path where the needles bridge the orthography."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            old_doc = s.add_source(nb, "txt", "old", "o", "sha-a")
+            s.add_chunks(old_doc.id, ["學校は國學院の建物である。"], ["歴史"])
+            new_doc = s.add_source(nb, "txt", "new", "o", "sha-b")
+            s.add_chunks(new_doc.id, ["学校の建物は国立である。"], ["現代"])
+            decoy = s.add_source(nb, "txt", "decoy", "o", "sha-c")
+            s.add_chunks(decoy.id, ["山道の徒歩記録。"], ["登山"])
+            # Either orthography must surface BOTH documents — the bridge is
+            # symmetric. The decoy (no mapped chars at all) stays absent.
+            for q in ("学校", "學校"):
+                hits = bm25_search(s, nb, q, k=5)
+                got = {h.source_id for h in hits}
+                self.assertEqual(got, {old_doc.id, new_doc.id}, q)
+
+    def test_kyujitai_variants_emit_both_directions(self) -> None:
+        """The table maps both ways; a term with no mappable char is unchanged."""
+        self.assertIn("學校", term_variants("学校"))
+        self.assertIn("学校", term_variants("學校"))
+        self.assertIn("廣島縣", term_variants("広島県"))
+        self.assertIn("広島県", term_variants("廣島県"))
+        self.assertEqual(term_variants("言語"), ["言語"])
+
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
         # ＧＰＵ and ２０２４ are ordinary in Japanese prose, and without this the
@@ -2638,9 +2666,12 @@ class TestSearch(unittest.TestCase):
         self.assertIn('"書院は"', three_char)   # original hiragana trigram
         self.assertIn('"書院ハ"', three_char)   # katakana alternate (は→ハ)
 
-        # Pure-kanji 3-char term: no kana → single trigram, no alternate
-        pure_kanji = fts_query("書院学")  # all kanji
-        self.assertIn('"書院学"', pure_kanji)
+        # Pure-kanji 3-char term: no kana and no kyujitai-mappable char →
+        # single trigram, no alternate (v0.2.227: a kanji term whose chars all
+        # have old forms now contributes the kyujitai gram too, so this term
+        # deliberately avoids them).
+        pure_kanji = fts_query("言語理")  # all kanji, none kyujitai-mappable
+        self.assertIn('"言語理"', pure_kanji)
         self.assertNotIn("OR", pure_kanji)     # no alternate for pure kanji
 
         four_char = fts_query("書院はな")  # 4-char → 2 original + 2 alternate trigrams
@@ -3254,8 +3285,10 @@ class TestSearch(unittest.TestCase):
         from shoin.search import fts_query, _kana_alt
         # Pure kanji term — no kana characters → unchanged
         self.assertEqual(_kana_alt("書院"), "書院")
-        # fts_query for 3-char pure kanji: one trigram (itself), no alternate
-        expr = fts_query("書院学")
+        # fts_query for 3-char pure kanji: one trigram (itself), no alternate.
+        # "言語理" deliberately avoids kyujitai-mappable chars — since v0.2.227 a
+        # kanji term whose chars have old forms contributes that gram too.
+        expr = fts_query("言語理")
         self.assertNotIn("OR", expr, "Pure kanji must not produce alternate OR branch")
         # Each trigram must appear exactly once (no duplication)
         expr2 = fts_query("書院はな")
@@ -9177,9 +9210,10 @@ class TestWidthVariants(unittest.TestCase):
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
         # Control: a term whose spellings all coincide yields only itself, so
-        # pure-kanji FTS expressions stay byte-identical to before.
-        self.assertEqual(term_variants("研究論文"), ["研究論文"])
-        self.assertEqual(fts_query("研究論文"), '"研究論" OR "究論文"')
+        # pure-kanji FTS expressions stay byte-identical to before.  "言語理解"
+        # deliberately avoids kyujitai-mappable chars (v0.2.227 emits those).
+        self.assertEqual(term_variants("言語理解"), ["言語理解"])
+        self.assertEqual(fts_query("言語理解"), '"言語理" OR "語理解"')
 
     def test_cross_width_retrieval_both_directions(self) -> None:
         st, nb_id, ids = self._seeded_store()
@@ -9204,7 +9238,8 @@ class TestWidthVariants(unittest.TestCase):
             self.assertIn(want, v)
         # Non-digit and non-numeric terms emit no numeric spellings.
         self.assertEqual(term_variants("python"), ["python", "ｐｙｔｈｏｎ"])
-        self.assertEqual(term_variants("研究"), ["研究"])
+        # "言語" has no variant of any kind (v0.2.227: kyujitai would add one).
+        self.assertEqual(term_variants("言語"), ["言語"])
 
     def test_numeric_retrieval_both_directions(self) -> None:
         """Digit query finds shorthand sources; shorthand query finds digit sources."""
