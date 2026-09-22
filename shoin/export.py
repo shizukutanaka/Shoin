@@ -20,6 +20,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
+    "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
 }
 
@@ -58,6 +59,9 @@ def _status_line(report: dict[str, object]) -> str:
     uncited = report.get("uncited")
     if isinstance(uncited, list) and uncited:
         bits.append(f"{_t('status_uncited')} ({len(uncited)})")
+    degenerate = report.get("degenerate")
+    if isinstance(degenerate, list) and degenerate:
+        bits.append(f"{_t('status_degenerate')} ({len(degenerate)})")
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. Warned in the Web UI
     # since early on but silently dropped from exports until v0.2.138 — an

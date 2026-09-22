@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.187
+## Version History: v0.1.37 → v0.2.188
+
+### v0.2.188 (2026-09-22)
+**Added (answer-quality check, degenerate)**: `degenerate_spans()` — a seventh machine signal in `citation.py`, and the first that inspects the answer itself rather than its citations. Small local LLMs are prone to degeneration/repeat loops (the failure llama.cpp's and Ollama's sampling-time repeat penalties exist to prevent), and every citation check is structurally blind to it: a parroted or tail-stuck answer carries no citation anomaly at all.
+
+- **Two orthogonal shapes**, both mechanical: (a) the same normalised sentence (≥10 non-whitespace chars) appearing ≥3 times — the "parroting" loop; (b) any ≥6-char span repeating ≥3 times *consecutively* — the "stuck tail" loop, even inside one run-on sentence. Comparisons are NFKC-folded, lower-cased, and whitespace-stripped so spacing variants can't disguise a repeat.
+- **Deliberately asymmetric**: nothing fires below the bounds — parallel structures ("Aである。Bである。"), honest emphasis, and filler echoes (はい/です) repeat *differently* or too briefly, so they stay silent. Only verbatim-normalised ≥3× repetition asserts a loop.
+- **Wired end-to-end like the existing signals**: `citation_report.degenerate` (NotRequired, list of offending snippets ≤40 chars, present only when non-empty; answer-internal so no sources needed) renders as a `warn` badge with count + snippet tooltip at all three Web UI sites (chat message, history re-render, Studio card header), as a `cite.degenerate` CLI block (ja/en), and as `status_degenerate` in the Markdown export status line (ja/en). The UI additions are display surfaces for a new verification signal — reason documented here: without them the flag would compute but stay invisible to users.
+- **No spec/schema change**: additive optional field, `.get()`-guarded everywhere.
+
+7 tests added: 3×-sentence flag; consecutive-span flag; parallel-structure silence; sub-threshold filler silence; 2×-emphasis silence; whitespace-variant matching; report wiring + clean-report absence. `pytest tests/` now runs 753 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.187 (2026-09-22)
 **Added (citation verification, check 6)**: `quote_mismatches()` — quoted fabrication/misattribution detection, the sixth machine check. A 「…」/"…" span of ≥8 non-whitespace chars cited to source n but appearing verbatim in a *different* source m is unambiguous proof n is the wrong number for that claim — the exact-string cousin of `verify_grounding()`'s bigram misattributed flag, needing no overlap margin. Quoted fabrication sits at the top of the citation-failure taxonomy (arXiv:2510.20303), and the bigram checks can miss it entirely because a paraphrased *surrounding* sentence still scores overlap with the wrongly-cited source.

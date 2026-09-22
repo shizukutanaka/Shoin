@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.187")
+        self.assertEqual(VERSION, "0.2.188")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4028,6 +4028,69 @@ class TestQuoteMismatches(unittest.TestCase):
         )
         self.assertEqual(report.get("quote_mismatch"), [1])
         self.assertIn(1, report.get("misattributed", []))
+
+
+class TestDegenerateSpans(unittest.TestCase):
+    """degenerate_spans() (v0.2.188): verbatim repetition signalling an LLM
+    degeneration loop — the failure shape small local models are prone to and
+    every other check is blind to (it is answer-internal, not a citation
+    problem)."""
+
+    def test_repeated_sentence_three_times_flagged(self) -> None:
+        from shoin.citation import degenerate_spans
+
+        text = "結論は常に同じ結論である。" * 3 + "補足。"
+        self.assertTrue(degenerate_spans(text))
+        self.assertTrue(
+            any("結論は常に同じ結論" in s for s in degenerate_spans(text))
+        )
+
+    def test_consecutive_span_loop_flagged(self) -> None:
+        """A ≥6-char unit repeated ≥3 times consecutively — the stuck-tail
+        loop, even inside one run-on sentence."""
+        from shoin.citation import degenerate_spans
+
+        self.assertTrue(degenerate_spans("その結果は重要である" * 3))
+
+    def test_parallel_structure_stays_silent(self) -> None:
+        """Similar-but-different sentences are honest prose, not a loop."""
+        from shoin.citation import degenerate_spans
+
+        text = "猫は液体である。犬は固体である。鳥は空を飛ぶものである。"
+        self.assertEqual(degenerate_spans(text), [])
+
+    def test_short_filler_repeats_stay_silent(self) -> None:
+        """Sub-threshold units (はい/です etc.) recur legitimately."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(degenerate_spans("はい。はい。はい。"), [])
+
+    def test_two_repeats_stay_silent(self) -> None:
+        """Twice is emphasis or structure — only ≥3 asserts a loop."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(degenerate_spans("結論は常に同じ結論である。" * 2), [])
+
+    def test_whitespace_variants_still_match(self) -> None:
+        """Spacing differences do not disguise the same repeated sentence."""
+        from shoin.citation import degenerate_spans
+
+        text = "結論は 常に同じ 結論である。 結論は常に同じ結論である。結論は常に同じ結論である。"
+        self.assertTrue(degenerate_spans(text))
+
+    def test_report_carries_degenerate_field(self) -> None:
+        """make_report() attaches degenerate whenever the check fires —
+        answer-internal, no sources needed."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "これは繰り返しの文です。これは繰り返しの文です。これは繰り返しの文です。",
+            ["調査"],
+            source_bodies=["全く別の内容。"],
+        )
+        self.assertTrue(report.get("degenerate"))
+        clean = make_report("正常な回答です。[S1]", ["調査"], source_bodies=["正常な内容。"])
+        self.assertIsNone(clean.get("degenerate"))
 
 
 class TestUncitedSentences(unittest.TestCase):
