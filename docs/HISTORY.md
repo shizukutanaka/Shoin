@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.208
+## Version History: v0.1.37 → v0.2.209
+
+### v0.2.209 (2026-09-22)
+**Fixed (citation verification, fence awareness)**: completes the structural-line work of v0.2.206 — `degenerate_spans()` and `self_contradictions()` still analysed fenced-code contents as prose, producing two real false positives:
+
+- `result=compute(x)` repeated 3× inside a fence → flagged as a degeneration loop (identical statements in code are not degraded prose).
+- `port = 1234` / `port = 5678` inside a fence → flagged as a self-contradiction (a code reassignment is not a polarity flip).
+
+**`_strip_fences()`** removes ```` ``` ````/`~~~` blocks and their contents before either check runs — including an unterminated fence, which runs to end-of-file per Markdown. `uncited_sentences()` already handled fences inline (it needs the boundary for pending-resolution), so the helper is shared only where a whole-text strip is the right shape.
+
+2 tests added: fenced reassignment silent (contra), fenced repeats silent (degen), unterminated fence, tilde fence — plus prose still fires in both. `tests/` now runs 832 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.208 (2026-09-22)
 **Improved (qa, document-order excerpts)**: completes the adjacent-chunk merge — v0.2.207 only merged hits arriving in ascending seq order, so a pair that arrived reversed (rank k+1 above rank k) kept a false "…" discontinuity and presented the source body out of document order.

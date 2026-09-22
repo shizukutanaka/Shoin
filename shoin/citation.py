@@ -142,6 +142,23 @@ _STRUCTURAL_LINE_RE = re.compile(
 # everything between a pair is code, not prose sentences.
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 
+
+def _strip_fences(text: str) -> str:
+    """Remove fenced code blocks and their contents — code is not prose, so
+    repeated statements or reassigned values inside a fence must not feed the
+    degeneration/self-contradiction signals (uncited_sentences() tracks the
+    same boundary inline for its pending-resolution logic). An unterminated
+    fence runs to end-of-file, matching Markdown."""
+    out: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
 # Common English question-starter words. LLMs asked for "no decoration" often
 # omit trailing "?" in list form; these words reliably identify questions.
 _EN_QUESTION_STARTERS = frozenset(
@@ -1182,6 +1199,7 @@ def self_contradictions(text: str) -> list[str]:
     when the negation parity flips, a shared antonym class nets opposite
     signs, or the swapped digits assert different values.
     """
+    text = _strip_fences(text)  # reassigned values inside code aren't contradictions
     sents: list[tuple[str, str]] = []
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
@@ -1254,6 +1272,7 @@ def degenerate_spans(text: str) -> list[str]:
     these bounds — parallel structures ("Aである。Bである。") and honest
     emphasis repeat *differently*, never verbatim-normed ≥3 times.
     """
+    text = _strip_fences(text)  # repeated statements inside code aren't degeneration
     low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).lower()
     out: set[str] = set()
     counts: dict[str, int] = {}

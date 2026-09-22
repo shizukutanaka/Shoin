@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.208")
+        self.assertEqual(VERSION, "0.2.209")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4688,6 +4688,25 @@ class TestSelfContradictions(unittest.TestCase):
         )
         self.assertEqual(report.get("self_contradiction"), ["治療の効果はない[S1]。"])
 
+    def test_fenced_code_reassignment_stays_silent(self) -> None:
+        """v0.2.209: `port = 1234` / `port = 5678` inside a fence is a code
+        reassignment, not a prose contradiction — fences are stripped before
+        comparing sentences."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("```\nport = 1234\nport = 5678\n```"), []
+        )
+        # Unterminated fence = code to end-of-file (Markdown rule).
+        self.assertEqual(
+            self_contradictions("```\nport = 1234\nport = 5678"), []
+        )
+        # …while the same shape in prose still fires.
+        self.assertEqual(
+            self_contradictions("売上は1234万円だった。売上は5678万円だった。"),
+            ["売上は5678万円だった。"],
+        )
+
 
 class TestDegenerateSpans(unittest.TestCase):
     """degenerate_spans() (v0.2.188): verbatim repetition signalling an LLM
@@ -4750,6 +4769,22 @@ class TestDegenerateSpans(unittest.TestCase):
         self.assertTrue(report.get("degenerate"))
         clean = make_report("正常な回答です。[S1]", ["調査"], source_bodies=["正常な内容。"])
         self.assertIsNone(clean.get("degenerate"))
+
+    def test_fenced_code_repeats_stay_silent(self) -> None:
+        """v0.2.209: identical statements inside a fence are code, not a
+        degeneration loop — ```- and ~~~-fences are stripped before scanning."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(
+            degenerate_spans("```\nresult=compute(x)\nresult=compute(x)\nresult=compute(x)\n```"),
+            [],
+        )
+        self.assertEqual(
+            degenerate_spans("~~~\nresult=compute(x)\nresult=compute(x)\nresult=compute(x)\n~~~"),
+            [],
+        )
+        # …while the same repetition in prose still fires.
+        self.assertTrue(degenerate_spans("result=compute(x)" * 3))
 
 
 class TestUncitedSentences(unittest.TestCase):
