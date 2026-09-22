@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.219
+## Version History: v0.1.37 → v0.2.220
+
+### v0.2.220 (2026-09-22)
+**Changed (citation report, actionable misattributed)**: `misattributed` told the user *that* an S-number was wrong but not *which* source was right — same gap v0.2.216 fixed for `uncited_supported`. The report now emits **`misattributed_suggested`**: `"S<wrong>" → "S<right>"` from the argmax already computed for the flag, kept instead of discarded.
+
+- Both producers fill one shared map via an optional `suggested` out-param (existing two-tuple callers unaffected — backward compatible):
+  - `verify_grounding` → bigram argmax vs the cited number.
+  - `quote_mismatches` → **verbatim provenance wins**: a quote found verbatim in S_k is stronger evidence than any bigram argmax, so it overwrites. Doctored-quote flags (near-verbatim of the *cited* source — paraphrase wearing quotes) still flag `n` but emit no suggestion (`k == n` is a different complaint, not a wrong number).
+- Surfaces: CLI marker `…誤番→S2`, UI badges `S3→S1` in both render paths. `"S#"` string keys survive JSON round-trip (persisted reports re-read via `json.loads`).
+- Fixed a latent semantics slip caught mid-implementation: the doctored branch must argmax over ALL sources (near-verbatim of the *cited* source is a real flag), not only rivals.
 
 ### v0.2.219 (2026-09-22)
 **Changed (generation, runaway bound)**: every chat request now sends `max_tokens: 4096`. Without it the only stop was the endpoint's own default — llama.cpp's `n_predict=-1` and Ollama's `num_predict=-1` both generate until context exhaustion, so the degeneration loops the citation report *detects* (v0.2.188+) also *consumed* the entire remaining context window: minutes of garbage on CPU-scale hardware, bounded only by the 32 MB stream cap.
