@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.202
+## Version History: v0.1.37 → v0.2.203
+
+### v0.2.203 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **framing sentences** — "以下に要点を示します", "要点は以下の通りです", "the following summarizes the sources" — as unsupported assertions. These lines describe the answer's own structure and assert nothing about the sources, so every well-organized answer produced false-positive uncited warnings.
+
+- **`_FRAMING_RE` exemption**: full-match patterns requiring a structural verb (示し/まとめ/説明/記載/列挙/言及/確認/紹介/報告/述べ) or a 通り-phrase, with tightly bounded tails — "以下の通り：効果はある" (framing prefix + real claim in one sentence) does NOT match and is still flagged, as is "上記の治療は効果がある" (上記 + content verb, not a structural verb). Only lines that are framing all the way through are exempt.
+- Same family as the existing exclusions (trivial fragments, disclaimers, questions): the check stays a high-precision signal by only asserting what it can stand behind.
+
+3 tests added: JP framing silence (2 forms), EN framing silence, framing-prefix-plus-claim still flagged. `tests/` now runs 810 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.202 (2026-09-22)
 **Improved (citation verification, antonym polarity)**: the polarity check now covers the second inversion shape — a mirrored claim that swaps a **scale term for its opposite** while negation parity stays equal ("効果は高い" citing "効果は低い", "sales increased" citing "sales decreased"). Negation parity alone cannot see this: both sides are affirmative; the contradiction lives in the degree word.
