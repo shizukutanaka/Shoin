@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.211")
+        self.assertEqual(VERSION, "0.2.212")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5114,6 +5114,36 @@ class TestUncitedSentences(unittest.TestCase):
         )
         self.assertNotIn("uncited", report)
         self.assertEqual(report["confirmed"], [1, 2])
+
+    def test_make_report_splits_grounded_uncited(self) -> None:
+        """v0.2.212: `uncited_supported` splits citation-omission from
+        hallucination — an uncited claim that lexically matches a source is a
+        missing-[S#] fix, not an unsupported assertion."""
+        from shoin.citation import make_report
+
+        bodies = ["治療の効果は高いことが示された。安全性も確認済み。"]
+        text = (
+            "治療の効果は高いことが示された。\n"   # grounded → supported
+            "全く関係のない架空の主張が加えられた。"  # ungrounded → dangerous
+        )
+        report = make_report(text, ["調査A"], source_bodies=bodies)
+        self.assertEqual(
+            report.get("uncited_supported"),
+            ["治療の効果は高いことが示された。"],
+        )
+        # Both stay in `uncited` — the split annotates, it does not remove.
+        self.assertEqual(len(report["uncited"]), 2)
+
+    def test_make_report_no_supported_field_without_grounded_uncited(self) -> None:
+        """With no lexically-matching uncited sentence the field is absent."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "全く無関係の主張がここにある。",
+            ["調査A"],
+            source_bodies=["治療の効果は高いことが示された。"],
+        )
+        self.assertNotIn("uncited_supported", report)
 
     def test_make_report_populates_uncited_when_sources_present(self) -> None:
         from shoin.citation import make_report

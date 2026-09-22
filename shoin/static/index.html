@@ -287,7 +287,7 @@ const I18N = {
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
     "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.negation":"出典と逆の主張の可能性","chat.confirmed":"根拠確認済み",
-    "chat.uncited":"無出典の断定文","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
+    "chat.uncited":"無出典の断定文","chat.uncited_supported":"出典内一致=引用欠落","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -320,7 +320,7 @@ const I18N = {
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
     "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.negation":"possible contradiction with source","chat.confirmed":"grounding confirmed",
-    "chat.uncited":"uncited assertions","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
+    "chat.uncited":"uncited assertions","chat.uncited_supported":"source match — missing citation","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -803,8 +803,10 @@ function addMsg(role, body, report){
       c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
     }
     if (report.uncited && report.uncited.length){
+      const sup = new Set(report.uncited_supported || []);
       const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
-      b.title = report.uncited.join("\n");
+      // Grounded uncited = citation omission; ungrounded = the dangerous kind.
+      b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}]` : s).join("\n");
       c.append(b);
     }
     if (report.degenerate && report.degenerate.length){
@@ -906,8 +908,9 @@ $("#askForm").onsubmit = async e=>{
           if (rpt.confirmed?.length)
             c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
           if (rpt.uncited?.length){
+            const sup = new Set(rpt.uncited_supported || []);
             const ub = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${rpt.uncited.length}`);
-            ub.title = rpt.uncited.join("\n");
+            ub.title = rpt.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}]` : s).join("\n");
             c.append(ub);
           }
           if (rpt.degenerate?.length){
