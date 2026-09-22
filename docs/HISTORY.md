@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.213
+## Version History: v0.1.37 → v0.2.214
+
+### v0.2.214 (2026-09-22)
+**Fixed (citation verification, rate notation)**: `numeric_mismatches` false-flagged the most common rate restatement — a claim asserting **"0.5"** against a source writing **"50%"** (and the reverse) fired a numeric-mismatch warning, because the presence check compared literal digit strings and `0.5` never occurs in `50%`. Same rate, different notation — a correct restatement accused.
+
+- **`_rate_values(text)`**: canonical value strings *asserted as rates* — numbers marked with `%`, `パーセント`, or `percent` (with a trailing-letter guard so `percentile` is not a marker), plus every wari value （五割→50 already parsed as percent semantics). `_canon()` canonicalizes integral floats so `0.5` and `50` compare as strings.
+- **Asymmetric bridge in `numeric_mismatches`**: a rate-marked claim number also matches its /100 fraction in the source ("50%" ↔ "0.5"); a bare-fraction claim (`0 < f < 1`) also matches a **rate-marked** source value (`0.5` ↔ "50%"). The reverse stays strict — an unmarked claim "50" does not match a bare "0.5", and a fraction claim does not reach an unmarked "50個" (different magnitudes, still flagged).
+- Wari refactor: the 歩合 expansion inside `_numbers_expanded` extracted to `_wari_values()` so the rate-marking set reuses it exactly.
+
+2 tests added (equivalence silence + directional asymmetry). `tests/` now runs 841 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.213 (2026-09-22)
 **Improved (retrieval, numeric vocabulary mismatch)**: citation checks have known numeric equivalence since v0.2.194 (`_numbers_expanded`: 3.2万=32000, 三万二千=32000, 五割=50, three million=3000000) — but the retrieval path never did. A query for "32000" missed every source that wrote the value as shorthand, and a query for "3.2万" missed every source that spelled it out in digits. FTS5 and LIKE match literal characters, so the gap was structural — the same vocabulary-mismatch class `term_variants` already bridges for kana and width.

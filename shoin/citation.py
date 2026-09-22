@@ -644,6 +644,19 @@ def _numbers_expanded(text: str) -> set[str]:
         ev = _en_value(m.group(0))
         if ev is not None and ev > 0:
             nums.add(str(ev))
+    nums |= _wari_values(t)
+    return nums - suffixed
+
+
+def _canon(v: float) -> str:
+    """Canonical string for a numeric value: integral floats print as ints."""
+    r = round(v)
+    return str(r) if abs(v - r) < 1e-6 else str(round(v, 10))
+
+
+def _wari_values(t: str) -> set[str]:
+    """Canonical percent values of 歩合 tokens in text (五割→50, 2割5分8厘→25.8)."""
+    out: set[str] = set()
     for m in _WARI_RE.finditer(t):
         wari = _part_value(m.group(1))
         fun = _part_value(m.group(2)) if m.group(2) else 0.0
@@ -654,8 +667,22 @@ def _numbers_expanded(text: str) -> set[str]:
         # >100% is not a real 歩合 value ("十二割" is nonsense) — leave
         # inconclusive text unchecked rather than registering a phantom.
         if 0 < v <= 100:
-            nums.add(str(round(v)) if abs(v - round(v)) < 1e-6 else str(round(v, 1)))
-    return nums - suffixed
+            out.add(str(round(v)) if abs(v - round(v)) < 1e-6 else str(round(v, 1)))
+    return out
+
+
+# Rate-marked numerals (v0.2.214): a number immediately followed by %,
+# パーセント, or "percent" asserts a rate — so does every wari value.
+_RATE_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|パーセント|percent(?![a-zA-Z]))", re.IGNORECASE)
+
+
+def _rate_values(t: str) -> set[str]:
+    """Canonical value strings asserted as rates (50%→50, 五割→50) — the
+    marking set used to bridge percent↔fraction restatements (0.5 ↔ 50%)
+    asymmetrically: rate-marked numbers may stand in for their /100 fraction."""
+    out = {_canon(float(m.group(1))) for m in _RATE_NUM_RE.finditer(t)}
+    out |= _wari_values(t)
+    return out
 
 
 def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
@@ -684,6 +711,7 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     }
     src_nums = {n: _numbers_expanded(t) for n, t in src_norm.items()}
     src_conv = {n: _conv_values(t) for n, t in src_norm.items()}
+    src_rate = {n: _rate_values(t) for n, t in src_norm.items()}
     out: set[int] = set()
     prev_claim = ""
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -716,12 +744,28 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 ent = _UNIT_SCALE.get(m.group(2))
                 if ent is not None:
                     conv_by_num.setdefault(m.group(1), set()).add((ent[0], float(m.group(1)) * ent[1]))
-            if any(
-                num not in src_nums[n]
-                and num not in src_norm[n]
-                and conv_by_num.get(num, set()).isdisjoint(src_conv[n])
-                for num in _numbers_expanded(claim_n)
-            ):
+            # Rate restatements (v0.2.214): a claim asserting "50%" matches a
+            # source writing the same rate as the bare fraction "0.5", and a
+            # bare-fraction claim "0.5" matches a source asserting "50%" — but
+            # the reverse directions stay strict: an unmarked claim "50" does
+            # NOT match a bare "0.5" (different magnitudes), and a fraction
+            # claim only bridges to a RATE-marked source value (claim "0.5" vs
+            # source "50個" keeps flagging — 50 was not asserted as a rate).
+            claim_rate = _rate_values(claim_n)
+            def _num_missing(num: str) -> bool:
+                if (
+                    num in src_nums[n]
+                    or num in src_norm[n]
+                    or not conv_by_num.get(num, set()).isdisjoint(src_conv[n])
+                ):
+                    return False
+                f = float(num)
+                if num in claim_rate and _canon(f / 100) in src_nums[n]:
+                    return False
+                if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
+                    return False
+                return True
+            if any(_num_missing(num) for num in _numbers_expanded(claim_n)):
                 out.add(n)
     return sorted(out)
 
