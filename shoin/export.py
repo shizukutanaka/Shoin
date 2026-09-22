@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .citation import COVERAGE_LOW
+from .citation import COVERAGE_LOW, found_bits
 from .config import ui_lang
 from .store import Store
 
@@ -23,6 +23,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
     "status_uncited_supported": {"ja": "⚠出典内一致=引用欠落", "en": "⚠ source match — missing citation"},
+    "found_label": {"ja": "検出: ", "en": "found: "},
+    "found_fts": {"ja": "全文", "en": "full-text"},
+    "found_vec": {"ja": "意味", "en": "semantic"},
+    "found_lex": {"ja": "語彙", "en": "lexical"},
     "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
     "status_contradict": {"ja": "⚠前後の記述が矛盾", "en": "⚠ contradictory statements"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
@@ -138,8 +142,26 @@ def _legend(report: dict[str, object]) -> str:
     section_map: dict[str, str] = (
         {k: str(v) for k, v in raw_ctx.items()} if isinstance(raw_ctx, dict) else {}
     )
+    # Retrieval provenance (v0.2.229): which channel surfaced each source — the
+    # same line the app's seal viewer draws, kept when the answer is archived.
+    raw_det = report.get("source_detail")
+    detail_map: dict[str, dict[str, float]] = (
+        raw_det if isinstance(raw_det, dict) else {}
+    )
+
+    def _legend_item(k: str, v: str) -> str:
+        sec = f" (§ {section_map[k]})" if section_map.get(k) else ""
+        bits = [
+            f"{_t('found_' + kind)} #{int(val)}"
+            if kind != "lex"
+            else f"{_t('found_' + kind)} {val:.2f}"
+            for kind, val in found_bits(detail_map.get(k))
+        ]
+        prov = f" [{_t('found_label')}{' + '.join(bits)}]" if bits else ""
+        return f"{k}={v}{sec}{prov}"
+
     return ", ".join(
-        f"{k}={v}" + (f" (§ {section_map[k]})" if section_map.get(k) else "")
+        _legend_item(k, v)
         for k, v in sorted(
             ((str(k), str(v)) for k, v in raw_map.items()),
             key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,

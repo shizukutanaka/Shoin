@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.228
+## Version History: v0.1.37 → v0.2.229
+
+### v0.2.229 (2026-09-22)
+**Fixed (explainability, surface parity)**: v0.2.228 added retrieval provenance (`source_detail` — which channel surfaced a source) but surfaced it only in the Web seal viewer, leaving the CLI `[S#]` line and the export legend blind — the same REQ-103 parity gap class as v0.2.130-131's section breadcrumb, fixed the same way. `citation.found_bits()` is now the single extraction (ordered `("fts"|"vec"|"lex", value)` pairs from a detail map) shared by the CLI's per-citation line (`[S1] title (§ sec) [検出: 全文 #2 + 意味 #5]`) and the export `_legend` (chat + Studio sections at once, since they share `_legend`). The signal matters most on the surfaces that get archived/shared: a source surfaced **only** semantically is where unsupported claims live. Old persisted reports without `source_detail` render exactly as before.
 
 ### v0.2.228 (2026-09-22)
 **Fixed (explainability, retrieval provenance)**: the report already carried *what* a citation retrieved (excerpts), *where* it sat (section breadcrumb, cited chunk ids), and *how it verified* — but never *why* the source surfaced at all. `Hit.detail` already records exactly that (rrf_bm25_rank / rrf_vec_rank say which channel — full-text vs semantic — ranked it, `lex` records term presence) and was being dropped. `GroundedContext.source_detail` now carries each source's top-hit detail through to `report["source_detail"]` ("S1" → detail map, wired through all four `make_report` call sites: ask×2, SSE, studio), and the source viewer shows a "検出: 全文 #2 + 意味 #5" line under the section label. The signal matters: a source surfaced **only** semantically (no BM25 rank) is exactly the class unsupported claims come from, so provenance belongs next to the excerpt the citation leans on. Absent on old persisted reports — consumers guard.

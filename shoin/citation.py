@@ -1586,6 +1586,26 @@ def uncited_sentences(text: str) -> list[str]:
     return out
 
 
+def found_bits(detail: dict[str, float] | None) -> list[tuple[str, float]]:
+    """Ordered (channel, value) pairs from a retrieval-provenance detail map.
+
+    `report["source_detail"]["S#"]` holds `Hit.detail` of the top hit — which
+    RRF channel surfaced the source (rrf_bm25_rank / rrf_vec_rank, 1-based
+    ranks) and whether its terms were present (`lex`). Every surface that
+    explains "why this source was retrieved" (CLI [S#] line, export legend)
+    shares this one extraction so they can't drift on key names or order.
+    """
+    if not detail:
+        return []
+    out: list[tuple[str, float]] = []
+    for key in ("rrf_bm25_rank", "rrf_vec_rank", "lex"):
+        v = detail.get(key)
+        kind = {"rrf_bm25_rank": "fts", "rrf_vec_rank": "vec", "lex": "lex"}[key]
+        if isinstance(v, (int, float)) and v:
+            out.append((kind, float(v)))
+    return out
+
+
 def make_report(
     text: str,
     source_titles: list[str],
