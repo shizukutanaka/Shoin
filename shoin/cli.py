@@ -62,6 +62,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      期待={exp} 取得={got}",
+        "eval.saved": "ベースライン保存: {f}",
+        "eval.diff_header": "ベースライン比較 ({f})",
+        "eval.diff_recall": "  recall  : {old} → {new} ({d})",
+        "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
+        "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_new": "  新規ケース {n}件 (ベースライン無し)",
+        "eval.diff_dropped": "  削除ケース {n}件 (現実行に無し)",
+        "eval.diff_k_warn": "  注意: ベースラインは k={bk} で計測 (現実行 k={k}) — 同条件での比較ではありません",
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -109,6 +117,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      expected={exp} retrieved={got}",
+        "eval.saved": "Baseline saved: {f}",
+        "eval.diff_header": "Baseline comparison ({f})",
+        "eval.diff_recall": "  recall  : {old} → {new} ({d})",
+        "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
+        "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_new": "  {n} new case(s) (no baseline entry)",
+        "eval.diff_dropped": "  {n} case(s) dropped (absent in this run)",
+        "eval.diff_k_warn": "  note: baseline was measured at k={bk} (current k={k}) — not a like-for-like comparison",
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -211,6 +227,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ev.add_argument("notebook_id", type=int)
     ev.add_argument("cases", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]')
     ev.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+    ev.add_argument("--save", metavar="FILE", help="この実行をベースラインJSONとして保存")
+    ev.add_argument("--diff", metavar="FILE", help="保存済みベースラインとの差分を表示")
 
     ex = sub.add_parser("export", help="エクスポート")
     ex.add_argument("notebook_id", type=int)
@@ -355,6 +373,64 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
         if not ok:
             print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
+    if args.save:
+        from .evaluate import report_to_dict
+
+        Path(str(args.save)).write_text(
+            _json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        print(_t("eval.saved", f=str(args.save)))
+    if args.diff:
+        from .evaluate import diff_reports, report_from_dict
+
+        try:
+            base_raw = _json.loads(Path(str(args.diff)).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
+        except _json.JSONDecodeError as exc:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
+            ) from exc
+        try:
+            base, base_k = report_from_dict(base_raw)
+        except ValueError as exc:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", str(exc)) from exc
+        diff = diff_reports(base, rep)
+        print(_t("eval.diff_header", f=str(args.diff)))
+        print(
+            _t(
+                "eval.diff_recall",
+                old=f"{base.recall:.3f}",
+                new=f"{rep.recall:.3f}",
+                d=f"{diff.d_recall:+.3f}",
+            )
+        )
+        print(
+            _t(
+                "eval.diff_mrr",
+                old=f"{base.mrr:.3f}",
+                new=f"{rep.mrr:.3f}",
+                d=f"{diff.d_mrr:+.3f}",
+            )
+        )
+        if base_k is not None and base_k != int(args.k):
+            print(_t("eval.diff_k_warn", bk=str(base_k), k=str(args.k)))
+        for cd in diff.case_deltas:
+            print(
+                _t(
+                    "eval.diff_case",
+                    q=cd.question,
+                    ro=f"{cd.recall_before:.3f}",
+                    rn=f"{cd.recall_after:.3f}",
+                    mo=f"{cd.rr_before:.3f}",
+                    mn=f"{cd.rr_after:.3f}",
+                )
+            )
+        if diff.new_questions:
+            print(_t("eval.diff_new", n=str(len(diff.new_questions))))
+        if diff.dropped_questions:
+            print(_t("eval.diff_dropped", n=str(len(diff.dropped_questions))))
     return 0
 
 
