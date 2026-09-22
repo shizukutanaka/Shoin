@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.195
+## Version History: v0.1.37 → v0.2.196
+
+### v0.2.196 (2026-09-22)
+**Fixed (citation verification, spelled-out English numerals)**: `_numbers_expanded()` now expands English numeral words — "three million" ↔ "3000000", "twenty-one" ↔ "21". English-language sources assert the same values in words, and the digit-string presence check false-flagged the correct restatement — the same FP class the kanji and digit-shorthand fixes closed, one orthography over.
+
+- **`_en_value()` accumulates, multiplies at scale words**: small numbers (one…ninety) add into a local accumulator; "hundred" multiplies it (empty local reads as one — "a hundred" → 100); "thousand"/"million"/"billion" flush `local × scale` into the total. "three hundred twenty five thousand" → 325,000.
+- **"and" is deliberately not a separator**: "one and two" is a list, not a sum — allowing "and" anywhere would mis-expand lists into phantom values. The BrE form "three hundred and twenty" therefore splits into two runs (a documented miss, not a wrong expansion). Plurals ("millions") never match — the word-boundary lookahead rejects them as vague.
+
+1 test added: spelled↔digits silence both directions (three million, twenty-one, three hundred twenty five thousand); a differing value still flags. `tests/` now runs 786 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.195 (2026-09-22)
 **Fixed (citation verification, full kanji numerals)**: kanji numerals now parse positionally — the v0.2.193 claim that multi-character forms were "ambiguous" was wrong; "二十億" is unambiguously 20億, "百三万" is 103万, and "一億二千万" is 120,000,000. Every remaining kanji FP class is now covered: multi-char numerals (十二万), kanji and mixed chains (一億二千万, 一億2000万), and bare numerals with no magnitude suffix (十二人 ↔ 12人).

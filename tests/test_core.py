@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.195")
+        self.assertEqual(VERSION, "0.2.196")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4098,6 +4098,17 @@ class TestNumericMismatches(unittest.TestCase):
         self.assertEqual(numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}), [])
         self.assertEqual(numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}), [])
         self.assertEqual(numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}), [1])
+
+    def test_spelled_english_numerals(self) -> None:
+        """"three million" ↔ "3000000", "twenty-one" ↔ "21" — English numeral
+        words expand like kanji and digit shorthand (v0.2.196)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("The city has 3000000 people. [S1]", {1: "The city has three million people."}), [])
+        self.assertEqual(numeric_mismatches("The city has three million people. [S1]", {1: "The city has 3000000 people."}), [])
+        self.assertEqual(numeric_mismatches("21 participants joined. [S1]", {1: "Twenty-one participants joined."}), [])
+        self.assertEqual(numeric_mismatches("Sales hit 325000 yen. [S1]", {1: "Sales hit three hundred twenty five thousand yen."}), [])
+        self.assertEqual(numeric_mismatches("The city has 4000000 people. [S1]", {1: "The city has three million people."}), [1])
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
