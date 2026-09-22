@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.225
+## Version History: v0.1.37 → v0.2.226
+
+### v0.2.226 (2026-09-22)
+**Fixed (eval harness, A/B comparison)**: `shoin eval` measured recall/MRR — but the harness exists to answer "does toggling X help MY notebook?", which requires comparing two runs, and there was no baseline: the user had to run twice and eyeball two printouts. `eval --save baseline.json` now persists a run (scores + per-case results + the `k` it was measured at), and `eval --diff baseline.json` prints the delta — aggregate Δrecall/ΔMRR plus per-case movements. Cases pair by question text, not position (the case file may be reordered between runs — index matching would mislabel edits as regressions); questions present in only one run are listed as new/dropped rather than silently treated as score changes; a `k` mismatch between baseline and current run prints a warning instead of comparing unlike depths.
 
 ### v0.2.225 (2026-09-22)
 **Fixed (retrieval + citation, era-name years)**: "令和6年" and "2024年" assert the same year, but nothing bridged them — retrieval missed both directions, and the numeric check could flag a correct restatement. One shared `_ERAS` table now converts both ways:

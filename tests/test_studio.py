@@ -1098,6 +1098,98 @@ class EvalTest(unittest.TestCase):
         self.assertIn("recall", out)
         self.assertIn("MRR", out)
 
+    def test_eval_report_roundtrip_and_diff(self) -> None:
+        """--save must serialize a run faithfully; --diff must pair cases by
+        question (not position) and report only the cases that moved."""
+        from shoin.evaluate import (
+            CaseResult,
+            EvalReport,
+            diff_reports,
+            report_from_dict,
+            report_to_dict,
+        )
+
+        s, nb = self._seeded()
+        with s:
+            from shoin.evaluate import EvalCase, evaluate
+
+            rep = evaluate(s, FakeLLM(), nb, [EvalCase("和紙はどう作られるか", [1])])
+        blob = report_to_dict(rep, 8)
+        self.assertEqual(blob["k"], 8)
+        back, back_k = report_from_dict(blob)
+        self.assertEqual(back_k, 8)
+        self.assertAlmostEqual(back.recall, rep.recall)
+        self.assertAlmostEqual(back.mrr, rep.mrr)
+        self.assertEqual([c.question for c in back.cases], [c.question for c in rep.cases])
+
+        before = EvalReport(
+            [
+                CaseResult("hit", [1], [1, 2], 1.0, 1.0),
+                CaseResult("miss", [1], [2], 0.0, 0.0),
+                CaseResult("same", [1], [1], 1.0, 0.5),
+                CaseResult("gone", [1], [1], 1.0, 1.0),
+            ],
+            recall=0.75,
+            mrr=0.625,
+        )
+        after = EvalReport(
+            [
+                # Same cases, reordered — question matching must still pair them.
+                CaseResult("same", [1], [1], 1.0, 0.5),
+                CaseResult("miss", [1], [1, 2], 1.0, 1.0),
+                CaseResult("hit", [1], [1, 2], 1.0, 0.5),
+                CaseResult("fresh", [1], [1], 1.0, 1.0),
+            ],
+            recall=1.0,
+            mrr=0.75,
+        )
+        d = diff_reports(before, after)
+        self.assertAlmostEqual(d.d_recall, 0.25)
+        self.assertAlmostEqual(d.d_mrr, 0.125)
+        moved = {cd.question for cd in d.case_deltas}
+        self.assertEqual(moved, {"hit", "miss"})  # "same" unchanged → absent
+        self.assertEqual(d.new_questions, ["fresh"])
+        self.assertEqual(d.dropped_questions, ["gone"])
+
+        for bad in (None, "x", {"no": "cases"}, {"cases": [{"q": "x"}]}):
+            with self.assertRaises(ValueError):
+                report_from_dict(bad)
+
+    def test_eval_cli_save_and_diff(self) -> None:
+        """End-to-end: --save writes a baseline, --diff prints the delta."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1]}]), encoding="utf-8"
+        )
+        base = Path(d) / "baseline.json"
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--save", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        self.assertTrue(base.exists())
+        self.assertEqual(_json.loads(base.read_text())["k"], 8)
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)

@@ -51,6 +51,34 @@ class EvalReport:
     mrr: float = 0.0  # mean reciprocal rank
 
 
+@dataclass(frozen=True)
+class CaseDelta:
+    """One case's score movement between two runs of the same case file."""
+
+    question: str
+    recall_before: float
+    recall_after: float
+    rr_before: float
+    rr_after: float
+
+
+@dataclass
+class EvalDiff:
+    """Baseline-vs-current comparison: aggregate deltas plus per-case moves.
+
+    The per-case list keeps only cases whose score CHANGED — an A/B run exists
+    to answer "did this setting help", so unchanged cases are noise. Questions
+    present in only one run are surfaced separately: a silently-rekeyed case
+    file would otherwise look like a score change.
+    """
+
+    d_recall: float = 0.0
+    d_mrr: float = 0.0
+    case_deltas: list[CaseDelta] = field(default_factory=list)
+    new_questions: list[str] = field(default_factory=list)
+    dropped_questions: list[str] = field(default_factory=list)
+
+
 def parse_cases(data: object) -> list[EvalCase]:
     """Parse the cases file's decoded JSON into EvalCase objects.
 
@@ -119,4 +147,99 @@ def evaluate(
         cases=results,
         recall=sum(r.recall for r in results) / n if n else 0.0,
         mrr=sum(r.reciprocal_rank for r in results) / n if n else 0.0,
+    )
+
+
+def report_to_dict(rep: EvalReport, k: int) -> dict[str, object]:
+    """Serialize a run for `--save` — the baseline a later `--diff` compares
+    against. `k` is stored so a diff across different search depths warns
+    instead of comparing apples to oranges."""
+    return {
+        "k": k,
+        "recall": rep.recall,
+        "mrr": rep.mrr,
+        "cases": [
+            {
+                "q": c.question,
+                "expected": c.expected,
+                "retrieved": c.retrieved,
+                "recall": c.recall,
+                "rr": c.reciprocal_rank,
+            }
+            for c in rep.cases
+        ],
+    }
+
+
+def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
+    """Rebuild a saved report. Raises ValueError on malformed input — same
+    refuse-to-degrade rule as parse_cases: a silently-dropped baseline case
+    would fabricate a score delta."""
+    if not isinstance(data, dict):
+        raise ValueError("baseline file must contain a JSON object")
+    raw_cases = data.get("cases")
+    if not isinstance(raw_cases, list):
+        raise ValueError("baseline file has no 'cases' array")
+    cases: list[CaseResult] = []
+    for i, raw in enumerate(raw_cases):
+        if not isinstance(raw, dict):
+            raise ValueError(f"baseline case {i}: expected an object")
+        q = raw.get("q")
+        exp = raw.get("expected")
+        got = raw.get("retrieved")
+        rec = raw.get("recall")
+        rr = raw.get("rr")
+        if (
+            not isinstance(q, str)
+            or not isinstance(exp, list)
+            or not isinstance(got, list)
+            or not isinstance(rec, (int, float))
+            or not isinstance(rr, (int, float))
+        ):
+            raise ValueError(f"baseline case {i}: missing or mistyped fields")
+        cases.append(CaseResult(q, exp, got, float(rec), float(rr)))
+    rec_all = data.get("recall")
+    mrr_all = data.get("mrr")
+    if not isinstance(rec_all, (int, float)) or not isinstance(mrr_all, (int, float)):
+        raise ValueError("baseline file has missing or non-numeric recall/mrr")
+    k_raw = data.get("k")
+    return (
+        EvalReport(cases=cases, recall=float(rec_all), mrr=float(mrr_all)),
+        int(k_raw) if isinstance(k_raw, (int, float)) else None,
+    )
+
+
+def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
+    """Compare two runs of (ideally) the same case file: baseline → current.
+
+    Cases match by question text — the case file may be reordered or edited
+    between runs, and index-matching would mislabel edits as regressions. On
+    duplicate questions the last occurrence wins; eval case files are authored
+    per-question, so duplicates are already a data smell.
+    """
+    by_q_before = {c.question: c for c in before.cases}
+    by_q_after = {c.question: c for c in after.cases}
+    deltas: list[CaseDelta] = []
+    for c in after.cases:
+        old = by_q_before.get(c.question)
+        if old is None:
+            continue
+        if old.recall != c.recall or old.reciprocal_rank != c.reciprocal_rank:
+            deltas.append(
+                CaseDelta(
+                    c.question,
+                    old.recall,
+                    c.recall,
+                    old.reciprocal_rank,
+                    c.reciprocal_rank,
+                )
+            )
+    return EvalDiff(
+        d_recall=after.recall - before.recall,
+        d_mrr=after.mrr - before.mrr,
+        case_deltas=deltas,
+        new_questions=[c.question for c in after.cases if c.question not in by_q_before],
+        dropped_questions=[
+            c.question for c in before.cases if c.question not in by_q_after
+        ],
     )
