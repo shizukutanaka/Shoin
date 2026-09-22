@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.210")
+        self.assertEqual(VERSION, "0.2.211")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3708,6 +3708,26 @@ class TestQA(unittest.TestCase):
 
         ids = ctx.source_chunk_ids[0]
         self.assertEqual(ids, [1], "only the leading chunk survives the 70-token cut")
+
+    def test_build_context_truncated_excerpt_gets_cut_marker(self) -> None:
+        """v0.2.211: a segment truncated by the budget ends with "…" — without
+        the marker a mid-sentence fragment reads as a COMPLETE passage and the
+        model may quote it as such."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-cut")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            big = "word " * 500  # ~500 tokens, far over budget
+            ctx = build_context(
+                s,
+                [Hit(chunk_id=1, source_id=src.id, text=big, score=1.0)],
+                budget_tokens=80,
+            )
+        body = ctx.source_bodies[0]
+        self.assertTrue(body.endswith("…"), "truncated excerpt must carry the cut marker")
+        self.assertLess(len(body), len(big))
 
 
     def test_degraded_text_s_numbers_match_unique_sources_not_hits(self) -> None:
