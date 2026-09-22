@@ -356,6 +356,18 @@ def _numbers(text: str) -> set[str]:
 _MAG_SUFFIX = {"千": 1_000, "万": 10_000, "百万": 1_000_000, "千万": 10_000_000, "億": 100_000_000}
 _MAG_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(千万|百万|億|万|千)")
 
+# Single-kanji numeral + magnitude suffix (v0.2.193): "一万" → 10000, "十億" →
+# 10^9. Bounded to ONE kanji digit (一…九, 十) — multi-character kanji numerals
+# (十二万, 百三万) are genuinely ambiguous to parse and stay unchecked per the
+# silent-when-inconclusive principle. A single kanji before a date/unit is no
+# match because the magnitude suffix is required ("一月"/"十日" never expand).
+_KANJI_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+# Lookaround guards keep multi-character kanji numerals out: the digit char
+# must not touch another numeral kanji on either side — "二十億" (10億×2) and
+# "百三万" (103万) would otherwise mis-expand as 十億 / 三万. Unchecked →
+# silent, which is correct for genuinely ambiguous forms.
+_KANJI_MAG_NUM_RE = re.compile(r"(?<![一二三四五六七八九十百千])([一二三四五六七八九十])(?![一二三四五六七八九十])(千万|百万|億|万|千)")
+
 
 def _numbers_expanded(text: str) -> set[str]:
     """_numbers() plus canonical values for magnitude-suffixed shorthand.
@@ -364,8 +376,10 @@ def _numbers_expanded(text: str) -> set[str]:
     expanded value INSTEAD of the raw digits: "3.2万" → {"32000"}. The raw
     string is removed because the written digits literally do not occur in a
     source that spelled the value out ("32000"), and keeping it would flag a
-    correct restatement. Only integral expansions are added (non-integral
-    values like 1.2345万 have no canonical spelling — inconclusive).
+    correct restatement. Kanji-numeral shorthand ("一万") expands additively —
+    no digit string exists to remove. Only integral expansions are added
+    (non-integral values like 1.2345万 have no canonical spelling —
+    inconclusive).
     """
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
     nums = _numbers(t)
@@ -377,6 +391,8 @@ def _numbers_expanded(text: str) -> set[str]:
         r = round(v)
         if abs(v - r) < 1e-6:
             nums.add(str(r))
+    for m in _KANJI_MAG_NUM_RE.finditer(t):
+        nums.add(str(_KANJI_NUM[m.group(1)] * _MAG_SUFFIX[m.group(2)]))
     return nums - suffixed
 
 
