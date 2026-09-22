@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.181")
+        self.assertEqual(VERSION, "0.2.182")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2811,6 +2811,94 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb_id = seed(s)
             self.assertEqual(bm25_search(s, nb_id, "", k=5), [])
+
+    # --- pseudo-relevance feedback (bm25_prf_search, v0.2.182) --------------
+
+    def test_prf_expands_recall_for_vocabulary_mismatch(self) -> None:
+        """A chunk sharing topical vocabulary with the top hits — but no query
+        term — must surface via the feedback expansion (RM3-style PRF)."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは儒学教育を行う学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            base = bm25_search(s, nb_id, "書院", k=5)
+            self.assertTrue(base)
+            self.assertFalse(any("中心科目" in h.text for h in base),
+                             "baseline must not find the vocabulary-mismatch chunk")
+
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            self.assertTrue(any("中心科目" in h.text for h in hits),
+                            "PRF expansion must surface the mismatch chunk")
+
+    def test_prf_skips_when_fewer_than_min_feedback_docs(self) -> None:
+        """Fewer than PRF_MIN_DOCS feedback hits means no expansion evidence —
+        the result list must be returned unchanged (single-doc drift guard)."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf1").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            base = bm25_search(s, nb_id, "書院", k=5)
+            self.assertEqual(len(base), 1)
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            self.assertEqual([h.chunk_id for h in hits], [h.chunk_id for h in base],
+                             "with one feedback doc the result must not change")
+
+    def test_prf_skips_when_pool_already_filled(self) -> None:
+        """A first pass at capacity has no recall head-room: no second pass."""
+        from unittest.mock import patch
+        from shoin import search as search_mod
+
+        with make_store() as s:
+            nb_id = seed(s)
+            with patch.object(search_mod, "bm25_search", wraps=search_mod.bm25_search) as spy:
+                hits = search_mod.bm25_prf_search(s, nb_id, "書斎", k=1)
+            self.assertTrue(hits)
+            # First pass fills k=1 → the expanded pass must never run.
+            self.assertEqual(spy.call_count, 1)
+
+    def test_prf_respects_neg_terms(self) -> None:
+        """A negated term must suppress expansion-surfaced chunks too."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-neg").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が科目だった。"])
+
+            hits = bm25_prf_search(s, nb_id, "書院 -儒学", k=5)
+            self.assertFalse(any("儒学" in h.text for h in hits),
+                             "negated term must still exclude expansion hits")
+
+    def test_prf_terms_excludes_query_vocabulary(self) -> None:
+        """_prf_terms must not propose grams the user already typed (variants
+        included): re-adding existing query terms wastes the OR budget."""
+        from shoin.search import _prf_terms
+
+        hits = [
+            Hit(1, 1, "書院は近世日本の学問所である", 1.0),
+            Hit(2, 1, "書院の多くは学問所だった", 0.9),
+        ]
+        terms = _prf_terms(hits, "書院 学問所")
+        self.assertNotIn("書院", terms)
+        self.assertNotIn("学問", terms)
+        self.assertNotIn("問所", terms)
+        self.assertEqual(terms, [], "every df>=2 gram is already in the query")
 
     def test_sim_empty_text_returns_zero(self) -> None:
         """_sim() must return 0.0 when a Hit has empty text (no bigrams to compare)."""
