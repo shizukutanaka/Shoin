@@ -796,10 +796,10 @@ $("#viewer").addEventListener("keydown", e=>{
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
 
 /* ---------- chat ---------- */
-// The badge row beneath an assistant message. Lives in one place because it is
-// the SAME chain for the live SSE path and the persisted-history path — when a
-// new check lands, one copy per surface is how flags like negation_mismatch end
-// up warning in the badges while the seal stays unstyled (v0.2.234).
+// The badge row beneath an assistant message or Studio card. Lives in one
+// place because it is the SAME chain for all three surfaces (chat SSE, chat
+// history, Studio) — when a new check lands, one copy per surface is how flags
+// end up warning in one place and staying silent in another (v0.2.234-235).
 function reportBadges(c, report){
   if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
   if (report.invalid && report.invalid.length){
@@ -966,25 +966,7 @@ function renderStudio(){
   items.forEach(o=>{
     const card = el("div","card");
     const h = el("h4",null,t("studio."+o.kind));
-    if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
-    if (o.report && o.report.misattributed && o.report.misattributed.length) h.append(el("span","badge err", t("chat.misattr")));
-    if (o.report && o.report.uncited && o.report.uncited.length){
-      const ub = el("span","badge warn", `${t("chat.uncited")}: ${o.report.uncited.length}`);
-      ub.title = o.report.uncited.join("\n");
-      h.append(ub);
-    }
-    if (o.report && o.report.degenerate && o.report.degenerate.length){
-      const db = el("span","badge warn", `${t("chat.degenerate")}: ${o.report.degenerate.length}`);
-      db.title = o.report.degenerate.join("\n");
-      h.append(db);
-    }
-    if (o.report && o.report.self_contradiction && o.report.self_contradiction.length){
-      const cb = el("span","badge warn", `${t("chat.contradict")}: ${o.report.self_contradiction.length}`);
-      cb.title = o.report.self_contradiction.join("\n");
-      h.append(cb);
-    }
-    if (o.report && o.report.cited && o.report.cited.length && o.report.coverage < COVERAGE_LOW)
-      h.append(el("span","badge warn", t("chat.coverage.low")));
+    if (o.report) reportBadges(h, o.report);
     card.append(h);
     const bd = el("div","bd"); renderWithSeals(bd, o.body, o.report); card.append(bd);
     out.append(card);
