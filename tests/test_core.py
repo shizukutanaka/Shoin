@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.202")
+        self.assertEqual(VERSION, "0.2.203")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4689,6 +4689,35 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "What is the capital of France? Paris has existed for centuries."
         self.assertEqual(uncited_sentences(text), ["Paris has existed for centuries."])
+
+    def test_ignores_framing_sentences(self) -> None:
+        """v0.2.203: structural sentences ("以下に要点を示します") describe the
+        answer's own shape, not the sources — flagging them false-positives
+        every well-organized answer."""
+        from shoin.citation import uncited_sentences
+
+        text = "以下に要点を示します。効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+        text = "要点は以下の通りです。効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_english_framing_sentences(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "the following summarizes the sources. efficacy is high [S1]."
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_framing_prefix_does_not_hide_claim(self) -> None:
+        """A framing opening followed by a real claim in the same sentence is
+        still an unsupported claim — the exemption covers pure framing only."""
+        from shoin.citation import uncited_sentences
+
+        text = "以下の通り：効果は高い。"
+        self.assertEqual(uncited_sentences(text), ["以下の通り：効果は高い。"])
+
+        text = "上記の治療は効果がある。"
+        self.assertEqual(uncited_sentences(text), ["上記の治療は効果がある。"])
 
     def test_ignores_formal_japanese_question_ending_in_ka_period(self) -> None:
         """Formal written Japanese ends a question in か。 with no "?" at all —

@@ -94,6 +94,22 @@ _DISCLAIMER_MARKERS = (
     "not found in the source",
 )
 
+# Framing sentences describe the answer's own structure ("以下に要点を示します",
+# "要点は以下の通りです", "as follows") — they assert nothing about the
+# sources, so flagging them as unsupported assertions is a false positive on
+# every well-organized answer. The patterns require a structural verb and
+# bound the tail tightly, so "以下の通り：効果はある" (framing prefix + real
+# claim) does NOT match — only lines that are framing all the way through.
+_FRAMING_RE = re.compile(
+    r"^(以下|上記|以上|前項|前述|次に)[のにはが：:、]?"
+    r"[^。]{0,10}(示し|まとめ|説明|記載|列挙|言及|確認|紹介|報告|述べ)"
+    r"[^。]{0,10}。?$"
+    r"|^(要点|結論|まとめ|結果)は(以下|上記|前項|前述)の通り(です|である)?。?$"
+    r"|^(the following|as follows|in summary|in conclusion|"
+    r"as (noted|shown|described|mentioned) (above|below))[^.]{0,30}\.?$",
+    re.IGNORECASE,
+)
+
 # Common English question-starter words. LLMs asked for "no decoration" often
 # omit trailing "?" in list form; these words reliably identify questions.
 _EN_QUESTION_STARTERS = frozenset(
@@ -1206,6 +1222,8 @@ def uncited_sentences(text: str) -> list[str]:
             continue  # too short/trivial to carry a claim worth flagging
         if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
+        if _FRAMING_RE.match(bare):
+            continue  # describes the answer's structure, not source content
         # A question asserts nothing; the faq/study_guide kinds ask 5-8 questions
         # per output (studio.py prompts), and each becomes its own citation-less
         # sentence at this split boundary — flagging them would violate this
