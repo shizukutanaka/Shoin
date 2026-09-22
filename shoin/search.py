@@ -761,6 +761,65 @@ def _overlap_from_norm(norm_terms: list[str], text: str) -> float:
     return score / len(norm_terms)
 
 
+# --- term proximity (SDM-style unordered window) ----------------------------
+
+PROX_SPAN = 32  # chars: ~one compact CJK phrase — tight enough to mean co-occurrence
+PROX_WEIGHT = 0.35  # of rerank's lexical budget: effective ~0.10, SDM's canon
+
+
+def _occurrences(low: str, term: str) -> Iterator[int]:
+    """Start offsets of every (possibly overlapping) occurrence of term in low."""
+    start = 0
+    while True:
+        p = low.find(term, start)
+        if p < 0:
+            return
+        yield p
+        start = p + 1
+
+
+def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
+    """0..1 unordered-window term-dependency score (Metzler & Croft, SIGIR 2005).
+
+    BM25 and lexical_overlap both treat the query as a bag of words: a chunk
+    where every term co-occurs inside one phrase scores identically to one
+    where the same terms scatter a paragraph apart.  The term-dependency line
+    (Metzler & Croft 2005's unordered-window feature; Rasolofo & Savoy 2003)
+    is one of the strongest cheap precision signals in IR — and FTS5's trigram
+    index stores no positions, so the window is measured on the text itself.
+
+    Score = distinct-coverage x tightness of the smallest window containing the
+    most distinct query terms: (covered / len(terms)) x (PROX_SPAN /
+    (span + PROX_SPAN)).  Fewer than two distinct present terms returns 0.0 —
+    there is no pair to be near — which keeps every single-term scoring path
+    byte-identical to before this signal existed.
+    """
+    terms = list(dict.fromkeys(norm_terms))
+    if len(terms) < 2:
+        return 0.0
+    low = unicodedata.normalize("NFKC", text).lower()
+    pts = sorted((p, t) for t in terms for p in _occurrences(low, t))
+    if len({t for _, t in pts}) < 2:
+        return 0.0
+    # Sliding window over the sorted occurrence list: contract left while the
+    # leftmost term still occurs again inside the window, so each residual
+    # window is the tightest covering of its distinct set for that right edge.
+    counts: dict[str, int] = {}
+    best_cover, best_span = 0, len(low) + 1
+    left = 0
+    for right in range(len(pts)):
+        pos, term = pts[right]
+        counts[term] = counts.get(term, 0) + 1
+        while counts[pts[left][1]] > 1:
+            counts[pts[left][1]] -= 1
+            left += 1
+        span = pos + len(term) - pts[left][0]
+        cover = len(counts)
+        if cover > best_cover or (cover == best_cover and span < best_span):
+            best_cover, best_span = cover, span
+    return (best_cover / len(terms)) * (PROX_SPAN / (best_span + PROX_SPAN))
+
+
 def lexical_overlap(query: str, text: str) -> float:
     """Saturating term-frequency overlap between query terms and text.
 
@@ -794,12 +853,25 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     The query is tokenised and NFKC-folded once here, not once per hit inside
     lexical_overlap: the term set is identical across the whole hit list, only the
     text being scored changes.
+
+    For multi-term queries an unordered-window term-proximity bonus
+    (_proximity_from_norm) is added inside the same lexical weight — BM25 has
+    no positional signal at all, so without this a chunk where the terms sit a
+    paragraph apart ranks identically to one where they co-occur in a phrase.
+    detail["lex"] stays the pure overlap measure (existing consumers and the
+    hoisted-terms contract pin that), and prox is additive: a bonus on top of
+    the blend, never a replacement for it.
     """
     norm_terms = _norm_query_terms(query)
+    multi = len(set(norm_terms)) >= 2
     for h in hits:
-        lex = _overlap_from_norm(norm_terms, f"{h.text}\n{h.context}" if h.context else h.text)
+        scored = f"{h.text}\n{h.context}" if h.context else h.text
+        lex = _overlap_from_norm(norm_terms, scored)
         h.detail["lex"] = lex
-        h.score = (1 - weight) * h.score + weight * lex
+        prox = _proximity_from_norm(norm_terms, scored) if multi else 0.0
+        if multi:
+            h.detail["prox"] = prox
+        h.score = (1 - weight) * h.score + weight * lex + weight * PROX_WEIGHT * prox
     return sorted(hits, key=lambda h: h.score, reverse=True)
 
 
