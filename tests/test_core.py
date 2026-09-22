@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.206")
+        self.assertEqual(VERSION, "0.2.207")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3627,6 +3627,82 @@ class TestQA(unittest.TestCase):
         self.assertGreater(top, nxt, "rank-1 source must get the larger share of the surplus")
         self.assertGreaterEqual(nxt, MIN_PER_SOURCE_TOKENS - 5,
                                 "the floor must still hold for the lower-ranked source")
+
+    def test_build_context_merges_consecutive_seq_hits(self) -> None:
+        """v0.2.207: adjacent-chunk hits share a ~CHUNK_OVERLAP boundary, so a
+        consecutive-seq pair must merge into continuous text — not be joined by
+        the "\n…\n" gap marker that claims a discontinuity which doesn't exist
+        AND bills the shared boundary to the budget twice."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。"
+        c2 = "全く別の段落です。距離があります。"
+        with make_store() as s:
+            nb = s.create_notebook("ctx-merge")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            hits = [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0, seq=0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9, seq=1),
+                Hit(chunk_id=3, source_id=src.id, text=c2, score=0.8, seq=2),
+            ]
+            ctx = build_context(s, hits, budget_tokens=1000)
+
+        body = ctx.source_bodies[0]
+        # The shared boundary appears exactly once — the overlap is deduplicated.
+        self.assertEqual(body.count(tail), 1)
+        # Continuous reading: c0's tail flows straight into c1's new content.
+        self.assertIn(tail + "と、隣接チャンク", body)
+        # All three seqs are consecutive — one merged segment, no "…" marker.
+        self.assertNotIn("…", body)
+        self.assertEqual(ctx.source_chunk_ids[0], [1, 2, 3])
+
+    def test_build_context_no_merge_without_seq_or_order(self) -> None:
+        """Unknown seq (-1, test-constructed) and descending seqs never merge —
+        only ascending doc-order runs are continuous text."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。"
+        with make_store() as s:
+            nb = s.create_notebook("ctx-nomerge")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            unknown = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9),
+            ])
+            reversed_ = build_context(s, [
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=1.0, seq=1),
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=0.9, seq=0),
+            ])
+        self.assertIn("…", unknown.source_bodies[0])
+        self.assertIn("…", reversed_.source_bodies[0])
+
+    def test_build_context_truncated_segment_marks_only_surviving_chunks(self) -> None:
+        """A merged segment truncated by the budget marks only the chunk ids
+        whose text actually survived the cut — the tail chunk may be dropped."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail + " word " * 60
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。" + " word " * 60
+        with make_store() as s:
+            nb = s.create_notebook("ctx-trunc")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            hits = [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0, seq=0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9, seq=1),
+            ]
+            # ~100-token segment into a 70-token budget → tail chunk cut.
+            ctx = build_context(s, hits, budget_tokens=70)
+
+        ids = ctx.source_chunk_ids[0]
+        self.assertEqual(ids, [1], "only the leading chunk survives the 70-token cut")
 
 
     def test_degraded_text_s_numbers_match_unique_sources_not_hits(self) -> None:

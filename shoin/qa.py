@@ -203,6 +203,26 @@ def _truncate_tokens(text: str, limit: int) -> str:
     return text
 
 
+_MIN_BOUNDARY_OVERLAP = 20  # chars — below this a shared boundary is coincidental
+
+
+def _boundary_overlap(a: str, b: str) -> int:
+    """Longest prefix of `b` that is also a suffix of `a` (>= _MIN_BOUNDARY_OVERLAP).
+
+    Adjacent chunks share a ~CHUNK_OVERLAP-token boundary — split_text() seeds
+    each new chunk with `_tail(previous)` — so the head of the later chunk
+    repeats the tail of the earlier one. This is the exact dedup point for
+    merging them back into continuous prompt text. 0 = no shared boundary.
+    Scans downward from the longest candidate: "a ends with b[:k]" is NOT
+    monotone in k (a can end with b[:30] yet not with b[:28]), so a binary
+    search would miss the true boundary.
+    """
+    for k in range(min(len(a), len(b)), _MIN_BOUNDARY_OVERLAP - 1, -1):
+        if a.endswith(b[:k]):
+            return k
+    return 0
+
+
 def _section_from_context(context: str, title: str) -> str:
     """Strip the source-title prefix from a chunk's stored context breadcrumb.
 
@@ -283,6 +303,26 @@ def build_context(
         # preserves the relevance order hits arrived in, so [0] is the best match.
         contexts.append(_section_from_context(grouped[source_id][0].context, title))
         snums[source_id] = idx
+        # Merge consecutive-seq hits into one continuous segment (v0.2.207):
+        # adjacent chunks share a ~CHUNK_OVERLAP-token boundary, so presenting
+        # them with the "\n…\n" gap marker claims a discontinuity that does not
+        # exist AND bills the shared overlap region to the token budget twice.
+        # Merging deduplicates the shared boundary so the prompt reads as the
+        # document reads and the saved tokens serve further hits. Hits with an
+        # unknown seq (-1, test-constructed) never merge, and a descending pair
+        # (k+1 then k) is never reordered — only ascending doc-order runs merge.
+        seg_parts: list[list[tuple[int, str]]] = []  # (chunk_id, contributed text)
+        prev_seq = -2  # sentinel distinct from any real seq and the -1 unknown
+        for h in grouped[source_id]:
+            piece = h.text
+            if seg_parts and h.seq >= 0 and h.seq == prev_seq + 1:
+                prev_text = "".join(p for _, p in seg_parts[-1])
+                ov = _boundary_overlap(prev_text, h.text)
+                piece = h.text[ov:] if ov else "\n" + h.text
+                seg_parts[-1].append((h.chunk_id, piece))
+            else:
+                seg_parts.append([(h.chunk_id, h.text)])
+            prev_seq = h.seq
         used = 0
         texts: list[str] = []
         # Chunk ids actually placed in the prompt for this source (not merely
@@ -291,31 +331,41 @@ def build_context(
         # (visual source attribution, cf. VISA arXiv:2412.14457). Collected in
         # lock-step with `texts` so a chunk dropped by the budget is never marked.
         chunk_ids: list[int] = []
-        for h in grouped[source_id]:
-            cost = estimate_tokens(h.text)
+        for seg in seg_parts:
+            seg_text = "".join(p for _, p in seg)
+            cost = estimate_tokens(seg_text)
             # Zero-token text (Arabic, Cyrillic, Hebrew, pure punctuation — scripts
             # outside _CJK_RANGES and _WORD_RE) escapes the token budget: cost=0 means
             # cost > remaining is always False and ALL chunks are appended uncapped.
             # Use 5 chars/token (≈ASCII word density) as a conservative char-based cost
             # so the budget guard fires for scripts that estimate_tokens() can't count.
-            effective_cost = cost if cost > 0 else len(h.text) // 5
+            effective_cost = cost if cost > 0 else len(seg_text) // 5
             remaining = per_source - used
             if effective_cost > remaining:
-                # Chunk won't fit in full: truncate to remaining budget if any.
+                # Segment won't fit in full: truncate to remaining budget if any.
                 # Previously, the truncation guard fired only for the first chunk
                 # (when used==0); later oversize chunks were silently dropped.
                 if remaining > 0:
                     if cost > 0:
-                        texts.append(_truncate_tokens(h.text, remaining))
+                        truncated = _truncate_tokens(seg_text, remaining)
                     else:
                         # Zero-token text: _truncate_tokens may also return the full
                         # text (same 0-count problem). Use char window as fallback.
-                        texts.append(h.text[: remaining * 5])
-                    # A truncated chunk IS in the prompt, so it counts as cited.
-                    chunk_ids.append(h.chunk_id)
+                        truncated = seg_text[: remaining * 5]
+                    # A truncated segment IS in the prompt, so its surviving
+                    # chunks count as cited — but only those whose text survived
+                    # the truncation point (a merged tail chunk may be cut).
+                    texts.append(truncated)
+                    off = 0
+                    for cid, piece in seg:
+                        if off < len(truncated):
+                            chunk_ids.append(cid)
+                        off += len(piece)
+                        if off >= len(truncated):
+                            break
                 break
-            texts.append(h.text)
-            chunk_ids.append(h.chunk_id)
+            texts.append(seg_text)
+            chunk_ids.extend(cid for cid, _ in seg)
             used += effective_cost
         body = "\n…\n".join(texts)
         bodies.append(body)

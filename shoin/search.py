@@ -89,6 +89,10 @@ class Hit:
     # the section a citation came from in the UI. Defaults to "" so every existing
     # positional Hit(...) construction in tests stays valid.
     context: str = ""
+    # The chunk's sequence index within its source (v0.2.207). -1 = unknown
+    # (test-constructed hits); build_context() merges hits with consecutive
+    # known seqs instead of inserting a false "…" discontinuity.
+    seq: int = -1
 
 
 # --- query helpers --------------------------------------------------------
@@ -340,7 +344,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
-            "SELECT c.id, c.source_id, c.text, c.context, bm25(chunks_fts) AS rank"
+            "SELECT c.id, c.source_id, c.text, c.context, c.seq, bm25(chunks_fts) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
@@ -352,6 +356,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
                 Hit(
                     r["id"], r["source_id"], r["text"], 0.0,
                     bm25=-float(r["rank"]), context=str(r["context"] or ""),
+                    seq=int(r["seq"]),
                 )
             )
         # Return early only when fts_query covered every query term (no terms with
@@ -401,7 +406,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # on a large notebook can pull tens of thousands of rows into memory.
     like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
-        f"SELECT c.id, c.source_id, c.text, c.context FROM chunks c"
+        f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
         f" LIMIT ?",
@@ -413,7 +418,8 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         score = _needle_score(text, str(r["context"] or ""), needles)
         if score > 0:
             like_hits.append(
-                Hit(r["id"], r["source_id"], text, 0.0, bm25=score, context=str(r["context"] or ""))
+                Hit(r["id"], r["source_id"], text, 0.0, bm25=score,
+                    context=str(r["context"] or ""), seq=int(r["seq"]))
             )
     like_hits.sort(key=lambda h: h.bm25, reverse=True)
     if fts_hits:
@@ -627,7 +633,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
     # defined as sorted(..., key=..., reverse=True)[:k], so ties still resolve in
     # row order and the returned list is identical to the previous sort-then-slice.
     cur = store.conn.execute(
-        "SELECT c.id, c.source_id, c.text, c.context, c.embedding, c.embedding_norm"
+        "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"
         " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
         (notebook_id,),
@@ -653,6 +659,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
                 0.0,
                 vec=_cosine_with_norms(query_vec, query_norm, vec, vec_norm),
                 context=str(r["context"] or ""),
+                seq=int(r["seq"]),
             )
 
     return heapq.nlargest(k, _scored(), key=lambda h: h.vec)
