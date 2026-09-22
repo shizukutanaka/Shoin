@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.242
+## Version History: v0.1.37 → v0.2.243
+
+### v0.2.243 (2026-09-22)
+**Fixed (pipeline, unchanged refresh churn)**: `refresh_source` re-fetched a URL and unconditionally deleted every chunk and re-inserted it — even when the refetched content was **byte-identical** (same sha256). The delete+reinsert minted fresh rowids, discarded all embeddings (LLM embed calls spent for zero content change), and churned the very rowid-reuse surface v0.2.230's excerpt check exists to guard stored `source_chunk_ids` against. `extracted.sha256 == src.sha256` now returns early (`IndexResult(src, existing_n_chunks, 0)`) before any chunk work — a refresh of unchanged content is a true no-op that keeps chunk ids and embeddings intact. New `test_refresh_source_unchanged_content_is_noop`: a second source occupies higher rowids so delete+reinsert *shifts* the first source's ids (without it rowid reuse makes churn invisible), plus a counting `embed_one` LLM asserts zero embed calls. Verified fail-then-pass (old code shifted ids → assertion fails).
 
 ### v0.2.242 (2026-09-22)
 **Fixed (UI, dead SSE meta store)**: the reader dispatch stored each `meta` frame into `let meta = j` and then **never read the variable** — the last unread signal in the dispatch after v0.2.240-241 wired the previously-dead `degraded`/`error` paths. The meta frame's payload (`sources: [{s, title, source_id}]`) is fully redundant with the `done` frame's `report` (`source_map`, `source_id_map`), so there is nothing the stored value could add — the honest fix is dropping the dead store rather than inventing a consumer. The frame itself is still parsed (advancing the SSE buffer); only the unread assignment is gone. New `test_no_dead_sse_meta_store` guards against the dead branch returning. Verified fail-then-pass (old code keeps `ev==="meta"` → test fails).
