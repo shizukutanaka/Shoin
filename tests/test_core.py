@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.194")
+        self.assertEqual(VERSION, "0.2.195")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4071,15 +4071,33 @@ class TestNumericMismatches(unittest.TestCase):
         self.assertEqual(numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}), [])
         self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}), [])
 
-    def test_multi_kanji_numerals_stay_unchecked(self) -> None:
-        """"二十億"/"百三万" are ambiguous multi-kanji forms — the guards must
-        leave them unchecked rather than mis-expand (silent, not wrong)."""
+    def test_multi_kanji_numerals_parsed(self) -> None:
+        """Multi-kanji numerals parse positionally (v0.2.195): "二十億" = 20億,
+        "百三万" = 103万 — equal values stay silent, differing values flag."""
         from shoin.citation import numeric_mismatches
 
-        # 2000000000 is NOT the value of 二十億 written as digits (that IS 20億);
-        # the guards must not have registered a bogus 10億 expansion either.
+        self.assertEqual(numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [])
+        self.assertEqual(numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}), [])
         self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
         self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
+
+    def test_kanji_and_mixed_chains(self) -> None:
+        """"一億二千万" and mixed "一億2000万" both = 120,000,000 (v0.2.195)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+
+    def test_bare_kanji_numerals(self) -> None:
+        """"十二人" ↔ "12人" — a bare multi-char kanji numeral expands too;
+        "二三" ("a few") is a counting sequence, not a numeral (v0.2.195)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}), [])
+        self.assertEqual(numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}), [])
+        self.assertEqual(numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}), [1])
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
