@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.190
+## Version History: v0.1.37 → v0.2.191
+
+### v0.2.191 (2026-09-22)
+**Fixed (citation verification, unit aliases)**: `_UNIT_ALIASES` — cross-script same-unit spellings no longer false-flag. v0.2.190's `_units_compat` only accepted identical or prefix-extending units, so `100キロ` vs `100km`, `3歳` vs `3才`, `12名` vs `12人` — the same count written in another script — were flagged as mismatches. Found while shipping the check: same-unit synonyms are a documented blind spot it produced itself.
+
+- **Directional alias sets, deliberately**: ambiguous colloquial tokens point at ALL their possible readings (`キロ`→{km,kg}, `ミリ`→{mm,ml}) while the precise readings never list each other — `100km` vs `100kg` still flags even though both share the `キロ` alias. The compat check is `a ∈ aliases(b) or b ∈ aliases(a)`, so an ambiguous bare token can only under-flag, never over-flag.
+- **No case-folding**: ASCII units keep case — `100MW` vs `100mW` is a real 9-orders-of-magnitude swap and still flags; NFKC already folds composed forms (㎞→km, ％→%) upstream.
+- **Bounded table**: katakana spellings of SI/imperial units (メートル, グラム, パーセント, ドル, バイト…) plus counter-kanji pairs that mean the same count for every referent (歳/才, 名/人, 軒/棟/戸). 本/冊 (long objects vs volumes) and 番/位 (serial vs rank) are deliberately excluded — they can differ, so they still flag.
+
+6 tests added: cross-script aliases silent (4 cases); counter-kanji aliases silent (3 cases); ambiguous キロ silent vs km and kg; precise readings still flag through the shared alias + キロ vs メートル; ASCII case preserved (MW vs mW); excluded counter pairs still flag (本/冊, 番/位). `pytest tests/` now runs 775 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.190 (2026-09-22)
 **Added (citation verification, check 8)**: `unit_mismatches()` — the eighth machine check, closing the hole in `numeric_mismatches()`' presence test. That check asks only whether a digit string exists in the cited source; a number that IS present but carries a different unit is the same magnitude of fabrication and structurally invisible to it — "100km" vs "100m", "25ppm" vs "25%", "100億円" vs "100万円" all pass the presence check while being wrong. Here each cited clause's (number, unit) pairs are compared against the units the source attaches to that same number.

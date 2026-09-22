@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.190")
+        self.assertEqual(VERSION, "0.2.191")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4116,6 +4116,51 @@ class TestUnitMismatches(unittest.TestCase):
             source_bodies=["距離は100mだった。"],
         )
         self.assertEqual(report.get("unit_mismatch"), [1])
+
+    def test_cross_script_aliases_silent(self) -> None:
+        """km↔キロメートル, m↔メートル, %↔パーセント: same unit, other script."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}), [])
+        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}), [])
+        self.assertEqual(unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}), [])
+        self.assertEqual(unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}), [])
+
+    def test_counter_kanji_aliases_silent(self) -> None:
+        """歳↔才, 名↔人, 棟↔軒: same count in another spelling."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}), [])
+        self.assertEqual(unit_mismatches("委員は12名だった。[S1]", {1: "委員は12人だった。"}), [])
+        self.assertEqual(unit_mismatches("被害は25棟だった。[S1]", {1: "被害は25軒だった。"}), [])
+
+    def test_ambiguous_abbreviation_silent_both_ways(self) -> None:
+        """キロ reads as km or kg — ambiguous, so it can only under-flag."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は40キロだった。[S1]", {1: "距離は40kmだった。"}), [])
+        self.assertEqual(unit_mismatches("重量は40キロだった。[S1]", {1: "重量は40kgだった。"}), [])
+
+    def test_precise_units_still_flag_through_ambiguous_alias(self) -> None:
+        """The directional table must not join the precise readings: km and kg
+        share the ambiguous alias キロ but are not aliases of each other."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}), [1])
+        self.assertEqual(unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}), [1])
+
+    def test_ascii_case_preserved(self) -> None:
+        """MW vs mW differ by 9 orders of magnitude — case is meaning."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}), [1])
+
+    def test_non_alias_counter_pairs_still_flag(self) -> None:
+        """本/冊 and 番/位 are deliberately excluded — they can differ."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("冊数は30冊だった。[S1]", {1: "冊数は30本だった。"}), [1])
+        self.assertEqual(unit_mismatches("順位は12位だった。[S1]", {1: "順位は12番だった。"}), [1])
 
 
 class TestQuoteMismatches(unittest.TestCase):
