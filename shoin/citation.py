@@ -827,6 +827,15 @@ _QUOTE_RE = re.compile(r"「([^」]+)」|\"([^\"]+)\"")
 # verbatim-quotation claim. Shorter 「…」 spans are concept names/emphasis
 # (「重要な点」), which never assert "this wording appears in the source".
 _QUOTE_MIN = 8
+# Near-verbatim (doctored-quote) bounds: a span ≥12 chars sharing ≥60% of its
+# bigrams with some source while matching none verbatim derives from that
+# source but asserts wording it never wrote — an error whether the overlap is
+# with the cited source (paraphrase wearing quotes) or a different one
+# (near-verbatim misattribution). Below 12 chars a topic-term emphasis could
+# coincidentally share 60% of its bigrams; below 0.6 the text could be a
+# legitimately loose quote-adjacent paraphrase — inconclusive, stays silent.
+_DOCTORED_MIN_LEN = 12
+_DOCTORED_MIN_OVERLAP = 0.6
 
 
 def _quote_spans(text: str) -> list[str]:
@@ -856,15 +865,24 @@ def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     it entirely because a paraphrased surrounding sentence still scores
     overlap with the wrongly-cited source.
 
+    A second, near-verbatim shape (v0.2.199): a span ≥ _DOCTORED_MIN_LEN
+    whose bigram overlap with some source exceeds _DOCTORED_MIN_OVERLAP
+    while matching NO source verbatim is a doctored quote — the assertive
+    「…」 claims exact wording the source never wrote, yet the text clearly
+    derives from that source (paraphrase wearing quotes, or near-verbatim
+    of a different source — both are citation errors).
+
     Deliberately asymmetric like the other checks: a span found in NO source
-    could be fabricated, but it could equally be emphasis-「」 — inconclusive,
-    so it stays silent. Same sentence- and clause-level attribution as
-    verify_grounding()/numeric_mismatches() via the shared _segment_claims.
+    at any meaningful overlap could be fabricated, but it could equally be
+    emphasis-「」 — inconclusive, so it stays silent. Same sentence- and
+    clause-level attribution as verify_grounding()/numeric_mismatches() via
+    the shared _segment_claims.
     """
     src_norm = {
         n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).lower()
         for n, t in source_texts.items()
     }
+    src_bg = {n: _bigrams(t) for n, t in src_norm.items()}
     out: set[int] = set()
     prev_claim = ""
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -886,8 +904,14 @@ def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         for n in nums:
             claim_n = segments.get(n, claim_text)
             for q in _quote_spans(claim_n):
-                if q not in src_norm[n] and any(
-                    q in src_norm[k] for k in src_norm if k != n
+                if q in src_norm[n]:
+                    continue
+                if any(q in src_norm[k] for k in src_norm if k != n) or (
+                    len(q) >= _DOCTORED_MIN_LEN
+                    and any(
+                        _overlap(_bigrams(q), bg) >= _DOCTORED_MIN_OVERLAP
+                        for bg in src_bg.values()
+                    )
                 ):
                     out.add(n)
                     break
