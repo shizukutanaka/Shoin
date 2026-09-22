@@ -129,6 +129,19 @@ _LIST_INTRO_RE = re.compile(
     r"\s*[。．.、,：:]?\s*$"
 )
 
+# Markdown structural lines are not sentences and cannot carry the kind of
+# claim uncited_sentences() exists to flag: an ATX heading is a label, a table
+# row's cells are fragments (and a |---| separator asserts nothing at all), a
+# horizontal rule is pure layout, and a "> " blockquote is itself an
+# attribution form. Fenced code blocks are handled separately below since the
+# code INSIDE them isn't prose either — both need the same exclusion.
+_STRUCTURAL_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s|\|.*\|\s*$|[\-*_~]{3,}\s*$|>)"
+)
+# Fence open/close markers. `in_fence` in uncited_sentences() toggles on these;
+# everything between a pair is code, not prose sentences.
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
 # Common English question-starter words. LLMs asked for "no decoration" often
 # omit trailing "?" in list form; these words reliably identify questions.
 _EN_QUESTION_STARTERS = frozenset(
@@ -1290,6 +1303,7 @@ def uncited_sentences(text: str) -> list[str]:
     pending: str | None = None  # most recent uncited sentence, awaiting a trailing citation
     prev_bare, prev_cited = "", False  # previous non-empty sentence's bare text / citation state
     list_scope = False  # inside a list block opened by a cited enumeration lead-in
+    in_fence = False  # inside a fenced code block — its content is not prose
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
@@ -1305,6 +1319,14 @@ def uncited_sentences(text: str) -> list[str]:
             list_scope or (prev_cited and _LIST_INTRO_RE.search(prev_bare) is not None)
         )
         prev_bare, prev_cited = bare, bool(nums)
+        if _FENCE_RE.match(sentence):
+            in_fence = not in_fence
+            continue
+        if in_fence or _STRUCTURAL_LINE_RE.match(sentence):
+            # Code, headings, table rows, rules, quotes — markdown structure,
+            # not a sentence asserting source content. Invisible to the claim
+            # check: skipped without flushing a pending trailing citation.
+            continue
         if nums and not has_claim:
             # Citation-only fragment (e.g. the "[S1]" tail of "Sentence. [S1]") —
             # resolves whatever sentence it trails; that sentence is not uncited.

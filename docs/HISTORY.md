@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.205
+## Version History: v0.1.37 → v0.2.206
+
+### v0.2.206 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **markdown structural lines** — ATX headings, pipe-table rows (including `|---|` separators that assert nothing at all), horizontal rules, blockquotes, and fenced code + everything inside it — as uncited "claims". The check exists to flag *sentences* asserting source content; none of these are sentences.
+
+- **`_STRUCTURAL_LINE_RE` + fence tracking**: `#`-headings, `|…|` rows, `---`/`***`/`___` rules, and `>` quotes are matched by one pattern; ```` ``` ````/`~~~` fences toggle `in_fence` so code inside a block (and an unterminated fence, to end-of-file) is skipped too.
+- **Invisible, not claimless**: structural lines are skipped BEFORE the pending-resolution step — a trailing `[S1]` still resolves the sentence above a heading/rule — but they DO break list scope and update the prev-line tracker (a heading between a cited lead-in and its items correctly ends the enumeration's citation scope).
+- Claims after structure still flag normally ("## 概要\n効果は高い。" → flags 効果は高い).
+
+5 tests added: structural lines silent, fenced code + contents silent, unclosed fence to EOF, claim after structure flags, structure doesn't consume a trailing citation. `tests/` now runs 827 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.205 (2026-09-22)
 **Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged every item of a **cited enumeration** — "効果は以下の通り[S1]：\n・効果は高い\n・副作用は少ない" produced two false-positive uncited warnings even though the lead-in's citation introduces and scopes the whole list, the most common LLM list style.
