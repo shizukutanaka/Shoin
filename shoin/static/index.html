@@ -955,6 +955,12 @@ $("#askForm").onsubmit = async e=>{
           if (c.children.length) wrap.append(c);
           $("#chat").scrollTop = $("#chat").scrollHeight;
         }
+        else if (ev==="error"){
+          // The server can fail mid-stream: without this branch the partial
+          // answer just freezes with zero signal (the catch path only sees
+          // network-level errors, not an SSE "error" frame).
+          toast(j.message || j.code || "");
+        }
       }
     }
   }catch(err){ bd.textContent=""; toast(err.message); }

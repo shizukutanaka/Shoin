@@ -492,6 +492,40 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_sse_error_event_is_surfaced(self) -> None:
+        """v0.2.241: the server emits `ev==="error"` mid-stream
+        ({"code","message"}) but the client dispatch only handled
+        meta/delta/done — a mid-stream failure left a partial answer frozen
+        with no signal at all. Executes the real error branch under node and
+        asserts the toast carries the server message."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, 'else if (ev==="error")')
+        except ValueError:
+            self.fail("SSE error event has no handler branch in the dispatch")
+        harness = (
+            """\
+const toasts = [];
+function toast(m){ toasts.push(m) }
+function runErr(j){ let ev = "error"; if (false) {}
+"""
+            + block
+            + """
+}
+runErr({code: "SYSTEM_INTERNAL_ERROR", message: "mid-stream boom"});
+if (toasts.length !== 1 || !String(toasts[0]).includes("mid-stream boom"))
+  { console.error("error event not surfaced: " + JSON.stringify(toasts)); process.exit(1) }
+runErr({code: "SOME_CODE"});
+if (!String(toasts[1]).includes("SOME_CODE"))
+  { console.error("code-only error fell through: " + JSON.stringify(toasts)); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
