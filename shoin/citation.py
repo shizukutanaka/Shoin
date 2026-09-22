@@ -509,6 +509,22 @@ _MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
 # is a component of a larger form, not a standalone value.
 _KANJI_BARE_RE = re.compile(r"([一二三四五六七八九十百千]{2,})(?![一二三四五六七八九十百千万億兆])")
 
+# Era-name year spellings (元号) ↔ Gregorian year (v0.2.225): "令和6年" and
+# "2024" assert the same year, but neither the digit extraction nor LIKE/FTS
+# matches can see it.  One shared table keeps the numeric check (which uses
+# the expansions to suppress false mismatches) and the query-side bridge in
+# search._numeric_variants consistent.  (name, gregorian year of 元年,
+# last gregorian year the era covers — bounds reject 昭和65年-type input.)
+_ERAS: tuple[tuple[str, int, int], ...] = (
+    ("明治", 1868, 1912),
+    ("大正", 1912, 1926),
+    ("昭和", 1926, 1989),
+    ("平成", 1989, 2019),
+    ("令和", 2019, 2050),  # ongoing — far-future era years aren't assertable
+)
+_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|[0-9]+|[一二三四五六七八九十百千]+)年")
+_ERA_BASE_END = {name: (base, end) for name, base, end in _ERAS}
+
 # Spelled-out English numerals (v0.2.196): "three million" ↔ "3000000",
 # "twenty-one" ↔ "21" — English sources assert the same values in words and
 # the digit-string presence check flagged the correct restatement. "and" is
@@ -690,6 +706,15 @@ def _numbers_expanded(text: str) -> set[str]:
         ev = _en_value(m.group(0))
         if ev is not None and ev > 0:
             nums.add(str(ev))
+    for m in _ERA_NUM_RE.finditer(t):
+        part = m.group(2)
+        n = 1 if part == "元" else _part_value(part)
+        if n is None:
+            continue
+        base, end = _ERA_BASE_END[m.group(1)]
+        year = base + int(n) - 1
+        if year <= end:
+            nums.add(str(year))
     nums |= _wari_values(t)
     return nums - suffixed
 

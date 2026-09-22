@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.224
+## Version History: v0.1.37 → v0.2.225
+
+### v0.2.225 (2026-09-22)
+**Fixed (retrieval + citation, era-name years)**: "令和6年" and "2024年" assert the same year, but nothing bridged them — retrieval missed both directions, and the numeric check could flag a correct restatement. One shared `_ERAS` table now converts both ways:
+
+- `_numbers_expanded` (citation.py) expands `(明治|大正|昭和|平成|令和)(元|digits|kanji)年` → the Gregorian year. The numeric check gains era≡year equivalence **and** `_numeric_query_terms` picks the digits up for free (the query "令和6年" finds the "2024年" source).
+- `_numeric_variants` (search.py) emits era spellings for year-valued digit terms — `2024` → `令和6`, `令和６`, plus `令和元` for year 1 — so the "2024" query finds the "令和6年" document. No 年 suffix needed: `%令和6%`/`令和6`-gram already substring-match it.
+- Bounds reject invalid era years (昭和65年 stays unasserted; 令和 is capped at 2050 — far-future era years are fiction, not data).
 
 ### v0.2.224 (2026-09-22)
 **Fixed (retrieval, JA conjugation recall)**: a query "泳いだ" shared **zero trigrams** with a document saying "泳ぐ" — every inflected verb/adjective query was invisible to every other inflection of the same stem (same for okurigana: "切り替える"/"切替える"). `term_variants` now emits a **kanji skeleton** — the term with hiragana stripped ("泳", "切替") — which is <3 chars, so it pulls the query into the LIKE path where '%泳%' bridges every inflection. A dictionary-free stem bridge: Sudachi/Kuromoji solve this via inflection to dictionary form, which requires a morphological dictionary Shoin deliberately doesn't carry.

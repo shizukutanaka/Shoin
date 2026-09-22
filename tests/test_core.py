@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.224")
+        self.assertEqual(VERSION, "0.2.225")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -9233,6 +9233,37 @@ class TestWidthVariants(unittest.TestCase):
                 self.assertEqual(got, want, query)
         finally:
             st.close()
+
+    def test_era_retrieval_both_directions(self) -> None:
+        """v0.2.225: '令和6年' and '2024年' assert the same year.  The citation
+        numeric check expands era→gregorian via _numbers_expanded, and the
+        query bridge picks it up for free; the reverse direction emits
+        era spellings for year terms in _numeric_variants."""
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        era = st.add_source(nb.id, "md", "era", "era.md", "sha-e")
+        st.add_chunks(era.id, ["この制度は令和6年に施行された。"], contexts=["era"])
+        gre = st.add_source(nb.id, "md", "gre", "gre.md", "sha-g")
+        st.add_chunks(gre.id, ["この制度は2024年に施行された。"], contexts=["gre"])
+        decoy = st.add_source(nb.id, "md", "decoy", "decoy.md", "sha-d")
+        st.add_chunks(decoy.id, ["猫が窓辺で眠っている。"], contexts=["decoy"])
+        try:
+            # "2024年" query must find the 令和6年 source (and vice-versa).
+            got = {h.source_id for h in bm25_search(st, nb.id, "2024年", 9)}
+            self.assertEqual(got, {era.id, gre.id})
+            got = {h.source_id for h in bm25_search(st, nb.id, "令和6年", 9)}
+            self.assertEqual(got, {era.id, gre.id})
+        finally:
+            st.close()
+
+    def test_era_expansion_suppresses_numeric_mismatch(self) -> None:
+        """The same shared table feeds the citation check: a claim saying
+        令和6年 against a source writing 2024年 asserts the same year."""
+        from shoin.citation import _numbers_expanded
+        self.assertIn("2024", _numbers_expanded("令和6年に施行"))
+        self.assertIn("1989", _numbers_expanded("平成元年に公布"))
+        self.assertIn("1989", _numbers_expanded("昭和六十四年に終了"))
+        self.assertNotIn("2118", _numbers_expanded("令和100年"))  # out of era
 
     def test_nfkc_shortened_variant_still_reaches_like_path(self) -> None:
         """ｶﾞｽ is 3 chars but normalises to ガス (2), which FTS5 cannot trigram.
