@@ -37,7 +37,7 @@ from shoin.search import (
 )
 from shoin.llm import LLMError
 from shoin.pipeline import _embed_chunks, _embed_input, rename_source
-from shoin.search import Hit, _char_bigrams, _fallback_needles, vector_search
+from shoin.search import Hit, _char_bigrams, _fallback_needles, _kanji_skeleton, vector_search
 from shoin.store import MIGRATIONS, Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.223")
+        self.assertEqual(VERSION, "0.2.224")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2584,6 +2584,31 @@ class TestSearch(unittest.TestCase):
             hits = bm25_search(s, nb, "効果", k=5)
             self.assertEqual(len(hits), 2)
             self.assertEqual(hits[0].source_id, src_b.id)
+
+    def test_conjugated_query_retrieves_dictionary_form_via_kanji_skeleton(self) -> None:
+        """v0.2.224: "泳いだ" and "泳ぐ" share ZERO trigrams, so a past-tense
+        query could never find a dictionary-form document.  The kanji-skeleton
+        variant ("泳") forces the LIKE fallback, where '%泳%' bridges every
+        inflection of the stem — a dictionary-free version of what Sudachi's
+        dictionary-form normalisation does."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src = s.add_source(nb, "txt", "swim", "o", "sha-a")
+            s.add_chunks(src.id, ["彼は毎朝プールで泳ぐ習慣を続けている。"],
+                         ["生活 > 運動"])
+            decoy = s.add_source(nb, "txt", "decoy", "o", "sha-b")
+            s.add_chunks(decoy.id, ["山道を徒歩で進む記録。"], ["生活 > 登山"])
+            hits = bm25_search(s, nb, "泳いだ", k=5)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0].source_id, src.id)
+
+    def test_kanji_skeleton_ignores_pure_kana_terms(self) -> None:
+        """The skeleton is only meaningful while a kanji stem remains —
+        "みーつ" would otherwise emit a '%ー%' needle that LIKE-matches every
+        long-vowel word in the notebook."""
+        self.assertEqual(_kanji_skeleton("みーつ"), "")
+        self.assertEqual(_kanji_skeleton("泳いだ"), "泳")
+        self.assertEqual(_kanji_skeleton("切り替える"), "切替")
 
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
