@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.220")
+        self.assertEqual(VERSION, "0.2.221")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3662,6 +3662,28 @@ class TestQA(unittest.TestCase):
         self.assertGreater(top, nxt, "rank-1 source must get the larger share of the surplus")
         self.assertGreaterEqual(nxt, MIN_PER_SOURCE_TOKENS - 5,
                                 "the floor must still hold for the lower-ranked source")
+
+    def test_build_context_shows_section_in_prompt_header(self) -> None:
+        """v0.2.221: the breadcrumb was indexed (v0.2.123) and ranked (v0.2.218)
+        but the prompt never showed it — the model saw "Doc" and a torn-out
+        excerpt, never "Doc (§ 免疫の基礎)". The header must carry the top
+        hit's section; absent context leaves the header unchanged."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-sec")
+            src = s.add_source(nb.id, "txt", "免疫レポート", "o", "sha1")
+            ctx = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text="防御機構の説明である。",
+                    score=1.0, context="免疫レポート > 免疫の基礎"),
+            ])
+            bare = build_context(s, [
+                Hit(chunk_id=2, source_id=src.id, text="防御機構の説明である。",
+                    score=1.0),
+            ])
+        self.assertIn("[S1] 免疫レポート (§ 免疫の基礎)", ctx.block)
+        self.assertIn("[S1] 免疫レポート\n", bare.block)
 
     def test_build_context_merges_consecutive_seq_hits(self) -> None:
         """v0.2.207: adjacent-chunk hits share a ~CHUNK_OVERLAP boundary, so a
