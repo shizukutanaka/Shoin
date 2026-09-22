@@ -1839,8 +1839,14 @@ class InputValidationSecurityTest(unittest.TestCase):
         cls.server.server_close()
         cls.tmp.cleanup()
 
+    # Generous liveness bound, not a latency SLA: only meant to catch a hung
+    # server. Under full-suite load a localhost request can legitimately take
+    # several seconds — a tight timeout here flakes with TimeoutError while
+    # the server and code under test are both healthy.
+    _CONN_TIMEOUT = 30
+
     def _raw_post(self, path: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request("POST", path, body=body, headers=headers)
         resp = conn.getresponse()
         return resp.status, resp.read()
@@ -1859,7 +1865,7 @@ class InputValidationSecurityTest(unittest.TestCase):
 
     def test_negative_content_length_returns_400(self) -> None:
         """A negative Content-Length on a JSON endpoint must return 400, not read until EOF."""
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST",
             "/api/notebooks",
@@ -1878,7 +1884,7 @@ class InputValidationSecurityTest(unittest.TestCase):
 
         # Create a notebook first so the rejection happens in _h_ask_sse, not at 404
         nb_body = _json.dumps({"name": "q-len-test"}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=nb_body,
             headers={"Content-Type": "application/json"},
@@ -1907,7 +1913,7 @@ class InputValidationSecurityTest(unittest.TestCase):
         import json as _json
 
         body = _json.dumps({"name": 42}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=body,
             headers={"Content-Type": "application/json"},
@@ -1934,7 +1940,7 @@ class InputValidationSecurityTest(unittest.TestCase):
             {"Content-Type": "application/json", "X-HTTP-Method-Override": "PATCH"},
         )
         # Can't use _raw_post for PATCH directly — do it manually
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "PATCH", "/api/sources/99999",
             body=patch_body,
@@ -1958,7 +1964,7 @@ class InputValidationSecurityTest(unittest.TestCase):
         import json as _json
 
         nb_body = _json.dumps({"name": "note-body-type-test"}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=nb_body,
             headers={"Content-Type": "application/json"},
