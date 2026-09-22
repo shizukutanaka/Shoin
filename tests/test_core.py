@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.214")
+        self.assertEqual(VERSION, "0.2.215")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4751,6 +4751,38 @@ class TestSelfContradictions(unittest.TestCase):
             self_contradictions("売上は1234万円だった。売上は5678万円だった。"),
             ["売上は5678万円だった。"],
         )
+
+    def test_cross_turn_flip_flagged_via_history(self) -> None:
+        """v0.2.215: a silent reversal of last turn's claim shows the same
+        single-diff flip; the CURRENT answer's sentence is the one flagged."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("治療の効果はない。", history="治療の効果はある。"),
+            ["治療の効果はない。"],
+        )
+        self.assertEqual(
+            self_contradictions("効果は低いことが分かった。", history="効果は高いことが分かった。"),
+            ["効果は低いことが分かった。"],
+        )
+        self.assertEqual(
+            self_contradictions("成長率は20%である。", history="成長率は15%である。"),
+            ["成長率は20%である。"],
+        )
+
+    def test_cross_turn_controls_stay_silent(self) -> None:
+        """Repeating last turn's claim is not a contradiction (degenerate_spans
+        owns repetition), a different-subject contrast stays silent, and
+        history-less calls behave exactly as before."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("治療の効果はある。", history="治療の効果はある。"), []
+        )
+        self.assertEqual(
+            self_contradictions("B社は効果がない。", history="A社は効果がある。"), []
+        )
+        self.assertEqual(self_contradictions("治療の効果はない。"), [])
 
 
 class TestDegenerateSpans(unittest.TestCase):
