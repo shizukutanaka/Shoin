@@ -24,7 +24,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
-from .citation import _KANJI_DIGIT, _numbers_expanded
+from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
 from .config import TOP_K
 from .store import Store
 
@@ -291,6 +291,20 @@ def _numeric_variants(term: str) -> list[str]:
             out.append(f"{q:g}{suf}")
     if v and v < 100_000_000:
         out.append(_int_to_kanji(v))
+    # Gregorian year → era-name spellings (v0.2.225): a query "2024" cannot
+    # match "令和6年" literally — the same vocabulary-mismatch class as the
+    # magnitude shorthand above.  Emit every era whose range covers the year
+    # (1989/2019 boundary years belong to two), both ASCII and fullwidth
+    # digits, plus the 元年 spelling.  No 年 suffix: '%令和6%' already
+    # substring-matches "令和6年", and the 3-char trigram "令和6" matches
+    # the FTS gram of it too.
+    for name, base, end in _ERAS:
+        if base <= v <= end:
+            y = v - base + 1
+            out.append(f"{name}{y}")
+            out.append(f"{name}{_to_fullwidth_ascii(str(y))}")
+            if y == 1:
+                out.append(f"{name}元")
     if 10_000 <= v < 100_000_000 and v % 10_000:
         out.append(f"{v // 10_000}万{v % 10_000}")
     return [o for o in out if o]
