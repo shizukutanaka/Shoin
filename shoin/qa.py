@@ -359,7 +359,11 @@ def build_context(
                     # A truncated segment IS in the prompt, so its surviving
                     # chunks count as cited — but only those whose text survived
                     # the truncation point (a merged tail chunk may be cut).
-                    texts.append(truncated)
+                    # The "…" marker tells the model the excerpt was CUT, not
+                    # complete — without it a mid-sentence fragment looks like a
+                    # whole passage and can be quoted as such (v0.2.211).
+                    if truncated:
+                        texts.append(truncated + "…")
                     off = 0
                     for cid, piece in seg:
                         if off < len(truncated):

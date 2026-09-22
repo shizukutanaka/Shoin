@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.210
+## Version History: v0.1.37 → v0.2.211
+
+### v0.2.211 (2026-09-22)
+**Fixed (qa, truncation honesty)**: a segment cut by the per-source token budget was appended verbatim — the excerpt ends mid-sentence with no continuation marker, so the model (and the UI excerpt view) could present a truncated fragment as a COMPLETE passage.
+
+- **`"…"` cut marker**: a budget-truncated segment now ends with `…`, matching the gap marker the prompt already uses — the model is told the excerpt continues beyond what it can see. A fragment that truncates to nothing contributes nothing (previously an empty string was appended and joined into a stray `…` boundary).
+- The marker is prompt-syntax like the `\n…\n` segment join — not billed to the source budget, and the citation id walk is unchanged (marks the same surviving chunks).
+
+1 test added: truncated excerpt ends with `…` (and is actually shorter than the source). `tests/` now runs 835 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.210 (2026-09-22)
 **Improved (citation verification, cross-turn degeneration)**: every check until now analysed one message at a time, which structurally cannot see the **cross-turn parrot loop** — a classic small-LLM failure where the model gets stuck re-emitting the SAME paragraph every turn (one occurrence per message, so each message passes the ≥3 repeat rule individually).
