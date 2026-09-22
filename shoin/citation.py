@@ -411,6 +411,51 @@ _EN_NUM_RE = re.compile(
 # minutes or as half of "五分五分" (50-50 odds), never a percentage alone.
 _WARI_RE = re.compile(rf"({_NUM_PART})割(?:({_NUM_PART})分)?(?:({_NUM_PART})厘)?")
 
+# Unit-conversion equivalence (v0.2.198): a claim saying "180分" against a
+# source writing "3時間" asserts the same duration — yet 180 never occurs in
+# the source text, so the presence check false-flagged. The conversion is
+# deterministic within each dimension family; months and years stay out
+# (28–31 days / 365–366 days are genuinely ambiguous).
+_SCALE_FAMILIES: list[dict[str, float]] = [
+    {"秒": 1 / 60, "分": 1.0, "時間": 60.0, "日": 1440.0, "週": 10080.0, "週間": 10080.0},
+    {
+        "mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0,
+        "ミリメートル": 0.001, "センチメートル": 0.01, "メートル": 1.0, "キロメートル": 1000.0,
+    },
+    {"g": 1.0, "kg": 1000.0, "グラム": 1.0, "キログラム": 1000.0},
+    {"ml": 0.001, "cc": 0.001, "L": 1.0, "ミリリットル": 0.001, "リットル": 1.0},
+]
+_UNIT_SCALE = {u: (i, s) for i, fam in enumerate(_SCALE_FAMILIES) for u, s in fam.items()}
+# Dedicated pair extractor — separate from _UNIT_NUM_RE because the unit check
+# deliberately excludes 時/分/秒/日 (indistinguishable from date chains), but
+# conversion pairs only ever SUPPRESS flags, and only same-family equality
+# suppresses, so the ambiguity that justified exclusion cannot cause a miss.
+_CONV_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(週間|時間|日|週|秒|分|[a-zA-Zμµ°%]+|[ァ-ヶー]+)")
+
+
+def _conv_values(text: str) -> set[tuple[int, float]]:
+    """(family, canonical value) pairs extractable from text, including
+    adjacent same-family sums — "1時間30分" yields (time, 60), (time, 30),
+    and (time, 90)."""
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    ms = list(_CONV_NUM_RE.finditer(t))
+    vals: set[tuple[int, float]] = set()
+    for i, m in enumerate(ms):
+        ent = _UNIT_SCALE.get(m.group(2))
+        if ent is None:
+            continue
+        fam, sc = ent
+        acc = float(m.group(1)) * sc
+        vals.add((fam, acc))
+        for j in range(i + 1, len(ms)):
+            nxt = ms[j]
+            ent2 = _UNIT_SCALE.get(nxt.group(2))
+            if ent2 is None or ent2[0] != fam or len(t[ms[j - 1].end():nxt.start()]) > 2:
+                break
+            acc += float(nxt.group(1)) * ent2[1]
+            vals.add((fam, acc))
+    return vals
+
 
 def _en_value(run: str) -> int | None:
     """Value of a spelled-out English numeral run, or None when ambiguous.
@@ -556,6 +601,7 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         for n, t in source_texts.items()
     }
     src_nums = {n: _numbers_expanded(t) for n, t in src_norm.items()}
+    src_conv = {n: _conv_values(t) for n, t in src_norm.items()}
     out: set[int] = set()
     prev_claim = ""
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -578,9 +624,20 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             claim_n = segments.get(n, claim_text)
             # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
             # the substring fallback preserves v0.2.184's rounding tolerance
-            # (claim "63" stays silent inside source "63.5%").
+            # (claim "63" stays silent inside source "63.5%"); the conversion
+            # check suppresses only when the claim's OWN unit pairs with the
+            # same canonical value in the same family — "300円" against a
+            # source saying "5時間" (→300min) stays flagged because 円 is
+            # not a time unit.
+            conv_by_num: dict[str, set[tuple[int, float]]] = {}
+            for m in _CONV_NUM_RE.finditer(claim_n):
+                ent = _UNIT_SCALE.get(m.group(2))
+                if ent is not None:
+                    conv_by_num.setdefault(m.group(1), set()).add((ent[0], float(m.group(1)) * ent[1]))
             if any(
-                num not in src_nums[n] and num not in src_norm[n]
+                num not in src_nums[n]
+                and num not in src_norm[n]
+                and conv_by_num.get(num, set()).isdisjoint(src_conv[n])
                 for num in _numbers_expanded(claim_n)
             ):
                 out.add(n)

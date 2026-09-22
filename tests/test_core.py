@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.197")
+        self.assertEqual(VERSION, "0.2.198")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4122,6 +4122,20 @@ class TestNumericMismatches(unittest.TestCase):
         self.assertEqual(numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}), [])
         self.assertEqual(numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}), [1])
         self.assertEqual(numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}), [1])
+
+    def test_unit_conversion_equivalence(self) -> None:
+        """"180分" ↔ "3時間", "1.5km" ↔ "1500m" — deterministic same-family
+        conversions stay silent; a different value or a different dimension
+        still flags (v0.2.198)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}), [])
+        self.assertEqual(numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}), [])
+        self.assertEqual(numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}), [])
+        self.assertEqual(numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}), [])
+        # Cross-dimension: 300円 is not 300 minutes — must still flag.
+        self.assertEqual(numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}), [1])
+        self.assertEqual(numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}), [1])
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical

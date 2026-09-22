@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.197
+## Version History: v0.1.37 → v0.2.198
+
+### v0.2.198 (2026-09-22)
+**Fixed (citation verification, unit conversions)**: `numeric_mismatches()` no longer false-flags when the claim and source state the same quantity in different units — "180分" against "3時間", "1.5km" against "1500m", "0.5kg" against "500g". Conversion is deterministic within each dimension family (time, length, mass, volume); months and years stay out (28–31-day months, 365–366-day years are genuinely ambiguous).
+
+- **Same-family equality, not blind injection**: a claim number is suppressed only when the claim's *own* unit pairs to a canonical value the source produces in the *same* family — "300円" against a source saying "5時間" (→300min) still flags because 円 is not a time unit. Injecting converted values into the number set would have silenced exactly that real mismatch.
+- **Adjacent pairs sum**: "1時間30分" yields 60, 30, AND 90 minutes (pairs separated by ≤2 chars in the same family accumulate), matching how durations are actually written.
+- **Dedicated extractor**: conversion pairs come from `_CONV_NUM_RE`, not `_UNIT_NUM_RE` — the unit check excludes 時/分/秒/日 for date-chain ambiguity, but conversion pairs only ever suppress flags, so that ambiguity cannot cause a miss.
+
+1 test added: same-family conversions silent both directions (180分↔3時間, 1.5km↔1500m, 90分↔1時間30分, 0.5kg↔500g); cross-dimension (300円 vs 5時間) and a different duration still flag. `tests/` now runs 788 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.197 (2026-09-22)
 **Fixed (citation verification, 歩合 notation)**: `_numbers_expanded()` now expands the 割/分/厘 percentage convention — "6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8%. The conversion is deterministic (割=10%, 分=1%, 厘=0.1%), so a claim asserting the percent value no longer false-flags — the last numeral-equivalence FP class.
