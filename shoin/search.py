@@ -489,6 +489,86 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     return out
 
 
+# --- pseudo-relevance feedback (PRF) --------------------------------------
+#
+# BM25's residual weakness is vocabulary mismatch: a chunk that shares no
+# query term's spelling (even via term_variants) is invisible to the index.
+# Classical PRF (Lavrenko & Croft, SIGIR 2001 "Relevance-based language
+# models"; Abdul-Jaleel et al., TREC 2004; revisited for BM25 by Jedidi & Lin,
+# SIGIR 2026) treats the top-ranked documents as relevant and expands the
+# query with their shared distinctive terms.  Unlike multi-query RAG-Fusion
+# (SHOIN_MULTI_QUERY), this costs no LLM call and works offline.
+
+PRF_DOCS = 3  # feedback docs: bottom of the classic 3-10 range — least drift
+PRF_MIN_DOCS = 2  # a term in >=2 of the top docs is topical, not one doc's noise
+PRF_TERMS = 8  # bounded expansion: noise and OR-list size both stay small
+_PRF_NGRAMS = (2, 3)  # CJK grams: 2-char compounds + the FTS trigram itself
+
+
+def _prf_terms(hits: list[Hit], query: str) -> list[str]:
+    """Distinctive terms shared by the top feedback hits, minus query vocabulary.
+
+    A candidate must appear in at least PRF_MIN_DOCS of the PRF_DOCS feedback
+    hits — the cheapest available evidence it is topical rather than one
+    document's idiosyncrasy — and must not already be in the query (a term the
+    user already typed adds nothing).  CJK candidates are 2- and 3-char grams
+    (the codebase's existing LIKE/FTS granularity); ASCII candidates are whole
+    words >= 3 chars, matching fts_query's whole-term threshold.  Exclusion
+    uses each gram's full spelling-variant set, so a katakana gram in the docs
+    is not re-added against a hiragana query (and vice-versa).
+    """
+    docs = hits[:PRF_DOCS]
+    if len(docs) < PRF_MIN_DOCS:
+        return []
+    norm_q = unicodedata.normalize("NFKC", query).casefold()
+    query_vocab = {v.casefold() for t in query_terms(query) for v in term_variants(t)}
+    counts: dict[str, int] = {}
+    for h in docs:
+        seen_in_doc: set[str] = set()
+        for term in query_terms(f"{h.text} {h.context}"):
+            if is_cjk(term[0]):
+                for n in _PRF_NGRAMS:
+                    seen_in_doc.update(term[i : i + n] for i in range(len(term) - n + 1))
+            elif len(term) >= 3:
+                seen_in_doc.add(term.casefold())
+        for g in seen_in_doc:
+            counts[g] = counts.get(g, 0) + 1
+    cands = [
+        g
+        for g, c in counts.items()
+        if c >= PRF_MIN_DOCS
+        and all(v.casefold() not in query_vocab and v.casefold() not in norm_q for v in term_variants(g))
+    ]
+    # df desc, longer grams first (more specific), then text — deterministic.
+    cands.sort(key=lambda g: (-counts[g], -len(g), g))
+    return cands[:PRF_TERMS]
+
+
+def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
+    """bm25_search plus one pseudo-relevance-feedback pass (see _prf_terms).
+
+    The expanded second pass runs only when the first left the result list
+    under-filled (< k): a pool already at capacity has no recall head-room for
+    expansion to add, so the extra search would be pure cost.  The expanded
+    query appends PRF terms AFTER the original text, so `-term` negations keep
+    parsing identically and still filter both passes.  Expanded-only hits can
+    only ADD recall — every first-pass hit keeps its score, and the merged
+    list is re-sorted by bm25 so an expansion-surfaced chunk with genuinely
+    higher term density still earns its rank.
+    """
+    hits = bm25_search(store, notebook_id, query, k)
+    if len(hits) >= k:
+        return hits
+    terms = _prf_terms(hits, query)
+    if not terms:
+        return hits
+    extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k)
+    seen = {h.chunk_id for h in hits}
+    merged = hits + [h for h in extra if h.chunk_id not in seen]
+    merged.sort(key=lambda h: h.bm25, reverse=True)
+    return merged[:k]
+
+
 _MUL = operator.mul  # bound once: map(operator.mul, ...) beats a generator expression
 
 
@@ -803,7 +883,10 @@ def retrieve(
     pool = max(k * 3, 12)
     negs = neg_terms(query)
     clean = strip_neg_terms(query) if negs else query
-    bm25_hits = bm25_search(store, notebook_id, query, pool)
+    # bm25_prf_search, not bare bm25_search: the pseudo-relevance-feedback pass
+    # costs nothing when the first pass already fills the pool, and adds recall
+    # for vocabulary-mismatch queries when it does not.
+    bm25_hits = bm25_prf_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
     # bm25_search() already excludes negated-term hits internally; vector_search()
     # has no query text to do the same, so filter it here. This must happen BEFORE
@@ -860,7 +943,9 @@ def retrieve_multi(
     total_vec = 0
     for i, (q, qv) in enumerate(zip(queries, vecs)):
         q_search = q if i == 0 else strip_neg_terms(q)
-        bm25_hits = bm25_search(store, notebook_id, q_search, pool)
+        # Same PRF-wrapped search as retrieve(): every phrasing expands on its
+        # own feedback evidence — original and rewrite queries alike.
+        bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool)
         if negs and i > 0:
             # bm25_search() already applied the primary query's own negs (i==0);
             # rewrite lists were searched without them and need the filter here.
