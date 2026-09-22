@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.228")
+        self.assertEqual(VERSION, "0.2.229")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -7072,6 +7072,62 @@ class TestExport(unittest.TestCase):
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc", md)
         self.assertNotIn("§", md)
+
+    def test_export_markdown_legend_shows_source_detail(self) -> None:
+        """v0.2.229: the seal viewer's 'found: full-text #2' provenance belongs in
+        the export too — a source surfaced only semantically is exactly the class
+        unsupported claims come from, so the archived legend carries it."""
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-detail-test")
+            a = s.add_source(nb.id, "txt", "doc-a", "mem://a", "sha-a")
+            b = s.add_source(nb.id, "txt", "doc-b", "mem://b", "sha-b")
+            s.add_chunks(a.id, ["書院はローカルツールである。"])
+            s.add_chunks(b.id, ["検証は引用を確かめる。"])
+            report = make_report(
+                "書院はローカルツールである[S1]。検証は引用を確かめる[S2]。",
+                ["doc-a", "doc-b"], [a.id, b.id],
+                ["書院はローカルツールである。", "検証は引用を確かめる。"],
+                source_detail=[
+                    {"rrf_bm25_rank": 2.0, "rrf_vec_rank": 5.0},
+                    {"rrf_vec_rank": 3.0},
+                ],
+            )
+            s.add_message(nb.id, "user", "書院とは", "{}")
+            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertIn("S1=doc-a [検出: 全文 #2 + 意味 #5]", md)
+        self.assertIn("S2=doc-b [検出: 意味 #3]", md)
+
+    def test_print_report_shows_source_detail(self) -> None:
+        """v0.2.229: CLI parity — the [S#] line carries the same provenance."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1], "invalid": [], "n_sources": 1,
+                "source_map": {"S1": "doc0"},
+                "source_detail": {"S1": {"rrf_vec_rank": 4.0, "lex": 0.35}},
+                "confirmed": [], "misattributed": [],
+            })
+        out = buf.getvalue()
+        self.assertIn("[検出: 意味 #4 + 語彙 0.35]", out)
+        # Old reports without source_detail render exactly as before.
+        buf2 = _io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            _cli._print_report({
+                "cited": [1], "invalid": [], "n_sources": 1,
+                "source_map": {"S1": "doc0"}, "confirmed": [], "misattributed": [],
+            })
+        self.assertNotIn("検出", buf2.getvalue())
 
     def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
         import json

@@ -12,7 +12,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .citation import COVERAGE_LOW, CitationReport
+from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
@@ -53,6 +53,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.negation": " ⚠出典と逆の主張の可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
         "cite.uncited_supported": "出典内一致=引用欠落の疑い",
+        "cite.found": "検出: ",
+        "cite.found_fts": "全文",
+        "cite.found_vec": "意味",
+        "cite.found_lex": "語彙",
         "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
         "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
@@ -108,6 +112,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.negation": " ⚠ possible contradiction with source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
         "cite.uncited_supported": "matches a source — missing citation",
+        "cite.found": "found: ",
+        "cite.found_fts": "full-text",
+        "cite.found_vec": "semantic",
+        "cite.found_lex": "lexical",
         "cite.degenerate": "⚠ Possible generation loop ({n}):",
         "cite.contradict": "⚠ Contradictory statements ({n}):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
@@ -256,10 +264,24 @@ def _print_report(report: CitationReport) -> None:
     # (REQ-103 CLI/Web parity). Absent on old reports/no-heading sources.
     raw_ctx = report.get("source_contexts")
     section_map: dict[str, str] = raw_ctx if isinstance(raw_ctx, dict) else {}
+    # Retrieval provenance per cited source (v0.2.229) — the same "which channel
+    # surfaced it" signal the seal viewer shows, on the headless surface too
+    # (REQ-103 parity). Absent on old reports.
+    raw_det = report.get("source_detail")
+    detail_map: dict[str, dict[str, float]] = (
+        raw_det if isinstance(raw_det, dict) else {}
+    )
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
         section = section_map.get(f"S{c}", "")
         sec = f" (§ {section})" if section else ""
+        bits = [
+            f"{_t('cite.found_' + kind)} #{int(v)}"
+            if kind != "lex"
+            else f"{_t('cite.found_' + kind)} {v:.2f}"
+            for kind, v in found_bits(detail_map.get(f"S{c}"))
+        ]
+        prov = f" [{_t('cite.found')}{' + '.join(bits)}]" if bits else ""
         if c in confirmed:
             marker = _t("cite.confirmed")
         elif c in misattr:
@@ -275,7 +297,7 @@ def _print_report(report: CitationReport) -> None:
             marker = _t("cite.negation")
         else:
             marker = ""
-        print(f"  [S{c}] {title}{sec}{marker}")
+        print(f"  [S{c}] {title}{sec}{prov}{marker}")
     uncited = report.get("uncited") or []
     if uncited:
         supported = set(report.get("uncited_supported") or [])
