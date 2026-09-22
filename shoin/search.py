@@ -480,6 +480,20 @@ def fts_query(query: str) -> str:
     return " OR ".join(groups)
 
 
+# The standard Lucene/Elasticsearch English stop list — the minimal,
+# widely-deployed set; no bespoke additions (a bespoke list is an
+# unverifiable knob). _needle_score counts RAW occurrences, so a ubiquitous
+# term like "the" or "of" contributes unbounded noise to LIKE-path ranking
+# that the FTS path never sees: FTS5's bm25 deweights high-DF terms via IDF
+# automatically. Filtering them from the needles — not from the FTS query —
+# mirrors that deweighting on exactly the path where it was missing.
+_ASCII_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in",
+    "into", "is", "it", "no", "not", "of", "on", "or", "such", "that", "the",
+    "their", "then", "there", "these", "they", "to", "was", "will", "with",
+})
+
+
 def _fallback_needles(query: str) -> list[str]:
     """Substring needles for the LIKE-scan fallback (CJK bigrams + words ≥ 2 chars).
 
@@ -497,14 +511,20 @@ def _fallback_needles(query: str) -> list[str]:
     two-character kana query (こー vs コー) stayed script-brittle, since terms
     that short never reach FTS5's trigram tokeniser in the first place.
     """
+    terms = query_terms(query) + _numeric_query_terms(query)
+    # Filter stopwords only when a content term remains: a query made entirely
+    # of stopwords ("to be") keeps its needles — noisy recall beats zero recall.
+    keep_stopwords = not any(t.lower() not in _ASCII_STOPWORDS for t in terms)
     needles: list[str] = []
-    for raw_term in query_terms(query) + _numeric_query_terms(query):
+    for raw_term in terms:
         # Drop a single-character ASCII term before expanding it: is_cjk('Ａ') is
         # true (fullwidth Latin lives in _CJK_RANGES), so its fullwidth variant
         # would otherwise fall into the CJK branch's keep-1-char path and
         # reintroduce precisely the flooding needle the raw term was excluded to
         # avoid.  Eligibility is a property of the term, not of each spelling.
         if not is_cjk(raw_term[0]) and len(raw_term) < 2:
+            continue
+        if not keep_stopwords and raw_term.lower() in _ASCII_STOPWORDS:
             continue
         for term in term_variants(raw_term):
             if is_cjk(term[0]):

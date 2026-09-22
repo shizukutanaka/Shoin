@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.243")
+        self.assertEqual(VERSION, "0.2.244")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3218,6 +3218,44 @@ class TestSearch(unittest.TestCase):
                              "underscore must not act as LIKE wildcard (false positive)")
             self.assertFalse(any("exactmatch no separator" in t for t in texts),
                              "chunk without underscore must not match")
+
+    def test_fallback_skips_ascii_stopword_needles(self) -> None:
+        """v0.2.244: English stopwords (the/is/of/…) ≥2 chars became LIKE
+        needles, and _needle_score counts raw occurrences — so a chunk dense
+        in 'the' could outscore a chunk dense in the real term, a divergence
+        the FTS path never has (BM25's IDF deweights ubiquitous terms
+        automatically). The LIKE needles now apply the standard Lucene stop
+        list when other terms remain; a query made ONLY of stopwords keeps
+        them (zero recall is worse than noisy recall)."""
+        with make_store() as s:
+            nb_id = s.create_notebook("stopword-nb").id
+            src = s.add_source(nb_id, "txt", "doc", "o", "sha-sw")
+            s.add_chunks(
+                src.id,
+                [
+                    "capital markets and capital flows",  # dense in real term
+                    # Only <3-char stopwords: ≥3-char ones (the/and/for/…)
+                    # reach FTS5's trigram index and would surface via the FTS
+                    # side regardless of LIKE-needle filtering.
+                    "is of to in on at by or it no as be",
+                ],
+            )
+            hits = bm25_search(s, nb_id, "what is the capital", k=5)
+            texts = [h.text for h in hits]
+            self.assertIn("capital markets and capital flows", texts)
+            self.assertNotIn(
+                "is of to in on at by or it no as be",
+                texts,
+                "a stopword-only chunk must not be recalled via stopword needles",
+            )
+
+        # All-stopword query keeps its needles: noisy recall beats zero recall.
+        with make_store() as s:
+            nb_id = s.create_notebook("only-stop-nb").id
+            src = s.add_source(nb_id, "txt", "doc2", "o", "sha-sw2")
+            s.add_chunks(src.id, ["to be or not to be", "completely unrelated text"])
+            hits = bm25_search(s, nb_id, "to be", k=5)
+            self.assertIn("to be or not to be", [h.text for h in hits])
 
     def test_neg_filter_ascii_word_boundary(self) -> None:
         """ASCII negated terms must exclude whole-word matches only.
