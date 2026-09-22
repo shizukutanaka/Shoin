@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.216")
+        self.assertEqual(VERSION, "0.2.217")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4752,6 +4752,16 @@ class TestSelfContradictions(unittest.TestCase):
             ["売上は5678万円だった。"],
         )
 
+    def test_indented_code_reassignment_stays_silent(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too —
+        reassigned values inside it aren't prose contradictions, exactly
+        like the fenced form above."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("例：\n\n    port = 1234\n    port = 5678"), []
+        )
+
     def test_cross_turn_flip_flagged_via_history(self) -> None:
         """v0.2.215: a silent reversal of last turn's claim shows the same
         single-diff flip; the CURRENT answer's sentence is the one flagged."""
@@ -4862,6 +4872,16 @@ class TestDegenerateSpans(unittest.TestCase):
         )
         # …while the same repetition in prose still fires.
         self.assertTrue(degenerate_spans("result=compute(x)" * 3))
+
+    def test_indented_code_repeats_stay_silent(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too — same
+        code-is-not-prose rule as the fenced form above."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(
+            degenerate_spans("例：\n\n    result=compute(x)\n    result=compute(x)\n    result=compute(x)"),
+            [],
+        )
 
     def test_cross_turn_loop_flagged_via_history(self) -> None:
         """v0.2.210: a sentence repeated across conversation turns reaches the
@@ -5060,6 +5080,27 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "```python\nx = compute()\n効果は高い[S1]。"
         self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_indented_code_and_its_contents(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too —
+        CommonMark's blank-line rule decides code vs lazy continuation."""
+        from shoin.citation import uncited_sentences
+
+        # Indent after a blank line = code block → silent.
+        self.assertEqual(
+            uncited_sentences("効果は高い[S1]。\n\n    port = 1234"), []
+        )
+        # Indent after a non-blank line = lazy paragraph continuation →
+        # still prose, still checked.
+        self.assertEqual(
+            uncited_sentences("効果は高い。\n    追加の散文文である。"),
+            ["効果は高い。", "追加の散文文である。"],
+        )
+        # A blank line inside the block keeps it open until non-indented text.
+        self.assertEqual(
+            uncited_sentences("例：\n\n    a = 1\n\n    b = 2\nこの後は散文である。"),
+            ["この後は散文である。"],
+        )
 
     def test_claim_after_structure_still_flags(self) -> None:
         from shoin.citation import uncited_sentences
