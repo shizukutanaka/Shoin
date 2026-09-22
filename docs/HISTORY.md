@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.229
+## Version History: v0.1.37 → v0.2.230
+
+### v0.2.230 (2026-09-22)
+**Fixed (UI, stale cited-passage mark after refresh)**: `chunks.id` is a plain SQLite rowid (no AUTOINCREMENT) — after `refresh_source()` replaces a URL source's chunks, the new rows can **reuse** the exact ids an old report's `source_chunk_ids` stored, so `renderFullSource` could pin the "引用箇所" mark on a chunk the citation never saw. That's a silent misattribution — the one display the app must never get wrong, since the mark is the visual proof of grounding. The stored `source_excerpts[S#]` already carries the text the citation actually used, so the renderer now marks a chunk only when its 24-char head appears in that excerpt; a refreshed source's recycled id whose text diverges marks nothing (honest absence over wrong claim). Without a stored excerpt there is nothing to verify against — old reports keep id-only marking. New contract test extracts `renderFullSource` into node with a stubbed DOM and asserts both directions (stale-id rejection + no-excerpt fallback), the suite's first behavioral UI check beyond syntax/i18n/routes.
 
 ### v0.2.229 (2026-09-22)
 **Fixed (explainability, surface parity)**: v0.2.228 added retrieval provenance (`source_detail` — which channel surfaced a source) but surfaced it only in the Web seal viewer, leaving the CLI `[S#]` line and the export legend blind — the same REQ-103 parity gap class as v0.2.130-131's section breadcrumb, fixed the same way. `citation.found_bits()` is now the single extraction (ordered `("fts"|"vec"|"lex", value)` pairs from a detail map) shared by the CLI's per-citation line (`[S1] title (§ sec) [検出: 全文 #2 + 意味 #5]`) and the export `_legend` (chat + Studio sections at once, since they share `_legend`). The signal matters most on the surfaces that get archived/shared: a source surfaced **only** semantically is where unsupported claims live. Old persisted reports without `source_detail` render exactly as before.
