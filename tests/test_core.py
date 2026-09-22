@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.242")
+        self.assertEqual(VERSION, "0.2.243")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -6478,6 +6478,64 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res1.source.sha256, "sha-v2")
         with make_store():
             pass  # store closed; already verified above
+
+    def test_refresh_source_unchanged_content_is_noop(self) -> None:
+        """v0.2.243: refreshing a URL whose content is byte-identical (same
+        sha256) previously deleted every chunk and re-inserted it with fresh
+        rowids — discarding all embeddings (LLM calls spent for zero content
+        change) and churning the rowid-reuse surface v0.2.230 guards stored
+        source_chunk_ids against. An unchanged refresh is now a no-op that
+        keeps chunk ids and embeddings intact."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        class EmbedLLM:
+            """Counts embed calls: an unchanged refresh must spend zero."""
+            embedding_model = "noop-embed-model"
+            calls = 0
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text: str) -> list[float]:
+                EmbedLLM.calls += 1
+                return [0.5, 0.5]
+
+        original = Extracted(
+            kind="url", title="Page", origin="http://same.test",
+            sha256="sha-same", text="word " * 200,
+        )
+        other = Extracted(
+            kind="url", title="Other", origin="http://other.test",
+            sha256="sha-other", text="filler " * 200,
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("noop-refresh-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://same.test")
+            source_id = res0.source.id
+            # A second source occupying higher rowids: without it, the first
+            # source's delete+reinsert lands back on the same 1..N rowids and
+            # the identity assertion below cannot discriminate churn from a
+            # true no-op.
+            with patch("shoin.pipeline.extract_url", return_value=other):
+                index_source(s, nb_id, "http://other.test")
+            before = [c.id for c in s.chunks_for_source(source_id)]
+            self.assertTrue(before)
+            EmbedLLM.calls = 0
+            same = Extracted(
+                kind="url", title="Page", origin="http://same.test",
+                sha256="sha-same", text="word " * 200,
+            )
+            with patch("shoin.pipeline.extract_url", return_value=same):
+                res1 = refresh_source(s, source_id, EmbedLLM())
+            after = [c.id for c in s.chunks_for_source(source_id)]
+        self.assertEqual(before, after, "chunk ids must survive an unchanged refresh")
+        self.assertEqual(EmbedLLM.calls, 0, "unchanged content must not re-embed")
+        self.assertEqual(res1.n_chunks, len(before))
+        self.assertEqual(res1.n_embedded, 0)
 
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
         """A user's custom rename (PATCH /api/sources/{id}) must survive a

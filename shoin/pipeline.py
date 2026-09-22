@@ -276,6 +276,12 @@ def refresh_source(
     ).fetchone()
     if dup:
         raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
+    if extracted.sha256 == src.sha256:
+        # Byte-identical content: re-chunking would produce the same texts, so
+        # delete+reinsert only mints fresh rowids — discarding every embedding
+        # (paid for in LLM calls) and churning the rowid-reuse surface that
+        # v0.2.230's excerpt check guards stored source_chunk_ids against.
+        return IndexResult(src, len(store.text_chunks_for_source(source_id)), 0)
     pairs = split_text_with_context(
         extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
     )
