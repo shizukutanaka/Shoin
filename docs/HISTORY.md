@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.235
+## Version History: v0.1.37 → v0.2.236
+
+### v0.2.236 (2026-09-22)
+**Fixed (UI, Studio badge parity) + test**: the Studio card heading had its **own third badge chain** — and it silently dropped `numeric_mismatch`, `unit_mismatch`, `negation_mismatch`, `misattributed_suggested`, `degraded` and `confirmed`. A fabricated statistic inside a briefing warned in chat but showed **nothing** on the Studio card whose whole job is surfacing exactly that. Its coverage guard was the weak `coverage < LOW` form too (`null < 0.5` → true in JS). The heading now calls the single `reportBadges()` extracted in v0.2.235, so all three surfaces (chat SSE, chat history, Studio) warn identically — the uncited/degenerate/contradict tooltips are preserved by the shared chain. New `test_renderStudio_shows_all_warning_badges` executes the real `renderStudio` + `reportBadges` under node and asserts the full class matrix on the card heading; verified fail-then-pass (the pre-change code emitted only 6 of 10 badges).
 
 ### v0.2.235 (2026-09-22)
 **Refactor (UI, single badge chain) + test**: v0.2.234's negation-seal bug was a symptom — the badge row beneath an assistant message existed in **two near-identical copies** (the `addMsg` history path and the SSE `done` path), the exact duplicated-chain shape that produced the drift class twice already (v0.2.77-79). Both copies are now one `reportBadges(c, report)` covering all eleven flags. The copies weren't actually identical: the SSE path's coverage guard was `cited?.length && coverage < COVERAGE_LOW` — `null < 0.5` is **true** in JS, so a report with `cited` set and `coverage: null` would have fired a spurious low-coverage badge on the live path only; the unified chain keeps the history path's stricter `typeof coverage === "number"` guard. ~80 lines removed. New `test_reportBadges_covers_every_flag` executes the real function under node — every flag → expected badge class in order, coverage badge fires on 0.3, `coverage: null` and an empty report fire nothing — pinning the whole warning surface the way `renderWithSeals`' test pins the chips.

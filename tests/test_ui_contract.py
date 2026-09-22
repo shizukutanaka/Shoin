@@ -370,6 +370,49 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_renderStudio_shows_all_warning_badges(self) -> None:
+        """v0.2.235: a Studio card's heading badges were a third badge chain —
+        and it silently dropped numeric_mismatch, unit_mismatch, negation,
+        misattributed_suggested, degraded and confirmed. A fabricated number
+        inside a briefing must warn there exactly as it does in chat. Executes
+        the real renderStudio + reportBadges under node: every flag lands."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        harness = (
+            """\
+function el(tag, cls, text){ return {tag, cls, text, children:[],
+  append(x){this.children.push(x)}, setAttribute(){}} }
+function t(k){ return k }
+const COVERAGE_LOW = 0.5;
+function renderWithSeals(){}
+const out = {children: [], replaceChildren(){ this.children = [] },
+  append(x){ this.children.push(x) }};
+const $ = s => s === "#studioOut" ? out : {replaceChildren(){}, append(){}};
+let cur = {studio: [{kind: "briefing", body: "甲 [S1]",
+  report: {invalid: [9], misattributed: [4], numeric_mismatch: [5],
+           unit_mismatch: [6], negation_mismatch: [7], confirmed: [1],
+           uncited: ["句"], degenerate: ["x"], self_contradiction: ["y"],
+           cited: [1], coverage: 0.3}}]};
+"""
+            + _js_block(src, "function reportBadges")
+            + "\n"
+            + _js_block(src, "function renderStudio")
+            + """
+renderStudio();
+const h = out.children[0].children[0];
+const texts = h.children.filter(b => b.cls && b.cls.startsWith("badge"))
+  .map(b => b.cls);
+const want = ["badge err","badge err","badge err","badge err","badge err",
+              "badge dim","badge warn","badge warn","badge warn","badge warn"];
+if (JSON.stringify(texts) !== JSON.stringify(want))
+  { console.error("studio badges: " + JSON.stringify(texts)); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
