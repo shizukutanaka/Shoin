@@ -286,7 +286,7 @@ const I18N = {
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
-    "chat.misattr":"誤ソースの可能性","chat.confirmed":"根拠確認済み",
+    "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.confirmed":"根拠確認済み",
     "chat.uncited":"無出典の断定文",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
@@ -319,7 +319,7 @@ const I18N = {
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
-    "chat.misattr":"possible wrong source","chat.confirmed":"grounding confirmed",
+    "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.confirmed":"grounding confirmed",
     "chat.uncited":"uncited assertions",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
@@ -632,6 +632,7 @@ function renderWithSeals(container, text, report){
   text = text.normalize("NFKC");
   const invalid = new Set((report && report.invalid) || []);
   const misattr = new Set((report && report.misattributed) || []);
+  const numeric = new Set((report && report.numeric_mismatch) || []);
   const confirmed = new Set((report && report.confirmed) || []);
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
@@ -647,7 +648,7 @@ function renderWithSeals(container, text, report){
     if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
     nums.forEach((n, i) => {
       if (i) container.append(document.createTextNode(" "));
-      const cls = invalid.has(n) ? " bad" : (misattr.has(n) ? " mis" : (confirmed.has(n) ? " ok" : ""));
+      const cls = invalid.has(n) ? " bad" : ((misattr.has(n)||numeric.has(n)) ? " mis" : (confirmed.has(n) ? " ok" : ""));
       const chip = el("button","seal" + cls, `S${n}`);
       chip.type="button";
       const name = srcMap[`S${n}`] || "";
@@ -655,6 +656,7 @@ function renderWithSeals(container, text, report){
       const nameSec = name + (section ? " › " + section : "");
       chip.title = invalid.has(n) ? t("chat.invalid")
         : misattr.has(n) ? t("chat.misattr") + (name ? " — " + nameSec : "")
+        : numeric.has(n) ? t("chat.numeric") + (name ? " — " + nameSec : "")
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
         : nameSec;
       chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
@@ -784,6 +786,9 @@ function addMsg(role, body, report){
     if (report.misattributed && report.misattributed.length){
       c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i).join(", ")));
     }
+    if (report.numeric_mismatch && report.numeric_mismatch.length){
+      c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: ` + report.numeric_mismatch.map(i=>"S"+i).join(", ")));
+    }
     if (report.confirmed && report.confirmed.length){
       c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
     }
@@ -872,6 +877,8 @@ $("#askForm").onsubmit = async e=>{
             c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
           if (rpt.misattributed?.length)
             c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x).join(", ")));
+          if (rpt.numeric_mismatch?.length)
+            c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: `+rpt.numeric_mismatch.map(x=>"S"+x).join(", ")));
           if (rpt.confirmed?.length)
             c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
           if (rpt.uncited?.length){

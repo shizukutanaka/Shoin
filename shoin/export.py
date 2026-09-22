@@ -17,6 +17,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_degraded": {"ja": "検索のみ", "en": "search only"},
     "status_invalid": {"ja": "⚠検証失敗", "en": "⚠ invalid citations"},
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
+    "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
@@ -48,6 +49,9 @@ def _status_line(report: dict[str, object]) -> str:
     misattr = report.get("misattributed")
     if isinstance(misattr, list) and misattr:
         bits.append(f"{_t('status_misattr')}: " + ", ".join(f"S{i}" for i in misattr))
+    numeric = report.get("numeric_mismatch")
+    if isinstance(numeric, list) and numeric:
+        bits.append(f"{_t('status_numeric')}: " + ", ".join(f"S{i}" for i in numeric))
     confirmed = report.get("confirmed")
     if isinstance(confirmed, list) and confirmed:
         bits.append(f"{_t('status_confirmed')}: " + ", ".join(f"S{i}" for i in confirmed))

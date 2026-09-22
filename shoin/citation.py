@@ -16,6 +16,12 @@ every generated text:
    at sentences that already carry a citation. A hallucinated or unsupported
    claim with *zero* citations anywhere in it is invisible to those checks —
    this scans for exactly that gap (docs/product-review.md priority item #1).
+5. Numeric-consistency check (`numeric_mismatches`): checks 2 and 3 compare
+   wording, which misses the most common hallucination shape the citation
+   literature actually documents (arXiv:2510.20303, ACL-industry CiteFix):
+   a correctly-attributed sentence carrying a *fabricated* statistic. A claim
+   citing [S1] that asserts a digit string S1 never contains is flagged — the
+   highest-precision hallucination signal available without an NLI model.
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -117,10 +123,13 @@ class CitationReport(TypedDict):
     # absent on old persisted reports — consumers must guard with .get().
     source_id_map: NotRequired[dict[str, int]]
     # Grounding checks (present only when source bodies are supplied):
-    #   confirmed     -> S-numbers whose cited sentence is lexically supported
-    #   misattributed -> S-numbers whose cited sentence clearly belongs elsewhere
+    #   confirmed         -> S-numbers whose cited sentence is lexically supported
+    #   misattributed     -> S-numbers whose cited sentence clearly belongs elsewhere
+    #   numeric_mismatch  -> S-numbers whose cited claim asserts a number the
+    #                        source never contains (present only when non-empty)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
+    numeric_mismatch: NotRequired[list[int]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
@@ -180,6 +189,48 @@ def _overlap(claim: set[str], source: set[str]) -> float:
     return len(claim & source) / len(claim) if claim else 0.0
 
 
+def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
+    """Attribute each citation to the clause-text that precedes it.
+
+    A sentence carrying several citations makes several claims; comparing the
+    WHOLE sentence against each cited source dilutes every one of them with
+    the other clauses' wording. With ordinary Japanese clause joining
+    ("…であり、…") that dilution is severe enough to push a correctly-cited
+    source below CONFIRM_MIN *and* let a different co-cited source win by the
+    MISMATCH_GAP margin — a false "wrong source number" accusation, which is
+    exactly what this module's design forbids (v0.1.4: never accuse a correct
+    answer). The citation markers are themselves the clause delimiters, so the
+    split needs no NLI model or LLM: the text since the previous marker is what
+    this marker cites. Sub-sentence attribution is where citation research is
+    heading (arXiv:2509.20859); this is its dependency-free special case.
+
+    Returns {} when the sentence has fewer than two citation positions — the
+    whole-sentence comparison is already correct there and stays untouched.
+    Shared by verify_grounding() (bigram overlap per clause) and
+    numeric_mismatches() (digit strings per clause) so the two can never
+    diverge on WHICH text a citation is held responsible for — the
+    v0.2.77-79 duplicated-heuristic drift lesson.
+    """
+    spans = list(_BRACKET_RE.finditer(norm))
+    cited_spans = [
+        (m, [int(x) for x in _SNUM_RE.findall(m.group(1)) if int(x) in valid])
+        for m in spans
+    ]
+    cited_spans = [(m, ns) for m, ns in cited_spans if ns]
+    if len(cited_spans) < 2:
+        return {}
+    out: dict[int, str] = {}
+    prev_end = 0
+    for m, ns in cited_spans:
+        seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
+        prev_end = m.end()
+        if not _bigrams(seg):
+            continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
+        for n in ns:
+            out[n] = seg
+    return out
+
+
 def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int]]:
     """Check each cited sentence against the source(s) it cites, lexically.
 
@@ -199,44 +250,6 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
     src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
     confirmed: set[int] = set()
     misattributed: set[int] = set()
-
-    def _segment_claims(norm: str, valid: list[int]) -> dict[int, set[str]]:
-        """Attribute each citation to the clause that precedes it.
-
-        A sentence carrying several citations makes several claims; comparing the
-        WHOLE sentence against each cited source dilutes every one of them with
-        the other clauses' wording. With ordinary Japanese clause joining
-        ("…であり、…") that dilution is severe enough to push a correctly-cited
-        source below CONFIRM_MIN *and* let a different co-cited source win by the
-        MISMATCH_GAP margin — a false "wrong source number" accusation, which is
-        exactly what this module's design forbids (v0.1.4: never accuse a correct
-        answer). The citation markers are themselves the clause delimiters, so the
-        split needs no NLI model or LLM: the text since the previous marker is what
-        this marker cites. Sub-sentence attribution is where citation research is
-        heading (arXiv:2509.20859); this is its dependency-free special case.
-
-        Returns {} when the sentence has fewer than two citation positions — the
-        whole-sentence comparison is already correct there and stays untouched.
-        """
-        spans = list(_BRACKET_RE.finditer(norm))
-        cited_spans = [
-            (m, [int(x) for x in _SNUM_RE.findall(m.group(1)) if int(x) in valid])
-            for m in spans
-        ]
-        cited_spans = [(m, ns) for m, ns in cited_spans if ns]
-        if len(cited_spans) < 2:
-            return {}
-        out: dict[int, set[str]] = {}
-        prev_end = 0
-        for m, ns in cited_spans:
-            seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
-            prev_end = m.end()
-            bg = _bigrams(seg)
-            if not bg:
-                continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
-            for n in ns:
-                out[n] = bg
-        return out
     # Carry the most recent non-empty claim bigrams so that citation-only fragments
     # (produced by the (?<=\.)(?=\s) split, e.g. "Sentence. [S1]" → " [S1]") can
     # still be verified against the sentence they annotate.
@@ -272,7 +285,7 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim)
+            claim_n = _bigrams(segments[n]) if n in segments else claim
             overlap_n = _overlap(claim_n, src_bg[n])
             if overlap_n >= CONFIRM_MIN:
                 confirmed.add(n)
@@ -289,6 +302,76 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
                     misattributed.add(n)
             # otherwise inconclusive (possibly a valid paraphrase) — stay silent
     return sorted(confirmed), sorted(misattributed)
+
+
+# --- numeric consistency (v0.2.184) ------------------------------------------
+
+_NUM_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
+_NUM_COMMA_RE = re.compile(r"(?<=\d),(?=\d)")
+
+
+def _numbers(text: str) -> set[str]:
+    """Significant digit strings in text (NFKC-folded): ≥2 digits or a decimal.
+
+    Single bare digits are excluded — nearly every Japanese text contains one
+    (第3版, 3月), so flagging them would be noise, not signal. Thousand
+    separators are stripped before matching so "1,234" and "1234" compare equal.
+    """
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    return {
+        m.group(0)
+        for m in _NUM_TOKEN_RE.finditer(t)
+        if "." in m.group(0) or len(m.group(0)) >= 2
+    }
+
+
+def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim asserts a number absent from that source.
+
+    verify_grounding() compares wording, which structurally misses the most
+    common hallucination shape the citation literature documents — a correctly
+    attributed sentence carrying a fabricated statistic (arXiv:2510.20303's
+    audit of real RAG answers found numeric errors dominate the citation-failure
+    taxonomy; ACL-industry CiteFix ships the same check). A claim citing [S1]
+    that asserts a digit string S1 never contains is flagged.
+
+    Same sentence- and clause-level attribution as verify_grounding (shared
+    _segment_claims): each citation is judged against the clause it annotates,
+    and a trailing "[S1]" fragment inherits the previous sentence's claim.
+
+    Deliberately asymmetric like the bigram checks: a claim number FOUND in the
+    source is no proof of correctness (rounding, derived arithmetic), and a
+    spelled-out number (three, 三) is never checked (ambiguous). Only an absent
+    digit string asserts anything — the module's "stay silent when inconclusive"
+    principle applied to numerals.
+    """
+    src_norm = {
+        n: _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", t))
+        for n, t in source_texts.items()
+    }
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            if any(num not in src_norm[n] for num in _numbers(claim_n)):
+                out.add(n)
+    return sorted(out)
 
 
 # Minimum non-whitespace character count in a sentence's citation-stripped body for
@@ -404,6 +487,9 @@ def make_report(
         )
         report["confirmed"] = confirmed
         report["misattributed"] = misattributed
+        num_mis = numeric_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if num_mis:
+            report["numeric_mismatch"] = num_mis
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}

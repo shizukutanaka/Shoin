@@ -48,6 +48,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
+        "cite.numeric": " ⚠数値が出典に無し",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
@@ -89,6 +90,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
+        "cite.numeric": " ⚠ number not in source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
@@ -217,6 +219,7 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.invalid", bad=bad))
     confirmed: set[int] = set(report.get("confirmed") or [])
     misattr: set[int] = set(report.get("misattributed") or [])
+    numeric: set[int] = set(report.get("numeric_mismatch") or [])
     # Section breadcrumb per cited source (v0.2.131) — completes v0.2.130's
     # in-app seal viewer and the Markdown export on the CLI surface too, so a
     # headless `shoin ask` user sees WHICH section each citation is grounded in
@@ -231,6 +234,8 @@ def _print_report(report: CitationReport) -> None:
             marker = _t("cite.confirmed")
         elif c in misattr:
             marker = _t("cite.misattr")
+        elif c in numeric:
+            marker = _t("cite.numeric")
         else:
             marker = ""
         print(f"  [S{c}] {title}{sec}{marker}")
