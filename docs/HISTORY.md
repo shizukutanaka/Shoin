@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.188
+## Version History: v0.1.37 → v0.2.189
+
+### v0.2.189 (2026-09-22)
+**Changed (retrieval, adaptive-k)**: `_tail_cut()` — score-gap (elbow) cutoff on the reranked candidate pool, applied before `mmr()` in both `retrieve()` and `retrieve_multi()`. Vector search ranks semantically-near chunks that may share zero query terms; RRF then hands that flat tail to MMR, which padded it into the prompt context and the `[S#]` source list whenever the genuinely-relevant set was smaller than k. The cut drops the tail at the first `ADAPTIVE_GAP = 0.25` adjacent score drop that lands on a chunk with `detail["lex"] == 0`.
+
+- **Why two conditions**: `_minmax` stretches RRF scores over [0,1] for ANY pool, so a large blended-score gap alone is routine even between two legitimate hits — a first-pass implementation that cut on the gap alone broke `TestRerankContext` (title-named docs were clipped). The lexical-zero requirement makes the cut fire only where relevance evidence is actually absent: term-bearing chunks are never cut, and BM25-only pools (every hit carries a query term) pass through untouched. Same "stay silent when inconclusive" asymmetry as the citation checks.
+- **Placement before MMR, not after**: the reranked, sorted list is where the cliff is measurable; cutting the pool upstream preserves MMR's own relevance/diversity trade-off on survivors instead of second-guessing its selection with score alone.
+- **Result-count contract**: `retrieve()` already returned ≤k (never guaranteed k), so letting the list end below k is the same contract — it now just also means "fewer than k chunks were actually relevant" instead of always padding.
+
+6 tests added: cliff onto term-free tail drops it; cliff onto term-bearing chunk never cuts (the regression that shaped the design); earliest-gap-wins; smooth-pool passthrough; empty/singleton; end-to-end vector-tail clip. `pytest tests/` now runs 759 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.188 (2026-09-22)
 **Added (answer-quality check, degenerate)**: `degenerate_spans()` — a seventh machine signal in `citation.py`, and the first that inspects the answer itself rather than its citations. Small local LLMs are prone to degeneration/repeat loops (the failure llama.cpp's and Ollama's sampling-time repeat penalties exist to prevent), and every citation check is structurally blind to it: a parroted or tail-stuck answer carries no citation anomaly at all.
