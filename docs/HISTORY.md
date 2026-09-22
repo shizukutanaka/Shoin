@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.240
+## Version History: v0.1.37 → v0.2.241
+
+### v0.2.241 (2026-09-22)
+**Fixed (UI, dropped SSE error frame)**: the server emits `ev==="error"` with `{"code","message"}` when it fails mid-stream — but the client dispatch only handled `meta`/`delta`/`done`, so a mid-stream failure left a **partial answer frozen with zero signal**: no toast, no error text, spinner already gone. The outer `catch` only sees network-level errors, not an error frame that arrived cleanly. The dispatch now handles it: `toast(j.message || j.code || "")`. New `test_sse_error_event_is_surfaced` extracts the real error branch and runs it under node — message-bearing frames toast the message, code-only frames toast the code. Verified fail-then-pass (pre-change: no handler branch existed).
 
 ### v0.2.240 (2026-09-22)
 **Fixed (UI, dead degraded badge)**: the pane-head `#degBadge` ("検索のみ") was dead UI — present in the markup with `hidden`, reset in two places, and **never unhidden** — while the SSE `done` frame has carried a `degraded` flag all along (False on the no-hit path, the real bool otherwise). The badge's evident purpose is the *per-answer* retrieval-only signal — the case where the LLM is nominally on but errored mid-answer, distinct from the global banner's "LLM off" — and the per-message `badge dim` scrolls away in a long thread. The `done` handler now sets `$("#degBadge").hidden = !j.degraded`. New `test_done_handler_toggles_degraded_pane_badge` extracts the real `else if (ev==="done")` block and runs it under node — badge shows on a degraded done and hides on a normal one. Verified fail-then-pass.
