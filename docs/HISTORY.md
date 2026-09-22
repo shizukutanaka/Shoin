@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.232
+## Version History: v0.1.37 → v0.2.233
+
+### v0.2.233 (2026-09-22)
+**Tests (behavioral UI coverage, defect-class expansion)**: product-review.md weakness #5 documented that the two defects found *only* via live browser verification (v0.2.177's `SHOIN_LANG` never reaching the UI; v0.2.179's stale export link after the last notebook was deleted) were both runtime state-transitions — outside the static contract tests' scope. v0.2.230 established the mechanism that covers them (lift the real function out of the script block, run it under node against a stub DOM); this version applies it to both classes, so the historical holes are now permanently guarded rather than relying on a human re-clicking them. New tests execute the real `renderNotebook` (export hrefs bound for an open notebook, `removeAttribute`'d when `cur` goes null) and the real lang resolver (`const _serverLang`..`const t` + `I18N`) — localStorage beats the server meta tag, the unsubstituted `__SHOIN_LANG__` placeholder is rejected by the length check and falls through to navigator, unknown locales fall back to en. Both verified fail-then-pass by mutating index.html (relaxing the length check / dropping the removeAttribute). Also factored `_js_block`/`_run_node` helpers so the next state-transition function is one harness away.
 
 ### v0.2.232 (2026-09-22)
 **Docs (product-review ledger sync)**: the ledger itself had been missed by v0.2.231's spec sync and was ~50 versions stale — it still named the flagship "引用の機械検証(四段)", listed weakness #5 as "no behavioral UI tests" even though v0.2.230 had added the first node-executed one, and stopped its summary at v0.2.179. Synced the header (v0.2.231, 869 tests), rewrote strength #1 as the ten-check suite + provenance, qualified weakness #5 with the v0.2.230 mechanism (runtime-state transitions are now coverable; real-browser rendering/interaction remains the hole), and added the v0.2.180-231 summary paragraph. Docs-only — a stale ledger misdirects every future cycle's priority pick, and it is the file consulted to pick them.
