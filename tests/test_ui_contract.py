@@ -285,6 +285,45 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_renderWithSeals_styles_each_flag_class(self) -> None:
+        """The seal chip is the visual proof of verification — every warning
+        check's flag must change the chip class, not just its tooltip. Executes
+        the real renderWithSeals under node and asserts the full class matrix:
+        invalid→bad; misattributed/numeric/unit/negation→mis; confirmed→ok;
+        unflagged→plain; full-width ［Ｓ］ normalized; combined [S1, S2] → two
+        chips; non-citation brackets stay text."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderWithSeals")
+        harness = """\
+function el(tag, cls, text){ return {tag, cls, text, children:[],
+  append(x){this.children.push(x)}, setAttribute(){}} }
+function t(k){ return k }
+const document = { createTextNode(s){ return {text: s, isText: true} } };
+const srcIndex = new Map();
+function openSeal(){}
+const container = { children: [], replaceChildren(){ this.children = [] },
+  append(x){ this.children.push(x) } };
+""" + fn + """
+renderWithSeals(container,
+  "甲 [S1] 乙 [S2] 丙 [S3] 丁 [S4] 戊 [S5] 己 [S6] 庚 [S7] ［Ｓ８］ [S1, S4] [note]",
+  {invalid: [3], misattributed: [4], numeric_mismatch: [5],
+   unit_mismatch: [6], negation_mismatch: [7], confirmed: [1, 8],
+   source_map: {}});
+const chips = container.children.filter(c => c.cls && c.cls.startsWith("seal"));
+const got = chips.map(c => c.cls);
+const want = ["seal ok","seal","seal bad","seal mis","seal mis","seal mis",
+              "seal mis","seal ok","seal ok","seal mis"];
+if (JSON.stringify(got) !== JSON.stringify(want))
+  { console.error("chip classes: " + JSON.stringify(got)); process.exit(1) }
+if (!container.children.some(c => c.isText && c.text.includes("[note]")))
+  { console.error("non-citation bracket lost"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

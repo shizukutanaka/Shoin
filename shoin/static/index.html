@@ -651,7 +651,7 @@ function renderWithSeals(container, text, report){
     if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
     nums.forEach((n, i) => {
       if (i) container.append(document.createTextNode(" "));
-      const cls = invalid.has(n) ? " bad" : ((misattr.has(n)||numeric.has(n)||unit.has(n)) ? " mis" : (confirmed.has(n) ? " ok" : ""));
+      const cls = invalid.has(n) ? " bad" : ((misattr.has(n)||numeric.has(n)||unit.has(n)||negation.has(n)) ? " mis" : (confirmed.has(n) ? " ok" : ""));
       const chip = el("button","seal" + cls, `S${n}`);
       chip.type="button";
       const name = srcMap[`S${n}`] || "";
