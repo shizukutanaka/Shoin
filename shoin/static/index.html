@@ -945,6 +945,10 @@ $("#askForm").onsubmit = async e=>{
         else if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){
           const rpt = j.report || {};
+          // Pane-head degraded badge: the done frame carries `degraded` — this
+          // is the per-answer retrieval-only signal (LLM nominally on but the
+          // call errored), distinct from the global banner's "LLM off".
+          $("#degBadge").hidden = !j.degraded;
           renderWithSeals(bd, acc, rpt);
           const wrap = bd.parentElement, c = el("div","cites");
           reportBadges(c, rpt);
