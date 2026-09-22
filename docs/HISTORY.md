@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.206
+## Version History: v0.1.37 → v0.2.207
+
+### v0.2.207 (2026-09-22)
+**Improved (qa, prompt continuity + budget dedup)**: when retrieval surfaces adjacent chunks of the same source (the common case — a topic spanning a chunk boundary), `build_context()` presented them joined by the `"\n…\n"` gap marker. That claims a discontinuity that does not exist AND bills the shared ~CHUNK_OVERLAP-token boundary to the token budget twice (once per chunk).
+
+- **Consecutive-`seq` merging**: `Hit` gains `seq` (populated from the chunks table in all three retrieval paths — FTS5, LIKE fallback, vector). In `build_context`, an ascending `k, k+1` run merges into one continuous segment: `_boundary_overlap()` finds the exact shared boundary and the later chunk contributes only its new text. The `…` marker survives for REAL gaps; descending/unknown seqs never merge.
+- **Exact suffix-prefix dedup**: `_boundary_overlap()` scans downward from the longest candidate ("a ends with b[:k]" is NOT monotone in k, so no binary search) with a 20-char floor to keep coincidental short suffixes from merging.
+- **Truncation-safe citations**: a merged segment truncated by the budget marks only the chunk ids whose text survived the cut — the tail chunk can be dropped by truncation and is then correctly not marked as cited.
+- ~64-token overlap saved per adjacent pair: on the 1000-token default budget one merged pair frees ~6% for further sources.
+
+3 tests added: merge dedups the boundary + ids, unknown/reverse seqs keep the gap, truncated segment marks only surviving chunks. `tests/` now runs 830 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.206 (2026-09-22)
 **Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **markdown structural lines** — ATX headings, pipe-table rows (including `|---|` separators that assert nothing at all), horizontal rules, blockquotes, and fenced code + everything inside it — as uncited "claims". The check exists to flag *sentences* asserting source content; none of these are sentences.
