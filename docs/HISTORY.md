@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.238
+## Version History: v0.1.37 → v0.2.239
+
+### v0.2.239 (2026-09-22)
+**Fixed (UI, seal-click title collision)**: on reports predating `source_id_map` the seal click fell back to a title scan and opened the **first** same-titled source — with two same-titled sources (identical `<title>` pages, duplicate file names) the reader verifies the citation against the wrong document: silent misattribution on the very surface built to prevent it. When the stored excerpt is available, `openSeal` now probes each candidate's chunks and opens the source whose text actually contains the excerpt head — the same provable check `renderFullSource` applies to chunk ids (v0.2.230), one level up. A `_sealSeq` counter guards the async probes against a second seal click racing in; single-match and no-excerpt paths are unchanged (no extra fetches). `openSeal` is now async — the `onclick` callers never awaited it anyway. New `test_openSeal_disambiguates_title_collision` executes the real function under node: collision → opens the excerpt-containing source (not the first), single match → no probe fetches, no excerpt → first-match fallback. Verified fail-then-pass (old code picked source 1).
 
 ### v0.2.238 (2026-09-22)
 **Fixed (search, negated-term false exclusion)**: `_apply_neg_filter` matched every negated term by substring — so `-api` silently suppressed "capital", `-net` suppressed "network", `-ai` suppressed "train/email/main". Exclusion is the asymmetric harm direction: positive-match overreach merely widens recall the reranker absorbs downstream, but a wrongly-dropped chunk is gone for good and the user sees a confident "found nothing relevant". ASCII negated terms now require word boundaries (the same `[0-9A-Za-z_]` character set `query_terms` tokenizes with, so the exclusion boundary is the same boundary that produced the term); CJK-containing terms keep substring semantics since CJK text has no word boundaries — `書院 -儒学` behaves identically. Verified fail-then-pass: the old code dropped the "capital markets" chunk under `-api` (`test_neg_filter_ascii_word_boundary`).

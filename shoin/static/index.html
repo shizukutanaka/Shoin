@@ -672,7 +672,8 @@ function renderWithSeals(container, text, report){
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details){
+let _sealSeq = 0;
+async function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
@@ -681,8 +682,29 @@ function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details){
   const cited = (chunkIds && chunkIds[`S${n}`]) || null;
   const detail = (details && details[`S${n}`]) || null;
   if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited, detail); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section, cited, detail); return; } }
-  if (title) toast(title);
+  const candidates = [];
+  for (const [id, info] of srcIndex){ if (info.title === title) candidates.push(id); }
+  if (candidates.length === 1){ showSource(candidates[0], title, excerpt, section, cited, detail); return; }
+  if (!candidates.length){ if (title) toast(title); return; }
+  // Title collision (only reachable on pre-source_id_map reports): the first
+  // match is not necessarily the cited source, and opening the wrong one is
+  // silent misattribution on the surface built to prevent it.  When the stored
+  // excerpt is available, pick the candidate whose chunks actually contain it —
+  // the same provable check renderFullSource applies to chunk ids (v0.2.230).
+  // _sealSeq guards the async probes against a second seal click racing in.
+  const seq = ++_sealSeq;
+  if (excerpt){
+    for (const id of candidates){
+      try{
+        const j = await (await api(`/api/sources/${id}/text`)).json();
+        if (seq !== _sealSeq) return;
+        if ((j.chunks || []).some(c => excerpt.includes(String(c.text).slice(0, 24)))){
+          showSource(id, title, excerpt, section, cited, detail); return;
+        }
+      }catch(e){ /* probe failed — try the next candidate */ }
+    }
+  }
+  if (seq === _sealSeq) showSource(candidates[0], title, excerpt, section, cited, detail);
 }
 let _srcAbort = null, _viewerOpener = null;
 function closeViewer(){

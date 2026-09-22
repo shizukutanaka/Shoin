@@ -413,6 +413,48 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_openSeal_disambiguates_title_collision(self) -> None:
+        """v0.2.239: on pre-source_id_map reports the title fallback opened the
+        FIRST same-titled source — silent misattribution when two sources share
+        a title. Executes the real openSeal under node: with a collision it
+        probes candidates' chunks and opens the one containing the excerpt
+        head; single match and id-less reports keep the old fast paths."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        harness = (
+            """\
+let _sealSeq = 0;
+const calls = [];
+function showSource(id){ calls.push(id) }
+function toast(){}
+const srcIndex = new Map([[1, {s:1, title:"dup"}],
+                        [2, {s:2, title:"dup"}],
+                        [3, {s:3, title:"other"}]]);
+const fetchLog = [];
+const chunkA = {text: "まったく別の本文がここにある。"};
+const chunkB = {text: "引用箇所のテキストはここにある。後続の文も続く。"};
+async function api(path){ fetchLog.push(path);
+  return {json: async () => ({chunks:
+    path === "/api/sources/2/text" ? [chunkB] : [chunkA]})}; }
+const excerpt = "前文。引用箇所のテキストはここにある。後続の文も続く。後文";
+(async () => {
+  await openSeal(1, {"S1": "dup"}, null, {"S1": excerpt}, null, null, null);
+  if (calls[0] !== 2)
+    { console.error("collision picked source " + calls[0]); process.exit(1) }
+  calls.length = 0;
+  await openSeal(2, {"S2": "other"}, null, {"S2": excerpt}, null, null, null);
+  if (calls[0] !== 3) { console.error("single match broke"); process.exit(1) }
+  calls.length = 0;
+  await openSeal(3, {"S3": "dup"}, null, null, null, null, null);
+  if (calls[0] !== 1) { console.error("no-excerpt fallback broke"); process.exit(1) }
+  console.log("ok")
+})();
+"""
+        )
+        rc, out = _run_node(harness + _js_block(src, "async function openSeal"))
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
