@@ -51,6 +51,39 @@ def _script_body(html: str) -> str:
     return m.group(1)
 
 
+def _js_block(src: str, marker: str) -> str:
+    """The JS source from *marker* through its matching closing brace.
+
+    Used to lift a single function/const object out of the monolithic script so
+    node can execute it against stubbed DOM globals — the mechanism v0.2.230
+    added for behavioral (not just static) UI checks.
+    """
+    start = src.index(marker)
+    depth, end = 0, start
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    return src[start:end]
+
+
+def _run_node(js_source: str) -> tuple[int, str]:
+    node = shutil.which("node")
+    if not node:
+        return -1, "node not available"
+    with tempfile.TemporaryDirectory() as d:
+        js = Path(d) / "ui.mjs"
+        js.write_text(js_source, encoding="utf-8")
+        proc = subprocess.run(
+            [node, str(js)], capture_output=True, text=True, timeout=60
+        )
+    return proc.returncode, proc.stderr or proc.stdout
+
+
 class TestUIContract(unittest.TestCase):
     def test_javascript_parses(self) -> None:
         """A syntax error anywhere kills the whole UI — the app is one script block."""
@@ -169,6 +202,88 @@ console.log("ok")
                 [node, str(js)], capture_output=True, text=True, timeout=60
             )
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+    def test_renderNotebook_clears_export_links_without_notebook(self) -> None:
+        """v0.2.179 defect class: after the last notebook is deleted, the export
+        links must lose their href — a stale /api/notebooks/{deleted}/export URL
+        otherwise stays visible and silently 404s on click. Executes the real
+        renderNotebook under node with a stub DOM and asserts both directions:
+        hrefs set when a notebook is open, removed when cur goes null."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderNotebook")
+        harness = """\
+const reg = {};
+function $(sel){
+  if (!reg[sel]) reg[sel] = {hidden:false, textContent:"",
+    replaceChildren(){}, append(){}, setAttribute(){}, contains(){return false},
+    removeAttribute(n){ delete this[n]; }};
+  return reg[sel];
+}
+function el(tag, cls, text){ return {tag, cls, text, children:[],
+  append(x){this.children.push(x)}, setAttribute(){}, querySelector(){return null}} }
+function t(k){ return k }
+const document = { activeElement: null };
+let srcIndex = new Map();
+let cur = {id: 7, name: "nb", sources: []};
+let externalPendingRename = null;
+function renderChatHistory(){} function renderStudio(){}
+function renderNotes(){} function refreshQuestions(){}
+function startSourceRename(){ return {setSelectionRange(){}} }
+""" + fn + """
+renderNotebook();
+if (reg["#exMd"].href !== "/api/notebooks/7/export?format=md")
+  { console.error("export href not bound: " + reg["#exMd"].href); process.exit(1) }
+cur = null;
+renderNotebook();
+if (reg["#exMd"].href !== undefined || reg["#exBib"].href !== undefined
+    || reg["#exRis"].href !== undefined)
+  { console.error("stale export href survived cur=null"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_lang_resolution_prefers_valid_server_code(self) -> None:
+        """v0.2.177 defect class: SHOIN_LANG never reached the UI. The resolver
+        runs once at script load — localStorage beats the server-injected meta
+        tag; an unsubstituted __SHOIN_LANG__ placeholder (length > 2) is rejected
+        by the length check, not string compare; a locale with no I18N table
+        falls back to en. Executes the real resolver + I18N + t() under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        i18n = _js_block(src, "const I18N = {")
+        # The resolver block: `const _serverLang` .. `const t = ...` (applyI18n
+        # follows t and is not part of the contract under test).
+        i1 = src.index("const _serverLang")
+        i2 = src.index("function applyI18n")
+        resolver = src[i1:i2]
+        harness = i18n + """
+function resolveLang(lsv, metaContent, nav){
+  const localStorage = { getItem(k){ return lsv; } };
+  const document = { querySelector(s){ return metaContent === null ? null : {content: metaContent} } };
+  const navigator = { language: nav };
+""" + resolver + """
+  return {lang, t};
+}
+const r1 = resolveLang(null, "en", "ja");
+if (r1.lang !== "en" || r1.t("app.title") !== I18N.en["app.title"])
+  { console.error("server code not honored: " + r1.lang); process.exit(1) }
+const r2 = resolveLang(null, "__SHOIN_LANG__", "ja");
+if (r2.lang !== "ja")
+  { console.error("unsubstituted placeholder leaked: " + r2.lang); process.exit(1) }
+const r3 = resolveLang("en", "ja", "ja");
+if (r3.lang !== "en")
+  { console.error("localStorage did not win: " + r3.lang); process.exit(1) }
+const r4 = resolveLang(null, null, "fr");
+if (r4.lang !== "en" || r4.t("app.title") !== I18N.en["app.title"])
+  { console.error("unknown locale not falling back: " + r4.lang); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
 
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
