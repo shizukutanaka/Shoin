@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.217")
+        self.assertEqual(VERSION, "0.2.218")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2549,6 +2549,41 @@ class TestSearch(unittest.TestCase):
             vh = vector_search(s, nb, [1.0, 0.0], k=5)
             self.assertTrue(vh)
             self.assertEqual(vh[0].context, "生物 > 光合成")
+
+    def test_heading_matched_chunk_outranks_body_matched(self) -> None:
+        """A term in the section breadcrumb is a stronger topicality signal
+        than a body occurrence, so the FTS path weights context 2x text
+        (v0.2.218).  Without the weight both docs tie at one match and the
+        body-matched one wins on column-length idf, burying the section whose
+        heading actually names the term."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src_a = s.add_source(nb, "txt", "body-a", "o", "sha-a")
+            # Term in body only.
+            s.add_chunks(src_a.id, ["光合成についての詳細な記述が続く文章。"],
+                         ["植物学 > 葉緑体"])
+            src_b = s.add_source(nb, "txt", "ctx-b", "o", "sha")
+            # Same term in the heading breadcrumb only — one occurrence each.
+            s.add_chunks(src_b.id, ["葉緑体でのエネルギー変換について説明する。"],
+                         ["植物学 > 光合成"])
+            hits = bm25_search(s, nb, "光合成", k=5)
+            self.assertEqual(len(hits), 2)
+            self.assertEqual(hits[0].source_id, src_b.id)
+
+    def test_heading_match_weighted_in_like_path(self) -> None:
+        """The LIKE fallback (terms < 3 chars skip FTS5 — every 2-char Japanese
+        compound) must apply the SAME context weight: an equal-1.0 fallback
+        would quietly un-rank heading matches for exactly the most common JA
+        query shape (v0.2.218)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src_a = s.add_source(nb, "txt", "body-a", "o", "sha-a")
+            s.add_chunks(src_a.id, ["効果についての記述。"], ["分野 > 実験"])
+            src_b = s.add_source(nb, "txt", "ctx-b", "o", "sha-b")
+            s.add_chunks(src_b.id, ["作用についての記述。"], ["分野 > 効果"])
+            hits = bm25_search(s, nb, "効果", k=5)
+            self.assertEqual(len(hits), 2)
+            self.assertEqual(hits[0].source_id, src_b.id)
 
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
