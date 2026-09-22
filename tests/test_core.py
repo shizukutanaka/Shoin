@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.215")
+        self.assertEqual(VERSION, "0.2.216")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5201,6 +5201,25 @@ class TestUncitedSentences(unittest.TestCase):
             source_bodies=["治療の効果は高いことが示された。"],
         )
         self.assertNotIn("uncited_supported", report)
+        self.assertNotIn("uncited_supported_source", report)
+
+    def test_make_report_names_supported_source(self) -> None:
+        """v0.2.216: `uncited_supported_source` maps each grounded uncited
+        sentence to the S# it most likely omitted — the fix is 'add [S#]',
+        not 're-read every source'."""
+        from shoin.citation import make_report
+
+        bodies = [
+            "安全性の評価は二重盲検試験で行われた。",
+            "治療の効果は高いことが示された。有効率は顕著だった。",
+        ]
+        report = make_report(
+            "治療の効果は高いことが示された。", ["調査A", "調査B"], source_bodies=bodies
+        )
+        self.assertEqual(
+            report.get("uncited_supported_source"),
+            {"治療の効果は高いことが示された。": "S2"},
+        )
 
     def test_make_report_populates_uncited_when_sources_present(self) -> None:
         from shoin.citation import make_report

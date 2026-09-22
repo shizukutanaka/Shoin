@@ -804,9 +804,10 @@ function addMsg(role, body, report){
     }
     if (report.uncited && report.uncited.length){
       const sup = new Set(report.uncited_supported || []);
+      const supSrc = report.uncited_supported_source || {};
       const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
       // Grounded uncited = citation omission; ungrounded = the dangerous kind.
-      b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}]` : s).join("\n");
+      b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
       c.append(b);
     }
     if (report.degenerate && report.degenerate.length){
@@ -909,8 +910,9 @@ $("#askForm").onsubmit = async e=>{
             c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
           if (rpt.uncited?.length){
             const sup = new Set(rpt.uncited_supported || []);
+            const supSrc = rpt.uncited_supported_source || {};
             const ub = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${rpt.uncited.length}`);
-            ub.title = rpt.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}]` : s).join("\n");
+            ub.title = rpt.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
             c.append(ub);
           }
           if (rpt.degenerate?.length){

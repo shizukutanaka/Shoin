@@ -1807,6 +1807,38 @@ class SSEConnectionErrorTest(unittest.TestCase):
         # Server must have responded (400 for too-large body or close gracefully)
         self.assertTrue(len(response) >= 0)  # did not crash
 
+    def test_streamed_report_receives_history(self) -> None:
+        """v0.2.216: the streamed make_report() must get the same `history`
+        join qa.ask() passes — previously it was omitted, so the cross-turn
+        checks (degenerate_spans/self_contradictions) silently never fired
+        on the web path, the primary user surface."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "xturn"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("治療法の効果について多くの研究がある。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        # Seed a prior assistant turn asserting the opposite.
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            store.add_message(nb_id, "user", "効果は？", "{}")
+            store.add_message(nb_id, "assistant", "治療の効果はある。", "{}")
+        self.llm.reply_parts = ["治療の効果はない。"]
+        try:
+            raw = self._ask_raw(nb_id, "効果はどうですか？")
+        finally:
+            self.llm.reply_parts = ["回答 ", "[S1]。"]
+        done = [d for ev, d in parse_sse(raw.decode()) if ev == "done"]
+        self.assertTrue(done)
+        self.assertEqual(
+            done[0]["report"].get("self_contradiction"), ["治療の効果はない。"]
+        )
+
 
 class HostnameOfTest(unittest.TestCase):
     def test_malformed_netloc_returns_empty_string(self) -> None:
