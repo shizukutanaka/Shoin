@@ -19,6 +19,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
     "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
     "status_unit": {"ja": "⚠単位が出典と不一致", "en": "⚠ unit differs from source"},
+    "status_negation": {"ja": "⚠出典と逆の主張の可能性", "en": "⚠ possible contradiction with source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
     "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
@@ -57,6 +58,9 @@ def _status_line(report: dict[str, object]) -> str:
     unit = report.get("unit_mismatch")
     if isinstance(unit, list) and unit:
         bits.append(f"{_t('status_unit')}: " + ", ".join(f"S{i}" for i in unit))
+    negation = report.get("negation_mismatch")
+    if isinstance(negation, list) and negation:
+        bits.append(f"{_t('status_negation')}: " + ", ".join(f"S{i}" for i in negation))
     confirmed = report.get("confirmed")
     if isinstance(confirmed, list) and confirmed:
         bits.append(f"{_t('status_confirmed')}: " + ", ".join(f"S{i}" for i in confirmed))

@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.200")
+        self.assertEqual(VERSION, "0.2.201")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4432,6 +4432,87 @@ class TestQuoteMismatches(unittest.TestCase):
         )
         self.assertEqual(report.get("quote_mismatch"), [1])
         self.assertIn(1, report.get("misattributed", []))
+
+
+class TestNegationMismatches(unittest.TestCase):
+    """negation_mismatches() (v0.2.201): a claim mirroring a source sentence
+    with the negation flipped — bigram overlap confirms it as grounded while
+    the polarity is inverted."""
+
+    def test_flags_negation_flip(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "治療の効果はないことが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_positive_claim_against_negative_source(self) -> None:
+        """The flip is symmetric — a positive claim citing a negative source
+        is the same inversion."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はないことが分かった。"}
+        text = "治療の効果はあることが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_matching_polarity_stays_silent(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "治療の効果はあることが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_subset_claim_of_bipolar_source_stays_silent(self) -> None:
+        """A claim restating only half of a bipolar source sentence
+        ("Aは効果があるがBはない") is a subset, not a flip — src coverage
+        below 0.5 stays silent."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療Aは効果があるが治療Bは効果がなかった。"}
+        text = "治療Aは効果がある[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_contrastive_negation_stays_silent(self) -> None:
+        """"AではなくB" asserts the same B the source asserts — exempt."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "会議は大阪で開催された。"}
+        text = "会議は東京ではなく大阪で開催された[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_double_negation_reads_positive(self) -> None:
+        """"なくはない" counts two markers → even → positive parity."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療には効果がある。"}
+        text = "この治療には効果がなくはない[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_english_negation_flip(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the treatment does improve survival rates."}
+        text = "the treatment does not improve survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_low_overlap_claim_stays_silent(self) -> None:
+        """A loosely paraphrased negative claim could disagree OR discuss a
+        different aspect — inconclusive below the mirror bound."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "効果は観察されなかった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_report_records_negation_mismatch(self) -> None:
+        from shoin.citation import make_report
+
+        report = make_report(
+            "治療の効果はないことが分かった[S1]。",
+            ["調査A"],
+            source_bodies=["治療の効果はあることが分かった。"],
+        )
+        self.assertEqual(report.get("negation_mismatch"), [1])
 
 
 class TestDegenerateSpans(unittest.TestCase):
