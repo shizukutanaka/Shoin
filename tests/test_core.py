@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.186")
+        self.assertEqual(VERSION, "0.2.187")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3941,6 +3941,93 @@ class TestNumericMismatches(unittest.TestCase):
             source_bodies=["採用率は63%だった。"],
         )
         self.assertEqual(report.get("numeric_mismatch"), [1])
+
+
+class TestQuoteMismatches(unittest.TestCase):
+    """quote_mismatches() (v0.2.187): a verbatim quote (「…」/"…") cited to a
+    source that does not contain it while a different source does — the
+    exact-string cousin of the misattributed flag (arXiv:2510.20303's quoted-
+    fabrication failure shape)."""
+
+    def test_flags_quote_living_in_other_source(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く別の内容である。",
+            2: "本文には完全な捏造テキストと記述がある。",
+        }
+        text = "出典では「完全な捏造テキスト」と書かれている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_no_flag_when_quote_in_cited_source(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "本文には完全な捏造テキストと記述がある。"}
+        text = "出典では「完全な捏造テキスト」と書かれている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
+    def test_absent_quote_stays_silent(self) -> None:
+        """A span in no source could be fabricated — or emphasis-「」."""
+        from shoin.citation import quote_mismatches
+
+        self.assertEqual(
+            quote_mismatches("「存在しない長い引用文」である[S1]。", {1: "無関係。"}),
+            [],
+        )
+
+    def test_short_concept_name_stays_silent(self) -> None:
+        """「…」 under 8 chars is a concept name, not a quotation claim."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "無関係な内容。", 2: "重要な設計原則という概念がある。"}
+        self.assertEqual(quote_mismatches("「重要な設計原則」が鍵だ[S1]。", sources), [])
+
+    def test_ascii_double_quotes_also_checked(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "nothing matching here",
+            2: "the verbatim quote text appears inside",
+        }
+        text = 'It says "verbatim quote text" in the report [S1].'
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the citation whose clause carries the
+        foreign-source quote is flagged."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "売上は100億円だった。従業員数は40人だった。",
+            2: "無関係な内容である。",
+        }
+        text = "売上は100億円だった[S1]、そして「従業員数は40人だった」と引用している[S2]。"
+        self.assertEqual(quote_mismatches(text, sources), [2])
+
+    def test_trailing_citation_fragment_inherits_claim(self) -> None:
+        """"Claim. [S1]" splits to a citation-only fragment — the previous
+        sentence's quotes are still checked against it."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "other content", 2: "the verbatim quote text lives here"}
+        text = 'The report says "verbatim quote text" is real. [S1]'
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_report_merges_into_misattributed_and_records_field(self) -> None:
+        """make_report() merges quote flags into misattributed (same evidence
+        shape) while recording quote_mismatch for inspection."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "出典では「完全な捏造テキスト」と書かれている[S1]。",
+            ["調査A", "調査B"],
+            source_bodies=[
+                "全く別の内容である。",
+                "本文には完全な捏造テキストと記述がある。",
+            ],
+        )
+        self.assertEqual(report.get("quote_mismatch"), [1])
+        self.assertIn(1, report.get("misattributed", []))
 
 
 class TestUncitedSentences(unittest.TestCase):

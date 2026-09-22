@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.186
+## Version History: v0.1.37 → v0.2.187
+
+### v0.2.187 (2026-09-22)
+**Added (citation verification, check 6)**: `quote_mismatches()` — quoted fabrication/misattribution detection, the sixth machine check. A 「…」/"…" span of ≥8 non-whitespace chars cited to source n but appearing verbatim in a *different* source m is unambiguous proof n is the wrong number for that claim — the exact-string cousin of `verify_grounding()`'s bigram misattributed flag, needing no overlap margin. Quoted fabrication sits at the top of the citation-failure taxonomy (arXiv:2510.20303), and the bigram checks can miss it entirely because a paraphrased *surrounding* sentence still scores overlap with the wrongly-cited source.
+
+- **Deliberately asymmetric**: a span found in NO source could be fabricated — but it could equally be emphasis-「」 (「重要な点」), which never asserts "this wording appears in the source". Inconclusive → silent, the module's core principle. `『…』` (work titles) and `'…'` (apostrophes) are never treated as quotes; spans under 8 non-whitespace chars are concept names, not quotation claims.
+- **Same attribution machinery**: shares `_segment_claims` with `verify_grounding()`/`numeric_mismatches()` — the quote in a co-cited sentence is judged against the clause it annotates, and a trailing `"Claim. [S1]"` fragment inherits the previous sentence.
+- **Folded into the existing flag surface**: the evidence shape is identical to `misattributed` ("this S-number's content lives elsewhere"), so flags merge into `misattributed` — the Web UI badge, CLI marker, and export status line all render it correctly with zero new surface — while a separate `quote_mismatch` field (NotRequired, present only when non-empty) records which numbers were flagged via quotes for inspection.
+- **No spec/schema change**: both fields are additive and optional; old persisted reports read as before via `.get()` guards.
+
+8 tests added: foreign-source flag; cited-source clean; absent-quote silence; sub-8-char concept-name silence; ASCII "…" coverage; clause-level attribution; trailing-fragment inheritance; report merge+field wiring. `pytest tests/` now runs 746 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.186 (2026-09-22)
 **Improved (retrieval precision)**: `rerank()`'s lexical signal now weights query terms by pool-local IDF (`_pool_idf`). The uniform mean treated every term as equally informative — but a term present in *every* candidate is what got them retrieved in the first place, so it carries zero discriminative power for the rerank, while a term few candidates contain is decisive. This is Robertson & Zaragoza's (2009) IDF rationale applied to the retrieved set — the same class of pool statistics the v0.2.182 PRF pass uses for expansion. Measured failure shape: a chunk that merely repeats the common term several times could outscore the chunk actually containing the query's rare, decisive term.

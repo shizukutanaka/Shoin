@@ -127,9 +127,13 @@ class CitationReport(TypedDict):
     #   misattributed     -> S-numbers whose cited sentence clearly belongs elsewhere
     #   numeric_mismatch  -> S-numbers whose cited claim asserts a number the
     #                        source never contains (present only when non-empty)
+    #   quote_mismatch    -> S-numbers cited for a verbatim quote that lives in
+    #                        a different source; also folded into `misattributed`
+    #                        (present only when non-empty)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
     numeric_mismatch: NotRequired[list[int]]
+    quote_mismatch: NotRequired[list[int]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
@@ -374,6 +378,80 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     return sorted(out)
 
 
+# --- verbatim-quote consistency (v0.2.187) ------------------------------------
+
+_QUOTE_RE = re.compile(r"「([^」]+)」|\"([^\"]+)\"")
+# Minimum non-whitespace chars inside a quote marker for it to count as a
+# verbatim-quotation claim. Shorter 「…」 spans are concept names/emphasis
+# (「重要な点」), which never assert "this wording appears in the source".
+_QUOTE_MIN = 8
+
+
+def _quote_spans(text: str) -> list[str]:
+    """Quoted spans ≥ _QUOTE_MIN, normalised for verbatim containment checks.
+
+    Only 「…」 and "…" count: 『…』 marks work titles (《書名》), and ASCII
+    apostrophes are too ambiguous to be quotation marks.
+    """
+    out: list[str] = []
+    for m in _QUOTE_RE.finditer(text):
+        q = m.group(1) or m.group(2)
+        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).lower()
+        if len(q) >= _QUOTE_MIN:
+            out.append(q)
+    return out
+
+
+def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers cited for a verbatim quote that lives in a *different* source.
+
+    The same evidence shape as verify_grounding()'s misattributed flag, but
+    on the exact-string signal only a direct quotation provides: a 「…」/"…"
+    span whose characters appear verbatim in source m yet not in cited source
+    n is unambiguous proof that n is the wrong number for that claim — no
+    lexical-overlap margin needed. Quoted fabrication is a top entry in the
+    citation-failure taxonomy (arXiv:2510.20303), and bigram checks can miss
+    it entirely because a paraphrased surrounding sentence still scores
+    overlap with the wrongly-cited source.
+
+    Deliberately asymmetric like the other checks: a span found in NO source
+    could be fabricated, but it could equally be emphasis-「」 — inconclusive,
+    so it stays silent. Same sentence- and clause-level attribution as
+    verify_grounding()/numeric_mismatches() via the shared _segment_claims.
+    """
+    src_norm = {
+        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).lower()
+        for n, t in source_texts.items()
+    }
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            for q in _quote_spans(claim_n):
+                if q not in src_norm[n] and any(
+                    q in src_norm[k] for k in src_norm if k != n
+                ):
+                    out.add(n)
+                    break
+    return sorted(out)
+
+
 # Minimum non-whitespace character count in a sentence's citation-stripped body for
 # it to count as a "claim" worth flagging. Filters trivial acknowledgments ("はい。",
 # "そう。") without needing an LLM to classify sentence intent. Higher than the
@@ -490,6 +568,13 @@ def make_report(
         num_mis = numeric_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
         if num_mis:
             report["numeric_mismatch"] = num_mis
+        quote_mis = quote_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if quote_mis:
+            # Same evidence shape as misattributed — the claim's content lives
+            # in a different source — so it merges into that flag, while
+            # quote_mismatch records which numbers were flagged via quotes.
+            report["misattributed"] = sorted(set(misattributed) | set(quote_mis))
+            report["quote_mismatch"] = quote_mis
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
