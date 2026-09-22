@@ -788,7 +788,8 @@ function addMsg(role, body, report){
       c.append(b);
     }
     if (report.misattributed && report.misattributed.length){
-      c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i).join(", ")));
+      const sugg = report.misattributed_suggested || {};
+      c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i+(sugg["S"+i]?"\u2192"+sugg["S"+i]:"")).join(", ")));
     }
     if (report.numeric_mismatch && report.numeric_mismatch.length){
       c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: ` + report.numeric_mismatch.map(i=>"S"+i).join(", ")));
@@ -898,8 +899,10 @@ $("#askForm").onsubmit = async e=>{
           if (rpt.degraded) c.append(el("span","badge dim", t("chat.degraded")));
           if (rpt.invalid?.length)
             c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
-          if (rpt.misattributed?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x).join(", ")));
+          if (rpt.misattributed?.length){
+            const sugg = rpt.misattributed_suggested || {};
+            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x+(sugg["S"+x]?"\u2192"+sugg["S"+x]:"")).join(", ")));
+          }
           if (rpt.numeric_mismatch?.length)
             c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: `+rpt.numeric_mismatch.map(x=>"S"+x).join(", ")));
           if (rpt.unit_mismatch?.length)

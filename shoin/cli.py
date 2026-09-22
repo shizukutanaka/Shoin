@@ -245,7 +245,10 @@ def _print_report(report: CitationReport) -> None:
         if c in confirmed:
             marker = _t("cite.confirmed")
         elif c in misattr:
-            marker = _t("cite.misattr")
+            # Wrong number — append the source the claim actually matches when
+            # the report names one (v0.2.220): the fix becomes a one-char edit.
+            sugg = (report.get("misattributed_suggested") or {}).get(f"S{c}")
+            marker = _t("cite.misattr") + (f"→{sugg}" if sugg else "")
         elif c in numeric:
             marker = _t("cite.numeric")
         elif c in unit:

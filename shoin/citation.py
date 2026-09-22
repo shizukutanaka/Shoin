@@ -236,6 +236,10 @@ class CitationReport(TypedDict):
     #                        (present only when non-empty)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
+    #   misattributed_suggested -> "S#"-keyed map wrong S-number → the source
+    #                        the claim actually matches (verbatim provenance
+    #                        wins over bigram argmax; v0.2.220)
+    misattributed_suggested: NotRequired[dict[str, str]]
     numeric_mismatch: NotRequired[list[int]]
     quote_mismatch: NotRequired[list[int]]
     unit_mismatch: NotRequired[list[int]]
@@ -360,13 +364,22 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
     return out
 
 
-def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int]]:
+def verify_grounding(
+    text: str,
+    source_texts: dict[int, str],
+    *,
+    suggested: dict[int, int] | None = None,
+) -> tuple[list[int], list[int]]:
     """Check each cited sentence against the source(s) it cites, lexically.
 
     Returns (confirmed, misattributed):
     - *confirmed*: S-numbers whose cited sentence is lexically supported by them.
     - *misattributed*: S-numbers whose cited sentence matches a *different* source
       far better than the cited one — a likely wrong citation number.
+
+    *suggested*, when a dict is passed, is filled with the argmax that produced
+    each misattributed flag — wrong S-number → the S-number the claim actually
+    matches (v0.2.220).  Optional so existing two-tuple callers are unaffected.
 
     Sentences whose overlap with the cited source is merely low (no other source
     matches either) are left unflagged: that is the inconclusive case a lexical
@@ -424,11 +437,19 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
                 # sentence are correctly cited.
                 # Compare rivals against the SAME clause, or the two sides of the
                 # MISMATCH_GAP comparison would be measured on different units.
-                best_other = max(
-                    (_overlap(claim_n, src_bg[k]) for k in src_bg if k != n), default=0.0
+                best_k, best_other = max(
+                    (
+                        (k, _overlap(claim_n, src_bg[k]))
+                        for k in src_bg
+                        if k != n
+                    ),
+                    key=lambda kv: kv[1],
+                    default=(0, 0.0),
                 )
                 if best_other >= CONFIRM_MIN and best_other - overlap_n >= MISMATCH_GAP:
                     misattributed.add(n)
+                    if suggested is not None:
+                        suggested[n] = best_k
             # otherwise inconclusive (possibly a valid paraphrase) — stay silent
     return sorted(confirmed), sorted(misattributed)
 
@@ -1004,7 +1025,12 @@ def _quote_spans(text: str) -> list[str]:
     return out
 
 
-def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+def quote_mismatches(
+    text: str,
+    source_texts: dict[int, str],
+    *,
+    suggested: dict[int, int] | None = None,
+) -> list[int]:
     """S-numbers cited for a verbatim quote that lives in a *different* source.
 
     The same evidence shape as verify_grounding()'s misattributed flag, but
@@ -1057,15 +1083,30 @@ def quote_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             for q in _quote_spans(claim_n):
                 if q in src_norm[n]:
                     continue
-                if any(q in src_norm[k] for k in src_norm if k != n) or (
-                    len(q) >= _DOCTORED_MIN_LEN
-                    and any(
-                        _overlap(_bigrams(q), bg) >= _DOCTORED_MIN_OVERLAP
-                        for bg in src_bg.values()
-                    )
-                ):
+                # Verbatim location of the quote, if any — a stronger provenance
+                # signal than bigram argmax, so this assignment wins when both
+                # checks flag the same number (make_report shares one dict).
+                hit_k = next((k for k in src_norm if k != n and q in src_norm[k]), None)
+                if hit_k is not None:
                     out.add(n)
+                    if suggested is not None:
+                        suggested[n] = hit_k
                     break
+                if len(q) >= _DOCTORED_MIN_LEN:
+                    # Doctored shape: argmax over ALL sources — a near-verbatim of
+                    # the cited source itself flags too (paraphrase wearing
+                    # quotes: the assertive 「…」 claims wording n never wrote).
+                    # The suggestion only helps when it points elsewhere.
+                    best_k, best_o = max(
+                        ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
+                        key=lambda kv: kv[1],
+                        default=(0, 0.0),
+                    )
+                    if best_o >= _DOCTORED_MIN_OVERLAP:
+                        out.add(n)
+                        if suggested is not None and best_k != n:
+                            suggested[n] = best_k
+                        break
     return sorted(out)
 
 
@@ -1554,21 +1595,27 @@ def make_report(
             raise ValueError(
                 f"source_bodies length {len(source_bodies)} must match source_titles length {n}"
             )
-        confirmed, misattributed = verify_grounding(
-            text, {i + 1: body for i, body in enumerate(source_bodies)}
-        )
+        sugg: dict[int, int] = {}
+        src_bodies_map = {i + 1: body for i, body in enumerate(source_bodies)}
+        confirmed, misattributed = verify_grounding(text, src_bodies_map, suggested=sugg)
         report["confirmed"] = confirmed
         report["misattributed"] = misattributed
-        num_mis = numeric_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        num_mis = numeric_mismatches(text, src_bodies_map)
         if num_mis:
             report["numeric_mismatch"] = num_mis
-        quote_mis = quote_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        quote_mis = quote_mismatches(text, src_bodies_map, suggested=sugg)
         if quote_mis:
             # Same evidence shape as misattributed — the claim's content lives
             # in a different source — so it merges into that flag, while
             # quote_mismatch records which numbers were flagged via quotes.
             report["misattributed"] = sorted(set(misattributed) | set(quote_mis))
             report["quote_mismatch"] = quote_mis
+        if sugg:
+            # "S#"-keyed so JSON round-trips keep string keys (persisted reports
+            # are re-read via json.loads, which stringifies int keys anyway).
+            report["misattributed_suggested"] = {
+                f"S{n}": f"S{k}" for n, k in sorted(sugg.items())
+            }
         unit_mis = unit_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
         if unit_mis:
             report["unit_mismatch"] = unit_mis

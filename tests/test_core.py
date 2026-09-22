@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.219")
+        self.assertEqual(VERSION, "0.2.220")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4106,6 +4106,40 @@ class TestCitation(unittest.TestCase):
             "[S1] after '. ' must be flagged misattributed when claim matches S2 far better",
         )
 
+    def test_verify_grounding_suggested_names_the_right_source(self) -> None:
+        """The argmax that produced the flag must be exportable (v0.2.220):
+        'wrong number' alone makes the user re-read every source."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "Washi paper is made from kozo fiber by traditional craftspeople.",
+            2: "The study found significant results in the experiment.",
+        }
+        text = "The study found significant results. [S1]"
+        sugg: dict[int, int] = {}
+        _, misattributed = verify_grounding(text, sources, suggested=sugg)
+        self.assertIn(1, misattributed)
+        self.assertEqual(sugg, {1: 2}, "the suggestion must name S2 — where the claim lives")
+
+    def test_make_report_emits_misattributed_suggested(self) -> None:
+        """Report field is 'S#'-keyed for JSON round-trip; absent when nothing
+        is flagged (NotRequired)."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "The study found significant results. [S1]",
+            ["paper", "study"],
+            source_bodies=[
+                "Washi paper is made from kozo fiber by traditional craftspeople.",
+                "The study found significant results in the experiment.",
+            ],
+        )
+        self.assertIn(1, report.get("misattributed", []))
+        self.assertEqual(report.get("misattributed_suggested"), {"S1": "S2"})
+
+        clean = make_report("Cats are cute.", ["a"], source_bodies=["cats"])
+        self.assertNotIn("misattributed_suggested", clean)
+
     def test_bigrams_single_char_returns_empty_set(self) -> None:
         """_bigrams of a single character must return set(), not {'x'}.
 
@@ -4593,6 +4627,8 @@ class TestQuoteMismatches(unittest.TestCase):
         )
         self.assertEqual(report.get("quote_mismatch"), [1])
         self.assertIn(1, report.get("misattributed", []))
+        # Verbatim provenance names the true source too (v0.2.220).
+        self.assertEqual(report.get("misattributed_suggested"), {"S1": "S2"})
 
 
 class TestNegationMismatches(unittest.TestCase):
