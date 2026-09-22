@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.199")
+        self.assertEqual(VERSION, "0.2.200")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3601,6 +3601,32 @@ class TestQA(unittest.TestCase):
         from shoin.chunk import estimate_tokens
         self.assertGreater(estimate_tokens(body), estimate_tokens(short_text),
                            "truncated hit1 must have been appended, not dropped")
+
+    def test_build_context_rank_proportional_budget(self) -> None:
+        """v0.2.200: the per-source budget is rank-proportional — every source
+        keeps the MIN_PER_SOURCE floor, and the surplus splits by harmonic
+        rank weight 1/i so the #1 source's slice beats the #2's.
+
+        Budget 200 across 2 sources → floor 64 each, surplus 72 split
+        1 : 1/2 → shares 112 and 88 (not the old uniform 100/100)."""
+        from shoin.chunk import estimate_tokens
+        from shoin.qa import MIN_PER_SOURCE_TOKENS, build_context
+        from shoin.search import Hit
+
+        big_text = "word " * 500  # ~500 tokens, always truncated to the share
+        with make_store() as s:
+            nb = s.create_notebook("ctx-rank")
+            src1 = s.add_source(nb.id, "txt", "Top", "o1", "sha1")
+            src2 = s.add_source(nb.id, "txt", "Next", "o2", "sha2")
+            hit1 = Hit(chunk_id=1, source_id=src1.id, text=big_text, score=1.0)
+            hit2 = Hit(chunk_id=2, source_id=src2.id, text=big_text, score=0.9)
+            ctx = build_context(s, [hit1, hit2], budget_tokens=200)
+
+        self.assertEqual(len(ctx.source_bodies), 2)
+        top, nxt = (estimate_tokens(b) for b in ctx.source_bodies)
+        self.assertGreater(top, nxt, "rank-1 source must get the larger share of the surplus")
+        self.assertGreaterEqual(nxt, MIN_PER_SOURCE_TOKENS - 5,
+                                "the floor must still hold for the lower-ranked source")
 
 
     def test_degraded_text_s_numbers_match_unique_sources_not_hits(self) -> None:

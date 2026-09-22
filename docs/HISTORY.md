@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.199
+## Version History: v0.1.37 → v0.2.200
+
+### v0.2.200 (2026-09-22)
+**Changed (context building, rank-proportional source budgets)**: `build_context()` divided `budget_tokens` **uniformly** across sources — the #8-ranked source got the same prompt share as #1 even though retrieval already produced the ranking. The budget now splits as **floor + rank-weighted surplus**: every source keeps `MIN_PER_SOURCE_TOKENS`(64), and the remaining surplus distributes by harmonic weight `1/i` over the ranked order.
+
+- **Invariants preserved**: total allocation still equals `budget_tokens` exactly; the floor still guarantees every included source a usable share; the existing `order` cap (drop the tail the floor can't support) is untouched — `surplus = budget − n·floor ≥ 0` by construction. Single-source callers see identical behaviour (`floor + surplus = budget`).
+- **Rationale**: lost-in-the-middle literature shows small context budgets benefit from front-loading the best evidence — with a fixed 1000-token share across 8 sources the old split gave rank-8 125 tokens, rank-1 125; the new split gives ~243/86 while keeping every source above the documented floor. This supersedes the earlier "fair share" note in `qa.py`'s docstring (the fairness the floor was designed to protect — a *usable* minimum — is retained exactly).
+
+1 test added: two equal-size sources under a 200-token budget now split 112/88 instead of 100/100, floor still holds. `tests/` now runs 793 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.199 (2026-09-22)
 **Improved (citation verification, doctored quotes)**: `quote_mismatches()` now flags near-verbatim spans, not just verbatim ones. A 「…」/"…" span ≥ `_DOCTORED_MIN_LEN`=12 chars sharing ≥ `_DOCTORED_MIN_OVERLAP`=60% of its bigrams with some source — while matching no source verbatim — is a doctored quote: the assertive quote marks claim wording the source never wrote, yet the text clearly derives from a source.

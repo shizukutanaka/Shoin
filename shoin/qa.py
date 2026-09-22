@@ -226,7 +226,7 @@ def _section_from_context(context: str, title: str) -> str:
 def build_context(
     store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
 ) -> GroundedContext:
-    """Group hits by source (relevance order) under a fair per-source budget.
+    """Group hits by source (relevance order) under a rank-proportional budget.
 
     budget_tokens defaults to SOURCE_TEXT_TOKENS (~1000, CLAUDE.md's documented
     "source text" sub-share of the 2400-token total), not CONTEXT_TOKENS itself —
@@ -254,14 +254,26 @@ def build_context(
     # order is source-id-first-seen, so this drops the lowest-priority tail.
     order = order[: max(budget_tokens // MIN_PER_SOURCE_TOKENS, 1)]
 
+    # Rank-proportional per-source budgets (v0.2.200): every source keeps the
+    # MIN_PER_SOURCE_TOKENS floor (so no source ever gets a meaningless sliver),
+    # and the remaining surplus is distributed by harmonic rank weight 1/i —
+    # retrieval already ranked `order`, so the #1 source deserves the largest
+    # share of the surplus rather than the same slice as the #8 source
+    # (lost-in-the-middle literature: front position matters most for small
+    # context budgets). Sum of shares = min(budget_tokens, n*floor + surplus)
+    # == budget_tokens exactly when order fits; the floor guarantees
+    # surplus >= 0 because order was capped to what the floor can support.
+    n_src = len(order)
+    surplus = max(budget_tokens - n_src * MIN_PER_SOURCE_TOKENS, 0)
+    harmonic = sum(1 / i for i in range(1, n_src + 1))
     titles: list[str] = []
     bodies: list[str] = []
     contexts: list[str] = []
     chunk_id_lists: list[list[int]] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
-    per_source = max(budget_tokens // max(len(order), 1), MIN_PER_SOURCE_TOKENS)
     for idx, source_id in enumerate(order, start=1):
+        per_source = MIN_PER_SOURCE_TOKENS + int(surplus * ((1 / idx) / harmonic))
         try:
             title = store.get_source(source_id).title
         except StoreError:
