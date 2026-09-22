@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.205")
+        self.assertEqual(VERSION, "0.2.206")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4819,6 +4819,46 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "結果は思った通りだった[S1]。\n・効果は高い"
         self.assertEqual(uncited_sentences(text), ["・効果は高い"])
+
+    def test_ignores_markdown_structural_lines(self) -> None:
+        """Headings, table rows (incl. |---| separators), rules and quotes are
+        markdown structure, not sentences asserting source content — the check
+        flags sentences, and none of these are one."""
+        from shoin.citation import uncited_sentences
+
+        text = (
+            "## 効果について\n効果は高い[S1]。\n---\n"
+            "| 項目 | 効果 |\n|---|---|\n| A | 高い |\n> 効果は高い"
+        )
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_fenced_code_and_its_contents(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "```python\nx = compute_answer()\n```\n効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_unclosed_fence_runs_to_eof(self) -> None:
+        """An unterminated fence means code to end-of-file — nothing after it
+        is prose, so even a claim-shaped line inside stays silent."""
+        from shoin.citation import uncited_sentences
+
+        text = "```python\nx = compute()\n効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_claim_after_structure_still_flags(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "## 概要\n効果は高い。"
+        self.assertEqual(uncited_sentences(text), ["効果は高い。"])
+
+    def test_structure_does_not_consume_trailing_citation(self) -> None:
+        """A structural line is invisible to the claim check — a trailing [S1]
+        still resolves the sentence before it."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は高い。\n## 次節\n[S1]"
+        self.assertEqual(uncited_sentences(text), [])
 
     def test_ignores_formal_japanese_question_ending_in_ka_period(self) -> None:
         """Formal written Japanese ends a question in か。 with no "?" at all —
