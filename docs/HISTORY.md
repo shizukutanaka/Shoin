@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.218
+## Version History: v0.1.37 → v0.2.219
+
+### v0.2.219 (2026-09-22)
+**Changed (generation, runaway bound)**: every chat request now sends `max_tokens: 4096`. Without it the only stop was the endpoint's own default — llama.cpp's `n_predict=-1` and Ollama's `num_predict=-1` both generate until context exhaustion, so the degeneration loops the citation report *detects* (v0.2.188+) also *consumed* the entire remaining context window: minutes of garbage on CPU-scale hardware, bounded only by the 32 MB stream cap.
+
+- `max_tokens` is a core OpenAI-compatible field accepted by llama.cpp, Ollama, vLLM and llamafile alike — no vendor detection needed.
+- **4096 is deliberately generous**: far above any legitimate answer or Studio output for a ~2400-token context budget. The cap bounds runaway generation; it does not shape real output. Truncated degeneration still surfaces via `degenerate_spans` in the report — detection and bounding now cover both ends of the failure.
+- Detection-only before; prevention-side now. Sent on both `chat()` and `chat_stream()` — the SSE `/ask` path is where a parrot loop actually hits users.
 
 ### v0.2.218 (2026-09-22)
 **Changed (retrieval, BM25 field weighting)**: the `context` column — the section breadcrumb added by v0.2.123's contextual retrieval — counted toward *recall* but not *ranking*: `bm25(chunks_fts)` defaults every column to 1.0, so a query term in a chunk's heading lifted it exactly as much as a body occurrence. A heading match is the stronger topicality signal (standard BM25F field-weighting result; titles typically get 2–4×).
