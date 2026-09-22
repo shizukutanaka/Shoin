@@ -347,6 +347,39 @@ def _numbers(text: str) -> set[str]:
     }
 
 
+# Magnitude suffixes that turn "3.2万" into the value 32000 (v0.2.192).
+# Japanese shorthand arithmetic is read constantly — a model legitimately
+# expands "3.2万円" to "32000円" — so a digit-string presence check alone
+# flags a correct restatement. "千万"/"百万" precede "万" in the alternation
+# (ordered leftmost matching). Spelled-out numerals and multi-suffix chains
+# (1億2000万) stay unchecked — ambiguous, per the module's silent principle.
+_MAG_SUFFIX = {"千": 1_000, "万": 10_000, "百万": 1_000_000, "千万": 10_000_000, "億": 100_000_000}
+_MAG_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(千万|百万|億|万|千)")
+
+
+def _numbers_expanded(text: str) -> set[str]:
+    """_numbers() plus canonical values for magnitude-suffixed shorthand.
+
+    A number carrying a 千/万/百万/千万/億 suffix is represented by its
+    expanded value INSTEAD of the raw digits: "3.2万" → {"32000"}. The raw
+    string is removed because the written digits literally do not occur in a
+    source that spelled the value out ("32000"), and keeping it would flag a
+    correct restatement. Only integral expansions are added (non-integral
+    values like 1.2345万 have no canonical spelling — inconclusive).
+    """
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    nums = _numbers(t)
+    suffixed: set[str] = set()
+    for m in _MAG_NUM_RE.finditer(t):
+        num, suf = m.group(1), m.group(2)
+        suffixed.add(num)
+        v = float(num) * _MAG_SUFFIX[suf]
+        r = round(v)
+        if abs(v - r) < 1e-6:
+            nums.add(str(r))
+    return nums - suffixed
+
+
 def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     """S-numbers whose cited claim asserts a number absent from that source.
 
@@ -371,6 +404,7 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         n: _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", t))
         for n, t in source_texts.items()
     }
+    src_nums = {n: _numbers_expanded(t) for n, t in src_norm.items()}
     out: set[int] = set()
     prev_claim = ""
     for raw in _SENTENCE_SPLIT_RE.split(text):
@@ -391,7 +425,13 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
             claim_n = segments.get(n, claim_text)
-            if any(num not in src_norm[n] for num in _numbers(claim_n)):
+            # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
+            # the substring fallback preserves v0.2.184's rounding tolerance
+            # (claim "63" stays silent inside source "63.5%").
+            if any(
+                num not in src_nums[n] and num not in src_norm[n]
+                for num in _numbers_expanded(claim_n)
+            ):
                 out.add(n)
     return sorted(out)
 
