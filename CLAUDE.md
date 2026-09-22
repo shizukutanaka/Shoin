@@ -46,9 +46,9 @@ Every answer and Studio output cites sources as `[S1]`, `[S2]`, etc. These are *
 - Examples: `[S1]`, `[Ｓ１]`, `[S1, S2]`, `[S1 and S3]` all parse correctly
 - First pass: extract all cited numbers, validate they fall in range 1..N_sources
 
-### Citation Verification: Four-Layer Machine Checks
+### Citation Verification: Machine Checks
 
-Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions) is one of the most user-visible LLM failure modes. Shoin runs four dependency-free, LLM-free checks on every assistant response and Studio output:
+Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions) is one of the most user-visible LLM failure modes. Shoin runs dependency-free, LLM-free checks on every assistant response and Studio output:
 
 **1. Range Check** (`validate_citations`): Detect `[S99]` when only 5 sources exist. Out-of-range numbers are the narrowest, highest-confidence hallucination signal.
 
@@ -57,6 +57,14 @@ Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions
 **3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP), the citation number is flagged `misattributed` — the model likely cited the wrong source.
 
 **4. Uncited-Assertion Detection** (`uncited_sentences`, v0.2.65): Checks 2 and 3 only ever examine sentences that *already* carry a citation. A hallucinated or simply unsupported claim with *zero* citations anywhere in it is invisible to those checks — this was docs/product-review.md's top-priority open gap. `uncited_sentences()` scans for sentences with no `[S#]` marker, resolving the common trailing-citation pattern ("Sentence. [S1]") the same way `verify_grounding()` does, and excludes trivial filler and explicit "not in the source" disclaimers (the *correct* response to missing facts, not an unsupported assertion).
+
+**5. Numeric-Consistency Check** (`numeric_mismatches`, v0.2.184): a cited claim asserting a digit string (≥2 digits or a decimal) the source never contains is flagged — the fabricated-statistic failure shape the citation literature flags as dominant (arXiv:2510.20303).
+
+**6. Quote-Mismatch Check** (`quote_mismatches`, v0.2.187): a 「…」/"…" span cited to S_n but appearing verbatim in a *different* source is exact-string proof of misattribution — folded into `misattributed`.
+
+**7. Degeneration Check** (`degenerate_spans`, v0.2.188): verbatim ≥3× repetition in the answer itself — the repeat-loop failure small local LLMs are prone to; the only check that inspects the answer rather than its citations.
+
+**8. Unit-Consistency Check** (`unit_mismatches`, v0.2.190): a number present in the source but asserted under an incompatible unit ("100km" vs "100m", "100億円" vs "100万円") — invisible to check 5's presence test.
 
 **Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, and `uncited` lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
 
@@ -326,7 +334,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.189** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.190** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 

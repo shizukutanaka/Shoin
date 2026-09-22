@@ -22,6 +22,16 @@ every generated text:
    a correctly-attributed sentence carrying a *fabricated* statistic. A claim
    citing [S1] that asserts a digit string S1 never contains is flagged — the
    highest-precision hallucination signal available without an NLI model.
+6. Quote-mismatch check (`quote_mismatches`): a 「…」/"…" span cited to S_n
+   but appearing verbatim in a *different* source is exact-string proof the
+   number is wrong — folded into `misattributed` (v0.2.187).
+7. Degeneration check (`degenerate_spans`): verbatim ≥3× repetition in the
+   answer itself — the failure shape small local LLMs are prone to
+   (v0.2.188).
+8. Unit-consistency check (`unit_mismatches`): the numeric check asks only
+   whether a digit string exists; a number present under a DIFFERENT unit
+   ("100km" vs "100m", "100億円" vs "100万円") is the same magnitude of
+   fabrication and invisible to it (v0.2.190).
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -130,10 +140,14 @@ class CitationReport(TypedDict):
     #   quote_mismatch    -> S-numbers cited for a verbatim quote that lives in
     #                        a different source; also folded into `misattributed`
     #                        (present only when non-empty)
+    #   unit_mismatch     -> S-numbers whose cited claim asserts a number the
+    #                        source carries under an incompatible unit
+    #                        (present only when non-empty)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
     numeric_mismatch: NotRequired[list[int]]
     quote_mismatch: NotRequired[list[int]]
+    unit_mismatch: NotRequired[list[int]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
@@ -382,6 +396,90 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     return sorted(out)
 
 
+# --- unit consistency (v0.2.190) ----------------------------------------------
+# A significant number followed by a unit suffix. Three bounded suffix classes:
+# - ASCII units/symbols: kg, km, GB, kWh, ppm, %, °C, μg — any letter run
+#   (% and ° included since 25%, 25°C read as single tokens)
+# - katakana units: キロ, メートル, ドル, パーセント — a >=1-char run
+# - a fixed counter-kanji set (persons/items/machines/currency/orders):
+#   time counters (年月日時分秒) are deliberately EXCLUDED — date chains like
+#   "2024年3月" make a bare 年 ambiguous between "year count" and "date part",
+#   so checking it would be noise, not signal.
+_UNIT_ASCII = r"[a-zA-Zμµ°%]+"
+_UNIT_KANA = r"[ァ-ヶー]+"
+_UNIT_KANJI = "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千"
+_UNIT_NUM_RE = re.compile(rf"(\d+(?:\.\d+)?)({_UNIT_ASCII}|{_UNIT_KANA}|[{_UNIT_KANJI}]+)")
+
+
+def _unit_pairs(text: str) -> list[tuple[str, str]]:
+    """(number, unit) pairs for significant numbers (same threshold as _numbers)."""
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    return [
+        (m.group(1), m.group(2))
+        for m in _UNIT_NUM_RE.finditer(t)
+        if "." in m.group(1) or len(m.group(1)) >= 2
+    ]
+
+
+def _units_compat(a: str, b: str) -> bool:
+    """Same unit, or one extending the other — '100年' vs '100年版' and
+    '1億' vs '1億円' are consistent elaboration, not a mismatch."""
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim asserts a number with a DIFFERENT unit.
+
+    numeric_mismatches() only asks whether a digit string exists in the
+    source; a number that IS present but carries another unit is the same
+    magnitude of fabrication and structurally invisible to it — '100km' vs
+    '100m', '25%' vs '25ppm', '100億円' vs '100万円' all pass the
+    presence check while being wrong. Here the cited claim's (number, unit)
+    pairs are compared against the units the source attaches to that same
+    number.
+
+    Deliberately asymmetric like the other checks: only fires when the
+    source attaches a *different, incompatible* unit to the same number —
+    a source occurrence with no unit is inconclusive (the unit may live in
+    the surrounding text), a claim number absent from the source is
+    numeric_mismatches()' job, and prefix-extending units are elaboration.
+    Same sentence- and clause-level attribution via _segment_claims.
+    """
+    src_norm = {
+        n: _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", t))
+        for n, t in source_texts.items()
+    }
+    src_units = {n: _unit_pairs(t) for n, t in src_norm.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            for num, unit in _unit_pairs(claim_n):
+                if num not in src_norm[n]:
+                    continue  # absent number — numeric_mismatches()' signal
+                units_n = [v for num2, v in src_units[n] if num2 == num]
+                if units_n and not any(_units_compat(unit, v) for v in units_n):
+                    out.add(n)
+                    break
+    return sorted(out)
+
+
 # --- verbatim-quote consistency (v0.2.187) ------------------------------------
 
 _QUOTE_RE = re.compile(r"「([^」]+)」|\"([^\"]+)\"")
@@ -621,6 +719,9 @@ def make_report(
             # quote_mismatch records which numbers were flagged via quotes.
             report["misattributed"] = sorted(set(misattributed) | set(quote_mis))
             report["quote_mismatch"] = quote_mis
+        unit_mis = unit_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if unit_mis:
+            report["unit_mismatch"] = unit_mis
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
