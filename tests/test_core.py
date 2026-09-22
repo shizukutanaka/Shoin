@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.188")
+        self.assertEqual(VERSION, "0.2.189")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -3276,6 +3276,98 @@ class TestSearch(unittest.TestCase):
                 0.5,
                 f"top hit score ({top.score:.4f}) must be > 0.5 after RRF normalization; "
                 f"unnormalized ceiling is ~0.33 (lex overwhelms raw RRF ≈ 0.016).",
+            )
+
+
+class TestTailCut(unittest.TestCase):
+    """_tail_cut() (v0.2.189): score-gap (elbow) cutoff on the reranked pool.
+
+    Applied between rerank() and mmr() in both retrieve() and
+    retrieve_multi().  Fires only where an ADAPTIVE_GAP adjacent drop lands
+    on a chunk with detail["lex"] == 0 (zero query-term presence, reached
+    the pool via vector/RRF position alone) — a term-bearing chunk is never
+    cut, since minmax normalization makes large blended gaps routine even
+    between legitimate hits.
+    """
+
+    @staticmethod
+    def _h(cid: int, score: float, lex: float) -> Hit:
+        h = Hit(cid, 1, "t", score)
+        if lex:
+            h.detail["lex"] = lex
+        return h
+
+    def test_cliff_onto_term_free_chunk_drops_tail(self) -> None:
+        """Gap >=0.25 landing on a lex=0 chunk = the relevance boundary."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.9, lex=0.5),
+            self._h(2, 0.8, lex=0.4),
+            self._h(3, 0.5, lex=0.0),  # 0.3 drop -> first tail item
+            self._h(4, 0.45, lex=0.0),
+        ]
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1, 2])
+
+    def test_cliff_onto_term_bearing_chunk_never_cuts(self) -> None:
+        """A big score gap alone is NOT evidence — minmax stretches RRF over
+        [0,1] for any pool, so legitimate hits routinely sit a cliff apart."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.95, lex=0.8),
+            self._h(2, 0.6, lex=0.5),  # 0.35 gap, but carries query terms
+            self._h(3, 0.3, lex=0.2),
+        ]
+        self.assertEqual(len(_tail_cut(hits)), 3)
+
+    def test_first_gap_wins(self) -> None:
+        """The earliest qualifying cliff is the boundary."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.9, lex=0.5),
+            self._h(2, 0.2, lex=0.0),
+            self._h(3, 0.19, lex=0.0),
+        ]
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1])
+
+    def test_smooth_pool_passes_through(self) -> None:
+        """Gradual decay (an all-relevant pool) is never cut."""
+        from shoin.search import _tail_cut
+
+        hits = [self._h(i, 1.0 - i * 0.05, lex=0.0) for i in range(10)]
+        self.assertEqual(len(_tail_cut(hits)), 10)
+
+    def test_empty_and_singleton_pass_through(self) -> None:
+        from shoin.search import _tail_cut
+
+        self.assertEqual(_tail_cut([]), [])
+        self.assertEqual(len(_tail_cut([self._h(1, 0.9, lex=0.0)])), 1)
+
+    def test_retrieve_drops_vector_tail(self) -> None:
+        """End-to-end via the vector list: semantically-near chunks sharing
+        zero query terms are clipped at the cliff instead of padding the
+        [S#] source list."""
+        with make_store() as s:
+            nb_id = s.create_notebook("tail-cut-test").id
+            src = s.add_source(nb_id, "txt", "rel", "mem://rel", "sha-rel")
+            chunk_ids = s.add_chunks(
+                src.id,
+                ["量子力学の基礎と観測問題。"]  # carries the query term
+                + [f"雑多な雑記その{i}。" for i in range(3)],  # term-free
+            )
+            # Relevant chunk at the query direction; tails near but off it —
+            # the vector list ranks all four, RRF fuses them, and the
+            # relevance cliff lands right after the term-bearing head.
+            s.set_embedding(chunk_ids[0], [1.0, 0.0])
+            for i, cid in enumerate(chunk_ids[1:]):
+                s.set_embedding(cid, [0.6 - i * 0.2, 0.8])
+            hits = retrieve(s, nb_id, "量子", query_vec=[1.0, 0.0], k=8)
+            self.assertEqual(
+                [h.chunk_id for h in hits],
+                [chunk_ids[0]],
+                "term-free vector tail must be clipped at the score cliff",
             )
 
 

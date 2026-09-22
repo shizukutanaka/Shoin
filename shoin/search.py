@@ -944,6 +944,37 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
     return selected
 
 
+# Score-gap (elbow) cutoff for the MMR candidate pool (v0.2.189).  Vector
+# search ranks semantically-near chunks that may share ZERO query terms, and
+# RRF hands that flat tail to MMR — which then pads it into the prompt
+# context and the [S#] source list whenever the genuinely-relevant set is
+# smaller than k.  Score-distributional thresholding (the "elbow" /
+# largest-gap heuristic behind vector stores' score_threshold options)
+# detects the cliff where relevance ends — but only alongside a lexical
+# zero: _minmax stretches RRF scores over [0,1] for ANY pool, so a large
+# blended-score gap alone is routine even between two legitimate hits, and
+# must never cut a chunk that actually carries query terms (detail["lex"]).
+# Both conditions required = the same "stay silent when inconclusive"
+# asymmetry the citation checks use.
+ADAPTIVE_GAP = 0.25
+
+
+def _tail_cut(hits: list[Hit]) -> list[Hit]:
+    """Drop the pool tail at the first score cliff into term-free chunks.
+
+    Input must be rerank() output (score-sorted, detail["lex"] populated).
+    Fires only when an >= ADAPTIVE_GAP adjacent drop lands on a chunk with
+    zero lexical overlap — a hit that reached the pool without sharing any
+    query term.  Never reorders; a pool with no cliff or whose tail still
+    carries terms passes through untouched.
+    """
+    for i in range(len(hits) - 1):
+        nxt = hits[i + 1]
+        if hits[i].score - nxt.score >= ADAPTIVE_GAP and nxt.detail.get("lex", 0.0) == 0.0:
+            return hits[: i + 1]
+    return hits
+
+
 # --- debugging aid ---------------------------------------------------------
 
 
@@ -1026,7 +1057,13 @@ def retrieve(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    result = mmr(rerank(clean, fused), k)
+    # _tail_cut between rerank and MMR: the reranked, blended-score list is
+    # where the relevance cliff is measurable.  Cutting the pool before MMR
+    # (not the final k results) preserves MMR's own relevance/diversity
+    # trade-off on the surviving candidates — and lets the final list end
+    # below k when fewer than k chunks are actually relevant, instead of
+    # padding context with the tail.
+    result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
         _debug_print("retrieve", query, negs, len(bm25_hits), len(vec_hits), result)
     return result
@@ -1083,7 +1120,9 @@ def retrieve_multi(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    result = mmr(rerank(clean, fused), k)
+    # Same pool cut as retrieve(): multi-query fusion produces a deeper pool,
+    # so the tail is longer and the clip more valuable.
+    result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
         _debug_print(f"retrieve_multi({len(queries)} queries)", primary, negs, total_bm25, total_vec, result)
     return result
