@@ -796,6 +796,54 @@ $("#viewer").addEventListener("keydown", e=>{
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
 
 /* ---------- chat ---------- */
+// The badge row beneath an assistant message. Lives in one place because it is
+// the SAME chain for the live SSE path and the persisted-history path — when a
+// new check lands, one copy per surface is how flags like negation_mismatch end
+// up warning in the badges while the seal stays unstyled (v0.2.234).
+function reportBadges(c, report){
+  if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
+  if (report.invalid && report.invalid.length){
+    const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
+    c.append(b);
+  }
+  if (report.misattributed && report.misattributed.length){
+    const sugg = report.misattributed_suggested || {};
+    c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i+(sugg["S"+i]?"→"+sugg["S"+i]:"")).join(", ")));
+  }
+  if (report.numeric_mismatch && report.numeric_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: ` + report.numeric_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.unit_mismatch && report.unit_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.unit")}: ` + report.unit_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.negation_mismatch && report.negation_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.negation")}: ` + report.negation_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.confirmed && report.confirmed.length){
+    c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
+  }
+  if (report.uncited && report.uncited.length){
+    const sup = new Set(report.uncited_supported || []);
+    const supSrc = report.uncited_supported_source || {};
+    const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
+    // Grounded uncited = citation omission; ungrounded = the dangerous kind.
+    b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
+    c.append(b);
+  }
+  if (report.degenerate && report.degenerate.length){
+    const b = el("span","badge warn", `⚠ ${t("chat.degenerate")}: ${report.degenerate.length}`);
+    b.title = report.degenerate.join("\n");
+    c.append(b);
+  }
+  if (report.self_contradiction && report.self_contradiction.length){
+    const b = el("span","badge warn", `⚠ ${t("chat.contradict")}: ${report.self_contradiction.length}`);
+    b.title = report.self_contradiction.join("\n");
+    c.append(b);
+  }
+  if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < COVERAGE_LOW){
+    c.append(el("span","badge warn", t("chat.coverage.low")));
+  }
+}
 function addMsg(role, body, report){
   const wrap = el("div","msg "+role);
   wrap.append(el("div","who", role==="user" ? t("chat.you") : t("chat.shoin")));
@@ -804,48 +852,7 @@ function addMsg(role, body, report){
   wrap.append(bd);
   if (report && role!=="user"){
     const c = el("div","cites");
-    if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
-    if (report.invalid && report.invalid.length){
-      const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
-      c.append(b);
-    }
-    if (report.misattributed && report.misattributed.length){
-      const sugg = report.misattributed_suggested || {};
-      c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i+(sugg["S"+i]?"\u2192"+sugg["S"+i]:"")).join(", ")));
-    }
-    if (report.numeric_mismatch && report.numeric_mismatch.length){
-      c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: ` + report.numeric_mismatch.map(i=>"S"+i).join(", ")));
-    }
-    if (report.unit_mismatch && report.unit_mismatch.length){
-      c.append(el("span","badge err", `⚠ ${t("chat.unit")}: ` + report.unit_mismatch.map(i=>"S"+i).join(", ")));
-    }
-    if (report.negation_mismatch && report.negation_mismatch.length){
-      c.append(el("span","badge err", `⚠ ${t("chat.negation")}: ` + report.negation_mismatch.map(i=>"S"+i).join(", ")));
-    }
-    if (report.confirmed && report.confirmed.length){
-      c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
-    }
-    if (report.uncited && report.uncited.length){
-      const sup = new Set(report.uncited_supported || []);
-      const supSrc = report.uncited_supported_source || {};
-      const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
-      // Grounded uncited = citation omission; ungrounded = the dangerous kind.
-      b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
-      c.append(b);
-    }
-    if (report.degenerate && report.degenerate.length){
-      const b = el("span","badge warn", `⚠ ${t("chat.degenerate")}: ${report.degenerate.length}`);
-      b.title = report.degenerate.join("\n");
-      c.append(b);
-    }
-    if (report.self_contradiction && report.self_contradiction.length){
-      const b = el("span","badge warn", `⚠ ${t("chat.contradict")}: ${report.self_contradiction.length}`);
-      b.title = report.self_contradiction.join("\n");
-      c.append(b);
-    }
-    if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < COVERAGE_LOW){
-      c.append(el("span","badge warn", t("chat.coverage.low")));
-    }
+    reportBadges(c, report);
     if (c.children.length) wrap.append(c);
   }
   $("#chat").append(wrap);
@@ -918,40 +925,7 @@ $("#askForm").onsubmit = async e=>{
           const rpt = j.report || {};
           renderWithSeals(bd, acc, rpt);
           const wrap = bd.parentElement, c = el("div","cites");
-          if (rpt.degraded) c.append(el("span","badge dim", t("chat.degraded")));
-          if (rpt.invalid?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
-          if (rpt.misattributed?.length){
-            const sugg = rpt.misattributed_suggested || {};
-            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x+(sugg["S"+x]?"\u2192"+sugg["S"+x]:"")).join(", ")));
-          }
-          if (rpt.numeric_mismatch?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: `+rpt.numeric_mismatch.map(x=>"S"+x).join(", ")));
-          if (rpt.unit_mismatch?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.unit")}: `+rpt.unit_mismatch.map(x=>"S"+x).join(", ")));
-          if (rpt.negation_mismatch?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.negation")}: `+rpt.negation_mismatch.map(x=>"S"+x).join(", ")));
-          if (rpt.confirmed?.length)
-            c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
-          if (rpt.uncited?.length){
-            const sup = new Set(rpt.uncited_supported || []);
-            const supSrc = rpt.uncited_supported_source || {};
-            const ub = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${rpt.uncited.length}`);
-            ub.title = rpt.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
-            c.append(ub);
-          }
-          if (rpt.degenerate?.length){
-            const db = el("span","badge warn", `⚠ ${t("chat.degenerate")}: ${rpt.degenerate.length}`);
-            db.title = rpt.degenerate.join("\n");
-            c.append(db);
-          }
-          if (rpt.self_contradiction?.length){
-            const cb = el("span","badge warn", `⚠ ${t("chat.contradict")}: ${rpt.self_contradiction.length}`);
-            cb.title = rpt.self_contradiction.join("\n");
-            c.append(cb);
-          }
-          if (rpt.cited?.length && rpt.coverage < COVERAGE_LOW)
-            c.append(el("span","badge warn", t("chat.coverage.low")));
+          reportBadges(c, rpt);
           if (c.children.length) wrap.append(c);
           $("#chat").scrollTop = $("#chat").scrollHeight;
         }

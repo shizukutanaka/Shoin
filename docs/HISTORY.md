@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.234
+## Version History: v0.1.37 → v0.2.235
+
+### v0.2.235 (2026-09-22)
+**Refactor (UI, single badge chain) + test**: v0.2.234's negation-seal bug was a symptom — the badge row beneath an assistant message existed in **two near-identical copies** (the `addMsg` history path and the SSE `done` path), the exact duplicated-chain shape that produced the drift class twice already (v0.2.77-79). Both copies are now one `reportBadges(c, report)` covering all eleven flags. The copies weren't actually identical: the SSE path's coverage guard was `cited?.length && coverage < COVERAGE_LOW` — `null < 0.5` is **true** in JS, so a report with `cited` set and `coverage: null` would have fired a spurious low-coverage badge on the live path only; the unified chain keeps the history path's stricter `typeof coverage === "number"` guard. ~80 lines removed. New `test_reportBadges_covers_every_flag` executes the real function under node — every flag → expected badge class in order, coverage badge fires on 0.3, `coverage: null` and an empty report fire nothing — pinning the whole warning surface the way `renderWithSeals`' test pins the chips.
 
 ### v0.2.234 (2026-09-22)
 **Fixed (UI, negation-flagged seal unstyled)**: the badge row has always flagged `negation_mismatch` red (`badge err` + "出典と逆の主張の可能性"), and the seal's *tooltip* named the same warning — but the chip's class chain was never updated when the check landed (v0.2.201), so a negation-flagged citation rendered as a **plain neutral seal**, identical to an unverified one. Within a single message the badge said "possibly contradicts the source" while the chip said nothing — the one surface whose job is making warnings visible. The `negation` set is now part of the `mis` class group alongside misattributed/numeric/unit (same "possible" hedge level). Caught by the new `renderWithSeals` behavioral test, which executes the real function under node and asserts the complete class matrix — invalid→bad, all four warning checks→mis, confirmed→ok, unflagged→plain — plus full-width `［Ｓ］` NFKC normalization, combined `[S1, S2]` rendering two chips, and non-citation brackets surviving as text. Verified fail-then-pass (the test failed on exactly the negation chip before the fix).
