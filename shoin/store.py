@@ -44,7 +44,8 @@ def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
                 raise
             last_exc = exc
             time.sleep(0.05 * (attempt + 1))
-    assert last_exc is not None
+    if last_exc is None:
+        raise AssertionError("unreachable: lock-retry loop exited without an exception")
     raise last_exc
 
 
