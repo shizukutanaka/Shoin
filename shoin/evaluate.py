@@ -20,6 +20,7 @@ same principle as citation.py: report what is directly measurable, nothing more.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 from .config import TOP_K
@@ -73,6 +74,13 @@ class EvalDiff:
     """
 
     d_recall: float = 0.0
+    # Means over the PAIRED questions only — the CLI prints these beside the
+    # deltas so the comparison rows describe the same population the delta was
+    # computed on (full-run means stay in the eval summary above the diff).
+    recall_before: float = 0.0
+    recall_after: float = 0.0
+    mrr_before: float = 0.0
+    mrr_after: float = 0.0
     d_mrr: float = 0.0
     case_deltas: list[CaseDelta] = field(default_factory=list)
     new_questions: list[str] = field(default_factory=list)
@@ -217,19 +225,28 @@ def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
     """Compare two runs of (ideally) the same case file: baseline → current.
 
     Cases match by question text — the case file may be reordered or edited
-    between runs, and index-matching would mislabel edits as regressions. On
-    duplicate questions the last occurrence wins; eval case files are authored
-    per-question, so duplicates are already a data smell. Aggregate deltas use
-    only the questions present in BOTH runs; new/dropped questions are listed
-    separately instead of distorting the score change.
+    between runs, and index-matching would mislabel edits as regressions. A
+    question occurring twice pairs occurrence-by-occurrence in file order;
+    unpaired extra occurrences are excluded from the aggregates (a leftover
+    is neither "new" nor "dropped" — the question still exists in both runs).
+    Aggregate deltas use only the questions present in BOTH runs; new/dropped
+    questions are listed separately instead of distorting the score change.
     """
-    by_q_before = {c.question: c for c in before.cases}
-    by_q_after = {c.question: c for c in after.cases}
+    before_qs = {c.question for c in before.cases}
+    after_qs = {c.question for c in after.cases}
+    pool: dict[str, deque[CaseResult]] = {}
+    for c in before.cases:
+        pool.setdefault(c.question, deque()).append(c)
     deltas: list[CaseDelta] = []
+    matched_old: list[CaseResult] = []
+    matched_new: list[CaseResult] = []
     for c in after.cases:
-        old = by_q_before.get(c.question)
-        if old is None:
+        q_before = pool.get(c.question)
+        if not q_before:
             continue
+        old = q_before.popleft()
+        matched_old.append(old)
+        matched_new.append(c)
         if old.recall != c.recall or old.reciprocal_rank != c.reciprocal_rank:
             deltas.append(
                 CaseDelta(
@@ -245,24 +262,25 @@ def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
     # edits into the score: dropping a hard case between runs would read as a
     # retrieval improvement that never happened — the measurement lying about
     # exactly the question the tool exists to answer.
-    matched_old = [by_q_before[c.question] for c in after.cases if c.question in by_q_before]
-    matched_new = [c for c in after.cases if c.question in by_q_before]
     n_matched = len(matched_new)
     d_recall = d_mrr = 0.0
+    recall_before = recall_after = mrr_before = mrr_after = 0.0
     if n_matched:
-        d_recall = sum(c.recall for c in matched_new) / n_matched - sum(
-            c.recall for c in matched_old
-        ) / n_matched
-        d_mrr = sum(c.reciprocal_rank for c in matched_new) / n_matched - sum(
-            c.reciprocal_rank for c in matched_old
-        ) / n_matched
+        recall_before = sum(c.recall for c in matched_old) / n_matched
+        recall_after = sum(c.recall for c in matched_new) / n_matched
+        mrr_before = sum(c.reciprocal_rank for c in matched_old) / n_matched
+        mrr_after = sum(c.reciprocal_rank for c in matched_new) / n_matched
+        d_recall = recall_after - recall_before
+        d_mrr = mrr_after - mrr_before
     return EvalDiff(
         d_recall=d_recall,
+        recall_before=recall_before,
+        recall_after=recall_after,
+        mrr_before=mrr_before,
+        mrr_after=mrr_after,
         d_mrr=d_mrr,
         case_deltas=deltas,
         matched_questions=n_matched,
-        new_questions=[c.question for c in after.cases if c.question not in by_q_before],
-        dropped_questions=[
-            c.question for c in before.cases if c.question not in by_q_after
-        ],
+        new_questions=[c.question for c in after.cases if c.question not in before_qs],
+        dropped_questions=[c.question for c in before.cases if c.question not in after_qs],
     )

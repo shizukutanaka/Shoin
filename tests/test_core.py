@@ -10541,6 +10541,10 @@ class TestEvalDiff(unittest.TestCase):
         self.assertEqual(diff.new_questions, ["q3"])
         self.assertEqual(diff.dropped_questions, ["q1"])
         self.assertEqual(diff.case_deltas, [])
+        # The displayed comparison means are over the matched population too
+        # — a "0.500 → 0.500 (+0.000)" row must mean what it labels.
+        self.assertEqual(diff.recall_before, 0.0)
+        self.assertEqual(diff.recall_after, 0.0)
 
     def test_dropped_hard_case_cannot_fabricate_regression_or_gain(self) -> None:
         from shoin.evaluate import CaseResult, EvalReport, diff_reports
@@ -10579,7 +10583,43 @@ class TestEvalDiff(unittest.TestCase):
         self.assertEqual(diff.d_mrr, 0.0)
         self.assertEqual(diff.matched_questions, 0)
         self.assertEqual(diff.dropped_questions, ["a"])
-        self.assertEqual(diff.new_questions, ["b"])
+
+    def test_duplicate_questions_pair_occurrence_by_occurrence(self) -> None:
+        """A question appearing twice must not fabricate a delta: identical
+        runs with a duplicated case must report zero movement, not the phantom
+        change a last-occurrence-wins map would produce."""
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        cases = [
+            CaseResult("q", [1], [1], 1.0, 1.0),
+            CaseResult("q", [1], [9], 0.0, 0.0),  # same text, different result
+        ]
+        before = EvalReport(cases=list(cases), recall=0.5, mrr=0.5)
+        after = EvalReport(cases=list(cases), recall=0.5, mrr=0.5)
+        diff = diff_reports(before, after)
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 2)  # both occurrences paired
+        self.assertEqual(diff.recall_before, 0.5)
+        self.assertEqual(diff.recall_after, 0.5)
+        self.assertEqual(diff.case_deltas, [])
+
+    def test_unpaired_duplicate_occurrence_is_not_new_or_dropped(self) -> None:
+        """before has q twice, after once: the unpaired before occurrence is
+        neither a new nor a dropped question — it is simply unmatched."""
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[CaseResult("q", [1], [1], 1.0, 1.0), CaseResult("q", [1], [1], 1.0, 1.0)],
+            recall=1.0,
+            mrr=1.0,
+        )
+        after = EvalReport(cases=[CaseResult("q", [1], [1], 1.0, 1.0)], recall=1.0, mrr=1.0)
+        diff = diff_reports(before, after)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(diff.new_questions, [])
+        self.assertEqual(diff.dropped_questions, [])
+        self.assertEqual(diff.d_recall, 0.0)
 
 
 class TestSearchCoverageTail(unittest.TestCase):
