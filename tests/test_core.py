@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.291")
+        self.assertEqual(VERSION, "0.2.292")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -8592,6 +8592,43 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(msgs["n"], 0, "rejected question must not be persisted")
         finally:
             os.unlink(db_file)
+
+    def test_ask_and_eval_reject_non_positive_k(self) -> None:
+        """-k is a free int: k=0 silently yields an empty hit list (degraded
+        answer / zero-score eval) and k<0 slices the merged pool arbitrarily
+        (merged[:-n] drops the tail). argparse must refuse k<1 at parse time."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        for argv in (
+            ["ask", "1", "q", "-k", "0"],
+            ["ask", "1", "q", "-k", "-3"],
+            ["eval", "1", "cases.json", "-k", "0"],
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2, argv)
+            self.assertIn("-k", err.getvalue())
+
+    def test_serve_rejects_out_of_range_port(self) -> None:
+        """--port reached serve() unchecked: port -1/99999 raised OverflowError
+        (an ArithmeticError, NOT the OSError the serve try/except catches) —
+        a raw traceback instead of argparse's clean usage error. Port 0 stays
+        legal: serve() prints back the ephemeral port the kernel assigned."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        for argv in (["serve", "--port", "-1"], ["serve", "--port", "99999"]):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2, argv)
+            self.assertIn("--port", err.getvalue())
 
     def test_health_command_reports_config_without_store(self) -> None:
         """`shoin health` (REQ-103 CLI parity with GET /api/health, v0.2.126) must

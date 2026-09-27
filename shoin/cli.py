@@ -37,6 +37,21 @@ from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
+
+def _pos_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return n
+
+
+def _port_num(value: str) -> int:
+    n = int(value)
+    if not 0 <= n <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 0-65535")
+    return n
+
+
 _STRINGS: dict[str, dict[str, str]] = {
     "ja": {
         "nb.created": "作成: [{id}] {name}",
@@ -229,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
-    askp.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+    askp.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
 
     st = sub.add_parser("studio", help="Studio出力生成")
     st.add_argument("notebook_id", type=int)
@@ -241,7 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
     ev.add_argument("notebook_id", type=int)
     ev.add_argument("cases", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]')
-    ev.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+    ev.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
     ev.add_argument("--save", metavar="FILE", help="この実行をベースラインJSONとして保存")
     ev.add_argument("--diff", metavar="FILE", help="保存済みベースラインとの差分を表示")
 
@@ -250,7 +265,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--format", choices=FORMATS, default="md")
 
     sv = sub.add_parser("serve", help="Web UI起動 (127.0.0.1のみ)")
-    sv.add_argument("--port", type=int, default=port(), help=f"ポート(既定: {port()})")
+    sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
 
     sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
     return p
