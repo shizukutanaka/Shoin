@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.276")
+        self.assertEqual(VERSION, "0.2.277")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2154,6 +2154,58 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_UNSUPPORTED_FORMAT")
         with self.assertRaises(IngestError) as cm:
             fetch_with("gzip", b"not-a-gzip")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
+    def test_validate_resolved_zone_scoped_addr_blocked(self) -> None:
+        """A getaddrinfo result like 'fe80::1%eth0' is rejected by ip_address() —
+        the ValueError tail must map to INGEST_URL_BLOCKED, not escape."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1%eth0", 0, 0, 0))]
+
+        with patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo):
+            with self.assertRaises(IngestError) as cm:
+                ing._validate_resolved("example.com")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_fetch_url_corrupt_deflate_raises(self) -> None:
+        """A deflate body that fails decompression must raise
+        INGEST_FETCH_FAILED — never index the raw compressed bytes."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            status = 200
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Content-Encoding":
+                    return "deflate"
+                if name == "Content-Type":
+                    return "text/plain"
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return b"\x00\x01corrupt"
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+        ):
+            with self.assertRaises(IngestError) as cm:
+                ing.fetch_url("http://example.com/page")
         self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
 
     def test_extracted_dataclass(self) -> None:
@@ -10392,6 +10444,154 @@ class TestCitationCoverageTail(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
+
+
+class TestResidualGuards(unittest.TestCase):
+    """Pin the last reachable guard tails left by the v0.2.270-275 sweep (v0.2.277)."""
+
+    def test_chunk_overlap_non_int_env_falls_back(self) -> None:
+        """SHOIN_CHUNK_OVERLAP='abc' must fall back to the default, not crash
+        at import-adjacent config time."""
+        import os
+
+        from shoin.config import CHUNK_OVERLAP, chunk_overlap
+
+        with patch.dict(os.environ, {"SHOIN_CHUNK_OVERLAP": "abc"}):
+            self.assertEqual(chunk_overlap(), CHUNK_OVERLAP)
+
+    def test_parse_cases_non_object_case_raises(self) -> None:
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases([42])
+
+    def test_report_from_dict_bad_case_and_missing_scores(self) -> None:
+        """Baseline rebuild refuses malformed cases AND missing recall/mrr —
+        a silently-dropped field would fabricate a score delta."""
+        from shoin.evaluate import report_from_dict
+
+        with self.assertRaises(ValueError):
+            report_from_dict({"cases": ["x"], "recall": 0.0, "mrr": 0.0})
+        with self.assertRaises(ValueError):
+            report_from_dict({"cases": []})
+
+    def test_status_line_lists_each_mismatch(self) -> None:
+        from shoin.export import _status_line
+
+        line = _status_line(
+            {
+                "numeric_mismatch": [1],
+                "unit_mismatch": [2],
+                "negation_mismatch": [3],
+                "degenerate": [4],
+                "self_contradiction": [5],
+            }
+        )
+        for tok in ("S1", "S2", "S3"):
+            self.assertIn(tok, line)
+        # degenerate/self_contradiction print counts, not S-numbers.
+        self.assertEqual(line.count("(1)"), 2)
+
+    def test_section_from_context_without_prefix(self) -> None:
+        from shoin.qa import _section_from_context
+
+        self.assertEqual(_section_from_context("no breadcrumb", "タイトル"), "")
+
+    def test_history_messages_zero_each_budget_breaks(self) -> None:
+        """A zero per-message budget must break the pack loop cleanly rather
+        than emitting empty turns."""
+        import shoin.qa as qa
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_message(nb.id, "user", "質問の本文です")
+            with patch.object(qa, "HISTORY_TOKENS_EACH", 0):
+                self.assertEqual(qa.history_messages(s, nb.id), [])
+
+    def test_rewrite_queries_skips_short_and_dup_lines(self) -> None:
+        """Rewrite parsing drops sub-2-char fragments and repeats of itself —
+        the same list conventions studio.suggest_questions established."""
+        from shoin.qa import rewrite_queries
+
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return "1. x\n2. 別の言い換えです\n別の言い換えです"
+
+        self.assertEqual(rewrite_queries(_Stub(), "元の質問"), ["別の言い換えです"])  # type: ignore[arg-type]
+
+    def test_degraded_text_caps_at_three_sources(self) -> None:
+        """The degraded fallback enumerates at most 3 sources — a fourth must
+        be dropped rather than overflowing the no-LLM notice."""
+        from shoin.qa import _degraded_text
+        from shoin.search import Hit
+
+        hits = [Hit(i, i, f"テキスト{i}", 1.0) for i in range(1, 5)]
+        text = _degraded_text(hits)
+        self.assertIn("[S3]", text)
+        self.assertNotIn("[S4]", text)
+
+    def test_retrieve_multi_neg_filters_vector_lane(self) -> None:
+        """-term exclusions apply to the vector lane too (v0.2.73 placement):
+        a chunk mentioning the excluded term must not ride in on vectors."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫についての文。", "犬についての文。"])
+            for c in s.chunks_for_notebook(nb.id):
+                s.set_embedding(c.id, [1.0, 0.0])
+            hits = retrieve_multi(s, nb.id, ["猫 -犬"], [[1.0, 0.0]])
+            self.assertTrue(hits)
+            self.assertTrue(all("犬" not in h.text for h in hits))
+
+    def test_embed_chunks_backend_without_embed_api_returns_zero(self) -> None:
+        """A backend with embedding_model set but neither embed() nor
+        embed_one() embeds nothing — return 0, don't crash."""
+        from shoin.pipeline import _embed_chunks
+
+        class _NoEmbedAPI:
+            embedding_model = "m"
+
+        with make_store() as s:
+            self.assertEqual(_embed_chunks(s, _NoEmbedAPI(), [1], ["t"]), 0)  # type: ignore[arg-type]
+
+    def test_numeric_variants_era_year_one(self) -> None:
+        """2019 = 令和元年 must emit the 元 spelling too — a corpus that writes
+        '元年' would otherwise miss a digit query (search.py y==1 tail)."""
+        from shoin.search import _numeric_variants
+
+        self.assertIn("令和元", _numeric_variants("2019"))
+
+    def test_tail_long_run_periodic_credit_hits_limit(self) -> None:
+        """A word run past _LONG_RUN_THRESHOLD is credited every 4 chars —
+        the mid-run `acc >= tokens` return must fire, cutting inside the run."""
+        from shoin.chunk import _tail
+
+        text = "a" * 60
+        res = _tail(text, 1)
+        self.assertTrue(text.endswith(res))
+        self.assertEqual(len(res), 41)  # threshold 40 + first periodic credit
+
+    def test_refresh_source_sha_collision_with_other_source_aborts(self) -> None:
+        """Re-fetched content hashing to a DIFFERENT existing source must abort
+        before chunk replacement — committing would leave source/sha paired
+        wrongly (the guard exists precisely to prevent that split state)."""
+        import types
+
+        import shoin.pipeline as pl
+        from shoin.store import StoreError
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src_a = s.add_source(nb.id, "url", "a", "https://x/a", "sha-a")
+            s.add_source(nb.id, "url", "b", "https://x/b", "sha-b")
+            fake = types.SimpleNamespace(sha256="sha-b", title="b", text="x")
+            with patch.object(pl, "extract_url", return_value=fake):
+                with self.assertRaises(StoreError):
+                    pl.refresh_source(s, src_a.id)
 
 
 if __name__ == "__main__":

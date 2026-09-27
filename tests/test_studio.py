@@ -107,6 +107,14 @@ class StudioTest(unittest.TestCase):
         result = generate(self.store, llm, self.nb, "faq")
         self.assertEqual(result.report["invalid"], [9])
 
+    def test_generate_flags_length_truncation(self) -> None:
+        """finish_reason='length' must mark the Studio report truncated, same
+        as chat answers (v0.2.245) — a mid-list cut must not read complete."""
+        llm = FakeLLM()
+        llm.last_finish_reason = "length"
+        result = generate(self.store, llm, self.nb, "briefing")
+        self.assertTrue(result.report.get("truncated"))
+
     def test_generate_rejects_unknown_kind(self) -> None:
         with self.assertRaises(StoreError) as ctx:
             generate(self.store, FakeLLM(), self.nb, "poem")
