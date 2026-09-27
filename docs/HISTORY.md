@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.298
+## Version History: v0.1.37 → v0.2.299
+
+### v0.2.299 (2026-09-27)
+
+- tests: pin the last two manifest-level silent-exclusion surfaces — every
+  tests/*.py file must match the `-p 'test_*.py'` pattern the gates use, and
+  every top-level dir holding .py files must be inside the mypy/coverage
+  scope (a misnamed test file or a new package dir would previously stay
+  green while never running).
+- llm.py/cli.py/store.py audit: all HTTP/SSE/embed error mapping, subcommand
+  surfaces, and remaining ORDER BY/row-scan helpers verified clean.
 
 ### v0.2.298 (2026-09-27)
 

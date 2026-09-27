@@ -60,7 +60,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.298")
+        self.assertEqual(VERSION, "0.2.299")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10876,6 +10876,38 @@ class TestResidualGuards(unittest.TestCase):
         hook = (root / ".githooks" / "pre-push").read_text(encoding="utf-8")
         self.assertIn("exec", hook)
         self.assertIn("scripts/verify.sh", hook)
+
+    def test_every_python_file_is_discovered_or_scoped(self) -> None:
+        """v0.2.299: two manifest-level silent-exclusion surfaces.
+
+        1. A tests/*.py file whose name does not match the `-p 'test_*.py'`
+           pattern both gate files use is never run — a whole file of tests
+           could rot unnoticed (a misnamed `foo_test.py` looks identical to
+           every real test file when read top-to-bottom).
+        2. A new top-level directory containing .py modules would escape
+           `mypy --strict shoin/` AND `coverage --include='shoin/*'` (ruff's
+           `ruff check .` already covers the whole tree). Both gates would
+           stay green while the new package shipped un-typechecked and
+           uncounted against the 90% floor.
+        """
+        root = Path(__file__).resolve().parent.parent
+        for f in (root / "tests").glob("*.py"):
+            self.assertTrue(
+                f.name.startswith("test_") or f.name == "__init__.py",
+                f"tests/{f.name} is never discovered by `unittest -p 'test_*.py'`",
+            )
+        # Top-level dirs holding .py files directly (non-recursive): build
+        # artifacts nest deeper (build/lib/...) and never appear here.
+        gate_scoped = {"shoin", "tests"}
+        for d in root.iterdir():
+            if not d.is_dir() or d.name.startswith(".") or d.name == "__pycache__":
+                continue
+            if any(d.glob("*.py")):
+                self.assertIn(
+                    d.name,
+                    gate_scoped,
+                    f"{d.name}/ holds .py files outside the mypy/coverage gate scope",
+                )
 
 
 if __name__ == "__main__":
