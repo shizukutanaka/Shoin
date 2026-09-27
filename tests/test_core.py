@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.274")
+        self.assertEqual(VERSION, "0.2.275")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -7577,6 +7577,35 @@ class TestExport(unittest.TestCase):
                 "source_map": {"S1": "doc0"}, "confirmed": [], "misattributed": [],
             })
         self.assertNotIn("検出", buf2.getvalue())
+
+    def test_print_report_flag_markers_and_tail_sections(self) -> None:
+        """v0.2.275: cover _print_report's flag markers (numeric/unit/negation),
+        the uncited block with supported-source naming, self_contradiction and
+        truncated — the print branches no earlier test exercised."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1, 2, 3, 4], "invalid": [], "n_sources": 4,
+                "coverage": 1.0,
+                "source_map": {"S1": "a", "S2": "b", "S3": "c", "S4": "d"},
+                "confirmed": [1], "misattributed": [],
+                "numeric_mismatch": [2], "unit_mismatch": [3],
+                "negation_mismatch": [4],
+                "uncited": ["無根拠の文", "根拠あり文"],
+                "uncited_supported": ["根拠あり文"],
+                "uncited_supported_source": {"根拠あり文": "S2"},
+                "self_contradiction": ["矛盾した文"],
+                "truncated": True,
+            })
+        out = buf.getvalue()
+        self.assertIn("→", out)             # supported names the likely source
+        self.assertIn("無根拠の文", out)
+        self.assertIn("矛盾した文", out)
 
     def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
         import json
