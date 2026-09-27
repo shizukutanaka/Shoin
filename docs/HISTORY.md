@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.303
+## Version History: v0.1.37 → v0.2.304
+
+### v0.2.304 (2026-09-27)
+
+- tests: pin README's user-facing JSON examples against the real schemas —
+  the cases.json block must parse via evaluate.parse_cases(), and every
+  key in the config.json example must be a SHOIN_* name config.py reads
+  via _get(). A schema change would otherwise leave the docs teaching a
+  broken format (same doc↔code drift class as v0.2.301/302).
+- audit: UI i18n key parity and the studio.KINDS↔I18N contract verified
+  already pinned (test_ui_contract.py); all README CLI examples match the
+  real argparse surface.
 
 ### v0.2.303 (2026-09-27)
 

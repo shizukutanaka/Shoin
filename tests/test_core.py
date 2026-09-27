@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import math
 import os
+import re
 import socket
 import sqlite3
 import sys
@@ -61,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.303")
+        self.assertEqual(VERSION, "0.2.304")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10968,6 +10970,29 @@ class TestResidualGuards(unittest.TestCase):
             self.assertNotIn("pytest", agent.lower(), f"{doc} still names pytest")
             for f in bump_files:
                 self.assertIn(f, agent, f"{doc} bump ritual no longer names {f}")
+
+    def test_readme_json_examples_parse_with_the_real_schemas(self) -> None:
+        """v0.2.304: README's two ```json examples are user-facing schema
+        documentation — if parse_cases() tightened or a config.json key was
+        renamed, the examples would silently teach a broken format (the same
+        doc↔code drift class as CONTRIBUTING.md's pytest instructions).
+        Extract each example block and feed it through the real machinery:
+        cases.json must parse via evaluate.parse_cases(), and every key in
+        the config.json example must be a SHOIN_* name config.py actually
+        reads via _get()."""
+        from shoin.evaluate import parse_cases
+
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        cfg_src = (root / "shoin" / "config.py").read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\n(.*?)\n```", readme, re.S)
+        cases_json = next(b for b in blocks if '"sources"' in b)
+        config_json = next(b for b in blocks if '"SHOIN_LLM_MODEL"' in b)
+        cases = parse_cases(json.loads(cases_json))
+        self.assertEqual(len(cases), 2, "README example must stay parseable")
+        known = set(re.findall(r'_get\("([A-Z_]+)"', cfg_src))
+        for key in json.loads(config_json):
+            self.assertIn(key, known, f"README config.json example names unknown key {key}")
 
 
 if __name__ == "__main__":
