@@ -914,6 +914,93 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_startSourceRename_commit_and_cancel_paths(self) -> None:
+        """v0.2.267: pin startSourceRename's five exit paths under node —
+        Enter commits via PATCH + reload, blur to a sibling row control skips
+        the commit entirely (the sibling's own click rebuilds), Escape cancels
+        without a PATCH, empty/unchanged input reloads without a PATCH, and a
+        second commit() (blur firing after Enter) is a no-op."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function startSourceRename")
+        harness = """\
+function mkEl(){ return {children:[], value:"", type:"", className:"", dataset:{},
+  disabled:false, focused:false,
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent = this }, parent:null,
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  setAttribute(){}, focus(){ this.focused = true }, select(){}, blur(){},
+  onclick:null, onblur:null, onkeydown:null, click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+function toast(){}
+const document = { createElement: () => mkEl() };
+let cur = { id: 7 };
+let patches = [], reloads = [];
+async function api(path, o){ patches.push({path, body: o && o.body}); return {json:async()=>({})}; }
+function openNotebook(id){ reloads.push(id) }
+""" + fn + """
+const s = { id: 5, title: "old", kind: "txt" };
+function fresh(){ const tt = mkEl(), row = mkEl(); row.children = [tt]; tt.parent = row;
+  return { tt, row, input: startSourceRename(s, tt, row) }; }
+const key = k => ({ key: k, preventDefault(){} });
+
+// Enter -> PATCH with trimmed title + reload.
+let f = fresh(); f.input.value = "  new name  ";
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1 || !patches[0].path.endsWith("/sources/5")
+    || !patches[0].body.includes("new name"))
+  { console.error("Enter commit failed: " + JSON.stringify(patches)); process.exit(1) }
+if (reloads.length !== 1 || reloads[0] !== 7) { console.error("no reload"); process.exit(1) }
+
+// Second commit (blur AFTER Enter already committed) -> no second PATCH.
+f.input.onblur({ relatedTarget: null });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1) { console.error("double commit"); process.exit(1) }
+
+// Blur to a sibling element inside the row -> NO commit, NO reload.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "changed";
+const sibling = mkEl(); f.row.children.push(sibling); sibling.parent = f.row;
+f.input.onblur({ relatedTarget: sibling });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 0)
+  { console.error("sibling blur committed"); process.exit(1) }
+
+// Blur to outside the row -> commit fires.
+patches = []; reloads = [];
+f.input.onblur({ relatedTarget: mkEl() });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1) { console.error("outside blur did not commit"); process.exit(1) }
+
+// Escape -> no PATCH, blur before reload (resurrection guard), reload happens.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "discarded";
+let blurred = false; f.input.blur = () => { blurred = true };
+f.input.onkeydown(key("Escape"));
+if (!blurred) { console.error("Escape did not blur before reload"); process.exit(1) }
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 1)
+  { console.error("Escape committed or skipped reload"); process.exit(1) }
+
+// Unchanged / empty title -> reload only, no PATCH.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "old";      // unchanged
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+f = fresh(); f.input.value = "   ";      // whitespace-only
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 2)
+  { console.error("unchanged/empty committed or skipped reload: "
+      + patches.length + "/" + reloads.length); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
