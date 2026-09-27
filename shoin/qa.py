@@ -11,13 +11,21 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, estimate_tokens, is_cjk
 from .citation import CitationReport, make_report
-from .config import MAX_QUESTION_LEN, TOP_K, multi_query_enabled, ui_lang
+from .config import (
+    MAX_QUESTION_LEN,
+    QUERY_VEC_CACHE_SIZE,
+    TOP_K,
+    multi_query_enabled,
+    ui_lang,
+)
 from .llm import LLMError, Message
 from .search import Hit, retrieve, retrieve_multi
 from .store import Store, StoreError
@@ -525,13 +533,41 @@ def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     return not stored or stored == current
 
 
+# Embedding the question is the single most repeated LLM call in the app: every
+# ask() embeds the retrieval query, and repeat questions, eval reruns, and
+# multi-query rewrites that coincide with an earlier phrasing all re-hit the
+# endpoint for a byte-identical vector. Bound a small LRU keyed on
+# (embedding model, question) — vectors are immutable per model so entries
+# never go stale, and failures are not cached (a transient outage must not
+# stick). ThreadingHTTPServer serves asks concurrently, so the tiny
+# check-and-evict section is serialized.
+_QUERY_VEC_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+_QUERY_VEC_LOCK = threading.Lock()
+
+
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
-    if not (llm.embedding_model or "").strip():
+    model = (llm.embedding_model or "").strip()
+    if not model:
         return None
+    key = (model, question)
+    with _QUERY_VEC_LOCK:
+        cached = _QUERY_VEC_CACHE.get(key)
+        if cached is not None:
+            _QUERY_VEC_CACHE.move_to_end(key)
+            # Copy out: callers receive a fresh list so a mutating consumer can
+            # never corrupt the shared cached vector.
+            return list(cached)
     try:
-        return llm.embed_one(question)
+        vec = llm.embed_one(question)
     except LLMError:
         return None  # vector path optional: degrade to BM25-only retrieval
+    with _QUERY_VEC_LOCK:
+        # The cache owns its own list; callers get `vec` and may mutate it.
+        _QUERY_VEC_CACHE[key] = list(vec)
+        _QUERY_VEC_CACHE.move_to_end(key)
+        while len(_QUERY_VEC_CACHE) > QUERY_VEC_CACHE_SIZE:
+            _QUERY_VEC_CACHE.popitem(last=False)
+    return vec
 
 
 def rewrite_queries(

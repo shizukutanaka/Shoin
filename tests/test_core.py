@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.250")
+        self.assertEqual(VERSION, "0.2.251")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -9934,6 +9934,102 @@ class TestRenameReembed(unittest.TestCase):
             self.assertEqual(st.get_source(a_id).title, "免疫レポート")
         finally:
             st.close()
+
+
+class TestQueryVectorCache(unittest.TestCase):
+    """_query_vector must not re-embed a repeated (model, question) pair.
+
+    Every ask() embeds the retrieval query; repeat questions, eval reruns and
+    multi-query rewrites that coincide with an earlier phrasing all paid a full
+    LLM round-trip for a byte-identical vector. The cache is keyed on the
+    model, bounded by QUERY_VEC_CACHE_SIZE, never caches failures, and hands
+    callers their own list so mutations cannot corrupt shared entries."""
+
+    def setUp(self) -> None:
+        import shoin.qa as qa_mod
+
+        qa_mod._QUERY_VEC_CACHE.clear()
+
+    class _CountingLLM:
+        embedding_model = "test-embed"
+
+        def __init__(self, fail: bool = False) -> None:
+            self.calls = 0
+            self.fail = fail
+
+        def chat(self, messages, temperature: float = 0.2) -> str:
+            return ""
+
+        def embed_one(self, text: str) -> list[float]:
+            self.calls += 1
+            if self.fail:
+                raise LLMError("SYSTEM_LLM_HTTP_ERROR", "down")
+            return [float(len(text)), 1.0]
+
+    def test_repeated_question_embeds_once(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        v1 = _query_vector(llm, "同じ質問")
+        v2 = _query_vector(llm, "同じ質問")
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(v1, v2)
+        # The cached entry is shared state — mutating a returned vector must
+        # not corrupt it.
+        self.assertIsNotNone(v1)
+        assert v1 is not None
+        v1[0] = -999.0
+        v3 = _query_vector(llm, "同じ質問")
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(v3, [float(len("同じ質問")), 1.0])
+
+    def test_distinct_questions_and_models_are_separate_keys(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        _query_vector(llm, "q1")
+        _query_vector(llm, "q2")
+        self.assertEqual(llm.calls, 2)
+        other = self._CountingLLM()
+        other.embedding_model = "other-model"
+        _query_vector(other, "q1")
+        self.assertEqual(other.calls, 1, "model is part of the cache key")
+
+    def test_failures_are_not_cached(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM(fail=True)
+        self.assertIsNone(_query_vector(llm, "flaky"))
+        self.assertIsNone(_query_vector(llm, "flaky"))
+        self.assertEqual(llm.calls, 2, "a transient failure must not poison the cache")
+        llm.fail = False
+        self.assertIsNotNone(_query_vector(llm, "flaky"))
+
+    def test_cache_is_bounded_and_evicts_lru(self) -> None:
+        from unittest.mock import patch
+
+        import shoin.qa as qa_mod
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        with patch.object(qa_mod, "QUERY_VEC_CACHE_SIZE", 2):
+            _query_vector(llm, "a")
+            _query_vector(llm, "b")
+            _query_vector(llm, "a")  # refresh a; b is now oldest
+            _query_vector(llm, "c")  # evicts b
+            self.assertEqual(len(qa_mod._QUERY_VEC_CACHE), 2)
+            _query_vector(llm, "a")
+            self.assertEqual(llm.calls, 3, "a survived eviction")
+            _query_vector(llm, "b")
+            self.assertEqual(llm.calls, 4, "b was evicted and re-embedded")
+
+    def test_no_embedding_model_bypasses_cache(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        llm.embedding_model = ""
+        self.assertIsNone(_query_vector(llm, "q"))
+        self.assertEqual(llm.calls, 0)
 
 
 if __name__ == "__main__":
