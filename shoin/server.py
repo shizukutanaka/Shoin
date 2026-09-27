@@ -167,6 +167,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Nothing here is cacheable: index.html must not outlive the server
+        # build serving it (stale JS vs new API), and API responses are
+        # live notebook state. Was SSE-only; hoisted to cover every response.
+        self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -720,7 +724,7 @@ class _Handler(BaseHTTPRequestHandler):
             store.add_message(nb_id, "user", question, "{}")
 
             try:
-                self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
+                self._headers(200, "text/event-stream; charset=utf-8")
             except ConnectionError:
                 # Client disconnected before SSE headers could even be sent. Save an
                 # empty assistant message so the orphaned user turn (already
