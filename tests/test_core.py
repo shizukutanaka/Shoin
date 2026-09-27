@@ -61,7 +61,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.301")
+        self.assertEqual(VERSION, "0.2.302")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10943,14 +10943,28 @@ class TestResidualGuards(unittest.TestCase):
         `pytest tests/` (the project runs `unittest discover` through
         scripts/verify.sh) and omitted detect-secrets from the setup deps —
         a contributor following the guide would skip one of the four gates
-        and hit verify failures only at push time. Pin the doc to the
-        canonical gate: it must name scripts/verify.sh and detect-secrets,
-        and never mention pytest."""
+        and hit verify failures only at push time. v0.2.302: the same
+        stale-runner claim lived in docs/agents/{opus,sonnet}.md, whose
+        bump ritual was also labeled 三点 while listing 5 files. Pin: the
+        docs name scripts/verify.sh and detect-secrets, never mention
+        pytest, and the agent docs enumerate all five bump targets."""
         root = Path(__file__).resolve().parent.parent
         text = (root / "CONTRIBUTING.md").read_text(encoding="utf-8")
         self.assertIn("scripts/verify.sh", text)
         self.assertIn("detect-secrets", text)
         self.assertNotIn("pytest", text.lower())
+        bump_files = (
+            "config.py",
+            "pyproject.toml",
+            "test_version",
+            "HISTORY.md",
+            "CLAUDE.md",
+        )
+        for doc in ("docs/agents/opus.md", "docs/agents/sonnet.md"):
+            agent = (root / doc).read_text(encoding="utf-8")
+            self.assertNotIn("pytest", agent.lower(), f"{doc} still names pytest")
+            for f in bump_files:
+                self.assertIn(f, agent, f"{doc} bump ritual no longer names {f}")
 
 
 if __name__ == "__main__":

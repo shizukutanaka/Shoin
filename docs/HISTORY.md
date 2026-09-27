@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.301
+## Version History: v0.1.37 → v0.2.302
+
+### v0.2.302 (2026-09-27)
+
+- docs/agents/{opus,sonnet}.md: same stale-runner drift as CONTRIBUTING.md —
+  `pytest` referenced as the test runner in three places, and the bump
+  ritual labeled 三点 while listing five files. Reworded to the unittest
+  suite and the explicit 五点 list (config.py / pyproject.toml /
+  test_version / HISTORY.md header+entry / CLAUDE.md pointer).
+- tests: the doc-consistency pin now also covers both agent docs — no
+  `pytest`, and all five bump targets named.
 
 ### v0.2.301 (2026-09-27)
 
