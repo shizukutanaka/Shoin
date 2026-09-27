@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.289")
+        self.assertEqual(VERSION, "0.2.290")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -1140,6 +1140,23 @@ class TestChunk(unittest.TestCase):
     def test_pathological_unbroken(self) -> None:
         chunks = split_text("x" * 5000, chunk_tokens=100, overlap_tokens=10)
         self.assertGreater(len(chunks), 0)
+
+    def test_newline_dense_input_splits_without_content_loss(self) -> None:
+        """v0.2.289+: newline-dense input (one token per line) used to make
+        _hard_split rescan the whole buffer per sentence — ~5s for 100k lines.
+        The incremental token counter fixes the stall; this pins the output
+        contract it must preserve: every line's content lands in exactly one
+        chunk, no chunk exceeds the token budget (+1 boundary slack for an
+        ASCII run split across the merge point)."""
+        text = "\n".join(f"line{i}" for i in range(3000))
+        chunks = split_text(text, chunk_tokens=100, overlap_tokens=0)
+        self.assertGreater(len(chunks), 20)
+        for c in chunks:
+            self.assertLessEqual(estimate_tokens(c), 101)
+        joined = " ".join(" ".join(c.splitlines()) for c in chunks)
+        for i in (0, 1500, 2999):
+            self.assertIn(f"line{i}", joined)
+        self.assertEqual(len(joined.split()), 3000)
 
     def test_southeast_asian_scripts_counted_as_tokens(self) -> None:
         """Thai, Myanmar, Khmer, Lao chars must each count as one token (REQ-003)."""

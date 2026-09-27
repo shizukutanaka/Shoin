@@ -165,14 +165,24 @@ def _hard_split(block: str, limit: int) -> list[str]:
     """Split an oversize block by sentences, then by char windows as last resort."""
     parts: list[str] = []
     buf = ""
+    buf_tokens = 0
     for sent in _SENTENCE_SPLIT_RE.split(block):
         if not sent:
             continue
-        if buf and estimate_tokens(buf + sent) > limit:
+        # Track the running total instead of estimate_tokens(buf + sent): the
+        # latter rescans all of buf once per sentence — ~50µs × the block's
+        # sentence count, which is a measurable stall on newline-dense input
+        # (100k lines ≈ 5s). Additivity is exact for CJK; an ASCII word run
+        # split across the boundary can overestimate by ≤1 token, which errs
+        # toward splitting early — safe.
+        sent_tokens = estimate_tokens(sent)
+        if buf and buf_tokens + sent_tokens > limit:
             parts.append(buf)
             buf = sent
+            buf_tokens = sent_tokens
         else:
             buf += sent
+            buf_tokens += sent_tokens
     if buf:
         parts.append(buf)
     out: list[str] = []
@@ -323,17 +333,24 @@ def split_text_with_context(
     chunks: list[tuple[str, str]] = []
     buf = ""
     buf_ctx = ""
+    buf_tokens = 0
     for ctx, piece in pieces:
-        candidate = f"{buf}\n\n{piece}" if buf else piece
-        if buf and estimate_tokens(candidate) > chunk_tokens:
+        piece_tokens = estimate_tokens(piece)
+        # Running total rather than estimate_tokens(candidate): same rescans-
+        # buf-per-piece stall as _hard_split above. ±1 boundary overestimate is
+        # safe (errs toward emitting early).
+        if buf and buf_tokens + piece_tokens > chunk_tokens:
             chunks.append((buf_ctx, buf))
             buf = _tail(buf, overlap_tokens)
+            buf_tokens = estimate_tokens(buf)
             buf = f"{buf}\n\n{piece}" if buf else piece
             buf_ctx = ctx
+            buf_tokens += piece_tokens
         else:
             if not buf:
                 buf_ctx = ctx
-            buf = candidate
+            buf = f"{buf}\n\n{piece}" if buf else piece
+            buf_tokens += piece_tokens
     if buf.strip():
         chunks.append((buf_ctx, buf))
     return [(c[:_MAX_CONTEXT_CHARS], t.strip()) for c, t in chunks if t.strip()]
