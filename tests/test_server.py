@@ -1201,6 +1201,55 @@ class TruncatedStreamTest(unittest.TestCase):
         _, msgs = self._json("GET", f"/api/notebooks/{nb_id}")
         self.assertTrue(msgs["messages"][-1]["report"].get("truncated"))
 
+    def test_finish_reason_is_captured_under_generation_lock(self) -> None:
+        """v0.2.284: last_finish_reason lives on the *shared* llm client and is
+        reset at the start of every call — reading it after generation_lock is
+        released races with the next queued request's reset and silently drops
+        (or misattributes) the truncated flag."""
+        handler_cls = self.server.RequestHandlerClass
+        llm = self.llm
+        inner = handler_cls.generation_lock
+
+        class _UnlockThenReset:
+            def __enter__(self):  # noqa: D102
+                return inner.__enter__()
+
+            def __exit__(self, *exc: object) -> object:
+                result = inner.__exit__(*exc)
+                # What the next queued request's chat()/chat_stream() does the
+                # moment it acquires the lock (llm.py resets on entry).
+                llm.last_finish_reason = None
+                return result
+
+        handler_cls.generation_lock = _UnlockThenReset()
+        try:
+            _, nb = self._json("POST", "/api/notebooks", {"name": "race"})
+            nb_id = nb["id"]
+            req = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/upload"),
+                data=("打切レーステストの内容。" * 30).encode(),
+                method="POST",
+                headers={"X-Filename": "race.txt"},
+            )
+            with urllib.request.urlopen(req):
+                pass
+            req2 = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/ask"),
+                data=json.dumps({"question": "内容は"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req2) as resp:
+                raw = resp.read().decode()
+        finally:
+            handler_cls.generation_lock = inner
+        done = [d for e, d in parse_sse(raw) if e == "done"]
+        self.assertTrue(done, "done frame missing")
+        self.assertTrue(
+            done[0]["report"].get("truncated"),
+            "a queued request's flag reset must not erase this request's truncated flag",
+        )
+
 
 class PostStreamStoreErrorTest(unittest.TestCase):
     """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
