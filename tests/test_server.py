@@ -2092,6 +2092,38 @@ class SSEConnectionErrorTest(unittest.TestCase):
             done[0]["report"].get("self_contradiction"), ["治療の効果はない。"]
         )
 
+    def test_build_context_error_frame_and_no_dangling_turn(self) -> None:
+        """build_context raising after hits are found (e.g. WAL busy_timeout)
+        must emit an SSE error frame — headers already committed, so no HTTP
+        status can be sent — and persist an EMPTY assistant message so the
+        orphaned user turn can't corrupt history_messages pairing."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-err"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch("shoin.server.build_context", side_effect=RuntimeError("ctx boom")):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        events = parse_sse(raw.decode())
+        kinds = [e for e, _ in events]
+        self.assertIn("error", kinds)
+        self.assertNotIn("done", kinds)
+        err_payload = [d for e, d in events if e == "error"][0]
+        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        # The dangling-turn guard: an empty assistant turn was persisted.
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            msgs = store.list_messages(nb_id)
+        self.assertEqual(msgs[-1]["role"], "assistant")
+        self.assertEqual(msgs[-1]["body"], "")
+
 
 class HostnameOfTest(unittest.TestCase):
     def test_malformed_netloc_returns_empty_string(self) -> None:

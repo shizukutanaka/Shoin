@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.270")
+        self.assertEqual(VERSION, "0.2.275")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -7578,6 +7578,35 @@ class TestExport(unittest.TestCase):
             })
         self.assertNotIn("検出", buf2.getvalue())
 
+    def test_print_report_flag_markers_and_tail_sections(self) -> None:
+        """v0.2.275: cover _print_report's flag markers (numeric/unit/negation),
+        the uncited block with supported-source naming, self_contradiction and
+        truncated — the print branches no earlier test exercised."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1, 2, 3, 4], "invalid": [], "n_sources": 4,
+                "coverage": 1.0,
+                "source_map": {"S1": "a", "S2": "b", "S3": "c", "S4": "d"},
+                "confirmed": [1], "misattributed": [],
+                "numeric_mismatch": [2], "unit_mismatch": [3],
+                "negation_mismatch": [4],
+                "uncited": ["無根拠の文", "根拠あり文"],
+                "uncited_supported": ["根拠あり文"],
+                "uncited_supported_source": {"根拠あり文": "S2"},
+                "self_contradiction": ["矛盾した文"],
+                "truncated": True,
+            })
+        out = buf.getvalue()
+        self.assertIn("→", out)             # supported names the likely source
+        self.assertIn("無根拠の文", out)
+        self.assertIn("矛盾した文", out)
+
     def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
         import json
 
@@ -10230,6 +10259,139 @@ class TestEvalDiff(unittest.TestCase):
         self.assertEqual(diff.matched_questions, 0)
         self.assertEqual(diff.dropped_questions, ["a"])
         self.assertEqual(diff.new_questions, ["b"])
+
+
+class TestSearchCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered guard/merge tails in search.py (v0.2.272)."""
+
+    def test_numeric_variants_man_remainder(self) -> None:
+        """12345 must emit the '1万2345' magnitude spelling (v0.2.213 bridge):
+        a digit query cannot substring-match '1万2345' without the variant."""
+        from shoin.search import _numeric_variants
+
+        got = _numeric_variants("12345")
+        self.assertIn("1万2345", got)
+        self.assertIn("一万二千三百四十五", got)
+
+    def test_bm25_neg_only_query_returns_fts_filtered(self) -> None:
+        """A query whose positive terms are all single ASCII chars ('a -cd')
+        produces no needles at all — the early return must still apply the
+        neg filter and must not crash."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["a cd を含む文。", "a のみの文。"])
+            hits = bm25_search(s, nb.id, "a -cd", 9)
+            self.assertEqual(hits, [])
+
+    def test_cosine_prepared_dim_mismatch_returns_zero(self) -> None:
+        """A vector from a different embedding model scores 0.0, not a crash
+        or a meaningless partial dot product (v0.2.261)."""
+        from shoin.search import _cosine_prepared
+
+        self.assertEqual(_cosine_prepared([1.0, 0.0], 1.0, [1.0, 0.0, 0.0]), 0.0)
+
+    def test_minmax_empty_returns_empty(self) -> None:
+        from shoin.search import _minmax
+
+        self.assertEqual(_minmax([]), [])
+
+    def test_proximity_window_shrinks_past_repeated_term(self) -> None:
+        """'a x a b': the window must drop the first 'a' so the measured span
+        is 3 (the tight cover), not 6 — the left-pointer shrink path."""
+        from shoin.search import PROX_SPAN, _proximity_from_norm
+
+        got = _proximity_from_norm(["a", "b"], "a x a b")
+        self.assertAlmostEqual(got, (2 / 2) * (PROX_SPAN / (3 + PROX_SPAN)))
+
+    def test_rrf_fuse_lists_merges_bm25_onto_vec_hit(self) -> None:
+        """Same chunk reached by a vector list first and a BM25 list second:
+        the canonical Hit must keep the bm25 signal, not lose it."""
+        from shoin.search import rrf_fuse_lists
+
+        fused = rrf_fuse_lists([
+            [Hit(7, 1, "t", 0.0, vec=0.9)],
+            [Hit(7, 1, "t", 0.0, bm25=0.8)],
+        ])
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].vec, 0.9)
+        self.assertEqual(fused[0].bm25, 0.8)
+
+    def test_retrieve_multi_empty_queries(self) -> None:
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            self.assertEqual(retrieve_multi(s, nb.id, []), [])
+
+
+class TestCitationCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered tails in citation.py (v0.2.273)."""
+
+    def test_conv_values_chained_same_family(self) -> None:
+        """'1km500m' must accumulate to 1500 m — consecutive same-family
+        units within 2 chars sum, so a claim of '1500m' isn't flagged."""
+        from shoin.citation import _conv_values
+
+        self.assertIn((1, 1500.0), _conv_values("1km500m"))
+
+    def test_unparsable_kanji_parts_stay_silent(self) -> None:
+        """'二三' is a counting sequence ('a few'), not a numeral — every
+        parser that meets it must return inconclusive silence, per the
+        module's never-accuse-on-inconclusive design."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("二三万"), set())     # suffix continue
+        self.assertEqual(_numbers_expanded("一億二三万"), set())  # chain break
+        self.assertEqual(_numbers_expanded("令和一二年"), set())  # era continue
+        self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
+
+    def test_citation_only_first_sentence_skips_claim(self) -> None:
+        """'[S1]' alone carries a citation number but no text and no prior
+        claim — every checker must skip it rather than fabricate a claim."""
+        from shoin.citation import (
+            negation_mismatches,
+            numeric_mismatches,
+            quote_mismatches,
+            unit_mismatches,
+        )
+
+        src = {1: "数値は10である。"}
+        self.assertEqual(numeric_mismatches("[S1]", src), [])
+        self.assertEqual(unit_mismatches("[S1]", src), [])
+        self.assertEqual(quote_mismatches("[S1]", src), [])
+        self.assertEqual(negation_mismatches("[S1]", src), [])
+
+    def test_conv_values_breaks_on_family_change(self) -> None:
+        """'1km500g' — a different family ends the chain: only the leading
+        '1km' accumulates; the 500 g is a separate value, never summed."""
+        from shoin.citation import _conv_values
+
+        vals = _conv_values("1km500g")
+        self.assertIn((1, 1000.0), vals)
+        self.assertNotIn((1, 1500.0), vals)
+
+    def test_quote_mismatch_suggested_names_right_source(self) -> None:
+        """When a doctored quote is flagged, `suggested` must name the source
+        it actually matches — the fix is 'say [S2]', not 're-read'."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く関係のない記述だけが書かれている。",
+            2: "ハイブリッド検索は両手法の長所を組み合わせる手法である。",
+        }
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        suggested: dict[int, int] = {}
+        self.assertEqual(quote_mismatches(text, sources, suggested=suggested), [1])
+        self.assertEqual(suggested, {1: 2})
+
+    def test_make_report_source_detail_length_mismatch(self) -> None:
+        """A source_detail list whose length ≠ source count is a caller bug —
+        raise loudly instead of silently mis-keying the S-numbers."""
+        from shoin.citation import make_report
+
+        with self.assertRaises(ValueError):
+            make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
 
 
 if __name__ == "__main__":
