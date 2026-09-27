@@ -829,6 +829,91 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_renderNotebook_preserves_in_progress_rename(self) -> None:
+        """v0.2.266: pin renderNotebook's pendingRename machinery under node —
+        an in-progress rename input must be detached (onblur/onkeydown nulled
+        so the DOM teardown can't fire a phantom commit) and restored after the
+        rebuild via BOTH detection paths: document.activeElement (unrelated
+        rebuilds) and the externalPendingRename stash (sibling-button clicks)."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderNotebook")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
+  disabled:false, textContent:"", href:"", title:"",
+  classList:{ contains(c){ return false }, add(){}, remove(){} },
+  dataset:{},
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent=this },
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  removeAttribute(n){ if(n==="href") delete this.href },
+  setAttribute(n,v){}, querySelector(){ return null },
+  setSelectionRange(){}, focus(){}, onclick:null, ondblclick:null, onkeydown:null,
+  onblur:null, onchange:null, tabIndex:0}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+function fmt(x){ return String(x) }
+function showSource(){}
+function toast(){}
+function renderChatHistory(){}
+function renderStudio(){}
+function renderNotes(){}
+function refreshQuestions(){}
+let apiCalls = [];
+async function api(path, o){ apiCalls.push(path); return {json:async()=>({})}; }
+function openNotebook(){}
+let notebooks = [], cur = null, srcIndex = new Map();
+let externalPendingRename = null;
+let renameCalls = [], selCalls = [];
+function startSourceRename(s, tt, row, initial){
+  renameCalls.push({srcId: s.id, initial});
+  const inp = mkEl(); inp.cls = "src-rename"; return inp;
+}
+const document = { activeElement: null };
+""" + fn + """
+// Path 1: focused rename input inside #srcList survives the rebuild.
+cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}], messages:[], studio:[], notes:[] };
+const rin = mkEl();
+rin.classList = { contains: c => c === "src-rename" };
+rin.dataset = { srcId: "5" };
+rin.value = "mid-edit"; rin.selectionStart = 2; rin.selectionEnd = 4;
+rin.onblur = ()=>{}; rin.onkeydown = ()=>{};
+$("#srcList").children = [rin]; rin.parent = $("#srcList");
+document.activeElement = rin;
+renderNotebook();
+if (renameCalls.length !== 1 || renameCalls[0].srcId !== 5 || renameCalls[0].initial !== "mid-edit")
+  { console.error("activeElement path did not restore: " + JSON.stringify(renameCalls)); process.exit(1) }
+if (rin.onblur !== null || rin.onkeydown !== null)
+  { console.error("old rename handlers not detached — phantom commit risk"); process.exit(1) }
+if (srcIndex.get(5).s !== 1) { console.error("srcIndex not repopulated"); process.exit(1) }
+
+// Path 2: externalPendingRename stash (sibling refresh-button click) restored once.
+renameCalls = [];
+externalPendingRename = { srcId: 5, value: "stashed-v", selStart: 0, selEnd: 1 };
+document.activeElement = null;
+renderNotebook();
+if (renameCalls.length !== 1 || renameCalls[0].initial !== "stashed-v")
+  { console.error("stash path did not restore"); process.exit(1) }
+if (externalPendingRename !== null)
+  { console.error("stash not consumed"); process.exit(1) }
+renameCalls = [];
+renderNotebook();
+if (renameCalls.length !== 0)
+  { console.error("stash restored twice"); process.exit(1) }
+
+// Pending rename for a deleted source id is dropped, not applied.
+externalPendingRename = { srcId: 99, value: "ghost", selStart: 0, selEnd: 0 };
+renderNotebook();
+if (renameCalls.length !== 0)
+  { console.error("ghost rename applied"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
