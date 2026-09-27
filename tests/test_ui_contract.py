@@ -727,6 +727,280 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_health_failure_reflects_offline_and_recovers(self) -> None:
+        """v0.2.264 defect class: a failed /api/health fetch flipped window._llmOn
+        to false but left the lamp green and the banner hidden — the UI claimed
+        "LLM on" while internal state said off. Executes the real health() under
+        node: api() rejects, then succeeds with llm:true — asserts the lamp and
+        banner track both directions and the off→on transition re-fetches
+        question chips."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function health")
+        harness = """\
+const reg = {};
+function mkEl(){
+  const cls = new Set();
+  return {textContent:"", title:"", style:{},
+    classList:{toggle:(c,on)=>{on?cls.add(c):cls.delete(c)},
+               remove:c=>cls.delete(c), add:c=>cls.add(c), contains:c=>cls.has(c)}};
+}
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function t(k){ return k }
+let refetches = 0;
+function refreshQuestions(){ refetches++ }
+const window = {};
+let apiImpl = async () => ({ json: async () => ({ llm: true, model: "m", embed_model: "e" }) });
+async function api(path){ return apiImpl(path); }
+""" + fn + """
+await health();                                    // initial on (fires first refetch)
+if (!reg["#lamp"].classList.contains("on")) { console.error("lamp not on"); process.exit(1) }
+if (refetches !== 1) { console.error("first off->on did not refetch: " + refetches); process.exit(1) }
+apiImpl = async () => { throw new Error("net down") };
+await health();                                    // fetch failure
+if (window._llmOn !== false) { console.error("_llmOn not false after failure"); process.exit(1) }
+if (reg["#lamp"].classList.contains("on")) { console.error("lamp stayed green on failure"); process.exit(1) }
+if (reg["#banner"].style.display !== "block") { console.error("banner hidden on failure"); process.exit(1) }
+if (refetches !== 1) { console.error("failure refetched questions"); process.exit(1) }
+apiImpl = async () => ({ json: async () => ({ llm: true }) });
+await health();                                    // off->on recovery
+if (!window._llmOn) { console.error("_llmOn not restored"); process.exit(1) }
+if (reg["#banner"].style.display !== "none") { console.error("banner still shown after recovery"); process.exit(1) }
+if (refetches !== 2) { console.error("questions not refetched on off->on: " + refetches); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_refreshQuestions_chips_guards_and_race(self) -> None:
+        """v0.2.265: pin refreshQuestions' three contract surfaces under node —
+        chips render as buttons that fill #askInput on click, the guard skips
+        fetching entirely when there is no notebook/sources/LLM, and chips for
+        a stale (switched-away) notebook id are dropped rather than shown."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function refreshQuestions")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], value:"", focused:false,
+  replaceChildren(){ this.children=[] }, append(x){ this.children.push(x) },
+  focus(){ this.focused = true }, onclick:null, type:"", cls:"", tag:"", text:""}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+const window = { _llmOn: true };
+let calls = [];
+let apiImpl = async (path) => { calls.push(path);
+  return { json: async () => ({ questions: ["質問Aですか?", "質問Bですか?"] }) }; };
+async function api(path){ return apiImpl(path); }
+let cur = { id: 1, sources: [{id: 5}] };
+""" + fn + """
+await refreshQuestions();
+if (calls.length !== 1) { console.error("no fetch for live nb: " + calls); process.exit(1) }
+if (reg["#qs"].children.length !== 2) { console.error("chips not rendered: " + reg["#qs"].children.length); process.exit(1) }
+const chip = reg["#qs"].children[0];
+if (chip.tag !== "button" || chip.type !== "button" || chip.cls !== "q-chip")
+  { console.error("chip shape wrong: " + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls})); process.exit(1) }
+chip.onclick();
+if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
+  { console.error("chip click did not fill+focus input"); process.exit(1) }
+
+// Guards: no sources / llm off / no notebook -> cleared, no fetch.
+cur = { id: 1, sources: [] };
+await refreshQuestions();
+window._llmOn = false; cur = { id: 1, sources: [{id: 5}] };
+await refreshQuestions();
+cur = null;
+await refreshQuestions();
+if (calls.length !== 1 || reg["#qs"].children.length !== 0)
+  { console.error("guards fetched or kept chips: calls=" + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+
+// Race: notebook switches while the fetch is in flight -> chips dropped.
+window._llmOn = true; cur = { id: 9, sources: [{id: 5}] };
+apiImpl = async () => ({ json: async () => { cur = { id: 10, sources: [{id:5}] };
+  return { questions: ["staleですか?"] }; } });
+await refreshQuestions();
+if (reg["#qs"].children.length !== 0)
+  { console.error("stale-notebook chips rendered"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_renderNotebook_preserves_in_progress_rename(self) -> None:
+        """v0.2.266: pin renderNotebook's pendingRename machinery under node —
+        an in-progress rename input must be detached (onblur/onkeydown nulled
+        so the DOM teardown can't fire a phantom commit) and restored after the
+        rebuild via BOTH detection paths: document.activeElement (unrelated
+        rebuilds) and the externalPendingRename stash (sibling-button clicks)."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderNotebook")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
+  disabled:false, textContent:"", href:"", title:"",
+  classList:{ contains(c){ return false }, add(){}, remove(){} },
+  dataset:{},
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent=this },
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  removeAttribute(n){ if(n==="href") delete this.href },
+  setAttribute(n,v){}, querySelector(){ return null },
+  setSelectionRange(){}, focus(){}, onclick:null, ondblclick:null, onkeydown:null,
+  onblur:null, onchange:null, tabIndex:0}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+function fmt(x){ return String(x) }
+function showSource(){}
+function toast(){}
+function renderChatHistory(){}
+function renderStudio(){}
+function renderNotes(){}
+function refreshQuestions(){}
+let apiCalls = [];
+async function api(path, o){ apiCalls.push(path); return {json:async()=>({})}; }
+function openNotebook(){}
+let notebooks = [], cur = null, srcIndex = new Map();
+let externalPendingRename = null;
+let renameCalls = [], selCalls = [];
+function startSourceRename(s, tt, row, initial){
+  renameCalls.push({srcId: s.id, initial});
+  const inp = mkEl(); inp.cls = "src-rename"; return inp;
+}
+const document = { activeElement: null };
+""" + fn + """
+// Path 1: focused rename input inside #srcList survives the rebuild.
+cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}], messages:[], studio:[], notes:[] };
+const rin = mkEl();
+rin.classList = { contains: c => c === "src-rename" };
+rin.dataset = { srcId: "5" };
+rin.value = "mid-edit"; rin.selectionStart = 2; rin.selectionEnd = 4;
+rin.onblur = ()=>{}; rin.onkeydown = ()=>{};
+$("#srcList").children = [rin]; rin.parent = $("#srcList");
+document.activeElement = rin;
+renderNotebook();
+if (renameCalls.length !== 1 || renameCalls[0].srcId !== 5 || renameCalls[0].initial !== "mid-edit")
+  { console.error("activeElement path did not restore: " + JSON.stringify(renameCalls)); process.exit(1) }
+if (rin.onblur !== null || rin.onkeydown !== null)
+  { console.error("old rename handlers not detached — phantom commit risk"); process.exit(1) }
+if (srcIndex.get(5).s !== 1) { console.error("srcIndex not repopulated"); process.exit(1) }
+
+// Path 2: externalPendingRename stash (sibling refresh-button click) restored once.
+renameCalls = [];
+externalPendingRename = { srcId: 5, value: "stashed-v", selStart: 0, selEnd: 1 };
+document.activeElement = null;
+renderNotebook();
+if (renameCalls.length !== 1 || renameCalls[0].initial !== "stashed-v")
+  { console.error("stash path did not restore"); process.exit(1) }
+if (externalPendingRename !== null)
+  { console.error("stash not consumed"); process.exit(1) }
+renameCalls = [];
+renderNotebook();
+if (renameCalls.length !== 0)
+  { console.error("stash restored twice"); process.exit(1) }
+
+// Pending rename for a deleted source id is dropped, not applied.
+externalPendingRename = { srcId: 99, value: "ghost", selStart: 0, selEnd: 0 };
+renderNotebook();
+if (renameCalls.length !== 0)
+  { console.error("ghost rename applied"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_startSourceRename_commit_and_cancel_paths(self) -> None:
+        """v0.2.267: pin startSourceRename's five exit paths under node —
+        Enter commits via PATCH + reload, blur to a sibling row control skips
+        the commit entirely (the sibling's own click rebuilds), Escape cancels
+        without a PATCH, empty/unchanged input reloads without a PATCH, and a
+        second commit() (blur firing after Enter) is a no-op."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function startSourceRename")
+        harness = """\
+function mkEl(){ return {children:[], value:"", type:"", className:"", dataset:{},
+  disabled:false, focused:false,
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent = this }, parent:null,
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  setAttribute(){}, focus(){ this.focused = true }, select(){}, blur(){},
+  onclick:null, onblur:null, onkeydown:null, click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+function toast(){}
+const document = { createElement: () => mkEl() };
+let cur = { id: 7 };
+let patches = [], reloads = [];
+async function api(path, o){ patches.push({path, body: o && o.body}); return {json:async()=>({})}; }
+function openNotebook(id){ reloads.push(id) }
+""" + fn + """
+const s = { id: 5, title: "old", kind: "txt" };
+function fresh(){ const tt = mkEl(), row = mkEl(); row.children = [tt]; tt.parent = row;
+  return { tt, row, input: startSourceRename(s, tt, row) }; }
+const key = k => ({ key: k, preventDefault(){} });
+
+// Enter -> PATCH with trimmed title + reload.
+let f = fresh(); f.input.value = "  new name  ";
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1 || !patches[0].path.endsWith("/sources/5")
+    || !patches[0].body.includes("new name"))
+  { console.error("Enter commit failed: " + JSON.stringify(patches)); process.exit(1) }
+if (reloads.length !== 1 || reloads[0] !== 7) { console.error("no reload"); process.exit(1) }
+
+// Second commit (blur AFTER Enter already committed) -> no second PATCH.
+f.input.onblur({ relatedTarget: null });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1) { console.error("double commit"); process.exit(1) }
+
+// Blur to a sibling element inside the row -> NO commit, NO reload.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "changed";
+const sibling = mkEl(); f.row.children.push(sibling); sibling.parent = f.row;
+f.input.onblur({ relatedTarget: sibling });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 0)
+  { console.error("sibling blur committed"); process.exit(1) }
+
+// Blur to outside the row -> commit fires.
+patches = []; reloads = [];
+f.input.onblur({ relatedTarget: mkEl() });
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 1) { console.error("outside blur did not commit"); process.exit(1) }
+
+// Escape -> no PATCH, blur before reload (resurrection guard), reload happens.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "discarded";
+let blurred = false; f.input.blur = () => { blurred = true };
+f.input.onkeydown(key("Escape"));
+if (!blurred) { console.error("Escape did not blur before reload"); process.exit(1) }
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 1)
+  { console.error("Escape committed or skipped reload"); process.exit(1) }
+
+// Unchanged / empty title -> reload only, no PATCH.
+patches = []; reloads = [];
+f = fresh(); f.input.value = "old";      // unchanged
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+f = fresh(); f.input.value = "   ";      // whitespace-only
+f.input.onkeydown(key("Enter"));
+await new Promise(r => setTimeout(r, 0));
+if (patches.length !== 0 || reloads.length !== 2)
+  { console.error("unchanged/empty committed or skipped reload: "
+      + patches.length + "/" + reloads.length); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
