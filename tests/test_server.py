@@ -1251,6 +1251,46 @@ class TruncatedStreamTest(unittest.TestCase):
         )
 
 
+class CacheControlTest(unittest.TestCase):
+    """v0.2.285: every response must carry Cache-Control: no-store — a cached
+    index.html outliving the server build silently runs stale JS against a
+    new API. Previously only the SSE route sent it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "cc.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _req(self, method: str, path: str) -> tuple[int, dict[str, str], bytes]:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", method=method
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+
+    def test_no_store_on_html_api_and_error(self) -> None:
+        for path in ("/", "/api/notebooks", "/api/nope"):
+            status, headers, _ = self._req("GET", path)
+            self.assertEqual(
+                "no-store",
+                headers.get("Cache-Control"),
+                f"{path} missing no-store (status {status})",
+            )
+
+
 class PostStreamStoreErrorTest(unittest.TestCase):
     """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
 
