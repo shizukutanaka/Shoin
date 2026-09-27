@@ -1066,6 +1066,74 @@ class MidStreamLLMErrorTest(unittest.TestCase):
         self.assertTrue(persisted_report.get("degraded"), "report.degraded must be True in DB")
 
 
+class TruncatedStreamTest(unittest.TestCase):
+    """v0.2.245: a stream ending at finish_reason "length" must surface as
+    report.truncated in the done frame — otherwise a MAX_TOKENS-clipped answer
+    is presented as complete on every client surface."""
+
+    class _TruncLLM(FakeLLM):
+        def chat_stream(self, messages, temperature=0.2):
+            yield from self.reply_parts
+            self.last_finish_reason = "length"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = cls._TruncLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "tr.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_done_frame_flags_truncated(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "trunc-test"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("これは打切テストの内容です。内容について説明します。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "trunc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        req2 = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/ask"),
+            data=json.dumps({"question": "内容について教えてください"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req2) as resp:
+            raw = resp.read().decode()
+        events = parse_sse(raw)
+        done = [d for e, d in events if e == "done"]
+        self.assertTrue(done, "done frame missing")
+        self.assertTrue(done[0]["report"].get("truncated"))
+        # And the persisted assistant message carries the same flag on reload.
+        _, msgs = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertTrue(msgs["messages"][-1]["report"].get("truncated"))
+
+
 class PostStreamStoreErrorTest(unittest.TestCase):
     """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
 

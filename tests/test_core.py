@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.244")
+        self.assertEqual(VERSION, "0.2.245")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -4082,6 +4082,56 @@ class TestQA(unittest.TestCase):
                         ask(s, _NoLLM(), nb_id, "notebook", persist=False)
             self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
 
+    def test_ask_flags_truncated_answer(self) -> None:
+        """v0.2.245: finish_reason "length" must land in report.truncated.
+
+        OpenAI-compatible endpoints report token-limit truncation via
+        finish_reason; chat()/chat_stream() record it as last_finish_reason and
+        ask() must carry it into the citation report — otherwise an answer cut
+        mid-sentence by MAX_TOKENS is presented as complete on every surface
+        (UI badge, export status line, CLI report). A "stop" finish and a
+        backend without the attribute must both leave the flag unset.
+        """
+        from shoin.qa import ask
+
+        class _TruncLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                self.last_finish_reason = "length"
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        class _StopLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                self.last_finish_reason = "stop"
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        class _NoAttrLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        with make_store() as s:
+            nb_id = seed(s)
+            truncated = ask(s, _TruncLLM(), nb_id, "書院とは何か", persist=False)
+            complete = ask(s, _StopLLM(), nb_id, "書院とは何か", persist=False)
+            plain = ask(s, _NoAttrLLM(), nb_id, "書院とは何か", persist=False)
+        self.assertTrue(truncated.report.get("truncated"))
+        self.assertNotIn("truncated", complete.report)
+        self.assertNotIn("truncated", plain.report)
+
     def test_studio_generate_build_context_db_lock_raises_store_error(self) -> None:
         """studio.generate() must have the same sqlite3.OperationalError guard
         around build_context() that qa.ask() has had since v0.2.44 — it was found
@@ -5731,6 +5781,54 @@ class TestLLMClient(unittest.TestCase):
             )
         self.assertEqual(_json.loads(sent[0])["max_tokens"], MAX_TOKENS)
 
+    def test_chat_records_finish_reason(self) -> None:
+        """chat() must capture choices[0].finish_reason on last_finish_reason
+        (v0.2.245) so callers can tell a max_tokens-clipped answer ("length")
+        from a complete one ("stop") — and a missing field stays None."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        def _chat_with(finish: str | None) -> "LLMClient":
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            choice: dict[str, object] = {"message": {"content": "ok"}}
+            if finish is not None:
+                choice["finish_reason"] = finish
+            mock_resp.read.return_value = _json.dumps({"choices": [choice]}).encode()
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                client.chat([{"role": "user", "content": "hi"}])
+            return client
+
+        self.assertEqual(_chat_with("length").last_finish_reason, "length")
+        self.assertEqual(_chat_with("stop").last_finish_reason, "stop")
+        self.assertIsNone(_chat_with(None).last_finish_reason)
+
+    def test_chat_stream_records_finish_reason(self) -> None:
+        """chat_stream() must capture finish_reason from the final SSE chunk —
+        the /ask SSE path generates through this method (v0.2.245)."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}',
+            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            b"data: [DONE]",
+        ])
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertEqual(
+                list(client.chat_stream([{"role": "user", "content": "hi"}])), ["x"]
+            )
+        self.assertEqual(client.last_finish_reason, "length")
+
     def test_available_returns_false_for_invalid_url_scheme(self) -> None:
         """available() must return False (not raise ValueError) for unknown URL schemes.
         _post and chat_stream already catch ValueError; available() had the same gap."""
@@ -7129,6 +7227,15 @@ class TestExport(unittest.TestCase):
         self.assertIn("S2", line)
         self.assertIn("S1", line)
         self.assertIn("1", line)  # uncited count
+
+    def test_status_line_flags_truncated(self) -> None:
+        """v0.2.245: report.truncated (finish_reason "length") must appear in the
+        exported status line — an archived answer must carry the same 'clipped
+        at the token limit' caveat the UI badge shows."""
+        from shoin.export import _status_line
+
+        self.assertIn("打切", _status_line({"truncated": True}))
+        self.assertNotIn("打切", _status_line({}))
 
     def test_status_line_carries_suggested_source_hints(self) -> None:
         """v0.2.223: the CLI/UI append '→S<right>' to misattributed numbers and

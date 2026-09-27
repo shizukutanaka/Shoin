@@ -15,6 +15,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "chat_section": {"ja": "チャット履歴", "en": "Chat History"},
     "source_label": {"ja": "引用元", "en": "sources"},
     "status_degraded": {"ja": "検索のみ", "en": "search only"},
+    "status_truncated": {"ja": "⚠出力打切の可能性", "en": "⚠ possibly truncated"},
     "status_invalid": {"ja": "⚠検証失敗", "en": "⚠ invalid citations"},
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
     "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
@@ -52,6 +53,10 @@ def _status_line(report: dict[str, object]) -> str:
     bits: list[str] = []
     if report.get("degraded"):
         bits.append(_t("status_degraded"))
+    if report.get("truncated"):
+        # finish_reason "length": the generation stopped at the token limit —
+        # the same caveat the UI badge shows, kept on the exported record.
+        bits.append(_t("status_truncated"))
     invalid = report.get("invalid")
     if isinstance(invalid, list) and invalid:
         bits.append(f"{_t('status_invalid')}: " + ", ".join(f"S{i}" for i in invalid))

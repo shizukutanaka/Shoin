@@ -253,6 +253,10 @@ class CitationReport(TypedDict):
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
+    # True when generation ended with finish_reason "length" — the answer hit
+    # MAX_TOKENS mid-output. Generation-side signal (not a citation check);
+    # absent on complete responses and old persisted reports.
+    truncated: NotRequired[bool]
     # Maps "S1" -> excerpt of the text actually retrieved as context for the answer.
     # Allows the UI to show the supporting passage immediately on seal-click without
     # an extra HTTP fetch. Absent on old persisted reports — consumers must guard.

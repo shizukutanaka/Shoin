@@ -189,6 +189,10 @@ def generate(
         body, context.source_titles, context.source_ids, context.source_bodies,
         context.source_contexts, context.source_chunk_ids, context.source_detail,
     )
+    # finish_reason "length" = output stopped at MAX_TOKENS mid-list — flag it
+    # so Studio cards carry the same truncated warning as chat answers.
+    if getattr(llm, "last_finish_reason", None) == "length":
+        report["truncated"] = True
     if persist:
         store.add_studio_output(notebook_id, kind, body, json.dumps(report))
     return StudioResult(kind, body, report)

@@ -675,6 +675,12 @@ def ask(
                     ),
                 ),
             )
+            # finish_reason "length" means the answer hit MAX_TOKENS mid-
+            # generation — the text is real but silently clipped. Flag it so
+            # every surface can warn instead of presenting it as complete.
+            # getattr-guarded: ChatBackend stubs do not carry the attribute.
+            if getattr(llm, "last_finish_reason", None) == "length":
+                answer.report["truncated"] = True
         except LLMError:
             text = _degraded_text(hits)
             report = make_report(

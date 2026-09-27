@@ -288,6 +288,7 @@ const I18N = {
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
     "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.negation":"出典と逆の主張の可能性","chat.confirmed":"根拠確認済み",
     "chat.uncited":"無出典の断定文","chat.uncited_supported":"出典内一致=引用欠落","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
+    "chat.truncated":"出力が途中で打ち切られた可能性","chat.truncated_hint":"トークン上限に達して生成が停止した応答です",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -321,6 +322,7 @@ const I18N = {
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
     "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.negation":"possible contradiction with source","chat.confirmed":"grounding confirmed",
     "chat.uncited":"uncited assertions","chat.uncited_supported":"source match — missing citation","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
+    "chat.truncated":"possibly truncated answer","chat.truncated_hint":"generation stopped at the token limit",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -860,6 +862,14 @@ function reportBadges(c, report){
   if (report.self_contradiction && report.self_contradiction.length){
     const b = el("span","badge warn", `⚠ ${t("chat.contradict")}: ${report.self_contradiction.length}`);
     b.title = report.self_contradiction.join("\n");
+    c.append(b);
+  }
+  // report.truncated = the LLM answered to MAX_TOKENS (finish_reason "length").
+  // The text is genuine but clipped mid-generation — warn rather than present
+  // a truncated answer as complete (v0.2.245).
+  if (report.truncated){
+    const b = el("span","badge warn", `⚠ ${t("chat.truncated")}`);
+    b.title = t("chat.truncated_hint");
     c.append(b);
   }
   if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < COVERAGE_LOW){
