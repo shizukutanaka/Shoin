@@ -4,15 +4,13 @@
 
 ```bash
 git clone https://github.com/shizukutanaka/shoin && cd shoin
-pip install -e . && pip install ruff mypy coverage
+pip install -e . && pip install ruff mypy coverage detect-secrets
 ```
 
 ## テスト・品質ゲート (PR前に全通過)
 
 ```bash
-pytest tests/
-ruff check .
-mypy --strict shoin/
+./scripts/verify.sh   # ci/ci.yml と同一の全ゲート (lint/型/テスト+カバレッジ/secret scan)
 ```
 
 `ruff format`(コード整形)は現状導入していません。既存コードは`ruff format`の

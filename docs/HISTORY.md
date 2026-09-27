@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.300
+## Version History: v0.1.37 → v0.2.301
+
+### v0.2.301 (2026-09-27)
+
+- CONTRIBUTING.md: replace the stale `pytest tests/` + partial dep list with
+  the canonical `./scripts/verify.sh` gate (README already documented it) —
+  a contributor following the guide ran no lint/type/secret-scan gate at all.
+- tests: pin CONTRIBUTING.md to name verify.sh and detect-secrets and never
+  mention pytest.
 
 ### v0.2.300 (2026-09-27)
 

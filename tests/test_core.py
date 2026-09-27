@@ -61,7 +61,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.300")
+        self.assertEqual(VERSION, "0.2.301")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10937,6 +10937,20 @@ class TestResidualGuards(unittest.TestCase):
             ".env.local",
         ):
             self.assertTrue(ignored(name), f"{name} is committable")
+
+    def test_contributing_md_matches_the_actual_gate(self) -> None:
+        """v0.2.301: CONTRIBUTING.md told contributors to run
+        `pytest tests/` (the project runs `unittest discover` through
+        scripts/verify.sh) and omitted detect-secrets from the setup deps —
+        a contributor following the guide would skip one of the four gates
+        and hit verify failures only at push time. Pin the doc to the
+        canonical gate: it must name scripts/verify.sh and detect-secrets,
+        and never mention pytest."""
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/verify.sh", text)
+        self.assertIn("detect-secrets", text)
+        self.assertNotIn("pytest", text.lower())
 
 
 if __name__ == "__main__":
