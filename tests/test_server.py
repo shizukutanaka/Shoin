@@ -305,6 +305,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(raw)["pages_failed"], 2)
 
+    def test_upload_filename_latin1_only_survives(self) -> None:
+        """An X-Filename whose latin-1 bytes don't form UTF-8 ('é.txt') must
+        skip the recovery decode and still upload under its decoded name —
+        the encodeURIComponent convention is unenforced, so the fallback must
+        degrade gracefully, not crash (v0.2.277)."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "latin"})
+        body = "内容テキストです。".encode()
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            body,
+            {"X-Filename": "é.txt"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(raw)["source"]["title"], "é.txt")
+
     def test_refresh_response_reports_pages_failed(self) -> None:
         """v0.2.258: refresh of a URL-ingested PDF re-extracts the document and
         can lose pages on the second pass — the response must carry the count
