@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.296
+## Version History: v0.1.37 → v0.2.297
+
+### v0.2.297 (2026-09-27)
+
+- **docs/product-review.md**: ledger sync to v0.2.296 (971 tests) — records the v0.2.291-296 sweep (CLI/env numeric range checks, package-data guard, HISTORY backfill, DB permissions). Corrects two stale rows: the "default branch synced" resolved-item is updated to reflect that main stalled at v0.2.181 with the v0.2.182+ chain living only in devin/* branches (rollup PR #160 pending), and the now-obsolete "rename default branch to main" backlog item is marked resolved (origin HEAD already points at main). Strength #10 (privacy) now covers the v0.2.296 filesystem-permissions fix.
 
 ### v0.2.296 (2026-09-27)
 
