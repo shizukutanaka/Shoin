@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.292"
+VERSION = "0.2.293"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -107,9 +107,13 @@ def ui_lang() -> str:
 
 def port() -> int:
     try:
-        return int(_get("SHOIN_PORT", "") or DEFAULT_PORT)
+        n = int(_get("SHOIN_PORT", "") or DEFAULT_PORT)
     except (ValueError, TypeError):
         return DEFAULT_PORT
+    # Same invalid->default contract as chunk_tokens()/embed_batch(): an
+    # out-of-range port would otherwise reach HTTPServer as OverflowError
+    # (not the OSError cli.main() catches) — a raw traceback at startup.
+    return n if 0 <= n <= 65535 else DEFAULT_PORT
 
 
 def multi_query_enabled() -> bool:

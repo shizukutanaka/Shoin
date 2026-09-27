@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.292")
+        self.assertEqual(VERSION, "0.2.293")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -8099,6 +8099,19 @@ class TestConfigXDG(unittest.TestCase):
         with patch.dict(os.environ, {"SHOIN_PORT": "notanumber"}):
             result = port()
         self.assertEqual(result, DEFAULT_PORT)
+
+    def test_port_out_of_range_env_falls_back_to_default(self) -> None:
+        """Out-of-range SHOIN_PORT must fall back to DEFAULT_PORT — otherwise the
+        value reaches HTTPServer and raises OverflowError (an ArithmeticError,
+        not the OSError cli.main() catches) = raw traceback at startup."""
+        import os
+        from shoin.config import DEFAULT_PORT, port
+
+        for bad in ("-1", "65536", "99999"):
+            with patch.dict(os.environ, {"SHOIN_PORT": bad}):
+                self.assertEqual(port(), DEFAULT_PORT, bad)
+        with patch.dict(os.environ, {"SHOIN_PORT": "0"}):
+            self.assertEqual(port(), 0)  # 0 = ephemeral bind; serve() prints actual
 
     def test_port_empty_env_falls_back_to_default(self) -> None:
         """Empty SHOIN_PORT must fall back to DEFAULT_PORT."""
