@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.271")
+        self.assertEqual(VERSION, "0.2.272")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10230,6 +10230,70 @@ class TestEvalDiff(unittest.TestCase):
         self.assertEqual(diff.matched_questions, 0)
         self.assertEqual(diff.dropped_questions, ["a"])
         self.assertEqual(diff.new_questions, ["b"])
+
+
+class TestSearchCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered guard/merge tails in search.py (v0.2.272)."""
+
+    def test_numeric_variants_man_remainder(self) -> None:
+        """12345 must emit the '1万2345' magnitude spelling (v0.2.213 bridge):
+        a digit query cannot substring-match '1万2345' without the variant."""
+        from shoin.search import _numeric_variants
+
+        got = _numeric_variants("12345")
+        self.assertIn("1万2345", got)
+        self.assertIn("一万二千三百四十五", got)
+
+    def test_bm25_neg_only_query_returns_fts_filtered(self) -> None:
+        """A query whose positive terms are all single ASCII chars ('a -cd')
+        produces no needles at all — the early return must still apply the
+        neg filter and must not crash."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["a cd を含む文。", "a のみの文。"])
+            hits = bm25_search(s, nb.id, "a -cd", 9)
+            self.assertEqual(hits, [])
+
+    def test_cosine_prepared_dim_mismatch_returns_zero(self) -> None:
+        """A vector from a different embedding model scores 0.0, not a crash
+        or a meaningless partial dot product (v0.2.261)."""
+        from shoin.search import _cosine_prepared
+
+        self.assertEqual(_cosine_prepared([1.0, 0.0], 1.0, [1.0, 0.0, 0.0]), 0.0)
+
+    def test_minmax_empty_returns_empty(self) -> None:
+        from shoin.search import _minmax
+
+        self.assertEqual(_minmax([]), [])
+
+    def test_proximity_window_shrinks_past_repeated_term(self) -> None:
+        """'a x a b': the window must drop the first 'a' so the measured span
+        is 3 (the tight cover), not 6 — the left-pointer shrink path."""
+        from shoin.search import PROX_SPAN, _proximity_from_norm
+
+        got = _proximity_from_norm(["a", "b"], "a x a b")
+        self.assertAlmostEqual(got, (2 / 2) * (PROX_SPAN / (3 + PROX_SPAN)))
+
+    def test_rrf_fuse_lists_merges_bm25_onto_vec_hit(self) -> None:
+        """Same chunk reached by a vector list first and a BM25 list second:
+        the canonical Hit must keep the bm25 signal, not lose it."""
+        from shoin.search import rrf_fuse_lists
+
+        fused = rrf_fuse_lists([
+            [Hit(7, 1, "t", 0.0, vec=0.9)],
+            [Hit(7, 1, "t", 0.0, bm25=0.8)],
+        ])
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].vec, 0.9)
+        self.assertEqual(fused[0].bm25, 0.8)
+
+    def test_retrieve_multi_empty_queries(self) -> None:
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            self.assertEqual(retrieve_multi(s, nb.id, []), [])
 
 
 if __name__ == "__main__":
