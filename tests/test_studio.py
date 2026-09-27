@@ -759,6 +759,24 @@ class CliTest(unittest.TestCase):
             rc, out, _ = self._run(["--db", db, "notebook", "list"], llm)
             self.assertIn("sources=1", out)
 
+    def test_ask_prints_degenerate_only_report(self) -> None:
+        """v0.2.262: an answer of the same question repeated is a degenerate-
+        only report — uncited filters questions, so cited/invalid/uncited are
+        all empty and the old "---" guard silently dropped the loop warning
+        that the Web badge shows."""
+        llm = FakeLLM(reply="それは本当に有効であると言えますか？それは本当に有効であると言えますか？それは本当に有効であると言えますか？")
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "memo.txt"
+            doc.write_text("会議メモ。決定事項あり。" * 20, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "案件A"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+
+            rc, out, _ = self._run(["--db", db, "ask", "1", "決定事項は？"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("---", out)
+            self.assertIn("繰り返し生成", out)
+
             # rename notebook
             rc, out, _ = self._run(["--db", db, "notebook", "rename", "1", "案件A改"], llm)
             self.assertEqual(rc, 0)

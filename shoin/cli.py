@@ -341,6 +341,29 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.coverage_low", n=str(len(set(report["cited"]))), total=str(n_sources)))
 
 
+def _report_has_output(report: CitationReport) -> bool:
+    """True iff _print_report() would print anything for this report.
+
+    The ask/studio "---" guards must neither print a bare separator over an
+    empty report (v0.2.27/55) nor skip a report over keys the printer renders
+    but the guard forgot — invalid/uncited/truncated were added piecemeal
+    (v0.2.55, v0.2.245), and degenerate/self_contradiction were still missing:
+    an answer of repeated questions or disclaimers produces a degenerate-only
+    report (uncited filters questions/disclaimers), so its generation-loop
+    warning vanished on the CLI while the Web badge showed it. One predicate
+    shared by both call sites keeps the guard and the printer from drifting
+    a third time. `coverage` prints only when `cited` is non-empty, so it is
+    covered transitively."""
+    return bool(
+        report["invalid"]
+        or report["cited"]
+        or report.get("uncited")
+        or report.get("degenerate")
+        or report.get("self_contradiction")
+        or report.get("truncated")
+    )
+
+
 def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     """Headless equivalent of GET /api/health (REQ-103 CLI parity) — a user
     running only the CLI previously had no way to check LLM reachability or
@@ -545,10 +568,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     # excludes from `uncited` (citation.py's _DISCLAIMER_MARKERS). Printing a
     # bare "---" with nothing under it is the same defect v0.2.27/v0.2.55 fixed
     # elsewhere; guard on actual report content too, not just hits/degraded.
-    if answer.hits and not answer.degraded and (
-        answer.report["cited"] or answer.report["invalid"] or answer.report.get("uncited")
-        or answer.report.get("truncated")
-    ):
+    if answer.hits and not answer.degraded and _report_has_output(answer.report):
         print("---")
         _print_report(answer.report)
     return 0
@@ -557,14 +577,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
     print(result.body)
-    # _print_report() also prints something for an invalid-only report (out-of-
-    # range [S#] citations, cli.py's own _print_report()) — the pre-existing
-    # guard here missed that case, silently dropping the warning from CLI
-    # output. Same fix shape as _cmd_ask()'s report-content guard.
-    if (
-        result.report["cited"] or result.report["invalid"] or result.report.get("uncited")
-        or result.report.get("truncated")
-    ):
+    if _report_has_output(result.report):
         print("---")
         _print_report(result.report)
     return 0
