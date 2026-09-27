@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.252
+## Version History: v0.1.37 → v0.2.253
+
+### v0.2.253 (2026-09-27)
+**Docs (product-review ledger sync to v0.2.252)**: the review ledger was 21 versions stale (v0.2.231). Synced the header/test count (901), extended weakness #5 (browser-test gap) with the now-generalized node-run behavioral test coverage — reportBadges flag matrix, openSeal excerpt disambiguation, SSE-drop recovery, openNotebook ordering, renderChatHistory disclosure — and added a "v0.2.233-252 の要約" paragraph covering the interval's themes: badge-chain unification, LIKE-pool ordering, negation word boundaries, stopword needles, truncated/degraded surfacing, SSE liveness, sequence guards, Content-Encoding decode, payload bounding, the embed LRU, and the eval-diff honesty fix.
 
 ### v0.2.252 (2026-09-27)
 **Fixed (eval, aggregate diff folded case-set edits into the score)**: `diff_reports` computed `d_recall`/`d_mrr` as `after.recall - before.recall` — the raw report means. When the case file was edited between runs (a question dropped, another added) the aggregate delta mixed the *case-set change* with the retrieval change: dropping a hard case fabricated an improvement, dropping an easy one fabricated a regression, and a fully rewritten case file reported a confident delta over zero shared questions — the measurement lying about exactly the question the tool exists to answer. Per-case deltas were already matched by question text; the aggregates now are too: both deltas are means over the shared questions (0.0 when none), and a new `matched_questions` field reports the comparison basis — printed by `--diff` as "(deltas computed over N shared questions)" whenever the two case sets differ. `new_questions`/`dropped_questions` still surface the unmatched cases. New tests: `TestEvalDiff` (3 tests — case-set edits don't masquerade as score changes, a dropped perfect case can't shrink a real improvement, zero shared questions reports 0 not the raw artifact). Verified fail-then-pass (old code reported -1.0 for a disjoint case set).
