@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.285")
+        self.assertEqual(VERSION, "0.2.286")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -8544,6 +8544,37 @@ class TestCLI(unittest.TestCase):
         with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
             rc = main(["serve"])
         self.assertEqual(rc, 1)
+
+    def test_ask_rejects_whitespace_question_like_the_api(self) -> None:
+        """v0.2.286: _cmd_ask must strip + refuse an empty question, matching
+        the API's _require("question") — otherwise a whitespace-only question is
+        persisted as a real user turn and answered via the degraded path."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = main(["--db", db_file, "ask", str(nb.id), "   "])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+            with Store(db_file) as s:
+                msgs = s.conn.execute(
+                    "SELECT COUNT(*) AS n FROM messages WHERE notebook_id = ?",
+                    (nb.id,),
+                ).fetchone()
+            self.assertEqual(msgs["n"], 0, "rejected question must not be persisted")
+        finally:
+            os.unlink(db_file)
 
     def test_health_command_reports_config_without_store(self) -> None:
         """`shoin health` (REQ-103 CLI parity with GET /api/health, v0.2.126) must

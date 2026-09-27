@@ -554,7 +554,12 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
-    question = str(args.question)
+    # Strip + reject empty, matching the API's _require("question") contract —
+    # otherwise a whitespace-only question is persisted as a real user turn and
+    # silently answered via the degraded path instead of refused like the API.
+    question = str(args.question).strip()
+    if not question:
+        raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "missing field: question")
     if len(question) > MAX_QUESTION_LEN:
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
