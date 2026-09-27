@@ -279,7 +279,7 @@ const I18N = {
     "tabs.sources":"資料","tabs.chat":"対話","tabs.studio":"書斎",
     "sources.head":"書 棚","sources.empty.title":"書棚が空",
     "sources.empty.body":"ファイルかURLを加えると、引用付きで対話できる。",
-    "sources.addurl":"取込","sources.added":"取込完了",
+    "sources.addurl":"取込","sources.added":"取込完了","src.pages_failed":"⚠ {n} ページの抽出に失敗（索引が不完全です）",
     "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.rename":"名前を変更","nb.delete":"この書院を削除",
     "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
     "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
@@ -315,7 +315,7 @@ const I18N = {
     "tabs.sources":"Sources","tabs.chat":"Chat","tabs.studio":"Studio",
     "sources.head":"SHELF","sources.empty.title":"The shelf is empty",
     "sources.empty.body":"Add a file or URL to start a cited conversation.",
-    "sources.addurl":"Fetch","sources.added":"Source added",
+    "sources.addurl":"Fetch","sources.added":"Source added","src.pages_failed":"⚠ {n} page(s) could not be extracted — index is incomplete",
     "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.rename":"Rename","nb.delete":"Delete this notebook",
     "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
     "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
@@ -1104,9 +1104,9 @@ $("#fileInput").onchange = async e=>{
   const nbId = cur.id;
   e.target.disabled = true;
   try{
-    await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
-      headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f});
-    e.target.value=""; toast(t("sources.added")); openNotebook(nbId);
+    const j = await (await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
+      headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f})).json();
+    e.target.value=""; toast(t("sources.added") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : "")); openNotebook(nbId);
   }catch(err){ e.target.value=""; toast(err.message); }
   finally{ e.target.disabled = false; }
 };
@@ -1115,8 +1115,8 @@ $("#urlBtn").onclick = async ()=>{
   const nbId = cur.id;
   const btn = $("#urlBtn");
   btn.disabled = true; const old = btn.textContent; btn.textContent = t("busy");
-  try{ await jpost(`/api/notebooks/${nbId}/sources`, {target:u});
-    $("#urlInput").value=""; toast(t("sources.added")); openNotebook(nbId);
+  try{ const j = await (await jpost(`/api/notebooks/${nbId}/sources`, {target:u})).json();
+    $("#urlInput").value=""; toast(t("sources.added") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : "")); openNotebook(nbId);
   }catch(err){ toast(err.message); }
   finally{ btn.disabled = false; btn.textContent = old; }
 };

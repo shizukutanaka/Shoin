@@ -472,6 +472,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "source": {"id": result.source.id, "title": result.source.title},
                     "n_chunks": result.n_chunks,
                     "n_embedded": result.n_embedded,
+                    # PDF pages whose text extraction failed — the response
+                    # must not present a partial index as a complete one.
+                    "pages_failed": result.pages_failed,
                 },
                 201,
             )
@@ -531,6 +534,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "source": {"id": result.source.id, "title": result.source.title},
                         "n_chunks": result.n_chunks,
                         "n_embedded": result.n_embedded,
+                        "pages_failed": result.pages_failed,
                     },
                     201,
                 )

@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.256")
+        self.assertEqual(VERSION, "0.2.257")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2168,11 +2168,12 @@ class TestIngest(unittest.TestCase):
         fake_body = b"%PDF-1.4 fake"
         with (
             patch.object(ing, "fetch_url", return_value=(fake_body, "application/octet-stream", "http://x/f.pdf")),
-            patch.object(ing, "pdf_to_text", return_value="parsed pdf content") as mock_pdf,
+            patch.object(ing, "pdf_to_text", return_value=("parsed pdf content", 0)) as mock_pdf,
         ):
             result = ing.extract_url("http://x/f.pdf")
         mock_pdf.assert_called_once_with(fake_body)
         self.assertIn("parsed pdf content", result.text)
+        self.assertEqual(result.pages_failed, 0)
 
     def test_extract_url_uses_final_url_as_title_after_redirect(self) -> None:
         """When a URL redirects, the title must be the *final* URL, not the original.
@@ -2189,7 +2190,7 @@ class TestIngest(unittest.TestCase):
                 "fetch_url",
                 return_value=(fake_body, "application/pdf", "https://journal.example/paper.pdf"),
             ),
-            patch.object(ing, "pdf_to_text", return_value="paper content"),
+            patch.object(ing, "pdf_to_text", return_value=("paper content", 0)),
         ):
             result = ing.extract_url("https://doi.org/10.9999/fake")
         self.assertEqual(
@@ -2296,9 +2297,12 @@ class TestIngest(unittest.TestCase):
         fake_reader.pages = [good1, bad, good2]
 
         with patch("pypdf.PdfReader", return_value=fake_reader):
-            result = pdf_to_text(b"fake pdf bytes")
-        self.assertIn("quarterly revenue grew by 12 percent", result)
-        self.assertIn("board approved a new dividend policy", result)
+            text, pages_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertIn("quarterly revenue grew by 12 percent", text)
+        self.assertIn("board approved a new dividend policy", text)
+        # v0.2.256: the failure is COUNTED, not just tolerated — callers must
+        # be able to warn that the index holds less than the document.
+        self.assertEqual(pages_failed, 1)
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""

@@ -64,6 +64,10 @@ class Extracted:
     text: str
     origin: str
     sha256: str
+    # Pages whose text extraction raised (PDF only). Surfaced so the ingest
+    # caller can warn: the graceful per-page fallback means a corrupt page's
+    # content silently vanishes from the index without this signal.
+    pages_failed: int = 0
 
 
 def _digest(data: bytes) -> str:
@@ -219,7 +223,13 @@ def html_to_text(html: str) -> tuple[str, str]:
     return "".join(parser.title_parts).strip(), text
 
 
-def pdf_to_text(data: bytes) -> str:
+def pdf_to_text(data: bytes) -> tuple[str, int]:
+    """Extract text per page, tolerating per-page failures.
+
+    Returns (text, n_failed_pages): pages whose extract_text() raised are
+    dropped — a malformed content stream on one page must not discard the
+    rest — but the caller learns HOW MANY were lost so it can warn instead
+    of silently indexing a partial document."""
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -238,12 +248,14 @@ def pdf_to_text(data: bytes) -> str:
     # fallback text... History_messages() survives malformed chats"), already
     # applied the same way to per-batch embedding failures in pipeline.py.
     pages: list[str] = []
+    n_failed = 0
     for page in reader.pages:
         try:
             pages.append(page.extract_text() or "")
         except Exception:
+            n_failed += 1
             continue
-    return "\n\n".join(p.strip() for p in pages if p.strip())
+    return "\n\n".join(p.strip() for p in pages if p.strip()), n_failed
 
 
 # --- SSRF guard -----------------------------------------------------------
@@ -441,8 +453,9 @@ def extract_file(path: Path | str) -> Extracted:
         raise IngestError("INGEST_FETCH_FAILED", f"cannot read file: {exc}") from exc
     _check_size(data)
     title = p.name
+    pages_failed = 0
     if kind == "pdf":
-        text = pdf_to_text(data)
+        text, pages_failed = pdf_to_text(data)
     elif kind == "html":
         html_title, text = html_to_text(_decode(data))
         title = html_title or title
@@ -453,7 +466,7 @@ def extract_file(path: Path | str) -> Extracted:
     text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text in {p.name}")
-    return Extracted(kind, title, text, str(p), _digest(data))
+    return Extracted(kind, title, text, str(p), _digest(data), pages_failed)
 
 
 def _charset_from_ctype(ctype: str) -> str | None:
@@ -470,8 +483,10 @@ def extract_url(url: str) -> Extracted:
     body, ctype, final_url = fetch_url(url)
     low = ctype.lower()
     charset = _charset_from_ctype(ctype)
+    pages_failed = 0
     if "pdf" in low or body.lstrip()[:4] == b"%PDF":
-        text, title = pdf_to_text(body), final_url
+        text, pages_failed = pdf_to_text(body)
+        title = final_url
     elif "html" in low or body.lstrip()[:1] == b"<":
         title, text = html_to_text(_decode(body, charset))
         title = title or final_url
@@ -483,4 +498,4 @@ def extract_url(url: str) -> Extracted:
     text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
-    return Extracted("url", title, text, final_url, _digest(body))
+    return Extracted("url", title, text, final_url, _digest(body), pages_failed)

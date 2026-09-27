@@ -85,6 +85,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "ソース削除完了",
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "src.pages_failed": "⚠ {n} ページのテキスト抽出に失敗（索引は不完全です）",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
         "health.yes": "はい",
@@ -146,6 +147,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "Source deleted",
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "src.pages_failed": "⚠ {n} page(s) could not be extracted — the index is incomplete",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
         "health.yes": "yes",
@@ -512,6 +514,13 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             print(
                 f"✓ {result.source.title}: {result.n_chunks} chunks ({result.n_embedded} embedded)"
             )
+            if result.pages_failed:
+                # Don't report a partial index as complete: the graceful
+                # per-page PDF fallback drops failed pages silently.
+                print(
+                    _t("src.pages_failed", n=str(result.pages_failed)),
+                    file=sys.stderr,
+                )
         except (IngestError, StoreError) as exc:
             print(f"✗ {target}: [{exc.code}] {exc}", file=sys.stderr)
             rc = 1
@@ -623,6 +632,8 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
                 embedded=str(result.n_embedded),
             )
         )
+        if result.pages_failed:
+            print(_t("src.pages_failed", n=str(result.pages_failed)), file=sys.stderr)
     return 0
 
 

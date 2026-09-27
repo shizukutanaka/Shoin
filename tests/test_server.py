@@ -279,6 +279,32 @@ class ServerTest(unittest.TestCase):
             "upload response title must match what was actually persisted",
         )
 
+    def test_upload_response_reports_pages_failed(self) -> None:
+        """v0.2.256: a PDF whose pages partially fail extraction must surface
+        pages_failed in the upload response — otherwise a partial index is
+        presented as a complete one."""
+        import shoin.server as srv
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "PDF欠損テスト"})
+        nb_id = nb["id"]
+        fake = IndexResult(
+            Source(id=1, notebook_id=nb_id, kind="pdf", title="broken.pdf",
+                   origin="broken.pdf", sha256="x", added_at="now"),
+            n_chunks=3, n_embedded=0, pages_failed=2,
+        )
+        body = "なんとか本文".encode("utf-8")
+        with patch.object(srv, "index_source", return_value=fake):
+            status, _, raw = self._req(
+                "POST",
+                f"/api/notebooks/{nb_id}/upload",
+                body,
+                {"X-Filename": "broken.pdf"},
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(raw)["pages_failed"], 2)
+
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
         (e.g. sqlite3.OperationalError: database is locked) must return HTTP 500
