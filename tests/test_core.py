@@ -61,7 +61,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.302")
+        self.assertEqual(VERSION, "0.2.303")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10935,6 +10935,9 @@ class TestResidualGuards(unittest.TestCase):
             "shoin.sqlite3-journal",
             ".env",
             ".env.local",
+            # v0.2.303: ci.yml regenerates sbom.json per build as an
+            # artifact; the tracked copy was a frozen v0.1.0 snapshot.
+            "sbom.json",
         ):
             self.assertTrue(ignored(name), f"{name} is committable")
 

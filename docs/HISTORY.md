@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.302
+## Version History: v0.1.37 → v0.2.303
+
+### v0.2.303 (2026-09-27)
+
+- sbom.json: removed the frozen v0.1.0 snapshot from tracking (it claimed
+  pypdf 5.9.0 while pyproject resolves far newer) — ci.yml regenerates it
+  per build as an artifact, so the committed copy could only rot. Added to
+  .gitignore; pinned by the gitignore test.
+- audit: shoin/__init__.py public surface, .github/dependabot.yml, spec.md
+  STRIDE claims and faq.md all verified accurate against code.
+- audit-saturation note: every gate-definition, doc-claim,
+  manifest-scope, and privacy surface now has a permanent regression pin.
 
 ### v0.2.302 (2026-09-27)
 
