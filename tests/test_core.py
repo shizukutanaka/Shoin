@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.260")
+        self.assertEqual(VERSION, "0.2.261")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2838,6 +2838,22 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb_id = seed(s)
             self.assertEqual(vector_search(s, nb_id, None, 10), [])
+
+    def test_vector_search_dim_mismatch_scores_zero(self) -> None:
+        """v0.2.261: cosine() returns 0.0 for mismatched dimensions, but the
+        hot path _cosine_with_norms truncated the dot product at the shorter
+        vector — a 1024-dim query against 768-dim stored embeddings (user
+        switched SHOIN_EMBED_MODEL without reindexing) fabricated a plausible
+        score from the leading dims instead of degrading to 0.0."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            chunk = s.chunks_for_notebook(nb_id)[0]
+            s.set_embedding(chunk.id, [1.0, 0.0])
+            hits = vector_search(s, nb_id, [0.9, 0.1, -100.0], k=5)
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].vec, 0.0)
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""

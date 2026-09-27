@@ -887,6 +887,12 @@ def _cosine_with_norms(
     """
     if not query_norm or not vec_norm:
         return 0.0
+    # map() stops at the shorter vector: a query/stored dimension mismatch
+    # (e.g. SHOIN_EMBED_MODEL switched without reindexing, or a corrupt blob)
+    # would fabricate a score from the leading dims. Match cosine()'s
+    # len-mismatch -> 0.0 semantics so the hit simply carries no vector signal.
+    if len(query) != len(vec):
+        return 0.0
     result = sum(map(_MUL, query, vec)) / (query_norm * vec_norm)
     return result if math.isfinite(result) else 0.0
 
