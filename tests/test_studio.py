@@ -1227,6 +1227,96 @@ class EvalTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
 
+    def test_eval_error_paths(self) -> None:
+        """_cmd_eval's uncovered error branches must exit rc 1 with a clean
+        [CODE] stderr line — unreadable cases file, non-JSON cases, valid JSON
+        of the wrong shape, and the same trio for a --diff baseline."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        db = str(Path(d) / "t.db")
+        cases = Path(d) / "cases.json"
+
+        def run(argv):
+            out, err = _io.StringIO(), _io.StringIO()
+            with _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+                rc = main(argv, llm=FakeLLM())
+            return rc, err.getvalue()
+
+        # Cases file: unreadable -> SYSTEM_IO_ERROR (never a bare traceback).
+        rc, err = run(["--db", db, "eval", "1", str(Path(d) / "nope.json")])
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_IO_ERROR", err)
+        self.assertNotIn("Traceback", err)
+
+        # Cases file: non-JSON -> VALIDATION_FIELD_FORMAT_INVALID.
+        cases.write_text("{not json", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", "1", str(cases)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        # Cases file: valid JSON, wrong shape -> VALIDATION_FIELD_FORMAT_INVALID.
+        cases.write_text("{}", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", "1", str(cases)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        # Baseline file errors fire AFTER a successful eval — needs a seeded db.
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1]}]),
+            encoding="utf-8",
+        )
+        rc, err = run(
+            ["--db", db, "eval", str(nb), str(cases), "--diff", str(Path(d) / "none.json")]
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_IO_ERROR", err)
+
+        bad = Path(d) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", str(nb), str(cases), "--diff", str(bad)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        bad.write_text("{}", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", str(nb), str(cases), "--diff", str(bad)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+    def test_serve_port_in_use_and_keyboard_interrupt(self) -> None:
+        """main()'s serve special-case must map OSError to SYSTEM_PORT_IN_USE
+        rc 1, and the top-level KeyboardInterrupt handler must exit 130 —
+        neither may leak a traceback."""
+        import io as _io
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with _cl.redirect_stdout(out), _cl.redirect_stderr(err), \
+             patch("shoin.server.serve", side_effect=OSError("address in use")):
+            rc = main(["serve", "--port", "1"], llm=FakeLLM())
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_PORT_IN_USE", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with _cl.redirect_stdout(out), _cl.redirect_stderr(err), \
+             patch("shoin.cli._cmd_messages", side_effect=KeyboardInterrupt):
+            rc = main(
+                ["--db", str(Path(tempfile.mkdtemp()) / "t.db"), "messages", "list", "1"],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 130)
+        self.assertNotIn("Traceback", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
