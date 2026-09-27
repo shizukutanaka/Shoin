@@ -60,7 +60,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.297")
+        self.assertEqual(VERSION, "0.2.298")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10850,6 +10850,32 @@ class TestResidualGuards(unittest.TestCase):
                 with Store(fdb):
                     self.assertEqual(mode(fdb), 0o600)
                     self.assertEqual(mode(foreign), 0o755)
+
+    def test_ci_yml_and_verify_sh_run_the_same_gates(self) -> None:
+        """v0.2.298: the repo defines the verification gate twice — ci/ci.yml
+        for GitHub Actions and scripts/verify.sh for local runs and the
+        pre-push hook — and nothing stops them drifting apart (the same
+        silent-drift class as the HISTORY.md anchor, v0.2.295: either file can
+        lose a gate with zero error anywhere). Pin every gate signature against
+        BOTH files; the ci.yml SBOM step is a build artifact, not a gate.
+        Also pin the pre-push hook delegating to verify.sh — a hook running
+        anything less is a hole in the only enforced gate."""
+        root = Path(__file__).resolve().parent.parent
+        ci = (root / "ci" / "ci.yml").read_text(encoding="utf-8")
+        verify = (root / "scripts" / "verify.sh").read_text(encoding="utf-8")
+        gates = [
+            "ruff check",
+            "mypy --strict shoin/",
+            "coverage run -m unittest discover",
+            "--fail-under=90",
+            "detect",  # spelled detect-secrets in ci.yml, detect_secrets module in verify.sh
+        ]
+        for sig in gates:
+            self.assertIn(sig, ci, f"ci.yml lost gate signature {sig!r}")
+            self.assertIn(sig, verify, f"verify.sh lost gate signature {sig!r}")
+        hook = (root / ".githooks" / "pre-push").read_text(encoding="utf-8")
+        self.assertIn("exec", hook)
+        self.assertIn("scripts/verify.sh", hook)
 
 
 if __name__ == "__main__":

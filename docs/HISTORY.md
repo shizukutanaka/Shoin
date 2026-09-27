@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.297
+## Version History: v0.1.37 → v0.2.298
+
+### v0.2.298 (2026-09-27)
+
+- **Gate-parity audit**: `ci/ci.yml` and `scripts/verify.sh` both define the verification gate (ruff check, mypy --strict, coverage ≥90, detect-secrets) — verified in sync today, but nothing prevented silent drift (the same class as the v0.2.295 HISTORY.md anchor no-op). New `test_ci_yml_and_verify_sh_run_the_same_gates` pins every gate signature against BOTH files and pins `.githooks/pre-push` delegating to verify.sh — a hook running anything less would be a hole in the only enforced gate.
+- Audit-clean: network surface (loopback-only `make_server` guard already pinned, Host/Origin checks, CSP, no-store on all responses) and `pipeline.py` partial-failure paths (sha-collision guard, chunk cap, atomic replace, embed-model mismatch rules) all verified already defended.
 
 ### v0.2.297 (2026-09-27)
 
