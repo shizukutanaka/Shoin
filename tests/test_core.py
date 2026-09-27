@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.272")
+        self.assertEqual(VERSION, "0.2.273")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10294,6 +10294,66 @@ class TestSearchCoverageTail(unittest.TestCase):
         with make_store() as s:
             nb = s.create_notebook("nb")
             self.assertEqual(retrieve_multi(s, nb.id, []), [])
+
+
+class TestCitationCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered tails in citation.py (v0.2.273)."""
+
+    def test_conv_values_chained_same_family(self) -> None:
+        """'1km500m' must accumulate to 1500 m — consecutive same-family
+        units within 2 chars sum, so a claim of '1500m' isn't flagged."""
+        from shoin.citation import _conv_values
+
+        self.assertIn((1, 1500.0), _conv_values("1km500m"))
+
+    def test_unparsable_kanji_parts_stay_silent(self) -> None:
+        """'二三' is a counting sequence ('a few'), not a numeral — every
+        parser that meets it must return inconclusive silence, per the
+        module's never-accuse-on-inconclusive design."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("二三万"), set())     # suffix continue
+        self.assertEqual(_numbers_expanded("一億二三万"), set())  # chain break
+        self.assertEqual(_numbers_expanded("令和一二年"), set())  # era continue
+        self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
+
+    def test_citation_only_first_sentence_skips_claim(self) -> None:
+        """'[S1].' carries a citation number but no text and no prior claim —
+        every checker must skip it rather than fabricate a claim."""
+        from shoin.citation import (
+            negation_mismatches,
+            numeric_mismatches,
+            quote_mismatches,
+            unit_mismatches,
+        )
+
+        src = {1: "数値は10である。"}
+        self.assertEqual(numeric_mismatches("[S1].", src), [])
+        self.assertEqual(unit_mismatches("[S1].", src), [])
+        self.assertEqual(quote_mismatches("[S1].", src), [])
+        self.assertEqual(negation_mismatches("[S1].", src), [])
+
+    def test_quote_mismatch_suggested_names_right_source(self) -> None:
+        """When a doctored quote is flagged, `suggested` must name the source
+        it actually matches — the fix is 'say [S2]', not 're-read'."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く関係のない記述だけが書かれている。",
+            2: "ハイブリッド検索は両手法の長所を組み合わせる手法である。",
+        }
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        suggested: dict[int, int] = {}
+        self.assertEqual(quote_mismatches(text, sources, suggested=suggested), [1])
+        self.assertEqual(suggested, {1: 2})
+
+    def test_make_report_source_detail_length_mismatch(self) -> None:
+        """A source_detail list whose length ≠ source count is a caller bug —
+        raise loudly instead of silently mis-keying the S-numbers."""
+        from shoin.citation import make_report
+
+        with self.assertRaises(ValueError):
+            make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
 
 
 if __name__ == "__main__":
