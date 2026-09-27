@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.280")
+        self.assertEqual(VERSION, "0.2.281")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10621,6 +10621,19 @@ class TestResidualGuards(unittest.TestCase):
                     self.assertEqual(
                         set(entry), {"ja", "en"}, f"{label}.{key}"
                     )
+
+    def test_no_assert_statements_in_package(self) -> None:
+        """`python -O` strips assert — a library must never depend on one for
+        control flow or a debug-only check becomes silent behavior change
+        (store.py's lock-retry tail was the only site; replaced with an
+        explicit raise)."""
+        import ast
+
+        pkg = Path(__file__).resolve().parent.parent / "shoin"
+        for f in sorted(pkg.glob("*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            sites = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assert)]
+            self.assertEqual(sites, [], f"{f.name}: assert at {sites}")
 
 
 if __name__ == "__main__":
