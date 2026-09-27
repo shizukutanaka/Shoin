@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.279")
+        self.assertEqual(VERSION, "0.2.280")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10592,6 +10592,35 @@ class TestResidualGuards(unittest.TestCase):
             with patch.object(pl, "extract_url", return_value=fake):
                 with self.assertRaises(StoreError):
                     pl.refresh_source(s, src_a.id)
+
+    def test_python_i18n_tables_have_ja_en_parity(self) -> None:
+        """Every server-side string table must define both locales — the UI
+        parity test (test_ui_contract) covers index.html only; a ja-only key
+        here would show Japanese text (or the bare key) to en users."""
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        tables = (
+            (shoin.cli, "_STRINGS"),      # lang-first: {"ja": {...}, "en": {...}}
+            (shoin.qa, "_STRINGS"),       # key-first: {"k": {"ja","en"}}
+            (shoin.studio, "_STRINGS"),
+            (shoin.studio, "_INSTRUCTIONS"),
+            (shoin.export, "_STRINGS"),
+            (shoin.server, "_STRINGS"),
+        )
+        for mod, name in tables:
+            table = getattr(mod, name)
+            label = f"{mod.__name__}.{name}"
+            if set(table) == {"ja", "en"}:
+                self.assertEqual(set(table["ja"]), set(table["en"]), label)
+            else:
+                for key, entry in table.items():
+                    self.assertEqual(
+                        set(entry), {"ja", "en"}, f"{label}.{key}"
+                    )
 
 
 if __name__ == "__main__":
