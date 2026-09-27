@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.258")
+        self.assertEqual(VERSION, "0.2.259")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -5929,6 +5929,77 @@ class TestLLMClient(unittest.TestCase):
                 list(client.chat_stream([{"role": "user", "content": "hi"}])), ["x"]
             )
         self.assertEqual(client.last_finish_reason, "length")
+
+    def test_chat_joins_content_parts(self) -> None:
+        """OpenAI's schema allows message.content as an ARRAY of parts
+        ([{"type":"text","text":"..."}]) — some compatible servers/proxies pass
+        that form through verbatim. str() would persist Python-repr garbage as
+        the answer; _message_text must join the text parts instead (v0.2.259)."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "refusal", "refusal": "n/a"},
+                {"type": "text", "text": " world"},
+            ]}}]}
+        ).encode()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out = LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(out, "Hello world")
+
+    def test_chat_rejects_non_text_content(self) -> None:
+        """A content field that is neither str nor a parts list (e.g. a dict
+        from a non-conforming endpoint) must raise LLMError — never str() it
+        into repr text that citation badges then decorate as a real answer."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, LLMError
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": {"text": "x"}}}]}
+        ).encode()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_chat_stream_joins_content_parts_and_skips_malformed(self) -> None:
+        """Stream deltas carry the same parts-list shape; malformed non-text
+        deltas are dropped rather than str()-coerced into the answer."""
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
+            b'data: {"choices":[{"delta":{"content":{"text":"junk"}}}]}',
+            b'data: {"choices":[{"delta":{"content":"!"}}]}',
+            b"data: [DONE]",
+        ])
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out = list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        self.assertEqual(out, ["Hello", "!"])
 
     def test_available_returns_false_for_invalid_url_scheme(self) -> None:
         """available() must return False (not raise ValueError) for unknown URL schemes.

@@ -49,6 +49,28 @@ class LLMError(Exception):
 Message = dict[str, str]
 
 
+def _message_text(content: object) -> str:
+    """Normalize an OpenAI `content` field to plain text.
+
+    The schema allows a string OR an array of parts
+    ([{"type": "text", "text": "..."}]) — some compatible servers and
+    proxies pass the parts form through verbatim. str() on either shape
+    would present Python-repr garbage ("[{'type': 'text', ...}]") as the
+    answer text, badges and all.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+    raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "non-text content in LLM response")
+
+
 class LLMClient:
     """Minimal OpenAI-compatible API client bound to one base URL."""
 
@@ -161,9 +183,10 @@ class LLMClient:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing choices in response") from exc
         if content is None:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "null content in LLM response")
+        content = _message_text(content)
         if isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str):
             self.last_finish_reason = choice["finish_reason"]
-        return str(content)
+        return content
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
         """Yield content deltas from an SSE streaming chat completion."""
@@ -210,14 +233,19 @@ class LLMClient:
                         # chunk (None on intermediate ones); keep the last one.
                         choice = obj["choices"][0]
                         delta = choice["delta"].get("content")
+                        if isinstance(delta, list):
+                            delta = _message_text(delta)
                         if isinstance(choice.get("finish_reason"), str):
                             self.last_finish_reason = choice["finish_reason"]
                     except LLMError:
                         raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
                         continue
-                    if delta:
-                        yield str(delta)
+                    # A malformed non-text delta is dropped rather than
+                    # str()-coerced — repr garbage mid-stream would land in the
+                    # persisted answer text (same shape as chat()'s fix above).
+                    if isinstance(delta, str) and delta:
+                        yield delta
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:
