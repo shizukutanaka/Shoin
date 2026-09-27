@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.273")
+        self.assertEqual(VERSION, "0.2.274")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10318,8 +10318,8 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
 
     def test_citation_only_first_sentence_skips_claim(self) -> None:
-        """'[S1].' carries a citation number but no text and no prior claim —
-        every checker must skip it rather than fabricate a claim."""
+        """'[S1]' alone carries a citation number but no text and no prior
+        claim — every checker must skip it rather than fabricate a claim."""
         from shoin.citation import (
             negation_mismatches,
             numeric_mismatches,
@@ -10328,10 +10328,19 @@ class TestCitationCoverageTail(unittest.TestCase):
         )
 
         src = {1: "数値は10である。"}
-        self.assertEqual(numeric_mismatches("[S1].", src), [])
-        self.assertEqual(unit_mismatches("[S1].", src), [])
-        self.assertEqual(quote_mismatches("[S1].", src), [])
-        self.assertEqual(negation_mismatches("[S1].", src), [])
+        self.assertEqual(numeric_mismatches("[S1]", src), [])
+        self.assertEqual(unit_mismatches("[S1]", src), [])
+        self.assertEqual(quote_mismatches("[S1]", src), [])
+        self.assertEqual(negation_mismatches("[S1]", src), [])
+
+    def test_conv_values_breaks_on_family_change(self) -> None:
+        """'1km500g' — a different family ends the chain: only the leading
+        '1km' accumulates; the 500 g is a separate value, never summed."""
+        from shoin.citation import _conv_values
+
+        vals = _conv_values("1km500g")
+        self.assertIn((1, 1000.0), vals)
+        self.assertNotIn((1, 1500.0), vals)
 
     def test_quote_mismatch_suggested_names_right_source(self) -> None:
         """When a doctored quote is flagged, `suggested` must name the source
