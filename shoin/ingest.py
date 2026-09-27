@@ -6,6 +6,7 @@ is the only network path and is restricted to public http(s) hosts.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -13,6 +14,7 @@ import re
 import socket
 import ssl
 import urllib.parse
+import zlib
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO
@@ -318,6 +320,43 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
+def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
+    """Decode a Content-Encoding response body; refuse what we cannot decode.
+
+    fetch_url never sends Accept-Encoding, so a spec-compliant server replies
+    unencoded — but some hosts and CDNs gzip unconditionally, and http.client
+    does not decode it transparently. Raw gzip bytes would then reach
+    _decode()'s cp932 fallback (which accepts any byte sequence) and index
+    mojibake into the notebook with zero signal. Encodings are applied in
+    reverse order (the header lists them in application order); anything we
+    cannot decode (br, zstd, …) fails cleanly rather than poisoning the index.
+    """
+    encodings = [e.strip().lower() for e in (header or "").split(",") if e.strip()]
+    for enc in reversed(encodings):
+        if enc == "identity":
+            continue
+        if enc in ("gzip", "x-gzip"):
+            try:
+                body = gzip.decompress(body)
+            # gzip.decompress also raises EOFError (not OSError) on truncated input.
+            except (OSError, EOFError) as exc:
+                raise IngestError("INGEST_FETCH_FAILED", f"corrupt gzip body: {exc}") from exc
+        elif enc == "deflate":
+            try:
+                body = zlib.decompress(body)
+            except zlib.error:
+                try:
+                    body = zlib.decompressobj(-zlib.MAX_WBITS).decompress(body)
+                except zlib.error as exc:
+                    raise IngestError("INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}") from exc
+        else:
+            raise IngestError("INGEST_UNSUPPORTED_FORMAT", f"unsupported Content-Encoding: {enc}")
+    if encodings:
+        # The wire cap bounded the encoded form; bound the inflated form too.
+        _check_size(body)
+    return body
+
+
 def fetch_url(url: str) -> tuple[bytes, str, str]:
     """Fetch a public URL. Returns (body, content_type, final_url).
 
@@ -360,6 +399,7 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
             if not body:
                 raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
             _check_size(body)
+            body = _decode_content_encoding(resp.getheader("Content-Encoding"), body)
             ctype = resp.getheader("Content-Type") or ""
             return body, ctype, current
         except (OSError, http.client.HTTPException) as exc:

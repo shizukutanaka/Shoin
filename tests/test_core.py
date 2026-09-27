@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.247")
+        self.assertEqual(VERSION, "0.2.248")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -2058,6 +2058,73 @@ class TestIngest(unittest.TestCase):
             ing.fetch_url("http://example.com/page")
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
         self.assertIn("cycle", str(cm.exception))
+
+    def test_fetch_url_decodes_content_encoding(self) -> None:
+        """v0.2.248: a server replying Content-Encoding: gzip/deflate without
+        being asked must still be decoded — http.client does not do it
+        transparently, and raw compressed bytes would otherwise pass _decode()'s
+        cp932 fallback and index mojibake silently. Unknown encodings (br) must
+        fail cleanly instead of poisoning the notebook."""
+        import gzip as _gzip
+        import zlib as _zlib
+
+        import shoin.ingest as ing
+
+        plain = "圧縮された本文。" * 20
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            def __init__(self, encoding: str, body: bytes) -> None:
+                self.status = 200
+                self._enc = encoding
+                self._body = body
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Content-Encoding":
+                    return self._enc
+                if name == "Content-Type":
+                    return "text/plain"
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return self._body
+
+        class FakeConn:
+            resp: FakeResp | None = None
+
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> FakeResp:
+                assert FakeConn.resp is not None
+                return FakeConn.resp
+
+            def close(self) -> None:
+                pass
+
+        def fetch_with(enc: str, body: bytes) -> bytes:
+            FakeConn.resp = FakeResp(enc, body)
+            with (
+                patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+                patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            ):
+                return ing.fetch_url("http://example.com/page")[0]
+
+        self.assertEqual(fetch_with("gzip", _gzip.compress(plain.encode())), plain.encode())
+        self.assertEqual(fetch_with("identity", plain.encode()), plain.encode())
+        # Raw-deflate variant (no zlib wrapper) must decode too.
+        co = _zlib.compressobj(9, _zlib.DEFLATED, -_zlib.MAX_WBITS)
+        raw_deflate = co.compress(plain.encode()) + co.flush()
+        self.assertEqual(fetch_with("deflate", _zlib.compress(plain.encode())), plain.encode())
+        self.assertEqual(fetch_with("deflate", raw_deflate), plain.encode())
+        with self.assertRaises(IngestError) as cm:
+            fetch_with("br", b"\x00\x01")
+        self.assertEqual(cm.exception.code, "INGEST_UNSUPPORTED_FORMAT")
+        with self.assertRaises(IngestError) as cm:
+            fetch_with("gzip", b"not-a-gzip")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
 
     def test_extracted_dataclass(self) -> None:
         ex = Extracted("txt", "t", "body", "o", "h")
