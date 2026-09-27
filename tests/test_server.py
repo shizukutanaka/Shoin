@@ -1519,6 +1519,73 @@ class ReindexCacheTest(unittest.TestCase):
         )
 
 
+class NotebookMessagesCapTest(unittest.TestCase):
+    """GET /api/notebooks/{id} embeds at most NB_MESSAGES_LIMIT messages.
+
+    Chat history grows monotonically and openNotebook() re-fetches this payload
+    on every mutation (upload, source add/delete/refresh, studio generate,
+    clear-chat, SSE-drop recovery) — an unbounded messages array would make
+    each click heavier forever. The payload stays honest: `messages_omitted`
+    reports the real hidden count for the UI's disclosure line; the full record
+    remains in the DB and in export()."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "mc.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_notebook_payload_caps_messages_and_reports_omitted(self) -> None:
+        from shoin.store import Store
+
+        import shoin.server as srv
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_message(nb_id, "user" if i % 2 == 0 else "assistant", f"msg {i}", "{}")
+        with patch.object(srv, "NB_MESSAGES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["messages"]), 4)
+        self.assertEqual(j["messages_omitted"], 8)
+        # The newest turns are the embedded ones — the SSE-drop recovery refetch
+        # (v0.2.246) depends on the persisted last assistant message being in
+        # the payload.
+        self.assertEqual(j["messages"][0]["body"], "msg 8")
+        self.assertEqual(j["messages"][-1]["body"], "msg 11")
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["messages_omitted"], 0)
+        self.assertEqual(len(j2["messages"]), 12)
+
+
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
 

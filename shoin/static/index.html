@@ -290,6 +290,7 @@ const I18N = {
     "chat.uncited":"無出典の断定文","chat.uncited_supported":"出典内一致=引用欠落","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
     "chat.truncated":"出力が途中で打ち切られた可能性","chat.truncated_hint":"トークン上限に達して生成が停止した応答です",
     "chat.stream_dropped":"応答ストリームが途中で切れました",
+    "chat.earlier":"— 以前の {n} 件は省略 —",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -325,6 +326,7 @@ const I18N = {
     "chat.uncited":"uncited assertions","chat.uncited_supported":"source match — missing citation","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
     "chat.truncated":"possibly truncated answer","chat.truncated_hint":"generation stopped at the token limit",
     "chat.stream_dropped":"answer stream ended early",
+    "chat.earlier":"— {n} earlier messages not shown —",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -903,6 +905,11 @@ function addMsg(role, body, report){
 function renderChatHistory(){
   $("#degBadge").hidden = true;
   $("#chat").replaceChildren();
+  // Disclose the server-side history cap (messages_omitted) rather than
+  // silently rendering a partial log — same honesty convention as the
+  // budget-cut marker and truncated badge.
+  if (cur.messages_omitted)
+    $("#chat").prepend(el("div","empty", t("chat.earlier").replace("{n}", cur.messages_omitted)));
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
   const hasChat = (cur.messages||[]).length > 0;
   $("#chatEmpty").hidden = hasChat;

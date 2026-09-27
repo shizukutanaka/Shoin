@@ -24,6 +24,7 @@ from .config import (
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
+    NB_MESSAGES_LIMIT,
     VERSION,
     db_path,
     multi_query_enabled,
@@ -107,6 +108,16 @@ def _safe_report(raw: Any) -> dict[str, Any]:
 
 def _notebook_json(store: Store, nb_id: int) -> Json:
     nb = store.get_notebook(nb_id)
+    # Chats grow monotonically; without a cap every mutation round-trips the
+    # whole history (and the SSE-drop recovery refetches it too). Embed only the
+    # newest NB_MESSAGES_LIMIT and report how many were omitted — the UI shows
+    # an honest "earlier N not shown" line rather than silently dropping them;
+    # export() and the DB still hold the full record.
+    recent_msgs = store.list_messages_recent(nb_id, NB_MESSAGES_LIMIT + 1)
+    omitted = 0
+    if len(recent_msgs) > NB_MESSAGES_LIMIT:
+        recent_msgs = recent_msgs[len(recent_msgs) - NB_MESSAGES_LIMIT :]
+        omitted = store.count_messages(nb_id) - len(recent_msgs)
     return {
         "id": nb.id,
         "name": nb.name,
@@ -132,8 +143,9 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 "body": m["body"],
                 "report": _safe_report(m["citation_report"]),
             }
-            for m in store.list_messages(nb_id)
+            for m in recent_msgs
         ],
+        "messages_omitted": omitted,
     }
 
 

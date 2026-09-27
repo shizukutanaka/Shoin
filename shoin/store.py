@@ -965,6 +965,12 @@ class Store:
         self.conn.commit()
         return int(cur.lastrowid or 0)
 
+    def count_messages(self, notebook_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()
+        return int(row[0])
+
     def list_messages(self, notebook_id: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(

@@ -675,6 +675,58 @@ main().catch(e => { console.error(e.message || e); process.exit(1) })
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_render_chat_history_discloses_omitted_messages(self) -> None:
+        """v0.2.250: GET /api/notebooks/{id} embeds at most NB_MESSAGES_LIMIT
+        messages and reports messages_omitted. renderChatHistory must prepend
+        the disclosure line when the flag is set — capping the payload without
+        an indicator would silently hide user history. Executes the real
+        function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "function renderChatHistory")
+        except ValueError:
+            self.fail("no renderChatHistory function in index.html")
+        harness = (
+            """\
+let cur = {messages: [{role:"user", body:"q", report:null},
+                      {role:"assistant", body:"a", report:{}}],
+           messages_omitted: 8};
+const calls = {prepended: [], added: []};
+const chat = {cleared: 0,
+  replaceChildren(){ this.cleared++ },
+  prepend(x){ calls.prepended.push(x) },
+  append(){}, scrollTop: 0, scrollHeight: 0};
+const degBadge = {hidden: false}, chatEmpty = {hidden: true}, clearChat = {hidden: false};
+const map = {"#degBadge": degBadge, "#chat": chat,
+             "#chatEmpty": chatEmpty, "#clearChat": clearChat};
+const $ = s => map[s];
+function el(tag, cls, txt){ return {tag, cls, text: txt} }
+function t(k){ return k + "={n}" }
+function addMsg(role, body, report){ calls.added.push(role + ":" + body) }
+"""
+            + block
+            + """
+renderChatHistory();
+if (calls.prepended.length !== 1 || !String(calls.prepended[0].text).includes("8"))
+  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended)); process.exit(1) }
+if (calls.added.length !== 2)
+  { console.error("messages not rendered: " + calls.added.length); process.exit(1) }
+cur.messages_omitted = 0;
+renderChatHistory();
+if (calls.prepended.length !== 1)
+  { console.error("disclosure shown with zero omitted"); process.exit(1) }
+cur.messages_omitted = undefined;  // payloads without the key must render clean
+renderChatHistory();
+if (calls.prepended.length !== 1)
+  { console.error("disclosure shown when key absent"); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
