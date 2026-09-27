@@ -216,6 +216,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")  # type: ignore[index]
 
+        # v0.2.255: response echoes the stored (stripped) name, not the raw
+        # request value — same response-vs-stored class as _h_src_patch.
+        status, renamed = self._json("PATCH", f"/api/notebooks/{nb_id}", {"name": "  和紙研究  "})
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed["name"], "和紙研究")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "和紙研究")
+
         # clear chat
         _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
         self.assertGreater(len(detail["messages"]), 0)

@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.254
+## Version History: v0.1.37 → v0.2.255
+
+### v0.2.255 (2026-09-27)
+**Bug fix (rename response echoes stored name)**: `PATCH /api/notebooks/{id}` returned the raw request `name` while `rename_notebook()` persisted `name.strip()` — the response reported a name the row never had. Same response-vs-stored class as v0.2.93's `_h_src_patch` title truncation; the handler now echoes the normalized value.
 
 ### v0.2.254 (2026-09-27)
 **Bug fix (query expansion bound)**: `expand_query` prepended the previous user turn (up to MAX_QUESTION_LEN chars) to a short follow-up, so the expanded retrieval query could reach ~2× the validated limit — exactly the pathological FTS5 OR-expression length the limit exists to prevent, on the very path expansion targets. The prepended context is now truncated to `MAX_QUESTION_LEN - len(question) - 1`; the current question itself is never cut. Includes a Devin Review follow-up on the eval-diff: duplicate questions now pair occurrence-by-occurrence (no phantom delta on identical runs), and `EvalDiff` exposes matched-population means the CLI comparison rows print.

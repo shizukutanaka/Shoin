@@ -435,6 +435,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_rename(self, nb_id: int) -> None:
         name = self._require(self._read_json(), "name")
+        # Echo the normalized name, not the raw request value — store strips
+        # whitespace before persisting, so echoing `name` would report a name
+        # the row never had (same response-vs-stored class as v0.2.93's
+        # _h_src_patch truncation).
+        name = name.strip()
         with Store(self.db) as store:
             store.rename_notebook(nb_id, name)
         self._json({"id": nb_id, "name": name})
