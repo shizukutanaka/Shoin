@@ -101,7 +101,7 @@ query → [BM25 (FTS5)] ─┐
 8. **否定反転** `negation_mismatch`: 出典文言を極性反転/反義語・程度語すり替えた主張
 9. **自己矛盾** `self_contradiction`: 同一回答内(および history= でターン横断)の極性矛盾
 10. **繰返し退化** `degenerate`: 回答内の逐語≥3回反復——小規模LLM特有のループ失敗
-11. `citation_report`: `{cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed(+misattributed_suggested), uncited(+uncited_supported, +uncited_supported_source), numeric_mismatch, quote_mismatch, unit_mismatch, negation_mismatch, self_contradiction, degenerate, degraded, source_excerpts, source_contexts, source_chunk_ids, source_detail}`。集約スコアは持たない(同義語言い換えと誤帰属を字句信号だけでは区別できないため、確信できる場合のみ提示)
+11. `citation_report`: `{cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed(+misattributed_suggested), uncited(+uncited_supported, +uncited_supported_source), numeric_mismatch, quote_mismatch, unit_mismatch, negation_mismatch, self_contradiction, degenerate, degraded, truncated, source_excerpts, source_contexts, source_chunk_ids, source_detail}`。`truncated`はLLM応答の`finish_reason="length"`(トークン上限での停止)を写す生成側シグナル(検査ではない)。集約スコアは持たない(同義語言い換えと誤帰属を字句信号だけでは区別できないため、確信できる場合のみ提示)
 12. UI/CLI/export: invalid引用は赤表示、coverage<50%は注意バッジ、各警告はバッジ/行/ステータス行で表示。ソースビューアは抜粋・節・引用チャンク・検出経路(`source_detail`: 全文/意味のどちらが拾ったか)を表示し、CLIの`[S#]`行とexport凡例も同じ出自を保持
 
 ## セキュリティ (STRIDE要点)

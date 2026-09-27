@@ -795,6 +795,10 @@ class _Handler(BaseHTTPRequestHandler):
             )
             if degraded:
                 report["degraded"] = True
+            # finish_reason "length" = the stream ended at MAX_TOKENS — surface
+            # it like degraded so a clipped answer is not shown as complete.
+            if getattr(self.llm, "last_finish_reason", None) == "length":
+                report["truncated"] = True
             if not client_gone:
                 try:
                     self._sse("done", {"report": dict(report), "degraded": degraded})

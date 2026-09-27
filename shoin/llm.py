@@ -61,6 +61,11 @@ class LLMClient:
         self.base_url = (base_url or llm_url()).rstrip("/")
         self.model = model or llm_model()
         self.embedding_model = embedding_model if embedding_model is not None else embed_model()
+        # finish_reason of the most recent chat/chat_stream call ("stop",
+        # "length", …), or None when the endpoint omitted it or no call ran.
+        # "length" means the answer stopped at MAX_TOKENS — callers surface it
+        # as report.truncated instead of presenting a clipped answer as whole.
+        self.last_finish_reason: str | None = None
 
     # --- transport ---
 
@@ -137,6 +142,7 @@ class LLMClient:
     # --- chat ---
 
     def chat(self, messages: list[Message], temperature: float = 0.2) -> str:
+        self.last_finish_reason = None
         data = self._post(
             "/chat/completions",
             {
@@ -149,11 +155,14 @@ class LLMClient:
             CHAT_TIMEOUT_SEC,
         )
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing choices in response") from exc
         if content is None:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "null content in LLM response")
+        if isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str):
+            self.last_finish_reason = choice["finish_reason"]
         return str(content)
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
@@ -173,6 +182,7 @@ class LLMClient:
             method="POST",
         )
         total_bytes = 0
+        self.last_finish_reason = None
         try:
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
                 for raw in resp:
@@ -196,7 +206,12 @@ class LLMClient:
                                 "SYSTEM_LLM_BAD_RESPONSE",
                                 f"LLM stream error: {str(msg)[:200]}",
                             )
-                        delta = obj["choices"][0]["delta"].get("content")
+                        # choices[0].finish_reason arrives on the final delta
+                        # chunk (None on intermediate ones); keep the last one.
+                        choice = obj["choices"][0]
+                        delta = choice["delta"].get("content")
+                        if isinstance(choice.get("finish_reason"), str):
+                            self.last_finish_reason = choice["finish_reason"]
                     except LLMError:
                         raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):

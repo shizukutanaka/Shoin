@@ -349,15 +349,19 @@ reportBadges(c, {
   unit_mismatch: [6], negation_mismatch: [7], confirmed: [1, 2],
   uncited: ["句a", "句b"], uncited_supported: ["句b"],
   uncited_supported_source: {"句b": "S3"}, degenerate: ["x","x","x"],
-  self_contradiction: ["y","z"], cited: [1], coverage: 0.3});
+  self_contradiction: ["y","z"], cited: [1], coverage: 0.3,
+  truncated: true});
 const classes = c.children.map(b => b.cls);
 const want = ["badge dim","badge err","badge err","badge err","badge err",
               "badge err","badge dim","badge warn","badge warn","badge warn",
-              "badge warn"];
+              "badge warn","badge warn"];
 if (JSON.stringify(classes) !== JSON.stringify(want))
   { console.error("badges: " + JSON.stringify(classes)); process.exit(1) }
 const cbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("coverage"));
 if (cbadges.length !== 1) { console.error("coverage badge missing"); process.exit(1) }
+// v0.2.245: a finish_reason "length" answer must carry a visible warning chip.
+const tbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("truncated"));
+if (tbadges.length !== 1) { console.error("truncated badge missing"); process.exit(1) }
 const c2 = mkc();
 reportBadges(c2, {cited: [1], coverage: null});
 if (c2.children.length !== 0)

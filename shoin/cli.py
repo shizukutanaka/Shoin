@@ -58,6 +58,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.found_vec": "意味",
         "cite.found_lex": "語彙",
         "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
+        "cite.truncated": "⚠ 出力が途中で打ち切られた可能性(トークン上限)",
         "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
@@ -118,6 +119,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.found_lex": "lexical",
         "cite.degenerate": "⚠ Possible generation loop ({n}):",
         "cite.contradict": "⚠ Contradictory statements ({n}):",
+        "cite.truncated": "⚠ Output may be truncated (token limit reached)",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
@@ -321,6 +323,10 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.contradict", n=str(len(contradict))))
         for sentence in contradict:
             print(f"  - {sentence}")
+    if report.get("truncated"):
+        # finish_reason "length": generation stopped at the token limit — the
+        # report flag the Web badge and export status line already carry.
+        print(_t("cite.truncated"))
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. The Web UI has warned
     # about this since early on; the CLI silently dropped it despite REQ-103
@@ -528,6 +534,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     # elsewhere; guard on actual report content too, not just hits/degraded.
     if answer.hits and not answer.degraded and (
         answer.report["cited"] or answer.report["invalid"] or answer.report.get("uncited")
+        or answer.report.get("truncated")
     ):
         print("---")
         _print_report(answer.report)
@@ -541,7 +548,10 @@ def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     # range [S#] citations, cli.py's own _print_report()) — the pre-existing
     # guard here missed that case, silently dropping the warning from CLI
     # output. Same fix shape as _cmd_ask()'s report-content guard.
-    if result.report["cited"] or result.report["invalid"] or result.report.get("uncited"):
+    if (
+        result.report["cited"] or result.report["invalid"] or result.report.get("uncited")
+        or result.report.get("truncated")
+    ):
         print("---")
         _print_report(result.report)
     return 0
