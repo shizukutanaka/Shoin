@@ -1227,6 +1227,54 @@ class EvalTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
 
+    def test_eval_cli_failing_case_and_diff_tail(self) -> None:
+        """v0.2.275: a case whose expected source is absent must print the
+        expected-vs-got detail line, and --diff against a k-mismatched,
+        question-shifted baseline must print the warn + deltas + matched/new/
+        dropped tail."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([
+                {"q": "和紙はどう作られるか", "sources": [1]},
+                {"q": "存在しない事実について", "sources": [999]},
+            ]),
+            encoding="utf-8",
+        )
+        base = Path(d) / "baseline.json"
+        base.write_text(
+            _json.dumps({
+                "k": 4,  # differs from the default 8 → k-mismatch warning
+                "recall": 0.5, "mrr": 0.5,
+                "cases": [
+                    {"q": "和紙はどう作られるか", "expected": [1],
+                     "retrieved": [], "recall": 0.0, "rr": 0.0},
+                    {"q": "消えた質問", "expected": [1],
+                     "retrieved": [1], "recall": 1.0, "rr": 1.0},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("存在しない事実について", out)  # NG case + detail
+        self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
+
     def test_eval_error_paths(self) -> None:
         """_cmd_eval's uncovered error branches must exit rc 1 with a clean
         [CODE] stderr line — unreadable cases file, non-JSON cases, valid JSON
@@ -1289,6 +1337,48 @@ class EvalTest(unittest.TestCase):
         rc, err = run(["--db", db, "eval", str(nb), str(cases), "--diff", str(bad)])
         self.assertEqual(rc, 1)
         self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+    def test_serve_success_returns_zero(self) -> None:
+        """`serve` returning normally exits rc 0 — the path opposite the
+        port-in-use branch (v0.2.275)."""
+        from shoin.cli import main
+
+        with patch("shoin.server.serve") as mock_serve:
+            rc = main(["serve", "--port", "0"])
+        self.assertEqual(rc, 0)
+        mock_serve.assert_called_once()
+
+    def test_pages_failed_printed_on_add_and_refresh(self) -> None:
+        """v0.2.275: a partial PDF index must print the pages_failed warning on
+        stderr for BOTH `add` and `source refresh` — never a silent ✓."""
+        import io as _io
+        import contextlib as _cl
+
+        from shoin.cli import main
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        s, nb_id = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        fake = IndexResult(
+            Source(id=1, notebook_id=nb_id, kind="pdf", title="broken.pdf",
+                   origin="broken.pdf", sha256="x", added_at="now"),
+            n_chunks=3, n_embedded=0, pages_failed=2,
+        )
+        out, err = _io.StringIO(), _io.StringIO()
+        with patch("shoin.cli.index_source", return_value=fake), \
+                _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+            rc = main(["--db", db, "add", str(nb_id), "broken.pdf"], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("2", err.getvalue())
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with patch("shoin.cli.refresh_source", return_value=fake), \
+                _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+            rc = main(["--db", db, "source", "refresh", "1"], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("2", err.getvalue())
 
     def test_serve_port_in_use_and_keyboard_interrupt(self) -> None:
         """main()'s serve special-case must map OSError to SYSTEM_PORT_IN_USE
