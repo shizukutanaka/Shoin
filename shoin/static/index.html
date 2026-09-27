@@ -289,6 +289,7 @@ const I18N = {
     "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.negation":"出典と逆の主張の可能性","chat.confirmed":"根拠確認済み",
     "chat.uncited":"無出典の断定文","chat.uncited_supported":"出典内一致=引用欠落","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
     "chat.truncated":"出力が途中で打ち切られた可能性","chat.truncated_hint":"トークン上限に達して生成が停止した応答です",
+    "chat.stream_dropped":"応答ストリームが途中で切れました",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -323,6 +324,7 @@ const I18N = {
     "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.negation":"possible contradiction with source","chat.confirmed":"grounding confirmed",
     "chat.uncited":"uncited assertions","chat.uncited_supported":"source match — missing citation","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
     "chat.truncated":"possibly truncated answer","chat.truncated_hint":"generation stopped at the token limit",
+    "chat.stream_dropped":"answer stream ended early",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -933,7 +935,7 @@ $("#askForm").onsubmit = async e=>{
   const bd = addMsg("ai", "", null);
   bd.append(el("span","spin", t("busy")));
   $("#askBtn").disabled = true;
-  let acc = "";
+  let acc = "", gotDone = false, failed = false;
   try{
     const r = await jpost(`/api/notebooks/${nbId}/ask`, {question:q});
     const reader = r.body.getReader(); const dec = new TextDecoder();
@@ -955,6 +957,7 @@ $("#askForm").onsubmit = async e=>{
         // the done frame's report (source_map/source_id_map) — nothing to store.
         if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){
+          gotDone = true;
           const rpt = j.report || {};
           // Pane-head degraded badge: the done frame carries `degraded` — this
           // is the per-answer retrieval-only signal (LLM nominally on but the
@@ -970,9 +973,28 @@ $("#askForm").onsubmit = async e=>{
           // The server can fail mid-stream: without this branch the partial
           // answer just freezes with zero signal (the catch path only sees
           // network-level errors, not an SSE "error" frame).
+          failed = true;
           toast(j.message || j.code || "");
         }
       }
+    }
+    if (!gotDone && !failed){
+      // Stream ended without a done frame (a proxy or network cut): the server
+      // persists the full assistant message + report anyway, so re-render the
+      // stored answer instead of leaving a seal-less partial text behind.
+      try{
+        const d = await (await api(`/api/notebooks/${nbId}`)).json();
+        const last = (d.messages||[]).filter(m=>m.role==="assistant").pop();
+        if (last){
+          acc = last.body || "";
+          bd.replaceChildren();
+          renderWithSeals(bd, acc, last.report || null);
+          const c = el("div","cites"); reportBadges(c, last.report || {});
+          if (c.children.length) bd.parentElement.append(c);
+          $("#degBadge").hidden = !(last.report && last.report.degraded);
+        }
+        else { toast(t("chat.stream_dropped")); }
+      }catch(_e){ toast(t("chat.stream_dropped")); }
     }
   }catch(err){ bd.textContent=""; toast(err.message); }
   finally{

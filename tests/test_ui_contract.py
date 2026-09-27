@@ -479,6 +479,7 @@ function renderWithSeals(){}
 function reportBadges(){}
 const bd = {parentElement: {kids: [], append(x){this.kids.push(x)}}};
 const acc = "回答テキスト";
+let gotDone = false, failed = false;
 function runDone(j){ let ev = "done"; if (false) {}
 """
             + _js_block(src, 'else if (ev==="done")')
@@ -512,6 +513,7 @@ console.log("ok")
         harness = (
             """\
 const toasts = [];
+let gotDone = false, failed = false;
 function toast(m){ toasts.push(m) }
 function runErr(j){ let ev = "error"; if (false) {}
 """
@@ -538,6 +540,77 @@ console.log("ok")
         frame itself is still consumed-and-advanced by the parser above."""
         src = _script_body(_html())
         self.assertNotIn('ev==="meta"', src)
+
+    def test_dropped_stream_restores_persisted_answer(self) -> None:
+        """v0.2.246: when the SSE stream ends without a done frame (a proxy or
+        network cut), the server has already persisted the complete assistant
+        message + report, but the live bubble used to keep the seal-less
+        partial text — diverging silently from what a reload renders. The
+        recovery path re-fetches the notebook and re-renders the stored
+        message through the same renderWithSeals/reportBadges chain. Executes
+        the real block under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "if (!gotDone && !failed)")
+        except ValueError:
+            self.fail("no recovery block for a done-less stream end")
+        harness = (
+            """\
+const calls = {render: [], badges: [], toasts: [], appended: [], api: 0};
+const degBadge = {hidden: true};
+const $ = s => s === "#degBadge" ? degBadge : {};
+function t(k){ return k }
+function el(t2, c, txt){ return {tag:t2, cls:c, text:txt, children:[],
+  append(x){ this.children.push(x) }} }
+const bd = {cleared: 0, parentElement: {append(x){ calls.appended.push(x) }},
+  replaceChildren(){ this.cleared++ }};
+function renderWithSeals(b, body, report){ calls.render.push({body, report}) }
+function reportBadges(c, report){ calls.badges.push(report);
+  if (report.degraded) c.append({cls: "badge dim"}) }
+function toast(m){ calls.toasts.push(m) }
+const nbId = 7;
+let apiImpl = async () => ({json: async () => ({messages: [
+  {role: "user", body: "q", report: null},
+  {role: "assistant", body: "full answer [S1]", report: {degraded: true}}]})});
+const api = p => { calls.api++; return apiImpl(p) };
+async function run(gotDone, failed){ let acc = "partial text";
+"""
+            + block
+            + """
+  return acc }
+let acc = await run(false, false);
+if (acc !== "full answer [S1]")
+  { console.error("persisted answer not restored: " + acc); process.exit(1) }
+if (calls.render.length !== 1 || calls.render[0].report.degraded !== true)
+  { console.error("render: " + JSON.stringify(calls.render)); process.exit(1) }
+if (degBadge.hidden !== false)
+  { console.error("degBadge not driven by restored report"); process.exit(1) }
+if (calls.appended.length !== 1 || bd.cleared !== 1)
+  { console.error("bubble/cites not rebuilt"); process.exit(1) }
+calls.api = 0;
+acc = await run(true, false);
+if (acc !== "partial text" || calls.api !== 0)
+  { console.error("refetched after a normal done frame"); process.exit(1) }
+acc = await run(false, true);
+if (calls.api !== 0)
+  { console.error("refetched after an error frame"); process.exit(1) }
+apiImpl = async () => { throw new Error("down") };
+acc = await run(false, false);
+if (!calls.toasts.some(m => String(m).includes("stream_dropped")))
+  { console.error("no drop toast on refetch failure"); process.exit(1) }
+apiImpl = async () => ({json: async () => ({messages: [{role: "user", body: "q"}]})});
+acc = await run(false, false);
+if (acc !== "partial text")
+  { console.error("partial clobbered when nothing persisted"); process.exit(1) }
+if (calls.toasts.length !== 2)
+  { console.error("toasts: " + calls.toasts.length); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
 
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
