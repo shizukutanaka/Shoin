@@ -1,6 +1,6 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.262 時点、2026-09-27 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.268 時点、2026-09-27 更新)
 
-shoin/ 15モジュール + 単一HTML UI・テスト913件・ドキュメント一式の精査結果。
+shoin/ 15モジュール + 単一HTML UI・テスト918件・ドキュメント一式の精査結果。
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
 v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位で残って
@@ -102,6 +102,21 @@ v0.1.0 時点の結論「設計判断(軽量・検証・日本語の3点集中)�
 ノートブック削除後にエクスポートリンクが陳腐化する欠陥(v0.2.179)。どちらも静的契約
 テストの死角(実行時の状態遷移)から見つかった、という点で短所#5 の記述を裏付ける
 具体例になっている。
+
+**v0.2.263-268 の要約**: 欠陥空間が実質的に枯渇した区間——再監査は
+`_check_embed_model_ok`・`_dispatch`・`overview_hits`・`loadNotebooks`・
+I18N双言語対称性(86/86一致)を含む全面で欠陥ゼロを確認し、主題は「動作未固定の
+UI機構をnode実行で構造的に封じる」へ移った。まず `health()` の fetch 失敗経路が
+`llm:false` と異なる表示(lamp・banner未更新)をしていた不誠実面を解消(v0.2.264——
+この区間唯一の実欠陥)。続いて質問候補チップ `refreshQuestions`(ガード3条件・
+ノートブック切替レース棄却・chip→入力充填)、`renderNotebook` の pendingRename
+(rename入力の再レンダ跨ぎstash/restore——activeElement検出と
+externalPendingRenameの2経路・幻PATCH防止・幽霊棄却)、`startSourceRename` の
+5分岐(Enter commit・sibling-blur skip・Escape取消・二重commitガード・
+空/未変更→reloadのみ)、`loadNotebooks`(curハイライト・削除後auto-open・
+confirm/promptガード)を連続でnode実行固定(v0.2.265-268)。これにより
+index.html の全多分岐経路——SSEリーダ・seal・studio・note・questions・
+rename・サイドバー——が動作テスト下に入った。
 
 **v0.2.253-262 の要約**(この台帳が v0.2.252 で止まっていたため追記): 主題は
 「自己矛盾と無言劣化の境界」をさらに一段深く閉じることだった。境界値の整合は
