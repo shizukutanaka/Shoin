@@ -1110,6 +1110,24 @@ console.log("ok")
         )
         self.assertIn('<meta name="shoin-lang" content="__SHOIN_LANG__">', html)
 
+    def test_no_html_injection_sinks(self) -> None:
+        """v0.2.288+: the UI renders every user/source/LLM string through
+        textContent/createElement — zero HTML-injection sinks exists by
+        construction today. Pin that property so a future handler can't
+        introduce innerHTML/insertAdjacentHTML/document.write/eval and turn a
+        notebook title or model answer into a stored-XSS vector."""
+        html = _html()
+        sinks = [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+            "new Function",
+        ]
+        found = [s for s in sinks if s in html]
+        self.assertEqual(found, [], f"HTML injection sink(s) in index.html: {found}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

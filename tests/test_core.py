@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.288")
+        self.assertEqual(VERSION, "0.2.289")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10683,6 +10683,16 @@ class TestResidualGuards(unittest.TestCase):
         ) + (root / "shoin" / "static" / "index.html").read_text(encoding="utf-8")
         untraced = [r for r in reqs if r not in corpus]
         self.assertEqual(untraced, [], f"REQ ids with no code/test trace: {untraced}")
+
+    def test_export_mime_and_ext_cover_all_formats(self) -> None:
+        """v0.2.288+: _h_export indexes _EXPORT_MIME/_EXPORT_EXT by fmt — adding
+        a format to export.FORMATS without its table entries turns export into
+        a 500 KeyError. The tables and FORMATS must stay in lockstep."""
+        from shoin.export import FORMATS
+        from shoin.server import _EXPORT_EXT, _EXPORT_MIME
+
+        self.assertEqual(set(FORMATS), set(_EXPORT_MIME), "mime table drift")
+        self.assertEqual(set(FORMATS), set(_EXPORT_EXT), "extension table drift")
 
 
 if __name__ == "__main__":
