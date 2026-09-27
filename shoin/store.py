@@ -429,7 +429,7 @@ class Store:
             current = version
         return current
 
-    # --- notebooks ---
+    # --- notebooks ---  (REQ-001: CRUD; delete cascades sources/notes/messages)
 
     def create_notebook(self, name: str) -> Notebook:
         name = name.strip()

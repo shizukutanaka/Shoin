@@ -1218,7 +1218,7 @@ def _sim(a: Hit, b: Hit) -> float:
 
 
 def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
-    """Maximal Marginal Relevance: relevance vs. redundancy trade-off."""
+    """REQ-106 — Maximal Marginal Relevance: relevance vs. redundancy trade-off."""
     pool = list(hits)
     selected: list[Hit] = []
     while pool and len(selected) < k:
