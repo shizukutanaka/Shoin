@@ -1453,6 +1453,72 @@ class SourceRenameCacheTest(unittest.TestCase):
         )
 
 
+class ReindexCacheTest(unittest.TestCase):
+    """POST /api/notebooks/{id}/reindex must invalidate the questions cache.
+    Reindex rebuilds every chunk's embedding under an unchanged source-id
+    fingerprint, so suggestions generated against the old retrieval substrate
+    would be served forever — the same eviction gap _h_src_refresh (v0.2.36)
+    and source rename already cover with an explicit pop."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "rx.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_reindex_invalidates_questions_cache(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "再索引キャッシュ"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("埋め込み再構築の対象文書。" * 50).encode(),
+            method="POST",
+            headers={"X-Filename": "rx.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        before = self.llm.chat_count
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        after_warm = self.llm.chat_count
+        self.assertEqual(after_warm, before + 1)  # one LLM call to warm the cache
+
+        status, _ = self._json("POST", f"/api/notebooks/{nb_id}/reindex", {})
+        self.assertEqual(status, 200)
+
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.llm.chat_count, after_warm + 1,
+            "reindex must invalidate the questions cache (one new LLM call)",
+        )
+
+
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
 
