@@ -788,6 +788,7 @@ class _Handler(BaseHTTPRequestHandler):
 
             parts: list[str] = []
             degraded = False
+            truncated = False
             client_gone = False
             try:
                 # spec.md STRIDE DoS control: serialize actual LLM generation so
@@ -798,6 +799,10 @@ class _Handler(BaseHTTPRequestHandler):
                     for token in self._stream_chat(build_messages(question, context, history)):
                         parts.append(token)
                         self._sse("delta", {"text": token})
+                    # Read last_finish_reason while still holding the lock — the
+                    # shared llm resets it at the start of every chat/stream call,
+                    # so reading after release races with the next queued request.
+                    truncated = getattr(self.llm, "last_finish_reason", None) == "length"
             except LLMError:
                 degraded = True
                 text = _degraded_text(hits)
@@ -829,7 +834,7 @@ class _Handler(BaseHTTPRequestHandler):
                 report["degraded"] = True
             # finish_reason "length" = the stream ended at MAX_TOKENS — surface
             # it like degraded so a clipped answer is not shown as complete.
-            if getattr(self.llm, "last_finish_reason", None) == "length":
+            if truncated:
                 report["truncated"] = True
             if not client_gone:
                 try:
