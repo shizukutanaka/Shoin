@@ -727,6 +727,52 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_health_failure_reflects_offline_and_recovers(self) -> None:
+        """v0.2.264 defect class: a failed /api/health fetch flipped window._llmOn
+        to false but left the lamp green and the banner hidden — the UI claimed
+        "LLM on" while internal state said off. Executes the real health() under
+        node: api() rejects, then succeeds with llm:true — asserts the lamp and
+        banner track both directions and the off→on transition re-fetches
+        question chips."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function health")
+        harness = """\
+const reg = {};
+function mkEl(){
+  const cls = new Set();
+  return {textContent:"", title:"", style:{},
+    classList:{toggle:(c,on)=>{on?cls.add(c):cls.delete(c)},
+               remove:c=>cls.delete(c), add:c=>cls.add(c), contains:c=>cls.has(c)}};
+}
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function t(k){ return k }
+let refetches = 0;
+function refreshQuestions(){ refetches++ }
+const window = {};
+let apiImpl = async () => ({ json: async () => ({ llm: true, model: "m", embed_model: "e" }) });
+async function api(path){ return apiImpl(path); }
+""" + fn + """
+await health();                                    // initial on (fires first refetch)
+if (!reg["#lamp"].classList.contains("on")) { console.error("lamp not on"); process.exit(1) }
+if (refetches !== 1) { console.error("first off->on did not refetch: " + refetches); process.exit(1) }
+apiImpl = async () => { throw new Error("net down") };
+await health();                                    // fetch failure
+if (window._llmOn !== false) { console.error("_llmOn not false after failure"); process.exit(1) }
+if (reg["#lamp"].classList.contains("on")) { console.error("lamp stayed green on failure"); process.exit(1) }
+if (reg["#banner"].style.display !== "block") { console.error("banner hidden on failure"); process.exit(1) }
+if (refetches !== 1) { console.error("failure refetched questions"); process.exit(1) }
+apiImpl = async () => ({ json: async () => ({ llm: true }) });
+await health();                                    // off->on recovery
+if (!window._llmOn) { console.error("_llmOn not restored"); process.exit(1) }
+if (reg["#banner"].style.display !== "none") { console.error("banner still shown after recovery"); process.exit(1) }
+if (refetches !== 2) { console.error("questions not refetched on off->on: " + refetches); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

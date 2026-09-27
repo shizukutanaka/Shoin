@@ -1153,7 +1153,17 @@ async function health(){
     // Re-fetch questions when LLM goes from off→on (e.g. first health check
     // completes after notebook was already loaded, or LLM restarts).
     if (!wasOn && j.llm) refreshQuestions();
-  }catch(_e){ window._llmOn=false; }
+  }catch(_e){
+    window._llmOn=false;
+    // Unreachable/invalid health response: the lamp must not keep claiming the
+    // LLM is on while _llmOn says otherwise — show the same offline state the
+    // !j.llm branch uses instead of leaving a stale green light.
+    $("#lamp").classList.remove("on");
+    $("#lampText").textContent = t("app.lamp.off");
+    const b = $("#banner");
+    b.style.display = "block";
+    b.textContent = t("banner.offline");
+  }
 }
 
 /* ---------- boot ---------- */
