@@ -305,6 +305,24 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(raw)["pages_failed"], 2)
 
+    def test_refresh_response_reports_pages_failed(self) -> None:
+        """v0.2.258: refresh of a URL-ingested PDF re-extracts the document and
+        can lose pages on the second pass — the response must carry the count
+        just like add/upload do, or the loss regresses to silent."""
+        import shoin.server as srv
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "refresh PDF"})
+        nb_id = nb["id"]
+        src = Source(id=1, notebook_id=nb_id, kind="pdf", title="paper.pdf",
+                     origin="https://x/paper.pdf", sha256="y", added_at="now")
+        fake = IndexResult(src, n_chunks=2, n_embedded=0, pages_failed=3)
+        with patch.object(srv, "refresh_source", return_value=fake):
+            status, body = self._json("POST", "/api/sources/1/refresh")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["pages_failed"], 3)
+
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
         (e.g. sqlite3.OperationalError: database is locked) must return HTTP 500

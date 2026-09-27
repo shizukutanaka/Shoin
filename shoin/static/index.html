@@ -586,7 +586,9 @@ function renderNotebook(){
             renameInput.onblur = null; renameInput.onkeydown = null;
           }
           ref.disabled = true; ref.textContent = "…";
-          try { await api(`/api/sources/${s.id}/refresh`,{method:"POST"}); toast(t("src.refresh.ok")); openNotebook(cur.id); }
+          try { const j = await (await api(`/api/sources/${s.id}/refresh`,{method:"POST"})).json();
+            toast(t("src.refresh.ok") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : ""));
+            openNotebook(cur.id); }
           catch(e){ toast(e.message); ref.disabled=false; ref.textContent="↻"; } };
         row.append(ref);
       }

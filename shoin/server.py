@@ -583,6 +583,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "source": {"id": result.source.id, "title": result.source.title},
                 "n_chunks": result.n_chunks,
                 "n_embedded": result.n_embedded,
+                # Same pages_failed surfacing as add/upload (v0.2.257): a URL
+                # source that IS a PDF re-extracts on refresh and can lose
+                # pages on the second pass too.
+                "pages_failed": result.pages_failed,
             },
             200,
         )

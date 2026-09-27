@@ -29,7 +29,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.257
+## Version History: v0.1.37 → v0.2.258
 
 ### v0.2.256 (2026-09-27)
 **Quality fix (HTML boilerplate exclusion)**: `html_to_text` indexed `<nav>`/`<footer>`/`<form>` chrome — menus, cookie notices, related-link lists — as document content, so navigation text was chunked, embedded, retrieved, and even cited. They are now skipped via `_skip_depth` (header/aside deliberately kept — articles use them for lead paragraphs and real sidebars). `nav`/`footer`/`form` join `_SKIP_TAG_BALANCE` so an unclosed opener degrades to keep-the-text instead of swallowing the rest of the page.
