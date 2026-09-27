@@ -1150,6 +1150,12 @@ class EvalTest(unittest.TestCase):
         self.assertAlmostEqual(d.d_recall, 1.0 - (2.0 / 3))  # shared: 2/3 → 3/3
         self.assertAlmostEqual(d.d_mrr, (2.0 / 3) - 0.5)     # shared: 1.5/3 → 2/3
         self.assertEqual(d.matched_questions, 3)
+        # CLI comparison rows print these matched-population means, not the
+        # report means — otherwise the row would contradict its own delta.
+        self.assertAlmostEqual(d.recall_before, 2.0 / 3)
+        self.assertAlmostEqual(d.recall_after, 1.0)
+        self.assertAlmostEqual(d.mrr_before, 0.5)
+        self.assertAlmostEqual(d.mrr_after, 2.0 / 3)
         moved = {cd.question for cd in d.case_deltas}
         self.assertEqual(moved, {"hit", "miss"})  # "same" unchanged → absent
         self.assertEqual(d.new_questions, ["fresh"])

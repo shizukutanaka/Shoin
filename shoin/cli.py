@@ -428,19 +428,23 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", str(exc)) from exc
         diff = diff_reports(base, rep)
         print(_t("eval.diff_header", f=str(args.diff)))
+        # The comparison rows print the means over the MATCHED questions — the
+        # same population the deltas were computed on. Printing the full-run
+        # means (base.recall / rep.recall) would show e.g. 0.500 → 1.000 next
+        # to (+0.000): two different populations labeled as one comparison.
         print(
             _t(
                 "eval.diff_recall",
-                old=f"{base.recall:.3f}",
-                new=f"{rep.recall:.3f}",
+                old=f"{diff.recall_before:.3f}",
+                new=f"{diff.recall_after:.3f}",
                 d=f"{diff.d_recall:+.3f}",
             )
         )
         print(
             _t(
                 "eval.diff_mrr",
-                old=f"{base.mrr:.3f}",
-                new=f"{rep.mrr:.3f}",
+                old=f"{diff.mrr_before:.3f}",
+                new=f"{diff.mrr_after:.3f}",
                 d=f"{diff.d_mrr:+.3f}",
             )
         )
