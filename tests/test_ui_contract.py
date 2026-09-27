@@ -1001,6 +1001,100 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_loadNotebooks_list_delete_and_rename_paths(self) -> None:
+        """v0.2.268: pin loadNotebooks' contract under node — rows render with
+        the current notebook highlighted and a S# count label; click/Enter
+        opens; delete-current clears `cur` and auto-opens the first remaining
+        notebook; delete requires confirm() and rename requires a non-blank
+        prompt() before any request fires."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function loadNotebooks")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], parent:null, className:"", value:"",
+  textContent:"", title:"", disabled:false, tabIndex:0,
+  append(...xs){ xs.forEach(x => { this.children.push(x); x.parent=this }) },
+  replaceChildren(...xs){ this.children=[]; xs.forEach(x => { this.children.push(x); x.parent=this }) },
+  setAttribute(n,v){ this["attr_"+n]=v },
+  onclick:null, onkeydown:null,
+  click(){ if(this.onclick) this.onclick({stopPropagation(){}}) },
+  press(k){ if(this.onkeydown) this.onkeydown({key:k, preventDefault(){}}) } }; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+function toast(){}
+function renderNotebook(){}
+let notebooks = [], cur = null, srcIndex = new Map();
+let calls = [], opens = [];
+async function api(path, o){ calls.push({path, o});
+  if (path === "/api/notebooks")
+    return {json: async()=>({notebooks: listNow})};
+  return {json: async()=>({})}; }
+function openNotebook(id){ opens.push(id) }
+let listNow = [{id:1, name:"A", counts:{sources:2}}, {id:3, name:"B", counts:{sources:0}}];
+let promptRet = null, confirmRet = true;
+function prompt(msg, def){ prompt.calls.push(def); return promptRet }
+prompt.calls = [];
+function confirm(msg){ return confirmRet }
+""" + fn + """
+// Render: two rows, current highlighted, count labels present.
+cur = { id: 3, name: "B" };
+await loadNotebooks();
+const lis = $("#nbList").children;
+if (lis.length !== 2) { console.error("row count " + lis.length); process.exit(1) }
+if (lis[0].className !== "" || lis[1].className !== "cur")
+  { console.error("highlight wrong: " + lis[0].className + "/" + lis[1].className); process.exit(1) }
+if (lis[0].children[1].text !== "2册")
+  { console.error("count label: " + lis[0].children[1].text); process.exit(1) }
+
+// Row click + Enter opens; Space opens too.
+lis[0].click(); lis[1].press("Enter"); lis[0].press(" ");
+if (JSON.stringify(opens) !== JSON.stringify([1,3,1]))
+  { console.error("open wiring: " + opens); process.exit(1) }
+
+// Rename: blank prompt -> no PATCH; valid -> PATCH + cur.name synced + reload.
+opens = []; calls = []; promptRet = "   ";
+lis[1].children[2].onclick({stopPropagation(){}});
+await new Promise(r => setTimeout(r, 0));
+if (calls.length !== 0) { console.error("blank rename sent a request"); process.exit(1) }
+promptRet = "B2";
+lis[1].children[2].onclick({stopPropagation(){}});
+await new Promise(r => setTimeout(r, 0));
+if (!calls.some(c => c.path === "/api/notebooks/3" && c.o.method === "PATCH"))
+  { console.error("rename PATCH missing: " + JSON.stringify(calls)); process.exit(1) }
+if (cur.name !== "B2") { console.error("cur.name not synced"); process.exit(1) }
+
+// Delete-current: confirm veto -> nothing; confirm -> DELETE + cur cleared +
+// auto-open the first remaining notebook.
+calls = []; opens = []; confirmRet = false;
+await loadNotebooks();
+const delBtn = $("#nbList").children[1].children[3];
+delBtn.onclick({stopPropagation(){}});
+await new Promise(r => setTimeout(r, 0));
+if (calls.some(c => c.o && c.o.method === "DELETE"))
+  { console.error("delete fired without confirm"); process.exit(1) }
+confirmRet = true; listNow = [{id:1, name:"A", counts:{sources:2}}];
+delBtn.onclick({stopPropagation(){}});
+await new Promise(r => setTimeout(r, 10));
+if (!calls.some(c => c.path === "/api/notebooks/3" && c.o.method === "DELETE"))
+  { console.error("DELETE missing"); process.exit(1) }
+if (cur !== null) { console.error("cur not cleared on delete"); process.exit(1) }
+if (opens[opens.length-1] !== 1)
+  { console.error("no auto-open after delete: " + opens); process.exit(1) }
+
+// Empty notebook list -> cur cleared + empty-state card rendered.
+listNow = []; cur = { id: 1 };
+await loadNotebooks();
+if (cur !== null) { console.error("cur kept on empty list"); process.exit(1) }
+if ($("#nbList").children[0].cls !== "empty")
+  { console.error("no empty state"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
