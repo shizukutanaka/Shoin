@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.255
+## Version History: v0.1.37 → v0.2.256
+
+### v0.2.256 (2026-09-27)
+**Quality fix (HTML boilerplate exclusion)**: `html_to_text` indexed `<nav>`/`<footer>`/`<form>` chrome — menus, cookie notices, related-link lists — as document content, so navigation text was chunked, embedded, retrieved, and even cited. They are now skipped via `_skip_depth` (header/aside deliberately kept — articles use them for lead paragraphs and real sidebars). `nav`/`footer`/`form` join `_SKIP_TAG_BALANCE` so an unclosed opener degrades to keep-the-text instead of swallowing the rest of the page.
 
 ### v0.2.255 (2026-09-27)
 **Bug fix (rename response echoes stored name)**: `PATCH /api/notebooks/{id}` returned the raw request `name` while `rename_notebook()` persisted `name.strip()` — the response reported a name the row never had. Same response-vs-stored class as v0.2.93's `_h_src_patch` title truncation; the handler now echoes the normalized value.

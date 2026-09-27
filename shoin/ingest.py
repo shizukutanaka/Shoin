@@ -34,9 +34,19 @@ _EXT_KIND = {
 _BLOCK_TAGS = frozenset(
     "p div br li ul ol h1 h2 h3 h4 h5 h6"
     " tr td th table caption thead tbody tfoot"
-    " section article header footer nav aside main"
+    " section article header aside main"
     " blockquote pre dd dt dl figure figcaption".split()
 )
+
+# Boilerplate chrome whose text is navigation chrome, not document content:
+# menus, cookie/related-link lists, and page footers get chunked, embedded,
+# and cited as if they were part of the source — the classic noise trafilatura
+# / readability-style extraction removes before retrieval. Skipping is done at
+# the parser level via _skip_depth, and _SKIP_TAG_BALANCE below neutralizes an
+# unclosed opener so a malformed <nav> can't swallow the rest of the page.
+# <header>/<aside> deliberately stay: articles use them for lead paragraphs
+# and substantive sidebars, not just boilerplate.
+_BOILERPLATE_TAGS = frozenset("nav footer form".split())
 
 
 class IngestError(Exception):
@@ -96,7 +106,7 @@ def _decode(data: bytes, charset: str | None = None) -> str:
 
 
 class _HTMLText(HTMLParser):
-    """Minimal stdlib HTML -> text extractor (skips script/style, keeps blocks)."""
+    """Minimal stdlib HTML -> text extractor (skips script/style and boilerplate, keeps blocks)."""
 
     # Remove "title" from Python's RCDATA_CONTENT_ELEMENTS so the tokenizer does
     # not enter raw-text mode on <title> — otherwise </noscript> (or any other tag)
@@ -115,7 +125,7 @@ class _HTMLText(HTMLParser):
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("script", "style", "noscript", "template"):
+        if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
             self._skip_depth += 1
         elif tag == "title" and not self._skip_depth:
             self._in_title = True
@@ -127,7 +137,7 @@ class _HTMLText(HTMLParser):
             self._in_title = False  # structural tag implies <title> was never properly closed
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style", "noscript", "template"):
+        if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag == "title":
             self._in_title = False
@@ -164,6 +174,13 @@ _SKIP_TAG_BALANCE = (
     # when it happens inside <body> instead.
     (re.compile(r"<noscript\b", re.I), re.compile(r"</noscript\s*>", re.I), "noscript"),
     (re.compile(r"<template\b", re.I), re.compile(r"</template\s*>", re.I), "template"),
+    # nav/footer/form are now skip-depth elements too (v0.2.256): an unclosed
+    # one would swallow the entire rest of the document, which is strictly
+    # worse than keeping its boilerplate text — the closer injection below
+    # degrades to the old keep-the-text behavior for malformed markup.
+    (re.compile(r"<nav\b", re.I), re.compile(r"</nav\s*>", re.I), "nav"),
+    (re.compile(r"<footer\b", re.I), re.compile(r"</footer\s*>", re.I), "footer"),
+    (re.compile(r"<form\b", re.I), re.compile(r"</form\s*>", re.I), "form"),
 )
 
 

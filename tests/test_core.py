@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.255")
+        self.assertEqual(VERSION, "0.2.256")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -1808,6 +1808,36 @@ class TestIngest(unittest.TestCase):
         # Crucially: adjacent cell values must NOT be run together
         self.assertNotIn("NameValue", text)
         self.assertNotIn("Alice42", text)
+
+    def test_html_boilerplate_tags_excluded(self) -> None:
+        """v0.2.256: nav/footer/form chrome must not be chunked, embedded, and
+        cited as document content — the boilerplate removal standard extractors
+        (trafilatura/readability) apply before retrieval. header/aside keep
+        their text: articles use them for lead paragraphs and real sidebars."""
+        html = (
+            "<html><head><title>T</title></head><body>"
+            "<nav><a>Home</a><a>MenuJunk</a></nav>"
+            "<main><p>実際の本文です。</p></main>"
+            "<aside>SidebarKept</aside>"
+            "<footer>CopyrightJunk 2024</footer>"
+            "<form><button>SubmitJunk</button></form>"
+            "</body></html>"
+        )
+        _, text = html_to_text(html)
+        self.assertIn("実際の本文", text)
+        self.assertIn("SidebarKept", text)
+        self.assertNotIn("MenuJunk", text)
+        self.assertNotIn("CopyrightJunk", text)
+        self.assertNotIn("SubmitJunk", text)
+
+    def test_html_unclosed_nav_does_not_swallow_rest(self) -> None:
+        """An unclosed <nav> must not skip_depth-swallow the rest of the page —
+        the balance pass closes it empty, degrading to keep-the-boilerplate
+        rather than lose-the-body."""
+        html = "<body><nav><a>SiteMenu</a><p>本文がnavの後に続く"
+        _, text = html_to_text(html)
+        self.assertIn("本文", text)
+        self.assertIn("SiteMenu", text)  # degradation keeps the boilerplate
 
     def test_html_semantic_tags_produce_newline_boundaries(self) -> None:
         """nav, aside, main, figure, figcaption, dd/dt must produce line breaks."""
