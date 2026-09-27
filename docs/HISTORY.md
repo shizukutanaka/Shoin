@@ -29,7 +29,52 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.283
+## Version History: v0.1.37 → v0.2.295
+
+### v0.2.295 (2026-09-27)
+**Guard + repair (history ledger self-heal)**: the per-version entries for v0.2.257-294 never landed in this file — the append step anchored on a `# Changelog` heading this file does not have, so it silently no-oped for 38 versions while the header kept advancing. Root cause recorded; the versions are backfilled below (v0.2.257-294 as a consolidated entry), the header is corrected, and a guard test now asserts `### v{VERSION}` exists in this file so the drift can never recur silently. Audit-clean surfaces this cycle: config.json value typing, upload filename sanitization, button in-flight guards, `add` per-target error isolation. Plus a new invariant pinned: every `SHOIN_*` env var read by code must be documented in README.md.
+
+### v0.2.257-294 (2026-09-27, consolidated backfill)
+**Ledger repair**: these 38 versions were committed (tests, code, and PRs #118-164 carry the full record) but their entries silently failed to land here — recorded as one consolidated list rather than rewritten as fake individual entries. Per-version detail lives in the commit messages and PR bodies.
+
+- v0.2.257: surface partial PDF extraction via `pages_failed` end-to-end
+- v0.2.258: carry `pages_failed` through the refresh path
+- v0.2.259: normalize LLM content fields instead of `str()`-coercing them
+- v0.2.260: drop unanswerable and duplicate suggested questions
+- v0.2.261: score 0.0 on embedding dimension mismatch
+- v0.2.262: close the report guard's missing keys
+- v0.2.263: sync the product-review ledger to v0.2.262
+- v0.2.264: reflect health-check failure in the lamp and banner
+- v0.2.265: pin `refreshQuestions` chips/guards/race under node
+- v0.2.266: pin `renderNotebook` in-progress rename preservation under node
+- v0.2.267: pin `startSourceRename` commit/cancel paths under node
+- v0.2.268: pin `loadNotebooks` list/delete/rename paths under node
+- v0.2.269: sync the product-review ledger to v0.2.268
+- v0.2.270: cover cli.py eval/serve/interrupt error paths
+- v0.2.271: cover the `build_context` SSE failure tail
+- v0.2.272: pin the search.py coverage tail
+- v0.2.273: pin the citation.py coverage tail
+- v0.2.274: close the last coverable citation.py tails
+- v0.2.275: cover the cli.py flag surface
+- v0.2.276: sync the product-review ledger to v0.2.275
+- v0.2.277: pin the remaining reachable guard tails
+- v0.2.278: sync spec.md with the implementation
+- v0.2.279: correct the README serve/subcommand claims
+- v0.2.280: pin server-side i18n parity
+- v0.2.281: ban `assert` in the package (-O-safe lock-retry tail)
+- v0.2.282: bound the spec search-latency claim with a measured envelope
+- v0.2.283: sync the product-review ledger to v0.2.282
+- v0.2.284: capture `last_finish_reason` under `generation_lock` (SSE race fix)
+- v0.2.285: send `Cache-Control: no-store` on every response
+- v0.2.286: reject whitespace-only questions in `cli ask` (API parity)
+- v0.2.287: trace every spec REQ-* id to code (guard test)
+- v0.2.288: run the detect-secrets gate in verify.sh too
+- v0.2.289: pin the no-HTML-sinks and export-table invariants
+- v0.2.290: track running token count in chunk merge loops (84x faster on newline-dense input)
+- v0.2.291: sync the product-review ledger to v0.2.290
+- v0.2.292: range-check numeric CLI flags at parse time (`-k >= 1`, `--port 0-65535`)
+- v0.2.293: range-check `SHOIN_PORT` env (falls back to default outside 0-65535)
+- v0.2.294: pin package-data glob coverage for `shoin/static`
 
 ### v0.2.256 (2026-09-27)
 **Quality fix (HTML boilerplate exclusion)**: `html_to_text` indexed `<nav>`/`<footer>`/`<form>` chrome — menus, cookie notices, related-link lists — as document content, so navigation text was chunked, embedded, retrieved, and even cited. They are now skipped via `_skip_depth` (header/aside deliberately kept — articles use them for lead paragraphs and real sidebars). `nav`/`footer`/`form` join `_SKIP_TAG_BALANCE` so an unclosed opener degrades to keep-the-text instead of swallowing the rest of the page.

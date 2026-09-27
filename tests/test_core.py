@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.294")
+        self.assertEqual(VERSION, "0.2.295")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10780,6 +10780,39 @@ class TestResidualGuards(unittest.TestCase):
                 any(fnmatch.fnmatchcase(f"static/{f.name}", g) for g in globs),
                 f"{f.name} not covered by package-data globs {globs}",
             )
+
+    def test_every_shoin_env_var_is_documented_in_readme(self) -> None:
+        """v0.2.294+: every SHOIN_* key read by code must appear in README.md —
+        an undocumented env var is a feature users cannot discover, and a
+        renamed var left in the docs points at a setting that does nothing."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        keys: set[str] = set()
+        for f in root.glob("shoin/*.py"):
+            keys.update(re.findall(r"SHOIN_[A-Z_]+", f.read_text(encoding="utf-8")))
+        keys = {k.rstrip("_") for k in keys if len(k) > len("SHOIN_")}
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        missing = [k for k in keys if k not in readme]
+        self.assertEqual(missing, [], f"env vars absent from README: {missing}")
+
+    def test_history_md_records_current_version(self) -> None:
+        """v0.2.295: the version-bump ritual silently stopped landing entries —
+        the append step anchored on a `# Changelog` heading HISTORY.md does not
+        have, so 38 versions (v0.2.257-294) no-oped while the header advanced.
+        Pin the contract: this file must contain a `### v{VERSION}` entry."""
+        from pathlib import Path
+
+        from shoin.config import VERSION
+
+        root = Path(__file__).resolve().parent.parent
+        history = (root / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"### v{VERSION}",
+            history,
+            "HISTORY.md has no entry for the current version — the bump ritual dropped it",
+        )
 
 
 if __name__ == "__main__":
