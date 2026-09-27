@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import math
 import os
 import socket
@@ -60,7 +61,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.299")
+        self.assertEqual(VERSION, "0.2.300")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10908,6 +10909,34 @@ class TestResidualGuards(unittest.TestCase):
                     gate_scoped,
                     f"{d.name}/ holds .py files outside the mypy/coverage gate scope",
                 )
+
+    def test_gitignore_covers_sqlite_sidecars_and_env_variants(self) -> None:
+        """v0.2.300: .gitignore listed `*.sqlite3` but not the WAL sidecars
+        (`shoin.sqlite3-wal`/`-shm`/`-journal`) or `.env.*` variants. A
+        `git add -A` in a checkout where Shoin ran with `--db ./x.sqlite3`
+        would commit the private DB's live sidecars — the same privacy
+        surface the file-permission fix (v0.2.296) hardened on disk.
+        Apply the ignore list via fnmatch, matching gitignore glob
+        semantics for the unanchored `*` patterns this file uses."""
+        root = Path(__file__).resolve().parent.parent
+        pats = [
+            line.strip()
+            for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+        def ignored(name: str) -> bool:
+            return any(fnmatch.fnmatch(name, p) for p in pats)
+
+        for name in (
+            "shoin.sqlite3",
+            "shoin.sqlite3-wal",
+            "shoin.sqlite3-shm",
+            "shoin.sqlite3-journal",
+            ".env",
+            ".env.local",
+        ):
+            self.assertTrue(ignored(name), f"{name} is committable")
 
 
 if __name__ == "__main__":

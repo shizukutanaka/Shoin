@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.299
+## Version History: v0.1.37 → v0.2.300
+
+### v0.2.300 (2026-09-27)
+
+- .gitignore: cover SQLite WAL/journal sidecars (`*.sqlite3-*`) and `.env.*`
+  variants — a `git add -A` in a checkout running `shoin --db ./x.sqlite3`
+  previously would have committed the private DB's live sidecars.
+- tests: pin the sidecar/env coverage by applying .gitignore via fnmatch
+  (same unanchored `*` semantics git uses for these patterns).
+- audit: every `except Exception`/`pass`/`contextlib.suppress` site in
+  shoin/ verified as a documented, intentional degradation path — no bare
+  excepts, no silent swallowing.
 
 ### v0.2.299 (2026-09-27)
 
