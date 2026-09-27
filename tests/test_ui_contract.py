@@ -612,6 +612,69 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_open_notebook_drops_out_of_order_responses(self) -> None:
+        """v0.2.249: openNotebook() resolves races by sequence. Clicking
+        notebook A then B used to be last-*write*-wins: if A's slower response
+        landed after B's, cur ended up on A — the pane shows the notebook the
+        user did not select last. The _nbSeq guard (same shape as _sealSeq)
+        makes the newest call win and discards stale resolves. Executes the
+        real function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "async function openNotebook")
+        except ValueError:
+            self.fail("no openNotebook function in index.html")
+        harness = (
+            """\
+let _nbSeq = 0;
+let cur = null;
+const calls = {rendered: [], loaded: [], toasts: []};
+function renderNotebook(){ calls.rendered.push(cur && cur.id) }
+function loadNotebooks(){ calls.loaded.push(cur && cur.id) }
+function toast(m){ calls.toasts.push(String(m)) }
+const pending = {};
+function api(url){ return new Promise((res, rej) => { pending[url] = {res, rej} }) }
+const tick = () => new Promise(r => setTimeout(r, 0));
+const nbUrl = id => `/api/notebooks/${id}`;
+"""
+            + block
+            + """
+async function main(){
+  // Out-of-order resolve: B resolves first, A lands second — cur must stay B.
+  openNotebook(1); openNotebook(2);
+  pending[nbUrl(2)].res({json: async () => ({id: 2})});
+  await tick();
+  if (!cur || cur.id !== 2) throw new Error("latest selection lost");
+  pending[nbUrl(1)].res({json: async () => ({id: 1})});
+  await tick();
+  if (cur.id !== 2) throw new Error("stale response overwrote newer selection: " + cur.id);
+  // A lone call still opens normally.
+  openNotebook(3);
+  pending[nbUrl(3)].res({json: async () => ({id: 3})});
+  await tick();
+  if (cur.id !== 3) throw new Error("normal open broken: " + cur.id);
+  // A stale failure must not toast (the user already moved on); a fresh one must.
+  openNotebook(4); openNotebook(5);
+  pending[nbUrl(5)].res({json: async () => ({id: 5})});
+  await tick();
+  pending[nbUrl(4)].rej(new Error("old-failure"));
+  await tick();
+  if (calls.toasts.length) throw new Error("stale error toasted");
+  openNotebook(6);
+  pending[nbUrl(6)].rej(new Error("fresh-failure"));
+  await tick();
+  if (!calls.toasts.some(m => m.includes("fresh-failure")))
+    throw new Error("fresh error not toasted");
+  console.log("ok")
+}
+main().catch(e => { console.error(e.message || e); process.exit(1) })
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

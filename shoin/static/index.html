@@ -446,11 +446,18 @@ async function loadNotebooks(){
     ul.append(e0);
   } else if (!cur){ openNotebook(notebooks[0].id); }
 }
+// Requests can resolve out of order (click notebook A, then B; B's response
+// arrives first) — last-write-wins would then leave the user looking at the
+// notebook they did NOT select last.  Same _sealSeq-style guard openSeal uses
+// for its async excerpt probes: the newest call wins; stale resolves discard.
+let _nbSeq = 0;
 async function openNotebook(id){
+  const seq = ++_nbSeq;
   try{
     const j = await (await api(`/api/notebooks/${id}`)).json();
+    if (seq !== _nbSeq) return;
     cur = j; renderNotebook(); loadNotebooks();
-  }catch(e){ toast(e.message); }
+  }catch(e){ if (seq === _nbSeq) toast(e.message); }
 }
 // Enters inline-rename mode for a source row. Factored out of the dblclick
 // handler so renderNotebook() can also call it to RESTORE an in-progress,
