@@ -517,7 +517,14 @@ def expand_query(question: str, history: list[Message]) -> str:
     if len(question) >= 30:
         return question
     prev = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
-    return f"{prev} {question}" if prev else question
+    if not prev:
+        return question
+    # The expanded string feeds the FTS5 OR-expression directly, so it must
+    # respect the same MAX_QUESTION_LEN bound the raw question was validated
+    # against — otherwise a max-length prior turn makes a short follow-up the
+    # pathological query the limit exists to prevent. Truncate the prepended
+    # context, never the current question itself (it is the actual intent).
+    return f"{prev[: MAX_QUESTION_LEN - len(question) - 1]} {question}"
 
 
 def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:

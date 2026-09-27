@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.253
+## Version History: v0.1.37 → v0.2.254
+
+### v0.2.254 (2026-09-27)
+**Bug fix (query expansion bound)**: `expand_query` prepended the previous user turn (up to MAX_QUESTION_LEN chars) to a short follow-up, so the expanded retrieval query could reach ~2× the validated limit — exactly the pathological FTS5 OR-expression length the limit exists to prevent, on the very path expansion targets. The prepended context is now truncated to `MAX_QUESTION_LEN - len(question) - 1`; the current question itself is never cut. Includes a Devin Review follow-up on the eval-diff: duplicate questions now pair occurrence-by-occurrence (no phantom delta on identical runs), and `EvalDiff` exposes matched-population means the CLI comparison rows print.
 
 ### v0.2.253 (2026-09-27)
 **Docs (product-review ledger sync to v0.2.252)**: the review ledger was 21 versions stale (v0.2.231). Synced the header/test count (901), extended weakness #5 (browser-test gap) with the now-generalized node-run behavioral test coverage — reportBadges flag matrix, openSeal excerpt disambiguation, SSE-drop recovery, openNotebook ordering, renderChatHistory disclosure — and added a "v0.2.233-252 の要約" paragraph covering the interval's themes: badge-chain unification, LIKE-pool ordering, negation word boundaries, stopword needles, truncated/degraded surfacing, SSE liveness, sequence guards, Content-Encoding decode, payload bounding, the embed LRU, and the eval-diff honesty fix.
