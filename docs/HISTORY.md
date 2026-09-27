@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.295
+## Version History: v0.1.37 → v0.2.296
+
+### v0.2.296 (2026-09-27)
+
+- **Store.__init__**: the SQLite DB was created with umask-derived permissions (644) inside a 755 data dir — private documents and chat history were world-readable to other users on a shared system. The DB is now pre-created `0600` (O_CREAT only sets the mode for new files) and, after migration, the DB plus any `-wal`/`-shm` sidecars are tightened to `0600` and the app's own `data_dir()` to `0700` — repairing existing installs. A `--db` path inside a foreign directory tightens only the file, never the directory.
+- New regression test pins the permission contract and the foreign-dir rule.
 
 ### v0.2.295 (2026-09-27)
 **Guard + repair (history ledger self-heal)**: the per-version entries for v0.2.257-294 never landed in this file — the append step anchored on a `# Changelog` heading this file does not have, so it silently no-oped for 38 versions while the header kept advancing. Root cause recorded; the versions are backfilled below (v0.2.257-294 as a consolidated entry), the header is corrected, and a guard test now asserts `### v{VERSION}` exists in this file so the drift can never recur silently. Audit-clean surfaces this cycle: config.json value typing, upload filename sanitization, button in-flight guards, `add` per-target error isolation. Plus a new invariant pinned: every `SHOIN_*` env var read by code must be documented in README.md.

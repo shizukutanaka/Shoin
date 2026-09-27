@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import socket
 import sqlite3
 import sys
@@ -59,7 +60,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.295")
+        self.assertEqual(VERSION, "0.2.296")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10813,6 +10814,42 @@ class TestResidualGuards(unittest.TestCase):
             history,
             "HISTORY.md has no entry for the current version — the bump ritual dropped it",
         )
+
+    @unittest.skipIf(os.name != "posix", "POSIX file modes")
+    def test_db_file_and_data_dir_permissions_are_private(self) -> None:
+        """v0.2.296: the DB holds private documents and chat history but was
+        created umask-readable (644) inside a 755 data dir — world-readable on
+        any shared system. Pin: DB file 0600, app's own data dir 0700, and
+        pre-existing -wal/-shm sidecars tightened; a foreign --db directory
+        must NOT be chmod'ed (only its file)."""
+        import os
+        import stat
+
+        from shoin.store import Store
+
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            db = data / "shoin.sqlite3"
+            data.mkdir(mode=0o755)
+            os.chmod(data, 0o755)
+            # Simulate a legacy install: a world-readable DB file.
+            db.write_bytes(b"")
+            os.chmod(db, 0o644)
+            foreign = Path(tmp) / "foreign"
+            foreign.mkdir(mode=0o755)
+            os.chmod(foreign, 0o755)
+            fdb = foreign / "other.db"
+            with patch.dict(os.environ, {"SHOIN_DATA_DIR": str(data)}):
+                # Assert inside the with-block: SQLite checkpoints and removes
+                # the -wal sidecar on close, so it only exists while open.
+                with Store(db):
+                    self.assertEqual(mode(data), 0o700)
+                    self.assertEqual(mode(db), 0o600)
+                    self.assertEqual(mode(data / "shoin.sqlite3-wal"), 0o600)
+                with Store(fdb):
+                    self.assertEqual(mode(fdb), 0o600)
+                    self.assertEqual(mode(foreign), 0o755)
 
 
 if __name__ == "__main__":

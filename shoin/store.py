@@ -7,8 +7,10 @@ that CJK text is searchable without external tokenizers (SQLite >= 3.34).
 from __future__ import annotations
 
 import array
+import contextlib
 import math
 import operator
+import os
 import sqlite3
 import time
 from collections.abc import Callable
@@ -18,7 +20,7 @@ from pathlib import Path
 from typing import Any, TypeVar, TypedDict
 
 from .chunk import _MAX_CONTEXT_CHARS
-from .config import MAX_NAME_LEN, MAX_TITLE_LEN
+from .config import MAX_NAME_LEN, MAX_TITLE_LEN, data_dir
 
 _T = TypeVar("_T")
 
@@ -330,7 +332,13 @@ class Store:
 
     def __init__(self, path: Path | str = ":memory:") -> None:
         if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            db_file = Path(path)
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            # Pre-create at 0600 so the DB is born private: it holds the user's
+            # documents and chat history, and would otherwise sit umask-readable
+            # (644) to other users on a shared system until the chmod below.
+            fd = os.open(db_file, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         # busy_timeout MUST be set before any statement that can block on a lock —
@@ -348,6 +356,17 @@ class Store:
         # that residual race; PRAGMA journal_mode is idempotent to re-run.
         _retry_on_lock(lambda: self.conn.execute("PRAGMA journal_mode = WAL"))
         self.migrate()
+        if path != ":memory:":
+            # Repair permissions on existing installs too: the data dir itself
+            # is tightened only when it is the app's own (a --db path inside a
+            # foreign directory tightens the file but never that directory).
+            # SQLite already gives -wal/-shm sidecars the DB file's mode; the
+            # glob covers sidecars and DBs left world-readable before this fix.
+            if db_file.parent == data_dir():
+                os.chmod(db_file.parent, 0o700)
+            for f in db_file.parent.glob(db_file.name + "*"):
+                with contextlib.suppress(OSError):
+                    os.chmod(f, 0o600)
 
     def close(self) -> None:
         self.conn.close()
