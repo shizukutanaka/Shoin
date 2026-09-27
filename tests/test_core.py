@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.293")
+        self.assertEqual(VERSION, "0.2.294")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10760,6 +10760,26 @@ class TestResidualGuards(unittest.TestCase):
 
         self.assertEqual(set(FORMATS), set(_EXPORT_MIME), "mime table drift")
         self.assertEqual(set(FORMATS), set(_EXPORT_EXT), "extension table drift")
+
+    def test_every_static_asset_is_declared_package_data(self) -> None:
+        """v0.2.293+: the wheel ships static/ only via pyproject's
+        [tool.setuptools.package-data] globs — a new asset unmatched by them
+        is silently absent from installed builds (shoin serve then 404s the
+        UI). Pin per-file glob coverage so adding e.g. a .css under static/
+        without extending the glob fails the suite."""
+        import fnmatch
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        globs: list[str] = data["tool"]["setuptools"]["package-data"]["shoin"]
+        static_dir = root / "shoin" / "static"
+        for f in sorted(static_dir.iterdir()):
+            self.assertTrue(
+                any(fnmatch.fnmatchcase(f"static/{f.name}", g) for g in globs),
+                f"{f.name} not covered by package-data globs {globs}",
+            )
 
 
 if __name__ == "__main__":
