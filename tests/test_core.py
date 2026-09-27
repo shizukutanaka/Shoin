@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.251")
+        self.assertEqual(VERSION, "0.2.252")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10030,6 +10030,85 @@ class TestQueryVectorCache(unittest.TestCase):
         llm.embedding_model = ""
         self.assertIsNone(_query_vector(llm, "q"))
         self.assertEqual(llm.calls, 0)
+
+
+class TestEvalDiff(unittest.TestCase):
+    """diff_reports aggregate deltas must compare the SHARED questions only.
+
+    The eval tool exists to answer "did this change help retrieval". Comparing
+    the raw report means when the case file was edited between runs folds
+    case-set edits into the score — dropping a hard case reads as an
+    improvement that never happened (or vice versa). The per-case deltas and
+    new/dropped lists were already correct; only the aggregate lied."""
+
+    def test_case_set_edits_do_not_masquerade_as_score_changes(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[
+                CaseResult("q1", [1], [1], 1.0, 1.0),  # easy — dropped below
+                CaseResult("q2", [2], [3], 0.0, 0.0),
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        after = EvalReport(
+            cases=[
+                CaseResult("q2", [2], [3], 0.0, 0.0),  # unchanged
+                CaseResult("q3", [3], [3], 1.0, 1.0),  # new — not in baseline
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        diff = diff_reports(before, after)
+        # q2 is identical in both runs — the honest delta is 0. The raw-mean
+        # comparison (0.5 - 0.5) coincidentally agrees here; see the next test
+        # for a case-set edit that would have fabricated a delta.
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(diff.new_questions, ["q3"])
+        self.assertEqual(diff.dropped_questions, ["q1"])
+        self.assertEqual(diff.case_deltas, [])
+
+    def test_dropped_hard_case_cannot_fabricate_regression_or_gain(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[
+                CaseResult("q1", [1], [1], 1.0, 1.0),  # perfect case, dropped
+                CaseResult("q2", [2], [3], 0.0, 0.0),  # hard case, kept+improved
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        after = EvalReport(
+            cases=[CaseResult("q2", [2], [2], 1.0, 1.0)],  # q2 improved to perfect
+            recall=1.0,
+            mrr=1.0,
+        )
+        diff = diff_reports(before, after)
+        # Raw means would report 1.0 - 0.5 = +0.5, but q2 went 0 → 1.0, so the
+        # true shared-question delta is +1.0.
+        self.assertAlmostEqual(diff.d_recall, 1.0)
+        self.assertAlmostEqual(diff.d_mrr, 1.0)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(len(diff.case_deltas), 1)
+        self.assertEqual(diff.case_deltas[0].question, "q2")
+
+    def test_no_shared_questions_reports_zero_delta(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(cases=[CaseResult("a", [1], [1], 1.0, 1.0)], recall=1.0, mrr=1.0)
+        after = EvalReport(cases=[CaseResult("b", [2], [9], 0.0, 0.0)], recall=0.0, mrr=0.0)
+        diff = diff_reports(before, after)
+        # Nothing comparable exists — 0 is the only honest delta (the -1.0 the
+        # raw means would claim is a case-set artifact, not a regression).
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 0)
+        self.assertEqual(diff.dropped_questions, ["a"])
+        self.assertEqual(diff.new_questions, ["b"])
 
 
 if __name__ == "__main__":

@@ -1144,8 +1144,12 @@ class EvalTest(unittest.TestCase):
             mrr=0.75,
         )
         d = diff_reports(before, after)
-        self.assertAlmostEqual(d.d_recall, 0.25)
-        self.assertAlmostEqual(d.d_mrr, 0.125)
+        # v0.2.252: aggregate deltas compare the SHARED cases ({hit, miss, same})
+        # only — the raw means (1.0 - 0.75) would fold the dropped perfect
+        # "gone" and the new perfect "fresh" into the score change.
+        self.assertAlmostEqual(d.d_recall, 1.0 - (2.0 / 3))  # shared: 2/3 → 3/3
+        self.assertAlmostEqual(d.d_mrr, (2.0 / 3) - 0.5)     # shared: 1.5/3 → 2/3
+        self.assertEqual(d.matched_questions, 3)
         moved = {cd.question for cd in d.case_deltas}
         self.assertEqual(moved, {"hit", "miss"})  # "same" unchanged → absent
         self.assertEqual(d.new_questions, ["fresh"])

@@ -72,6 +72,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
         "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
         "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_matched": "  (差分は共通 {n} 件で計算)",
         "eval.diff_new": "  新規ケース {n}件 (ベースライン無し)",
         "eval.diff_dropped": "  削除ケース {n}件 (現実行に無し)",
         "eval.diff_k_warn": "  注意: ベースラインは k={bk} で計測 (現実行 k={k}) — 同条件での比較ではありません",
@@ -132,6 +133,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
         "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
         "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_matched": "  (deltas computed over {n} shared questions)",
         "eval.diff_new": "  {n} new case(s) (no baseline entry)",
         "eval.diff_dropped": "  {n} case(s) dropped (absent in this run)",
         "eval.diff_k_warn": "  note: baseline was measured at k={bk} (current k={k}) — not a like-for-like comparison",
@@ -455,6 +457,8 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
                     mn=f"{cd.rr_after:.3f}",
                 )
             )
+        if diff.new_questions or diff.dropped_questions:
+            print(_t("eval.diff_matched", n=str(diff.matched_questions)))
         if diff.new_questions:
             print(_t("eval.diff_new", n=str(len(diff.new_questions))))
         if diff.dropped_questions:

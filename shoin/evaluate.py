@@ -77,6 +77,10 @@ class EvalDiff:
     case_deltas: list[CaseDelta] = field(default_factory=list)
     new_questions: list[str] = field(default_factory=list)
     dropped_questions: list[str] = field(default_factory=list)
+    # How many questions the aggregate deltas were computed over. When the case
+    # file was edited between runs this is < len(cases) on both sides — the
+    # context a reader needs to trust d_recall/d_mrr.
+    matched_questions: int = 0
 
 
 def parse_cases(data: object) -> list[EvalCase]:
@@ -215,7 +219,9 @@ def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
     Cases match by question text — the case file may be reordered or edited
     between runs, and index-matching would mislabel edits as regressions. On
     duplicate questions the last occurrence wins; eval case files are authored
-    per-question, so duplicates are already a data smell.
+    per-question, so duplicates are already a data smell. Aggregate deltas use
+    only the questions present in BOTH runs; new/dropped questions are listed
+    separately instead of distorting the score change.
     """
     by_q_before = {c.question: c for c in before.cases}
     by_q_after = {c.question: c for c in after.cases}
@@ -234,10 +240,27 @@ def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
                     c.reciprocal_rank,
                 )
             )
+    # Aggregate deltas are computed over the SHARED questions only. Comparing
+    # the raw report means (after.recall - before.recall) would fold case-set
+    # edits into the score: dropping a hard case between runs would read as a
+    # retrieval improvement that never happened — the measurement lying about
+    # exactly the question the tool exists to answer.
+    matched_old = [by_q_before[c.question] for c in after.cases if c.question in by_q_before]
+    matched_new = [c for c in after.cases if c.question in by_q_before]
+    n_matched = len(matched_new)
+    d_recall = d_mrr = 0.0
+    if n_matched:
+        d_recall = sum(c.recall for c in matched_new) / n_matched - sum(
+            c.recall for c in matched_old
+        ) / n_matched
+        d_mrr = sum(c.reciprocal_rank for c in matched_new) / n_matched - sum(
+            c.reciprocal_rank for c in matched_old
+        ) / n_matched
     return EvalDiff(
-        d_recall=after.recall - before.recall,
-        d_mrr=after.mrr - before.mrr,
+        d_recall=d_recall,
+        d_mrr=d_mrr,
         case_deltas=deltas,
+        matched_questions=n_matched,
         new_questions=[c.question for c in after.cases if c.question not in by_q_before],
         dropped_questions=[
             c.question for c in before.cases if c.question not in by_q_after
