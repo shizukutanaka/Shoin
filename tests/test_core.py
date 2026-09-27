@@ -59,7 +59,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.286")
+        self.assertEqual(VERSION, "0.2.287")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10665,6 +10665,24 @@ class TestResidualGuards(unittest.TestCase):
             tree = ast.parse(f.read_text(encoding="utf-8"))
             sites = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assert)]
             self.assertEqual(sites, [], f"{f.name}: assert at {sites}")
+
+    def test_spec_requirements_are_traced_to_code(self) -> None:
+        """v0.2.287: every REQ-* row in docs/spec.md must be referenced by the
+        implementation or a test — a spec requirement nothing cites is either
+        unimplemented or silently drifting (REQ-001/007/105/106 were the four
+        unreferenced; now tagged at their entry points)."""
+        import re
+
+        root = Path(__file__).resolve().parent.parent
+        spec = (root / "docs" / "spec.md").read_text(encoding="utf-8")
+        reqs = sorted(set(re.findall(r"REQ-\d+", spec)))
+        self.assertGreater(len(reqs), 0, "spec.md lost its REQ-* requirements table")
+        corpus = "\n".join(
+            f.read_text(encoding="utf-8")
+            for f in list(root.glob("shoin/*.py")) + list(root.glob("tests/*.py"))
+        ) + (root / "shoin" / "static" / "index.html").read_text(encoding="utf-8")
+        untraced = [r for r in reqs if r not in corpus]
+        self.assertEqual(untraced, [], f"REQ ids with no code/test trace: {untraced}")
 
 
 if __name__ == "__main__":

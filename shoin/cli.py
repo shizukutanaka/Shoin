@@ -179,6 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default=None, help="データベースパス(既定: SHOIN_DATA_DIR)")
     sub = p.add_subparsers(dest="command", required=True)
 
+    # REQ-105: the full subcommand surface — UI-free operation of every feature
     nb = sub.add_parser("notebook", help="ノートブック管理")
     nbsub = nb.add_subparsers(dest="action", required=True)
     nb_new = nbsub.add_parser("new", help="作成")
