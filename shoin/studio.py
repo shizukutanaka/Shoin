@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from .citation import CitationReport, looks_like_question, make_report
-from .config import ui_lang
+from .config import MAX_QUESTION_LEN, ui_lang
 from .llm import LLMError
 from .qa import _LIST_PREFIX_RE, _t as _qa_t, ChatBackend, build_context
 from .search import Hit
@@ -229,9 +229,22 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     # Question detection is shared with citation.py's uncited_sentences() via
     # looks_like_question() — see that function's docstring for why this used to
     # be two independently-drifting copies of the same heuristic.
+    # Two filters beyond that, both user-visible defects when absent:
+    # - > MAX_QUESTION_LEN: the /ask endpoint rejects questions that long, so
+    #   the app would suggest a question it cannot itself answer (a degenerate
+    #   LLM can emit a multi-KB runaway line that becomes a huge cached chip).
+    # - duplicates: repetition-prone local LLMs can emit the same line twice,
+    #   rendering identical suggestion chips.
     questions: list[str] = []
+    seen: set[str] = set()
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
-        if len(q) >= 2 and looks_like_question(q):
+        if (
+            len(q) >= 2
+            and len(q) <= MAX_QUESTION_LEN
+            and looks_like_question(q)
+            and q not in seen
+        ):
+            seen.add(q)
             questions.append(q)
     return questions[:n]

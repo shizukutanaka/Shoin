@@ -132,6 +132,21 @@ class StudioTest(unittest.TestCase):
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["目的は何か?", "仕組みはどう動きますか?", "制約は何か"])
 
+    def test_suggest_questions_drops_unanswerable_and_duplicate(self) -> None:
+        """v0.2.259+: a suggested question must be askable — /ask rejects
+        questions over MAX_QUESTION_LEN, so a runaway LLM line that long would
+        be a chip the app itself cannot answer. Duplicate lines must not
+        render as identical chips."""
+        from shoin.config import MAX_QUESTION_LEN
+
+        llm = FakeLLM(
+            reply="良い質問か？\n良い質問か？\n"
+            + "長い質問" * MAX_QUESTION_LEN + "？\n"
+            + "別の質問か？"
+        )
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["良い質問か?", "別の質問か?"])
+
     def test_suggest_questions_accepts_ka_with_trailing_period(self) -> None:
         """LLMs often append 。 even with 'no decoration' instructions — must not drop."""
         llm = FakeLLM(reply="この書院はどう動くのか。\n内容について説明します。")
