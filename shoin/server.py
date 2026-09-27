@@ -651,6 +651,13 @@ class _Handler(BaseHTTPRequestHandler):
         change without dropping to a terminal (Plan.md REQ-103: CLI/Web parity)."""
         with Store(self.db) as store:
             n_embedded, n_total = reindex_notebook(store, self.llm, nb_id)
+        # Reindex changes every chunk's embedding, so overview_hits() can surface
+        # different chunks — cached suggestions were generated against the old
+        # retrieval substrate. The fingerprint (source-id tuple) is unchanged by
+        # reindex, so without this the stale suggestions would never self-expire
+        # (same invalidation gap _h_src_refresh's pop covers for content changes).
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
         self._json({"n_embedded": n_embedded, "n_total": n_total})
 
     # --- SSE ask --------------------------------------------------------
