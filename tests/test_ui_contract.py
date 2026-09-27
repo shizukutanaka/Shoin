@@ -773,6 +773,62 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_refreshQuestions_chips_guards_and_race(self) -> None:
+        """v0.2.265: pin refreshQuestions' three contract surfaces under node —
+        chips render as buttons that fill #askInput on click, the guard skips
+        fetching entirely when there is no notebook/sources/LLM, and chips for
+        a stale (switched-away) notebook id are dropped rather than shown."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function refreshQuestions")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], value:"", focused:false,
+  replaceChildren(){ this.children=[] }, append(x){ this.children.push(x) },
+  focus(){ this.focused = true }, onclick:null, type:"", cls:"", tag:"", text:""}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
+function t(k){ return k }
+const window = { _llmOn: true };
+let calls = [];
+let apiImpl = async (path) => { calls.push(path);
+  return { json: async () => ({ questions: ["質問Aですか?", "質問Bですか?"] }) }; };
+async function api(path){ return apiImpl(path); }
+let cur = { id: 1, sources: [{id: 5}] };
+""" + fn + """
+await refreshQuestions();
+if (calls.length !== 1) { console.error("no fetch for live nb: " + calls); process.exit(1) }
+if (reg["#qs"].children.length !== 2) { console.error("chips not rendered: " + reg["#qs"].children.length); process.exit(1) }
+const chip = reg["#qs"].children[0];
+if (chip.tag !== "button" || chip.type !== "button" || chip.cls !== "q-chip")
+  { console.error("chip shape wrong: " + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls})); process.exit(1) }
+chip.onclick();
+if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
+  { console.error("chip click did not fill+focus input"); process.exit(1) }
+
+// Guards: no sources / llm off / no notebook -> cleared, no fetch.
+cur = { id: 1, sources: [] };
+await refreshQuestions();
+window._llmOn = false; cur = { id: 1, sources: [{id: 5}] };
+await refreshQuestions();
+cur = null;
+await refreshQuestions();
+if (calls.length !== 1 || reg["#qs"].children.length !== 0)
+  { console.error("guards fetched or kept chips: calls=" + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+
+// Race: notebook switches while the fetch is in flight -> chips dropped.
+window._llmOn = true; cur = { id: 9, sources: [{id: 5}] };
+apiImpl = async () => ({ json: async () => { cur = { id: 10, sources: [{id:5}] };
+  return { questions: ["staleですか?"] }; } });
+await refreshQuestions();
+if (reg["#qs"].children.length !== 0)
+  { console.error("stale-notebook chips rendered"); process.exit(1) }
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
