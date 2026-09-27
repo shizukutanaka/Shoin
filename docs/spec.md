@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0
+# Shoin 仕様書 v0.1.0 (実装 v0.2.277 時点に同期)
 
 ## プロダクト定義
 
@@ -42,7 +42,7 @@
 | REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。各チャンクに節文脈(タイトル>見出し)を併記(v0.2.123)。SQLite FTS5へ登録 |
 | REQ-004 | ハイブリッド検索 | BM25(FTS5) + ベクトル(埋め込みAPI委譲)をRRF融合(v0.2.56、下記「検索パイプライン」参照)。クエリは幅/字体バリアントに展開し半角カナ・全角英数を相互一致(v0.2.144)。埋め込み未設定時はBM25のみで劣化動作 |
 | REQ-005 | ソース限定・引用付きQ&A | 回答に `[S1][S2]` 形式の引用。コンテキスト外の質問には「ソースに記載なし」と回答 |
-| REQ-006 | 引用検証 | 生成テキストから `\[S(\d+)\]` を抽出し実在ソース番号と照合。不正引用をフラグ、引用カバレッジとソースマップ(`[S1]→ファイル名`)を回答に添付 |
+| REQ-006 | 引用検証 | 生成テキストから `[Ss]\s*(\d+)`(NFKC正規化により全角Ｓ１等も受理)を括弧内から抽出し実在ソース番号と照合。不正引用をフラグ、引用カバレッジとソースマップ(`[S1]→ファイル名`)を回答に添付 |
 | REQ-007 | Web UI (3ペイン) | ソース/チャット/Studio。単一HTML+vanilla JS、引用クリックで原文ハイライト表示 |
 | REQ-008 | LLMクライアント | OpenAI互換 `/v1/chat/completions` + `/v1/embeddings`(Ollama/llama.cpp/LM Studio)。SSEストリーミング。接続不可時はgraceful degradation(検索のみ動作) |
 
@@ -51,10 +51,10 @@
 | ID | 要件 | 受け入れ基準 |
 |----|------|-------------|
 | REQ-101 | Studio出力5種 | briefing / study_guide / faq / timeline / mindmap(Markdown階層)。全出力に引用+引用検証適用 |
-| REQ-102 | 推奨質問 | ソース取込後に3〜5問自動生成 |
+| REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可) |
 | REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化 |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
-| REQ-105 | CLI | serve/notebook/add/ask/studio/export。UI不要の全自動操作 |
+| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/health。UI不要の全自動操作 |
 | REQ-106 | レキシカルリランカ + MMR | 上位候補の多様性確保(冗長チャンク抑制) |
 
 ### P2 (Future / アーキ上の予約)
@@ -78,14 +78,16 @@ schema_migrations(version)
 ## 検索パイプライン
 
 ```
-query → [BM25 (FTS5)] ─┐
-      → [vector (埋め込みAPI)] ─┤→ RRF融合(Reciprocal Rank Fusion, k=60)
+query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasingで各走査し
+      → [vector (埋め込みAPI)] ─┤    RRF融合(RAG-Fusion)。`-term`否定フィルタは
+                               → RRF融合(Reciprocal Rank Fusion, k=60)    原クエリのみが定義しBM25/vector両レーンに適用
+                               → BM25-PRF(擬似適合性フィードバック)
                                → レキシカルリランク + MMR → top-k(既定8) → プロンプト構築
 ```
 
 - 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合(`fuse()`)/`adaptive_alpha()`はv0.2.150で削除(retrieve()はv0.2.56以降RRFのみ使用しており死コードだった)
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
-- プロンプト: ソースを `[S1]..[Sn]` で番号付け、各ソースへ公平なトークン予算配分
+- プロンプト: ソースを `[S1]..[Sn]` で番号付け、順位比例のトークン予算配分(v0.2.200: 上位ソースへ大きく配分)
 
 ## 引用検証仕様 (差別化の核、機械検証スイート)
 
@@ -117,7 +119,7 @@ query → [BM25 (FTS5)] ─┐
 ## 非機能要件
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.277時点の実測: shoin/ 99%)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
