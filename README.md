@@ -87,6 +87,16 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 ]
 ```
 
+ベースライン比較: `--save` で基準実行を保存し、`--diff` で差分を表示する。
+差分の集計は両実行に共通する質問のみで計算し、追加・削除された質問は別枠で一覧する
+(質問文の一致で対応付けるため、casesファイルの行順変更や編集で偽の回帰は出ない)。
+同一質問の重複は出現順にペアリングされる。
+
+```bash
+shoin eval 1 cases.json --save before.json   # 設定変更前
+shoin eval 1 cases.json --diff before.json   # 設定変更後: recall/MRR の ± を表示
+```
+
 `config.json` の例:
 
 ```json

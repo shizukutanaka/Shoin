@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.334
+## Version History: v0.1.37 → v0.2.335
+
+### v0.2.335 (2026-09-28)
+
+- Document the `eval --save`/`--diff` baseline-compare workflow in README — it existed since v0.2.226 and gained duplicate-pairing/matched-population means at v0.2.334, but README recommended before/after config comparison without ever showing the flags. Now documents the shared-question aggregation semantics, occurrence pairing for duplicate questions, and new/dropped question listing.
 
 ### v0.2.334 (2026-09-28)
 
