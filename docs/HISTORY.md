@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.316
+## Version History: v0.1.37 → v0.2.317
+
+### v0.2.317 (2026-09-28)
+
+- Pin the SSE frame parser itself under node: bytes split mid-frame, malformed JSON and empty-data frames — the last unguarded dispatch path in the UI
 
 ### v0.2.316 (2026-09-28)
 

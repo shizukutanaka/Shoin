@@ -1128,6 +1128,60 @@ console.log("ok")
         found = [s for s in sinks if s in html]
         self.assertEqual(found, [], f"HTML injection sink(s) in index.html: {found}")
 
+    def test_sse_frame_parser_buffers_and_dispatches(self) -> None:
+        """v0.2.317: the SSE frame parser (the \\n\\n splitter + event:/data:
+        accumulation inside the askForm read loop) is the one dispatch path no
+        existing pin exercises — a regression in buffering would silently drop
+        every frame. Feeds bytes split mid-frame through the real while-loop
+        body under node and asserts delta accumulation + done dispatch."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            loop = _js_block(src, 'while ((i = buf.indexOf("\\n\\n")) >= 0)')
+        except ValueError:
+            self.fail("SSE frame-split loop not found in askForm handler")
+        harness = (
+            """\
+let buf = "", acc = "", gotDone = false, failed = false, i;
+const doneReports = [], toasts = [];
+const degBadge = {hidden: true};
+const chatEl = {scrollTop: 0, scrollHeight: 0};
+const $ = s => s === "#degBadge" ? degBadge : s === "#chat" ? chatEl : {};
+function el(t2, c, txt){ return {children: [], append(x){ this.children.push(x) }} }
+function t(k){ return k }
+const bd = {textContent: "", parentElement: {kids: [],
+  append(x){ this.kids.push(x) }}, replaceChildren(){}};
+function renderWithSeals(b, body, report){ doneReports.push({body, report}) }
+function reportBadges(c, report){}
+function toast(m){ toasts.push(m) }
+function pump(text){ buf += text;
+"""
+            + loop
+            + """
+}
+// Frames arrive split mid-data — the parser must buffer until \\n\\n.
+pump('event: delta\\ndata: {"text":"he"}\\n\\nevent: delta\\nda');
+pump('ta: {"text":"llo"}\\n\\nevent: done\\nda');
+pump('ta: {"report":{"confirmed":1},"degraded":false}\\n\\n');
+pump('event: error\\ndata: not-json\\n\\n');   // malformed JSON: skip quietly
+pump('event: done\\n\\n');                     // no data: skipped by !data guard
+if (acc !== "hello")
+  { console.error("delta accumulation broken: " + JSON.stringify(acc)); process.exit(1) }
+if (!gotDone || doneReports.length !== 1 || doneReports[0].body !== "hello"
+    || doneReports[0].report.confirmed !== 1)
+  { console.error("done dispatch broken: " + JSON.stringify(doneReports)
+      + " gotDone=" + gotDone); process.exit(1) }
+if (failed || toasts.length !== 0)
+  { console.error("phantom error frame: " + JSON.stringify(toasts)); process.exit(1) }
+if (buf !== "")
+  { console.error("trailing bytes left in buffer: " + JSON.stringify(buf)); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_tabs_follow_the_wai_aria_pattern(self) -> None:
         """v0.2.311: the pane switcher declares role=tablist/tab, a contract
         that promises keyboard interaction — ArrowLeft/Right/Home/End must
