@@ -139,6 +139,40 @@ class TestUIContract(unittest.TestCase):
                 missing, [], f"studio kinds with no I18N.{loc} label (blank button): {missing}"
             )
 
+    def test_literal_t_keys_resolve_and_locales_are_symmetric(self) -> None:
+        """Pin the two i18n invariants the attribute scan cannot see.
+
+        (a) Every literal `t("k")` call site must resolve in ja — the primary
+        locale and `t()`'s last-resort fallback (`I18N.ja[k] || k`). A typo'd
+        or deleted key renders the raw key text in a toast/badge instead of a
+        message, silently. (b) ja and en must define the same key set —
+        the data-i18n attr test only checks keys the markup references, so a
+        locale-only key (or a dynamic `t()` key added to one side) drifts
+        unnoticed.
+        """
+        script = _script_body(_html())
+        locales: dict[str, set[str]] = {}
+        for loc in ("ja", "en"):
+            m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
+            self.assertIsNotNone(m, f"I18N.{loc} block not found")
+            assert m is not None
+            locales[loc] = set(re.findall(r'"([^"]+)"\s*:', m.group(1)))
+
+        literal = set(re.findall(r'\bt\("([a-z][a-z0-9._]*)"\)', script))
+        self.assertTrue(literal, "expected literal t() call sites")
+        missing = sorted(literal - locales["ja"])
+        self.assertEqual(missing, [], f"t() keys missing from I18N.ja (raw key renders): {missing}")
+        self.assertEqual(
+            locales["ja"] - locales["en"],
+            set(),
+            f"I18N.ja-only keys (en falls back to ja text): {sorted(locales['ja'] - locales['en'])}",
+        )
+        self.assertEqual(
+            locales["en"] - locales["ja"],
+            set(),
+            f"I18N.en-only keys (ja user sees raw key): {sorted(locales['en'] - locales['ja'])}",
+        )
+
     def test_studio_kinds_match_between_server_and_ui(self) -> None:
         """The UI's `const KINDS` array must equal studio.KINDS exactly.
 

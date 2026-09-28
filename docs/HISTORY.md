@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.328
+## Version History: v0.1.37 → v0.2.329
+
+### v0.2.329 (2026-09-28)
+
+- Pin the two i18n invariants the data-i18n attribute scan cannot see: every literal `t("k")` call site resolves in I18N.ja (the primary locale and `t()`'s last-resort fallback — a missing key renders the raw key text in a toast), and I18N.ja ≡ I18N.en key sets (the attr scan only checks markup-referenced keys, so locale-only keys drifted unnoticed). Audit-confirmed `_safe_report` already guards corrupt persisted citation_report JSON on both read paths.
 
 ### v0.2.328 (2026-09-28)
 
