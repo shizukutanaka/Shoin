@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.330
+## Version History: v0.1.37 → v0.2.331
+
+### v0.2.331 (2026-09-28)
+
+- Fix agent-doc gate drift (opus.md/sonnet.md): the stated 完了条件 was `python -m unittest discover -s tests`, which silently skips the other four gates (ruff, mypy --strict — the docs cited `mypy shoin/` without `--strict`, coverage ≥90%, detect-secrets) that verify.sh actually enforces, and bare `python` doesn't resolve to the project venv on machines whose system python3 is <3.11. Both docs now point at `./scripts/verify.sh` (with the `PYTHON=` knob noted) as the completion gate; sonnet.md's redundant manual lint step and the HISTORY template line updated to match. Audit-confirmed: refresh_source rejects non-URL kinds (INGEST_REFRESH_NOT_URL), pre-checks sha256 collisions before chunk replacement, and no-ops byte-identical content; add_source dedup is UNIQUE(notebook_id, sha256) + pre-check + race-mapped IntegrityError (all pinned since v0.2.321 _RacyConn tests).
 
 ### v0.2.330 (2026-09-28)
 

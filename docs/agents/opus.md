@@ -30,10 +30,12 @@
    テストスイートにブラウザテストは**残さない**（このプロジェクトの検証規約。
    v0.2.88/109/122/128 の前例に従い、検証内容は Version History に記録する）。
 4. **静的検査** — 変更したソースファイルで `python -m ruff check` と
-   `python -m mypy shoin/` をクリーンに保つ（既存の pypdf スタブ注記のみ許容）。
+   `python -m mypy --strict shoin/` をクリーンに保つ（既存の pypdf スタブ注記のみ許容）。
    **`ruff format` は絶対に実行しない** — このコードベースは手整形スタイルで、
    自動整形は16ファイルを書き換えてしまう（v0.2.133 の記録参照）。
-5. **完了条件** — `python -m unittest discover -s tests` 全緑。
+5. **完了条件** — `./scripts/verify.sh` 全ゲート全緑（lint / mypy --strict /
+   unittest+coverage≥90% / detect-secrets。`python3` が 3.11+ でない環境では
+   `PYTHON=.venv/bin/python ./scripts/verify.sh`）。unittest 単独では残り4ゲートを通らない。
    件数が増えたら Version History エントリに新しい総数を記す。
 6. **push** — 指定作業ブランチに push し、`git push origin HEAD:main` で
    公開 `main` を追従させる（両ブランチとも同一コミットを指すのが正常状態）。
