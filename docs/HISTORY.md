@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.344
+## Version History: v0.1.37 → v0.2.345
+
+### v0.2.345 (2026-09-28)
+
+- Extend the UI→server route pin to verbs (test_every_api_path_matches_a_registered_route): each index.html call site now asserts method+path ⊆ _ROUTES, not just path. A bare api() (GET) aimed at a POST-only route — or a POST aimed at a GET-only one — previously passed the pin and 405'd at click time. Method resolution mirrors the JS: jpost()=POST, api() defaults GET, {method:"X"} overrides (searched only up to the next api()/jpost() on the line so same-line calls don't cross-attribute). Current state clean; fail-then-pass verified (dropping {method:"POST"} on the refresh call is flagged).
 
 ### v0.2.344 (2026-09-28)
 

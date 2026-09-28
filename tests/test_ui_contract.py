@@ -392,20 +392,34 @@ const fetch = async (path, opts) => {
         self.assertEqual(rc, 0, out)
 
     def test_every_api_path_matches_a_registered_route(self) -> None:
-        """A path the UI fetches but the server never registers is a 404 in waiting."""
+        """A path or verb the UI fetches but the server never registers is a
+        404/405 in waiting. Path-only matching would let api() (GET) slip onto
+        a POST-only route — the server answers 405 at click time."""
         script = _script_body(_html())
-        # Fetch paths appear as api("/api/…") or api(`/api/…${expr}/…`).
-        raw_paths = set(re.findall(r'api\(\s*[`"](/api/[^`"?]*)', script))
-        self.assertTrue(raw_paths, "expected /api/ calls in index.html")
 
-        patterns = [p for _verb, p, _name in _Handler._ROUTES]
-        for raw in sorted(raw_paths):
+        # Call sites look like api("/api/…"), api(`/api/…${expr}/…`, {method:"X"}),
+        # or jpost("/api/…") (always POST). Bare api() defaults to GET.
+        seen: list[tuple[str, str, str]] = []
+        for lineno, line in enumerate(script.splitlines(), 1):
+            calls = list(re.finditer(r'(api|jpost)\(\s*[`"](/api/[^`"?]*)', line))
+            for i, m in enumerate(calls):
+                fn, raw = m.group(1), m.group(2)
+                # Search for a method override only up to the next api()/jpost()
+                # on the same line so adjacent calls don't cross-attribute.
+                tail = line[m.end():calls[i + 1].start() if i + 1 < len(calls) else len(line)]
+                meth = re.search(r'method\s*:\s*"([A-Z]+)"', tail)
+                verb = "POST" if fn == "jpost" else (meth.group(1) if meth else "GET")
+                seen.append((verb, raw, f"line {lineno}"))
+        self.assertTrue(seen, "expected /api/ calls in index.html")
+
+        for verb, raw, where in seen:
             # Substitute ${...} interpolations with a concrete id so the literal
             # can be matched against the server's numeric-id route patterns.
             concrete = re.sub(r"\$\{[^}]*\}", "1", raw).rstrip("/")
             self.assertTrue(
-                any(re.match(p, concrete) for p in patterns),
-                f"index.html calls {raw!r} (as {concrete!r}) but no server route matches it",
+                any(v == verb and re.match(p, concrete) for v, p, _ in _Handler._ROUTES),
+                f"index.html {where} calls {verb} {raw!r} (as {concrete!r}) "
+                "but no matching server route accepts that method",
             )
 
     def test_renderFullSource_verifies_chunk_against_excerpt(self) -> None:
