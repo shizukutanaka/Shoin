@@ -63,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.307")
+        self.assertEqual(VERSION, "0.2.308")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11065,6 +11065,32 @@ class TestResidualGuards(unittest.TestCase):
                 (root / doc).read_text(encoding="utf-8"),
                 f"{doc} no longer installs the pinned tool list",
             )
+
+    def test_notebook_listings_tie_break_on_id(self) -> None:
+        """v0.2.308: list_notebooks()/list_notebooks_with_counts() ordered by
+        `updated_at DESC` with no tiebreaker — on a coarse-grained clock
+        (Windows ~15ms ticks) two notebooks can share one timestamp and the
+        list order becomes arbitrary. ORDER BY is now (updated_at, id) so
+        equal timestamps resolve newest-id-first deterministically."""
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "x.sqlite3"))
+            with patch("shoin.store._now", return_value="2026-01-01T00:00:00+00:00"):
+                a = store.create_notebook("a")
+                b = store.create_notebook("b")
+                c = store.create_notebook("c")
+            self.assertEqual(
+                [n.id for n in store.list_notebooks()],
+                [c.id, b.id, a.id],
+                "identical updated_at must fall back to id DESC",
+            )
+            self.assertEqual(
+                [n["id"] for n in store.list_notebooks_with_counts()],
+                [c.id, b.id, a.id],
+                "list_notebooks_with_counts must tie-break the same way",
+            )
+            store.close()
 
 
 if __name__ == "__main__":

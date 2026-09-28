@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.307
+## Version History: v0.1.37 → v0.2.308
+
+### v0.2.308 (2026-09-27)
+
+- Fixed nondeterministic notebook ordering: list_notebooks() and
+  list_notebooks_with_counts() ordered by `updated_at DESC` with no
+  tiebreaker — on coarse-grained clocks (Windows ~15ms ticks) two
+  notebooks can share one timestamp and list order becomes arbitrary.
+  ORDER BY is now (updated_at DESC, id DESC). Tested via a pinned _now()
+  making all three timestamps identical.
+
 
 ### v0.2.307 (2026-09-27)
 

@@ -471,7 +471,7 @@ class Store:
         return Notebook(row["id"], row["name"], row["created_at"], row["updated_at"])
 
     def list_notebooks(self) -> list[Notebook]:
-        rows = self.conn.execute("SELECT * FROM notebooks ORDER BY updated_at DESC").fetchall()
+        rows = self.conn.execute("SELECT * FROM notebooks ORDER BY updated_at DESC, id DESC").fetchall()
         return [Notebook(r["id"], r["name"], r["created_at"], r["updated_at"]) for r in rows]
 
     def rename_notebook(self, notebook_id: int, name: str) -> None:
@@ -1031,7 +1031,7 @@ class Store:
             " LEFT JOIN sources s ON s.notebook_id = n.id"
             " LEFT JOIN chunks c ON c.source_id = s.id"
             " GROUP BY n.id"
-            " ORDER BY n.updated_at DESC"
+            " ORDER BY n.updated_at DESC, n.id DESC"
         ).fetchall()
         return [
             {
