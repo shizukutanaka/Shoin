@@ -186,6 +186,29 @@ class TestUIContract(unittest.TestCase):
         assert m is not None
         self.assertEqual(float(m.group(1)), COVERAGE_LOW)
 
+    def test_ui_report_keys_are_all_produced_by_citation_report(self) -> None:
+        """Every `report.X` the UI reads must be a CitationReport key.
+
+        The SSE `done` frame and persisted assistant messages carry
+        make_report()'s output verbatim; the UI reads ~20 report.* keys to
+        render badges, the seal detail, and the low-coverage marker. Renaming
+        or dropping a Python key leaves the reads silently undefined — every
+        check badge degrades with all server-side tests still green. Subset
+        (not equality): producer-only keys like n_sources and quote_mismatch
+        (folded into misattributed) legitimately have no UI reader.
+        """
+        script = _script_body(_html())
+        ui_keys = set(re.findall(r"\breport\.([a-z_]+)", script))
+        self.assertTrue(ui_keys, "expected report.* reads in index.html")
+        from shoin.citation import CitationReport
+
+        produced = set(CitationReport.__annotations__)
+        unknown = ui_keys - produced
+        self.assertFalse(
+            unknown,
+            f"index.html reads report keys CitationReport does not declare: {unknown}",
+        )
+
     def test_api_wrapper_maps_the_error_envelope(self) -> None:
         """Every handler surfaces failures via toast(e.message); api() is what
         turns the server's `{"error":{code,message}}` envelope into that

@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.327
+## Version History: v0.1.37 → v0.2.328
+
+### v0.2.328 (2026-09-28)
+
+- Pin the last cross-layer drift path: every `report.X` key the UI reads from the SSE done frame / persisted reports must be a declared `CitationReport` field (subset check — producer-only keys like `n_sources`/`quote_mismatch` have no UI reader). Renaming or dropping a Python key previously degraded every check badge silently with all server tests still green. Also audit-confirmed questions_cache eviction covers both stale-write paths (source refresh and rename already `pop()`).
 
 ### v0.2.327 (2026-09-28)
 
