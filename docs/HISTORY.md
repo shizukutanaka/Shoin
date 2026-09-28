@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.337
+## Version History: v0.1.37 → v0.2.338
+
+### v0.2.338 (2026-09-28)
+
+- Pin packaging dependency contract both directions (test_declared_dependencies_cover_all_nonstdlib_imports): ast-walks every import in shoin/ — including the lazy in-function pypdf import a top-of-file scan misses — and requires the non-stdlib set to equal pyproject's declared dependencies exactly. An undeclared import breaks `pip install` users at runtime; an unused declaration drags a package nobody needs. Fail-then-pass verified (removing pypdf from dependencies fails the pin).
 
 ### v0.2.337 (2026-09-28)
 

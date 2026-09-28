@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.337")
+        self.assertEqual(VERSION, "0.2.338")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11389,6 +11389,39 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(
             cfg["build-system"]["build-backend"],
             "setuptools.build_meta",
+        )
+
+    def test_declared_dependencies_cover_all_nonstdlib_imports(self) -> None:
+        """v0.2.338: every non-stdlib import in shoin/ must be a declared
+        dependency, and every declared dependency must be imported — a missing
+        declaration breaks `pip install` users at runtime (the lazy pypdf
+        import sits inside a function, so a top-of-file scan misses it), and a
+        stale declaration drags a package nobody uses. Walked via ast, so
+        conditional/lazy imports count."""
+        import ast
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        imported: set[str] = set()
+        for py in (root / "shoin").rglob("*.py"):
+            for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    imported.update(a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    imported.add(node.module.split(".")[0])
+        third_party = imported - sys.stdlib_module_names - {"shoin"}
+
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = {
+            re.split(r"[<>=!~\[;\s]", dep, 1)[0].strip().lower()
+            for dep in cfg["project"]["dependencies"]
+        }
+        self.assertEqual(
+            third_party,
+            declared,
+            f"pyproject dependencies drifted from imports: "
+            f"undeclared={sorted(third_party - declared)} "
+            f"unused={sorted(declared - third_party)}",
         )
 
 
