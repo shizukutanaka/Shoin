@@ -63,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.308")
+        self.assertEqual(VERSION, "0.2.309")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10928,7 +10928,15 @@ class TestResidualGuards(unittest.TestCase):
         ]
 
         def ignored(name: str) -> bool:
-            return any(fnmatch.fnmatch(name, p) for p in pats)
+            # A trailing-slash pattern is directory-only in gitignore
+            # semantics; approximate it by matching any path component.
+            if any(fnmatch.fnmatch(name, p) for p in pats):
+                return True
+            return any(
+                p.endswith("/")
+                and any(fnmatch.fnmatch(part, p[:-1]) for part in name.split("/"))
+                for p in pats
+            )
 
         for name in (
             "shoin.sqlite3",
@@ -10940,6 +10948,18 @@ class TestResidualGuards(unittest.TestCase):
             # v0.2.303: ci.yml regenerates sbom.json per build as an
             # artifact; the tracked copy was a frozen v0.1.0 snapshot.
             "sbom.json",
+            # v0.2.309: build/test/tool artifacts — a dropped pattern would
+            # silently make `git add -A` commit coverage output, wheels,
+            # caches, or the whole venv.
+            ".coverage",
+            "htmlcov/index.html",
+            "dist/shoin-0.0.0.tar.gz",
+            "build/lib/x.py",
+            "shoin.egg-info/PKG-INFO",
+            "__pycache__/x.pyc",
+            ".venv/bin/python",
+            ".mypy_cache/x",
+            ".ruff_cache/x",
         ):
             self.assertTrue(ignored(name), f"{name} is committable")
 

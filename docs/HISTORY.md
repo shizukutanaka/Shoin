@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.308
+## Version History: v0.1.37 → v0.2.309
+
+### v0.2.309 (2026-09-27)
+
+- Extended the .gitignore guard to the build/test/tool artifacts: the
+  pinned ignored-names list now also covers .coverage, htmlcov/, dist/,
+  build/, *.egg-info/, __pycache__/, .venv/, .mypy_cache/ and
+  .ruff_cache/, and the matcher handles directory-only (trailing-slash)
+  patterns by matching path components. A dropped pattern previously
+  meant `git add -A` could silently commit a venv or coverage output.
+
 
 ### v0.2.308 (2026-09-27)
 
