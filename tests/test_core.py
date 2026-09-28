@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.335")
+        self.assertEqual(VERSION, "0.2.336")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10929,6 +10929,52 @@ class TestResidualGuards(unittest.TestCase):
                 for key, entry in table.items():
                     self.assertEqual(
                         set(entry), {"ja", "en"}, f"{label}.{key}"
+                    )
+
+    def test_python_i18n_placeholders_have_ja_en_parity(self) -> None:
+        """cli._t() formats its template with the caller's kwargs — a {name}
+        placeholder present in one locale but missing in the other raises
+        KeyError at format time only for users of that locale. The key-parity
+        test above doesn't see this; pin the placeholder-name set too."""
+        from string import Formatter
+
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        def fields(template: str) -> set[str]:
+            return {
+                field_name.split(".")[0].split("[")[0]
+                for _, field_name, _, _ in Formatter().parse(template)
+                if field_name
+            }
+
+        tables = (
+            (shoin.cli, "_STRINGS"),
+            (shoin.qa, "_STRINGS"),
+            (shoin.studio, "_STRINGS"),
+            (shoin.studio, "_INSTRUCTIONS"),
+            (shoin.export, "_STRINGS"),
+            (shoin.server, "_STRINGS"),
+        )
+        for mod, name in tables:
+            table = getattr(mod, name)
+            label = f"{mod.__name__}.{name}"
+            if set(table) == {"ja", "en"}:  # lang-first: {"ja": {k: tmpl}, ...}
+                for key in table["ja"]:
+                    self.assertEqual(
+                        fields(table["ja"][key]),
+                        fields(table["en"][key]),
+                        f"{label}.{key}",
+                    )
+            else:  # key-first: {k: {"ja": tmpl, "en": tmpl}}
+                for key, entry in table.items():
+                    self.assertEqual(
+                        fields(entry["ja"]),
+                        fields(entry["en"]),
+                        f"{label}.{key}",
                     )
 
     def test_no_assert_statements_in_package(self) -> None:

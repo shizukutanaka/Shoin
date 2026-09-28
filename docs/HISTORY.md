@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.335
+## Version History: v0.1.37 → v0.2.336
+
+### v0.2.336 (2026-09-28)
+
+- Pin format-placeholder parity between ja/en in all five server-side string tables (test_python_i18n_placeholders_have_ja_en_parity): cli._t() formats templates with caller kwargs, so a {name} present in one locale but not the other raises KeyError only for users of that locale — the key-parity pin couldn't see it. Fail-then-pass verified (diverging {bk}→{bkw} in en fails the pin). Also audited eval baseline I/O: report_from_dict refuses malformed/mistyped baseline JSON (VALIDATION_FIELD_FORMAT_INVALID), k-mismatch between runs prints eval.diff_k_warn, element-type laxity in expected/retrieved is unreachable (diff uses question text + stored scores only).
 
 ### v0.2.335 (2026-09-28)
 
