@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.323
+## Version History: v0.1.37 → v0.2.324
+
+### v0.2.324 (2026-09-28)
+
+- Pin the source viewer's modal contract under node: the _srcAbort/sig.aborted pair discards a stale source-N response when the user opens another source mid-flight, and the viewer focus trap wraps Tab/Shift+Tab inside the open dialog with Escape closing — the last two unpinned async UI behaviors.
 
 ### v0.2.323 (2026-09-28)
 

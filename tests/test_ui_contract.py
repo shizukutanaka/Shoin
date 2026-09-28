@@ -1447,6 +1447,111 @@ const noteEv = {preventDefault(){}, target: {querySelector: () => noteBtn}};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_showsource_aborts_stale_fetch_and_traps_focus(self) -> None:
+        """v0.2.323: the source viewer's two safety behaviors are a modal
+        contract, not decoration — the `_srcAbort`/`sig.aborted` pair keeps a
+        slow source-N response from painting over the source the user opened
+        after it (the same defect class _nbSeq/_sealSeq already pin), and the
+        dialog's focus trap wraps Tab/Shift+Tab inside it. Both run the real
+        extracted code under node.
+        """
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            show = _js_block(src, "async function showSource")
+            trap = _js_block(src, '$("#viewer").addEventListener("keydown"')
+        except ValueError as e:
+            self.fail(f"block not found: {e}")
+        harness = (
+            """\
+const calls = {renders: [], toasts: [], closed: 0};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, _focused: false, _open: false, _cbs: {}, _q: () => [],
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    classList: {add(){ n._open = true }, remove(){ n._open = false },
+      contains(c){ return c === "open" ? n._open : false }},
+    focus(){ n._focused = true; },
+    addEventListener(ev, cb){ n._cbs[ev] = cb; },
+    querySelectorAll(s){ return n._q(s); },
+    setAttribute(){},
+  };
+  return n;
+};
+const els = {};
+const $ = s => els[s] || (els[s] = mk());
+const document = {activeElement: null, createElement: () => mk()};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+let _srcAbort = null, _viewerOpener = null;
+const deferred = [];
+const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
+  deferred.push(rec); return new Promise(res => { rec.res = res; }); };
+const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const toast = m => calls.toasts.push(m);
+const closeViewer = () => calls.closed++;
+"""
+            + show
+            + "\n"
+            + trap
+            + ");\n"
+            + """\
+(async () => {
+  // Abort guard: opening source 2 must abort source 1's in-flight fetch, and
+  // 1's late response must never reach the viewer.
+  showSource(1, "T1");
+  showSource(2, "T2");
+  const d1 = deferred[0], d2 = deferred[1];
+  if (deferred[0].path !== "/api/sources/1/text")
+    { console.error("wrong fetch path: " + deferred[0].path); process.exit(1) }
+  if (!d1.sig.aborted || d2.sig.aborted)
+    { console.error("abort wiring broken"); process.exit(1) }
+  d1.res({json: async () => ({chunks: [{id: 1, seq: 0, text: "stale"}]})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== 0)
+    { console.error("stale source rendered into viewer"); process.exit(1) }
+  d2.res({json: async () => ({chunks: [{id: 2, seq: 0, text: "live"}]})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== 1)
+    { console.error("live source not rendered"); process.exit(1) }
+  if (!els["#viewer"]._open)
+    { console.error("viewer never opened"); process.exit(1) }
+
+  // Focus trap: Tab on the last focusable wraps to first, Shift+Tab on first
+  // wraps to last, Escape closes. Requires the dialog open (set by showSource).
+  const viewer = els["#viewer"];
+  const f1 = mk(), f2 = mk();
+  viewer._q = () => [f1, f2];
+  const kd = viewer._cbs.keydown;
+  if (!kd) { console.error("viewer keydown not wired"); process.exit(1) }
+  let prevented = false;
+  document.activeElement = f2;
+  kd({key: "Tab", shiftKey: false, preventDefault(){ prevented = true }});
+  if (!prevented || !f1._focused)
+    { console.error("Tab wrap to first broken"); process.exit(1) }
+  prevented = false;
+  document.activeElement = f1;
+  kd({key: "Tab", shiftKey: true, preventDefault(){ prevented = true }});
+  if (!prevented || !f2._focused)
+    { console.error("Shift+Tab wrap to last broken"); process.exit(1) }
+  prevented = false;
+  kd({key: "x", shiftKey: false, preventDefault(){ prevented = true }});
+  if (prevented)
+    { console.error("non-Tab key stole focus flow"); process.exit(1) }
+  const before = calls.closed;
+  kd({key: "Escape", shiftKey: false, preventDefault(){}});
+  if (calls.closed !== before + 1)
+    { console.error("Escape did not close viewer"); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_sse_frame_parser_buffers_and_dispatches(self) -> None:
         """v0.2.317: the SSE frame parser (the \\n\\n splitter + event:/data:
         accumulation inside the askForm read loop) is the one dispatch path no
