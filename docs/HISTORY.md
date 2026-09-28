@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.333
+## Version History: v0.1.37 → v0.2.334
+
+### v0.2.334 (2026-09-28)
+
+- Land the unmerged review follow-up from PR #122's branch (commit 8a14353, cherry-picked): eval diff now pairs duplicate questions occurrence-by-occurrence via a per-question deque instead of last-occurrence-wins (identical runs with a repeated case report delta 0 rather than a phantom change), and `EvalDiff` carries `recall_before/after` + `mrr_before/after` over the paired population so the CLI comparison rows describe the same population the deltas were computed on.
 
 ### v0.2.333 (2026-09-28)
 
