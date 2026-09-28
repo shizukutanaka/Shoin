@@ -215,7 +215,9 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         try:
             data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            # RecursionError: a deeply nested body exceeds json.loads' depth —
+            # still a 400 input defect, not a 500.
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"bad JSON body: {exc}") from exc
         if not isinstance(data, dict):
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", "JSON object required")

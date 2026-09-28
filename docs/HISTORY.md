@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.313
+## Version History: v0.1.37 → v0.2.314
+
+### v0.2.314 (2026-09-28)
+
+- Deeply nested JSON bodies (RecursionError) now map to 400, not 500
 
 ### v0.2.313 (2026-09-28)
 

@@ -728,6 +728,20 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_json_body_deep_nesting_returns_400(self) -> None:
+        """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
+        and raises RecursionError — a malformed input that must still map to
+        400 VALIDATION_FIELD_FORMAT_INVALID, not 500 SYSTEM_INTERNAL_ERROR."""
+        depth = 20000
+        status, _, raw = self._req(
+            "POST",
+            "/api/notebooks",
+            ("[" * depth + "]" * depth).encode(),
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
     def test_upload_source_title_path_traversal_stripped(self) -> None:
         """Path components in X-Filename must be stripped; only the basename is stored."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "path-guard"})
