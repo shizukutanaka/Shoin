@@ -200,6 +200,46 @@ class TestUIContract(unittest.TestCase):
                 f"I18N[{key}] placeholders diverge: ja={tables['ja'][key]} en={tables['en'][key]}",
             )
 
+    def test_i18n_call_sites_substitute_every_placeholder(self) -> None:
+        """Each `t("k")` call on a placeholder-bearing key must `.replace` every
+        name the template defines — and nothing else.
+
+        A placeholder present in the template but never substituted leaks the
+        raw `{n}` into the rendered toast/label; a `.replace("{m}")` for a name
+        no template defines is dead code that usually signals the template and
+        call site have drifted apart. Checks both directions per source line,
+        against the union of ja+en placeholder sets.
+        """
+        script = _script_body(_html())
+        values: dict[str, set[str]] = {}
+        for loc in ("ja", "en"):
+            m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
+            assert m is not None
+            for k, v in re.findall(r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"', m.group(1)):
+                values.setdefault(k, set()).update(re.findall(r"\{([a-z_]+)\}", v))
+        placeholder_keys = {k for k, ph in values.items() if ph}
+        self.assertTrue(placeholder_keys, "expected placeholder-bearing i18n keys")
+
+        for lineno, line in enumerate(script.splitlines(), 1):
+            keys = re.findall(r'\bt\("([a-z][a-z0-9._]*)"\)', line)
+            if not keys:
+                continue
+            replaced = set(re.findall(r'\.replace\("\{([a-z_]+)\}"', line))
+            used = set().union(*(values.get(k, set()) for k in keys))
+            for k in keys:
+                missing = values.get(k, set()) - replaced
+                self.assertEqual(
+                    missing, set(),
+                    f"line {lineno}: t({k}) leaves {sorted(missing)} unsubstituted "
+                    "(raw braces render in the UI)",
+                )
+            dead = replaced - used
+            self.assertEqual(
+                dead, set(),
+                f"line {lineno}: replaces {sorted(dead)} for names no t() key on "
+                "the line defines — dead substitution",
+            )
+
     def test_studio_kinds_match_between_server_and_ui(self) -> None:
         """The UI's `const KINDS` array must equal studio.KINDS exactly.
 

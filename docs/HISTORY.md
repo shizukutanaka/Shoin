@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.339
+## Version History: v0.1.37 → v0.2.340
+
+### v0.2.340 (2026-09-28)
+
+- Pin the third leg of the i18n placeholder contract — call-site substitution completeness (test_i18n_call_sites_substitute_every_placeholder): for every line calling t("k") on a placeholder-bearing key, the line's .replace("{name}") set must cover the template's placeholder set (a miss leaks raw `{n}`/`{total}` into the UI) and must not replace names no key on the line defines (dead substitution = drift). Checks the union of ja+en placeholder sets, so it stays sound even if locales diverge under a separate failure. Fail-then-pass verified (dropping .replace("{total}") from reindex.ok fails the pin). With v0.2.336-337 this closes the whole placeholder contract: template names equal across locales AND every call site substitutes all of them.
 
 ### v0.2.339 (2026-09-28)
 
