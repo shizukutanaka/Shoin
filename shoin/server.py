@@ -190,6 +190,21 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, code: str, message: str) -> None:
         self._json({"error": {"code": code, "message": message}}, status)
 
+    def send_error(
+        self, code: int, message: str | None = None, explain: str | None = None
+    ) -> None:
+        # Base's send_error emits a bare HTML page that bypasses _headers() —
+        # no nosniff, no no-store, no Referrer-Policy. Route every protocol-level
+        # error (bad request line, unimplemented method, oversized headers)
+        # through the shared JSON envelope so the baseline headers always apply.
+        self.close_connection = True
+        try:
+            self._error(
+                code, f"HTTP_{code}", message or self.responses.get(code, ("Error",))[0]
+            )
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _safe_error(self, status: int, code: str, message: str) -> None:
         """_error(), but swallows a dead-connection write failure.
 

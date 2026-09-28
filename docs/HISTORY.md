@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.315
+## Version History: v0.1.37 → v0.2.316
+
+### v0.2.316 (2026-09-28)
+
+- Route protocol-level errors through the JSON envelope (send_error override) — unimplemented methods and malformed request lines previously emitted a bare HTML page with no nosniff/no-store/Referrer-Policy
 
 ### v0.2.315 (2026-09-28)
 

@@ -728,6 +728,28 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_protocol_error_responses_carry_baseline_headers(self) -> None:
+        """v0.2.316: the base send_error() path (unimplemented method, bad
+        request line) used to emit a bare HTML page bypassing _headers() — no
+        nosniff/no-store/Referrer-Policy and wrong content type. All errors
+        must go through the JSON envelope."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("OPTIONS", "/")  # not implemented -> 501 via send_error
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 501)
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+            self.assertEqual(headers.get("x-content-type-options"), "nosniff")
+            self.assertEqual(headers.get("cache-control"), "no-store")
+            self.assertEqual(headers.get("referrer-policy"), "no-referrer")
+            self.assertNotIn("Python", headers.get("server", ""))
+            payload = json.loads(body)
+            self.assertIn("error", payload)
+            self.assertEqual(payload["error"]["code"], "HTTP_501")
+        finally:
+            conn.close()
+
     def test_idle_connection_times_out_quietly(self) -> None:
         """v0.2.315: an accepted socket that never completes its request would
         hold its handler thread forever — REQUEST_SOCKET_SEC bounds any single
