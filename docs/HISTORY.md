@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.306
+## Version History: v0.1.37 → v0.2.307
+
+### v0.2.307 (2026-09-27)
+
+- Synced docs/product-review.md to v0.2.306: new summary block covering
+  the "parallel-structure silent drift" sweep (v0.2.297-306 — gate
+  parity, test discovery, .gitignore coverage, contributor/agent docs,
+  tracked artifacts, README examples, CLAUDE.md constants, gate-tool
+  pins), plus the installed-package end-to-end verification result.
+  Test count in the header updated 971→978.
+
 
 ### v0.2.306 (2026-09-27)
 
