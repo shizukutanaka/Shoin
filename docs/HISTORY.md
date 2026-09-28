@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.331
+## Version History: v0.1.37 → v0.2.332
+
+### v0.2.332 (2026-09-28)
+
+- Sync docs/product-review.md ledger to v0.2.331: header + test count (1003→1012), new v0.2.323-331 summary block (final source-row wiring pins completing the all-handler coverage, viewer abort/focus/lazy-toggle pins, COVERAGE_LOW + api() envelope constants, report.*⊆CitationReport and t()⊆I18N.ja+ja≡en producer↔consumer contracts, spec.md sync, agent-doc gate fix), and weakness-#5 row extended to v0.2.330 noting every event handler in index.html is now behavior-pinned under node. Audit-confirmed clean: refresh_source guards (non-URL/sha256-collision/byte-identical), updated_at touch coverage, questions_cache eviction, add_source dedup.
 
 ### v0.2.331 (2026-09-28)
 
