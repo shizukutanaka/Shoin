@@ -61,9 +61,48 @@ def seed(store: Store) -> int:
     return nb.id
 
 
+class _RacyConn:
+    """sqlite3.Connection proxy that injects one concurrent write (or failure)
+    the first time a statement containing `trigger` executes — a deterministic
+    single-threaded reproduction of the TOCTOU races Store's rowcount and
+    IntegrityError guards exist to translate into typed StoreErrors."""
+
+    def __init__(
+        self,
+        inner: sqlite3.Connection,
+        trigger: str,
+        pre_sql: str | None = None,
+        pre_params: tuple = (),
+        raise_exc: Exception | None = None,
+    ) -> None:
+        self._inner, self._trigger = inner, trigger
+        self._pre_sql, self._pre_params = pre_sql, pre_params
+        self._raise_exc = raise_exc
+        self.fired = False
+
+    def __getattr__(self, name: str):  # delegate commit/execute-free members
+        return getattr(self._inner, name)
+
+    def __enter__(self) -> "_RacyConn":
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *a):  # type: ignore[no-untyped-def]
+        return self._inner.__exit__(*a)
+
+    def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+        if not self.fired and self._trigger in sql:
+            self.fired = True
+            if self._raise_exc is not None:
+                raise self._raise_exc
+            if self._pre_sql is not None:
+                self._inner.execute(self._pre_sql, self._pre_params)
+        return self._inner.execute(sql, params)
+
+
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.320")
+        self.assertEqual(VERSION, "0.2.321")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -302,6 +341,93 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.delete_note(note_id)  # note is already gone
             self.assertEqual(cm.exception.code, "NOTE_NOT_FOUND")
+
+    def test_rowcount_guards_catch_mid_transaction_deletes(self) -> None:
+        """The `rowcount == 0` tails in update_source_title / update_source_sha256 /
+        replace_chunks_for_source / delete_note fire only when the row disappears
+        BETWEEN the method's own existence read and its write — inside the same
+        transaction. _RacyConn lands that delete deterministically; without the
+        mapping each would surface as silent success or a bare sqlite3 error."""
+        with make_store() as s:
+            nb = s.create_notebook("race-title")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-t")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "UPDATE sources SET title", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_title(src.id, "new", "o2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("concurrently", str(cm.exception))
+
+        with make_store() as s:
+            nb = s.create_notebook("race-sha")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-s")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SET sha256", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src.id, "sha-new", "t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+        with make_store() as s:
+            nb = s.create_notebook("race-meta")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-m")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SET sha256", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["new chunk"], sha256="sha-m2", title="t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+        with make_store() as s:
+            nb = s.create_notebook("race-note")
+            nid = s.add_note(nb.id, "n", "b")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "DELETE FROM notes", "DELETE FROM notes WHERE id=?", (nid,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.delete_note(nid)
+            self.assertEqual(cm.exception.code, "NOTE_NOT_FOUND")
+
+    def test_replace_chunks_fk_violation_maps_to_not_found(self) -> None:
+        """Deleting the source between get_source() and the chunk INSERT surfaces
+        as IntegrityError 'FOREIGN KEY constraint failed' — mapped to
+        SOURCE_NOT_FOUND rather than escaping as a raw sqlite3 error."""
+        with make_store() as s:
+            nb = s.create_notebook("race-fk")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-fk")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "INSERT INTO chunks", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["orphaned chunk"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("chunk replacement", str(cm.exception))
+
+    def test_replace_chunks_contexts_must_match_texts(self) -> None:
+        """contexts shorter/longer than texts is a caller bug — rejected before
+        any row is touched rather than silently misaligning breadcrumbs."""
+        with make_store() as s:
+            nb = s.create_notebook("ctx")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-ctx")
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["a", "b"], contexts=["only one"])
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_add_source_unexpected_integrity_error_is_system_internal(self) -> None:
+        """A constraint failure that is neither UNIQUE nor FOREIGN KEY (e.g. a
+        future CHECK) must surface as SYSTEM_INTERNAL_ERROR — not be misreported
+        as SOURCE_ALREADY_EXISTS or NOTEBOOK_NOT_FOUND."""
+        with make_store() as s:
+            nb = s.create_notebook("chk")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "INSERT INTO sources",
+                raise_exc=sqlite3.IntegrityError("CHECK constraint failed: sources"),
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "txt", "t", "o", "sha-c")
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
 
     def test_counts_empty_notebook(self) -> None:
         """counts() must return zeros for a notebook with no sources or chunks."""
@@ -1059,6 +1185,21 @@ class TestStore(unittest.TestCase):
                 s.create_notebook("disk")
             with Store(path) as s2:
                 self.assertEqual(s2.list_notebooks()[0].name, "disk")
+
+    def test_migrate_propagates_non_duplicate_schema_errors(self) -> None:
+        """Only the documented 'duplicate column name' race may be swallowed by
+        migrate()'s OperationalError handler — any other failure (here
+        schema_migrations replaced by a view, so the version INSERT fails with
+        'cannot modify ... because it is a view') must propagate rather than
+        leave a silently half-migrated database."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.db"
+            raw = sqlite3.connect(str(path))
+            raw.execute("CREATE VIEW schema_migrations AS SELECT 0 AS version WHERE 0")
+            raw.commit()
+            raw.close()
+            with self.assertRaises(sqlite3.OperationalError):
+                Store(path)
 
 
 class TestRetryOnLock(unittest.TestCase):
@@ -2068,6 +2209,25 @@ class TestIngest(unittest.TestCase):
             self.assertRaises(IngestError) as cm,
         ):
             ing.validate_public_url("http://linklocal.example/")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_ssrf_unparseable_resolved_address_blocked(self) -> None:
+        """A resolver token that is not an IP literal at all — a corrupt
+        getaddrinfo tuple, or a resolver backend returning a name — must fail
+        closed with INGEST_URL_BLOCKED, same as every other non-public address.
+        (On Python ≥3.9 the zone-scoped case above parses via scope_id and is
+        rejected by the is_link_local check; the ValueError branch below it is
+        the catch-all this test pins.)"""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("not-an-ip", 0, 0, 0))]
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.validate_public_url("http://corrupt.example/")
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
 
     def test_redirect_cycle_detected(self) -> None:
@@ -8629,6 +8789,13 @@ class TestCLI(unittest.TestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2, argv)
             self.assertIn("-k", err.getvalue())
+
+    def test_pos_int_accepts_positive_values(self) -> None:
+        """The -k validator's accept path: a valid positive integer must pass
+        through unchanged (the rejection path is pinned above)."""
+        from shoin.cli import _pos_int
+
+        self.assertEqual(_pos_int("3"), 3)
 
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError

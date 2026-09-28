@@ -1505,6 +1505,182 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
+    def test_headers_disconnect_then_persist_failure_stays_quiet(self) -> None:
+        """If the client is already gone when SSE headers are written (the
+        ConnectionError path) AND the orphan-turn repair write then fails too,
+        the request must still end quietly — no traceback, server responsive."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "hdr-disc"})
+        nb_id = nb["id"]
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_headers", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            req = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/ask"),
+                data=json.dumps({"question": "原料は？"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(
+                (urllib.error.URLError, ConnectionError, http.client.HTTPException)
+            ):
+                urllib.request.urlopen(req, timeout=10)
+
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_meta_disconnect_then_persist_failure_stays_quiet(self) -> None:
+        """Client gone at the meta frame + orphan-turn repair write failing —
+        the swallowed pair must leave the stream clean and the server alive."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "meta-disc"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_context_failure_on_dead_socket_swallows_both_writes(self) -> None:
+        """build_context raising after SSE headers commits the status line, so
+        the error frame is best-effort: when that frame hits a dead socket AND
+        the repair persist also fails, both must be swallowed quietly."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-dead"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod, "build_context", side_effect=RuntimeError("ctx boom")),
+            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_send_error_survives_a_dead_connection(self) -> None:
+        """send_error on a socket that died mid-response must swallow the write
+        failure — protocol-level errors are already terminal; raising again
+        would just produce noise in handle_error."""
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        h = srv_mod._Handler.__new__(srv_mod._Handler)
+        with patch.object(h, "_error", side_effect=BrokenPipeError()):
+            h.send_error(501)
+        self.assertTrue(h.close_connection)
+
+    def test_handle_error_still_reports_non_timeout_failures(self) -> None:
+        """Only TimeoutError is quieted by _HTTPServer.handle_error — a real
+        request-thread failure must keep the default traceback print so a
+        handler bug can never vanish silently."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                srv_mod._HTTPServer.handle_error(self.server, None, ("127.0.0.1", 0))
+        self.assertIn("RuntimeError", err.getvalue())
+
+    def test_handle_error_quiets_timeout_failures(self) -> None:
+        """Symmetric contract: a TimeoutError escaping a request thread (e.g. a
+        stalled write in finish(), outside handle_one_request's own catch) must
+        be swallowed — idle keep-alive timeouts are routine, not failures."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        try:
+            raise TimeoutError("idle socket")
+        except TimeoutError:
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                srv_mod._HTTPServer.handle_error(self.server, None, ("127.0.0.1", 0))
+        self.assertEqual(err.getvalue(), "")
+
 
 class ClearChatCacheTest(unittest.TestCase):
     """Clearing chat history must NOT invalidate the questions cache.

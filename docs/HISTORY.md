@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.320
+## Version History: v0.1.37 → v0.2.321
+
+### v0.2.321 (2026-09-28)
+
+- Pin the last reachable guard tails: concurrent-delete rowcount/FK mappings in store.py (_RacyConn proxy), migrate() non-duplicate-error re-raise, unparseable-resolver-token SSRF rejection, _pos_int accept path, send_error dead-socket swallow, handle_error TimeoutError/non-timeout symmetry, and the three SSE disconnect+persist-failure tails. Remaining uncovered lines (3) are provably unreachable defensive guards.
 
 ### v0.2.320 (2026-09-28)
 
