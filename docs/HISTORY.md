@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.309
+## Version History: v0.1.37 → v0.2.310
+
+### v0.2.310 (2026-09-27)
+
+- Pin the wheel packaging scope: packages.find include must stay exactly shoin*, plus the shoin console entry point and setuptools build-backend
 
 ### v0.2.309 (2026-09-27)
 

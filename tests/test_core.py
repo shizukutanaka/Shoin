@@ -63,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.309")
+        self.assertEqual(VERSION, "0.2.310")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11111,6 +11111,32 @@ class TestResidualGuards(unittest.TestCase):
                 "list_notebooks_with_counts must tie-break the same way",
             )
             store.close()
+
+    def test_wheel_package_scope_is_shoin_only(self) -> None:
+        """v0.2.310: pyproject's packages.find include must stay exactly
+        ["shoin*"] — a widened glob ("*") would silently bundle tests/,
+        docs/, and every future top-level dir into the distributed wheel,
+        and a dropped project.scripts entry would remove the `shoin`
+        command. The built wheel was verified to contain only shoin/**
+        plus dist-info."""
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["tool"]["setuptools"]["packages"]["find"]["include"],
+            ["shoin*"],
+            "packages.find scope widened — non-package files would ship in the wheel",
+        )
+        self.assertEqual(
+            cfg["project"]["scripts"]["shoin"],
+            "shoin.cli:main",
+            "the `shoin` console entry point must keep targeting cli.main",
+        )
+        self.assertEqual(
+            cfg["build-system"]["build-backend"],
+            "setuptools.build_meta",
+        )
 
 
 if __name__ == "__main__":
