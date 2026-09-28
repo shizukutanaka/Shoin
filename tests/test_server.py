@@ -1298,6 +1298,11 @@ class CacheControlTest(unittest.TestCase):
                     headers.get(name),
                     f"{path} missing {name}: {want} (status {status})",
                 )
+            self.assertNotIn(
+                "Python",
+                headers.get("Server", ""),
+                f"{path} Server header leaks the Python runtime version",
+            )
 
 
 class PostStreamStoreErrorTest(unittest.TestCase):

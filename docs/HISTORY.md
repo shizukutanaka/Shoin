@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.312
+## Version History: v0.1.37 → v0.2.313
+
+### v0.2.313 (2026-09-28)
+
+- Stop leaking the Python runtime version in the Server header (sys_version = ""); the security-headers pin now asserts it too
 
 ### v0.2.312 (2026-09-27)
 

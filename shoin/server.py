@@ -151,6 +151,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = f"shoin/{VERSION}"
+    sys_version = ""  # keep the Python runtime version out of every Server header
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
