@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.325
+## Version History: v0.1.37 → v0.2.326
+
+### v0.2.326 (2026-09-28)
+
+- Pin the last two unpinned JS branches under node: the source-refresh button's producer side (externalPendingRename stash + handler detach + disabled-in-flight + POST /refresh + pages_failed toast + error restore) and showSource's excerpt-path lazy <details> toggle (dataset.loaded once-only fetch, error written into the body, sig.aborted stale-response guard).
+- Pin the mid-stream dead-socket tail deterministically: _sse("delta") raising ConnectionError inside the stream loop → client_gone short-circuits the done frame and the repair persist failure is swallowed (server.py 842-843 was only ever covered incidentally by whichever fault landed first).
 
 ### v0.2.325 (2026-09-28)
 

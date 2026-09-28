@@ -1634,6 +1634,57 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
+    def test_delta_write_on_dead_socket_marks_client_gone(self) -> None:
+        """A delta write dying mid-stream must take the outer ConnectionError
+        branch — client_gone short-circuits the done frame and the broken-pipe
+        persist failure is still swallowed quietly. This tail was previously
+        covered only incidentally by whichever fault landed first."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delta-disc"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        def delta_boom(event, payload):
+            # meta must succeed — a dead socket at meta returns early and never
+            # reaches the stream loop; only the delta write should fail.
+            if event == "delta":
+                raise ConnectionError("gone")
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=delta_boom),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
     def test_send_error_survives_a_dead_connection(self) -> None:
         """send_error on a socket that died mid-response must swallow the write
         failure — protocol-level errors are already terminal; raising again

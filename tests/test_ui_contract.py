@@ -1008,6 +1008,192 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_source_refresh_button_posts_stashes_and_restores(self) -> None:
+        """v0.2.326: the refresh button's onclick is the producer half of the
+        externalPendingRename contract (the consumer half is pinned by
+        renderNotebook): it must stash an in-progress rename with selection,
+        detach that input's handlers, disable+relabel itself during flight,
+        POST to /api/sources/{id}/refresh, toast pages_failed when nonzero,
+        reload the notebook, and restore itself on error."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderNotebook")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
+  disabled:false, textContent:"", href:"", title:"",
+  classList:{ contains(c){ return false }, add(){}, remove(){} },
+  dataset:{},
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent=this },
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  removeAttribute(n){ if(n==="href") delete this.href },
+  setAttribute(n,v){}, querySelector(){ return null },
+  setSelectionRange(){}, focus(){}, onclick:null, ondblclick:null, onkeydown:null,
+  onblur:null, onchange:null, tabIndex:0, selectionStart:0, selectionEnd:0}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls;
+  e.text=text; e.textContent=text; return e }
+function t(k){ return k === "src.pages_failed" ? "{n} pages failed" : k }
+let apiCalls = []; let nextJson = {pages_failed: 0}; let failNext = false;
+async function api(path, o){ apiCalls.push({path, method: o && o.method});
+  if (failNext) throw new Error("refresh boom");
+  return {json:async()=>nextJson}; }
+let opens = [], toasts = [];
+function openNotebook(id){ opens.push(id) }
+function toast(m){ toasts.push(m) }
+function showSource(){}
+function renderChatHistory(){} function renderStudio(){}
+function renderNotes(){} function refreshQuestions(){}
+let notebooks = [], cur = null, srcIndex = new Map();
+let externalPendingRename = null;
+let renameCalls = [];
+function startSourceRename(s, tt, row, initial){
+  renameCalls.push({srcId: s.id, initial});
+  const inp = mkEl(); inp.cls = "src-rename"; return inp;
+}
+const document = { activeElement: null };
+""" + fn + """
+(async () => {
+cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x"}],
+  messages:[], studio:[], notes:[] };
+renderNotebook();
+const row = $("#srcList").children[0];
+const ref = row.children.find(c => c.cls === "src-act" && c.textContent === "↻");
+const tt = row.children.find(c => c.cls === "t");
+if (!ref || !tt) { console.error("refresh button/row not built"); process.exit(1) }
+// In-progress rename in the same row -> stash + handler detach.
+const rin = mkEl(); rin.value = "edited"; rin.selectionStart = 1; rin.selectionEnd = 3;
+rin.onblur = () => {}; rin.onkeydown = () => {};
+tt.querySelector = sel => sel === "input.src-rename" ? rin : null;
+await ref.onclick({stopPropagation(){}});
+if (!externalPendingRename || externalPendingRename.srcId !== 9
+    || externalPendingRename.value !== "edited"
+    || externalPendingRename.selStart !== 1 || externalPendingRename.selEnd !== 3)
+  { console.error("rename not stashed: " + JSON.stringify(externalPendingRename)); process.exit(1) }
+if (rin.onblur !== null || rin.onkeydown !== null)
+  { console.error("stashed input handlers not detached"); process.exit(1) }
+if (apiCalls.length !== 1 || apiCalls[0].path !== "/api/sources/9/refresh"
+    || apiCalls[0].method !== "POST")
+  { console.error("refresh POST wrong: " + JSON.stringify(apiCalls)); process.exit(1) }
+if (opens[0] !== 3) { console.error("no reload after refresh"); process.exit(1) }
+if (toasts.length !== 1 || toasts[0].indexOf("src.refresh.ok") !== 0)
+  { console.error("refresh toast wrong: " + JSON.stringify(toasts)); process.exit(1) }
+externalPendingRename = null;
+// pages_failed surfaces in the toast via src.pages_failed {n} substitution.
+nextJson = {pages_failed: 2};
+await ref.onclick({stopPropagation(){}});
+if (toasts[1] !== "src.refresh.ok 2 pages failed")
+  { console.error("pages_failed toast wrong: " + toasts[1]); process.exit(1) }
+// Error path: toast the message and restore the button (no reload).
+failNext = true;
+const opensBefore = opens.length;
+await ref.onclick({stopPropagation(){}});
+if (toasts[2] !== "refresh boom" || ref.disabled || ref.textContent !== "↻"
+    || opens.length !== opensBefore)
+  { console.error("error path wrong: " + JSON.stringify(toasts)); process.exit(1) }
+console.log("ok")
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_showsource_lazy_details_loads_once(self) -> None:
+        """v0.2.326: the excerpt path's <details> toggle lazy-loads full text
+        exactly once (dataset.loaded guard), renders into its body on success,
+        writes the error into the body on failure, and honors the stale-signal
+        check — the remaining unpinned branch of showSource."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            show = _js_block(src, "async function showSource")
+        except ValueError as e:
+            self.fail(f"showSource not found: {e}")
+        harness = (
+            """\
+const calls = {renders: [], toasts: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, open: false, _cbs: {}, className: "", tag: "",
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ n.children.unshift(x); n.kids.unshift(x); },
+    classList: {add(){}, remove(){}, contains: () => false},
+    focus(){}, addEventListener(ev, cb){ n._cbs[ev] = cb; },
+    querySelector(){ return null }, querySelectorAll(){ return [] },
+    setAttribute(){}, scrollIntoView(){},
+  };
+  return n;
+};
+const els = {};
+const $ = s => els[s] || (els[s] = mk());
+const document = {activeElement: null,
+  createElement: tag => { const n = mk(); n.tag = tag; return n; }};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+let _srcAbort = null, _viewerOpener = null;
+const deferred = [];
+const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
+  deferred.push(rec);
+  return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
+const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const toast = m => calls.toasts.push(m);
+const closeViewer = () => {};
+"""
+            + show
+            + """
+(async () => {
+  // Excerpt path: builds a lazy <details>; the toggle fires the fetch once.
+  showSource(9, "T", "excerpt text", "sec1", [1], null);
+  const vt = els["#viewerText"];
+  const det = vt.kids.find(c => c.className === "full-src");
+  if (!det || !det._cbs.toggle)
+    { console.error("lazy details not wired"); process.exit(1) }
+  det.open = true;
+  det._cbs.toggle();
+  if (deferred.length !== 1 || deferred[0].path !== "/api/sources/9/text")
+    { console.error("lazy fetch wrong"); process.exit(1) }
+  deferred[0].res({json: async () => ({chunks: [{id: 1, seq: 0, text: "c"}]})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== 1)
+    { console.error("lazy render did not happen"); process.exit(1) }
+  // Second toggle is a no-op (dataset.loaded).
+  det._cbs.toggle();
+  await new Promise(r => setTimeout(r, 0));
+  if (deferred.length !== 1)
+    { console.error("lazy fetch fired twice"); process.exit(1) }
+  // Failure writes into the body instead of toasting (viewer-local error).
+  showSource(10, "T2", "excerpt2", null, null, null);
+  const det2 = els["#viewerText"].kids.find(c => c.className === "full-src");
+  det2.open = true;
+  det2._cbs.toggle();
+  deferred[1].rej(new Error("fetch boom"));
+  await new Promise(r => setTimeout(r, 0));
+  const body2 = det2.kids[det2.kids.length - 1];
+  if (body2.textContent !== "fetch boom" || calls.toasts.length !== 0)
+    { console.error("lazy error path wrong"); process.exit(1) }
+  // Stale signal: det3's fetch is in flight when showSource(12) aborts the
+  // source-11 controller — its late resolution must not render.
+  showSource(11, "T3", "e3", null, null, null);
+  const det3 = els["#viewerText"].kids.find(c => c.className === "full-src");
+  det3.open = true;
+  det3._cbs.toggle();
+  const rendersBefore = calls.renders.length;
+  showSource(12, "T4", "e4", null, null, null);   // aborts deferred[2]'s signal
+  deferred[2].res({json: async () => ({chunks: []})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== rendersBefore)
+    { console.error("stale lazy fetch rendered"); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_startSourceRename_commit_and_cancel_paths(self) -> None:
         """v0.2.267: pin startSourceRename's five exit paths under node —
         Enter commits via PATCH + reload, blur to a sibling row control skips
