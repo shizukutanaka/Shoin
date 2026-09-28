@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.304
+## Version History: v0.1.37 → v0.2.305
+
+### v0.2.305 (2026-09-27)
+
+- Corrected CLAUDE.md's context-budget description: the history share is
+  HISTORY_TOKENS_TOTAL=400 (not "6 messages, 160 each" = 960, a
+  misdescription qa.py's comment had to flag by hand since v0.2.101) and
+  the source-text share is rank-proportional (v0.2.200), not "split
+  equally". Named every budget constant inline so the doc states values
+  directly.
+- Added test_claude_md_names_the_real_constant_values: every constant
+  CLAUDE.md names must appear in NAME=value form matching the code —
+  the doc↔code drift guard extended to the design document.
+
 
 ### v0.2.304 (2026-09-27)
 

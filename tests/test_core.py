@@ -63,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.304")
+        self.assertEqual(VERSION, "0.2.305")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10993,6 +10993,46 @@ class TestResidualGuards(unittest.TestCase):
         known = set(re.findall(r'_get\("([A-Z_]+)"', cfg_src))
         for key in json.loads(config_json):
             self.assertIn(key, known, f"README config.json example names unknown key {key}")
+
+    def test_claude_md_names_the_real_constant_values(self) -> None:
+        """v0.2.305: CLAUDE.md documented the history budget as "6 messages,
+        160 each" (implying 960) while the code's real share is
+        HISTORY_TOKENS_TOTAL=400 — a misdescription the qa.py comment had to
+        flag by hand, and the source-text share was still described as
+        "split equally" four versions after v0.2.200 made it
+        rank-proportional. Every named constant in CLAUDE.md must match the
+        code's value, or the design doc teaches a wrong mental model."""
+        from shoin.citation import CONFIRM_MIN, MISMATCH_GAP
+        from shoin.config import TOP_K
+        from shoin.qa import (
+            CONTEXT_TOKENS,
+            HISTORY_MESSAGES,
+            HISTORY_TOKENS_EACH,
+            HISTORY_TOKENS_TOTAL,
+            MIN_PER_SOURCE_TOKENS,
+            SOURCE_TEXT_TOKENS,
+        )
+
+        root = Path(__file__).resolve().parent.parent
+        compact = (root / "CLAUDE.md").read_text(encoding="utf-8").replace(" ", "")
+        constants = {
+            "CONTEXT_TOKENS": CONTEXT_TOKENS,
+            "SOURCE_TEXT_TOKENS": SOURCE_TEXT_TOKENS,
+            "HISTORY_MESSAGES": HISTORY_MESSAGES,
+            "HISTORY_TOKENS_EACH": HISTORY_TOKENS_EACH,
+            "HISTORY_TOKENS_TOTAL": HISTORY_TOKENS_TOTAL,
+            "MIN_PER_SOURCE_TOKENS": MIN_PER_SOURCE_TOKENS,
+            "TOP_K": TOP_K,
+            "CONFIRM_MIN": CONFIRM_MIN,
+            "MISMATCH_GAP": MISMATCH_GAP,
+        }
+        for name, value in constants.items():
+            rendered = f"{value:g}" if isinstance(value, float) else str(value)
+            self.assertIn(
+                f"{name}={rendered}",
+                compact,
+                f"CLAUDE.md must document {name}={rendered}",
+            )
 
 
 if __name__ == "__main__":

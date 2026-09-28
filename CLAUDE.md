@@ -52,9 +52,9 @@ Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions
 
 **1. Range Check** (`validate_citations`): Detect `[S99]` when only 5 sources exist. Out-of-range numbers are the narrowest, highest-confidence hallucination signal.
 
-**2. Grounding Confirmation** (`verify_grounding`): A cited sentence's wording is compared to the source text using character-bigram overlap. When overlap >= 30% (CONFIRM_MIN, calibrated for CJK), the citation is flagged `confirmed` — strong positive evidence the claim is lexically supported.
+**2. Grounding Confirmation** (`verify_grounding`): A cited sentence's wording is compared to the source text using character-bigram overlap. When overlap >= 30% (CONFIRM_MIN=0.30, calibrated for CJK), the citation is flagged `confirmed` — strong positive evidence the claim is lexically supported.
 
-**3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP), the citation number is flagged `misattributed` — the model likely cited the wrong source.
+**3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP=0.20), the citation number is flagged `misattributed` — the model likely cited the wrong source.
 
 **4. Uncited-Assertion Detection** (`uncited_sentences`, v0.2.65): Checks 2 and 3 only ever examine sentences that *already* carry a citation. A hallucinated or simply unsupported claim with *zero* citations anywhere in it is invisible to those checks — this was docs/product-review.md's top-priority open gap. `uncited_sentences()` scans for sentences with no `[S#]` marker, resolving the common trailing-citation pattern ("Sentence. [S1]") the same way `verify_grounding()` does, and excludes trivial filler and explicit "not in the source" disclaimers (the *correct* response to missing facts, not an unsupported assertion).
 
@@ -76,7 +76,7 @@ Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions
 
 ### History Management: Stripping Stale Citations, Deduplicating Roles
 
-Shoin supports multi-turn conversation by including up to 6 recent prior turns in the prompt context (HISTORY_MESSAGES=6, each truncated to 160 tokens to keep total budget ~2.4K). Challenges:
+Shoin supports multi-turn conversation by including up to 6 recent prior turns in the prompt context (HISTORY_MESSAGES=6 candidate turns, each truncated to HISTORY_TOKENS_EACH=160 tokens, and all together capped at HISTORY_TOKENS_TOTAL=400 tokens to keep the ~2.4K total budget). Challenges:
 
 **Stale Citation Stripping**: When including message N-1 in the prompt for query N, the [S1]..[Sn] numbers from the previous context are stale—they don't match the fresh retrieval for query N. If the model echoes stale numbers, they become meaningless. Solution: remove all `[S#]` markers from history messages before re-prompting.
 
@@ -152,10 +152,10 @@ Code: `ingest.py` `fetch_url()` and `_check_ip_pinning()`.
 
 ### Token-Aware Truncation
 
-The context window is budgeted: 2400 tokens, allocated as:
+The context window is budgeted: CONTEXT_TOKENS=2400 tokens, allocated as:
 - ~900 tokens: system prompt + source headers
-- ~1000 tokens: source text (split equally across TOP_K sources)
-- ~400 tokens: recent history (6 messages, 160 each)
+- SOURCE_TEXT_TOKENS=1000 tokens: source text, shared rank-proportionally across up to TOP_K=8 sources (harmonic 1/i weights over a MIN_PER_SOURCE_TOKENS=64 floor)
+- HISTORY_TOKENS_TOTAL=400 tokens: recent history — up to HISTORY_MESSAGES=6 turns, each ≤ HISTORY_TOKENS_EACH=160 tokens (the total binds first, so only the few most recent turns fit)
 - ~100 tokens: user query
 
 When truncating source text to fit the budget, naive character truncation would split mid-word or mid-UTF-8-sequence. Solution: `chunk.py` `_truncate_tokens(text, limit)` scans left-to-right, counts tokens via `estimate_tokens()` (which models LLM tokenizer behavior for CJK and punctuation), and stops exactly at the limit without mangling characters.
@@ -342,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.304** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.305** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 
