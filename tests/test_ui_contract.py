@@ -1156,6 +1156,100 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_source_row_delete_and_rename_guard(self) -> None:
+        """v0.2.329: the source row's remaining three unpinned wirings —
+        (a) the × delete button disables itself, DELETEs /api/sources/{id},
+        reloads the notebook, and restores itself + toasts on failure;
+        (b) row click/Enter/Space opens the source viewer EXCEPT while an
+        in-progress rename input lives inside `tt` (the guard that keeps a
+        stray click from tearing down the edit); (c) tt.ondblclick starts
+        the rename."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function renderNotebook")
+        harness = """\
+const reg = {};
+function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
+  disabled:false, textContent:"", href:"", title:"",
+  classList:{ contains(c){ return false }, add(){}, remove(){} },
+  dataset:{},
+  replaceChildren(){ this.children=[] },
+  append(x){ this.children.push(x); x.parent=this },
+  contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
+  removeAttribute(n){ if(n==="href") delete this.href },
+  setAttribute(n,v){}, querySelector(){ return null },
+  setSelectionRange(){}, focus(){}, onclick:null, ondblclick:null, onkeydown:null,
+  onblur:null, onchange:null, tabIndex:0, selectionStart:0, selectionEnd:0}; }
+function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
+function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls;
+  e.text=text; e.textContent=text; return e }
+function t(k){ return k }
+let apiCalls = []; let failNext = false;
+async function api(path, o){ apiCalls.push({path, method: o && o.method});
+  if (failNext) throw new Error("del boom");
+  return {json:async()=>({})}; }
+let opens = [], toasts = [], shown = [];
+function openNotebook(id){ opens.push(id) }
+function toast(m){ toasts.push(m) }
+function showSource(id, title){ shown.push(id) }
+function renderChatHistory(){} function renderStudio(){}
+function renderNotes(){} function refreshQuestions(){}
+let notebooks = [], cur = null, srcIndex = new Map();
+let externalPendingRename = null;
+let renameCalls = [];
+function startSourceRename(s, tt, row, initial){
+  renameCalls.push({srcId: s.id, initial});
+  const inp = mkEl(); inp.cls = "src-rename"; return inp;
+}
+const document = { activeElement: null };
+""" + fn + """
+(async () => {
+// Non-URL source: no refresh button — row children are [no][tt][del].
+cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"md"}],
+  messages:[], studio:[], notes:[] };
+renderNotebook();
+const row = $("#srcList").children[0];
+const tt = row.children.find(c => c.cls === "t");
+const del = row.children.find(c => c.cls === "src-act" && c.textContent === "×");
+if (!tt || !del) { console.error("row not built"); process.exit(1) }
+// (b) click + Enter/Space open the viewer; unrelated keys do not.
+row.onclick();
+row.onkeydown({key:"Enter", preventDefault(){}});
+row.onkeydown({key:" ", preventDefault(){}});
+row.onkeydown({key:"x", preventDefault(){}});
+if (shown.length !== 3 || shown.some(x => x !== 9))
+  { console.error("row open wiring wrong: " + JSON.stringify(shown)); process.exit(1) }
+// (b-guard) while a rename input lives in tt, clicks must not open the viewer.
+const rin = mkEl();
+tt.querySelector = sel => sel === "input.src-rename" ? rin : null;
+row.onclick();
+if (shown.length !== 3)
+  { console.error("rename-in-progress guard broken"); process.exit(1) }
+// (c) double-clicking the title span starts the rename.
+let stopped = false;
+tt.ondblclick({stopPropagation(){ stopped = true }});
+if (renameCalls.length !== 1 || renameCalls[0].srcId !== 9 || !stopped)
+  { console.error("dblclick rename wiring wrong"); process.exit(1) }
+// (a) delete: disable → DELETE → reload; on failure restore + toast, no reload.
+await del.onclick({stopPropagation(){}});
+if (!del.disabled)
+  { console.error("del was not disabled in flight"); process.exit(1) }
+if (apiCalls.length !== 1 || apiCalls[0].path !== "/api/sources/9"
+    || apiCalls[0].method !== "DELETE")
+  { console.error("delete call wrong: " + JSON.stringify(apiCalls)); process.exit(1) }
+if (opens[0] !== 3) { console.error("no reload after delete"); process.exit(1) }
+failNext = true;
+const opensBefore = opens.length;
+await del.onclick({stopPropagation(){}});
+if (toasts[0] !== "del boom" || del.disabled || opens.length !== opensBefore)
+  { console.error("delete error path wrong: " + JSON.stringify(toasts)); process.exit(1) }
+console.log("ok")
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_showsource_lazy_details_loads_once(self) -> None:
         """v0.2.326: the excerpt path's <details> toggle lazy-loads full text
         exactly once (dataset.loaded guard), renders into its body on success,

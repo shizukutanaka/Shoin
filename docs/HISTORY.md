@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.329
+## Version History: v0.1.37 → v0.2.330
+
+### v0.2.330 (2026-09-28)
+
+- Pin the last three unpinned source-row wirings in renderNotebook: the × delete button (disable → DELETE /api/sources/{id} → reload; failure restores the button and toasts without reloading), the row click/Enter/Space → showSource wiring with its rename-in-progress guard (a click on a row mid-rename must not tear down the edit), and tt.ondblclick → startSourceRename. With these, every event handler in index.html is behavior-pinned under node. Audit-confirmed: updated_at ordering is consistent (every content mutation calls touch_notebook or rides a touching parent; embeddings/settings correctly skip it).
 
 ### v0.2.329 (2026-09-28)
 
