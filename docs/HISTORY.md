@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.341
+## Version History: v0.1.37 → v0.2.342
+
+### v0.2.342 (2026-09-28)
+
+- Extend the call-site kwarg pin to aliased `_t` imports: `from .qa import _t as _qa_t` call sites in server.py/studio.py were invisible to the v0.2.341 check (func.id != "_t"). The pin now collects ImportFrom aliases of `_t` and resolves each call against the *source* module's `_STRINGS` table. Fail-then-pass verified both directions: a `{x}` placeholder added to qa's `no_hit` template flags `missing=['x']` at the in-module call, and a stray kwarg on `_qa_t("no_hit")` in server.py flags `extra=['x']`. Clean today: `_qa_t` targets (no_hit, system_prompt) and studio's `_INSTRUCTIONS`/`_t_kind` carry no placeholders.
 
 ### v0.2.341 (2026-09-28)
 

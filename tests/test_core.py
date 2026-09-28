@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.341")
+        self.assertEqual(VERSION, "0.2.342")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10985,8 +10985,10 @@ class TestResidualGuards(unittest.TestCase):
         (deep in an error tail — exactly where tests rarely reach); an extra
         kwarg is dead drift. Covers both call shapes — `_t("k", kw=...)`
         (cli.py) and `_t("k").format(kw=...)` (qa.py/studio.py) — and resolves
-        non-literal keys: `key if cond else key2` and `"prefix_" + var`
-        (concat prefixes expand to every matching table key).
+        non-literal keys (`key if cond else key2`, `"prefix_" + var`
+        concat prefixes expand to every matching table key) and
+        `from .qa import _t as _qa_t` aliases (resolved against the
+        *source* module's table).
         """
         import ast
         from string import Formatter
@@ -11013,17 +11015,31 @@ class TestResidualGuards(unittest.TestCase):
                 }
             return {k: e["ja"] + e["en"] for k, e in table.items()}
 
-        for mod in (shoin.cli, shoin.qa, shoin.studio, shoin.export, shoin.server):
-            pairs = table_pairs(mod)
-            placeholders = {k: fields(v) for k, v in pairs.items()}
+        mods = (shoin.cli, shoin.qa, shoin.studio, shoin.export, shoin.server)
+        pairs_by_mod = {m.__name__.split(".")[-1]: table_pairs(m) for m in mods}
+        for mname, pairs in pairs_by_mod.items():
             self.assertTrue(
-                all(n.isidentifier() and not n.isdigit() for p in placeholders.values() for n in p),
-                f"{mod.__name__}: unnamed/positional placeholders make the kwarg "
+                all(
+                    n.isidentifier() and not n.isdigit()
+                    for tmpl in pairs.values()
+                    for n in fields(tmpl)
+                ),
+                f"shoin.{mname}: unnamed/positional placeholders make the kwarg "
                 "contract unenforceable — use named fields",
             )
+
+        for mod in mods:
             tree = ast.parse(
                 Path(mod.__file__).read_text(encoding="utf-8")  # type: ignore[arg-type]
             )
+            # Aliases: `from .qa import _t as _qa_t` resolves against qa._STRINGS,
+            # not the file's own table.
+            aliases: dict[str, str] = {}
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom):
+                    for a in n.names:
+                        if a.name == "_t" and a.asname:
+                            aliases[a.asname] = (n.module or "").split(".")[-1]
             formatted: set[int] = {
                 id(n.func.value)
                 for n in ast.walk(tree)
@@ -11048,9 +11064,12 @@ class TestResidualGuards(unittest.TestCase):
                 if not (
                     isinstance(inner, ast.Call)
                     and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "_t"
+                    and (inner.func.id == "_t" or inner.func.id in aliases)
                 ):
                     continue
+                src = aliases.get(inner.func.id, mod.__name__.split(".")[-1])
+                pairs = pairs_by_mod.get(src, {})
+                placeholders = {k: fields(v) for k, v in pairs.items()}
                 supplied |= {k.arg for k in inner.keywords if k.arg}
                 arg = inner.args[0] if inner.args else None
                 keys: set[str] = set()
