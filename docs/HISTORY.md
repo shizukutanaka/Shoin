@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.321
+## Version History: v0.1.37 → v0.2.322
+
+### v0.2.322 (2026-09-28)
+
+- Pin the remaining cross-language enumerations: the UI's `const KINDS` array must equal studio.KINDS exactly (server-only kind renders no button; UI-only kind always 400s), and the export href set must equal export.FORMATS (a format added server-side gets no link; a stale link 400s on click).
 
 ### v0.2.321 (2026-09-28)
 

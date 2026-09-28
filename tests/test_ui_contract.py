@@ -139,6 +139,39 @@ class TestUIContract(unittest.TestCase):
                 missing, [], f"studio kinds with no I18N.{loc} label (blank button): {missing}"
             )
 
+    def test_studio_kinds_match_between_server_and_ui(self) -> None:
+        """The UI's `const KINDS` array must equal studio.KINDS exactly.
+
+        buildKindButtons() iterates the JS array; _h_studio validates against the
+        Python tuple. A kind added on only one side either renders no button at
+        all (server-only) or a button that always fails STUDIO_KIND_INVALID
+        (UI-only) — both silently, since every existing test exercises each side
+        independently.
+        """
+        from shoin.studio import KINDS
+
+        script = _script_body(_html())
+        m = re.search(r"\bKINDS\s*=\s*\[([^\]]*)\]", script)
+        self.assertIsNotNone(m, "const KINDS array not found in index.html")
+        assert m is not None
+        ui_kinds = re.findall(r'"([^"]+)"', m.group(1))
+        self.assertEqual(ui_kinds, list(KINDS))
+
+    def test_export_formats_match_between_server_and_ui(self) -> None:
+        """The UI's export hrefs must cover exactly export.FORMATS.
+
+        Each download link hardcodes `?format=X`; _h_export rejects anything
+        outside FORMATS. A format added server-side silently gets no link; a
+        link to a removed format 400s on click. Comparing the two sets pins
+        both directions.
+        """
+        from shoin.export import FORMATS
+
+        script = _script_body(_html())
+        ui_fmts = set(re.findall(r'export\?format=([a-z]+)', script))
+        self.assertTrue(ui_fmts, "expected export ?format= hrefs in index.html")
+        self.assertEqual(ui_fmts, set(FORMATS))
+
     def test_every_api_path_matches_a_registered_route(self) -> None:
         """A path the UI fetches but the server never registers is a 404 in waiting."""
         script = _script_body(_html())
