@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.317
+## Version History: v0.1.37 → v0.2.318
+
+### v0.2.318 (2026-09-28)
+
+- Pin the three write entry points under node: create-notebook, add-URL, file-upload handlers — disable during POST, clear input on success, reload, always re-enable in finally (error path included)
 
 ### v0.2.317 (2026-09-28)
 

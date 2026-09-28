@@ -1128,6 +1128,93 @@ console.log("ok")
         found = [s for s in sinks if s in html]
         self.assertEqual(found, [], f"HTML injection sink(s) in index.html: {found}")
 
+    def test_create_and_add_handlers_disable_clear_reload_reenable(self) -> None:
+        """v0.2.318: the three write entry points — create notebook (nbForm),
+        add URL source (urlBtn), file upload (fileInput) — share one contract:
+        disable the control during the POST, clear the input on success,
+        reload the notebook view, and always re-enable in finally (failure
+        included). Runs all three real handlers under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        blocks = []
+        for marker in ('$("#nbForm").onsubmit', '$("#fileInput").onchange', '$("#urlBtn").onclick'):
+            try:
+                blocks.append(_js_block(src, marker))
+            except ValueError:
+                self.fail(f"handler not found: {marker}")
+        nb_form, file_input, url_btn = blocks
+        harness = (
+            """\
+const calls = {posts: [], opens: [], toasts: []};
+const cur = {id: 9};
+const nbName = {value: "new nb"};
+const urlInput = {value: "https://example.com/x"};
+const urlBtnEl = {disabled: false, textContent: "Add"};
+const fileInputEl = {files: [{name: "a.pdf"}], disabled: false, value: "C:\\\\f"};
+const $ = s => s === "#nbName" ? nbName : s === "#urlInput" ? urlInput
+    : s === "#urlBtn" ? urlBtnEl : {};
+let failNext = false;
+const jpost = async (p, body) => {
+  calls.posts.push(["POST", p, body]);
+  if (failNext) throw new Error("[X] boom");
+  return {json: async () => p === "/api/notebooks" ? {id: 9} : {pages_failed: 0}};
+};
+const api = async (p, opts) => {
+  calls.posts.push(["UP", p, opts.headers["X-Filename"]]);
+  if (failNext) throw new Error("[X] boom");
+  return {json: async () => ({pages_failed: 0})};
+};
+const t = k => k;
+async function openNotebook(id){ calls.opens.push(id) }
+function toast(m){ calls.toasts.push(m) }
+const events = {};
+const nbFormEv = {preventDefault(){}, target: {querySelector: () => nbBtn}};
+const nbBtn = {disabled: false};
+"""
+            + f"events.nbForm = async e=>\n{nb_form.split('onsubmit = async e=>',1)[1]}\n"
+            + f"events.fileInput = async e=>\n{file_input.split('onchange = async e=>',1)[1]}\n"
+            + f"events.urlBtn = async ()=>\n{url_btn.split('onclick = async ()=>',1)[1]}\n"
+            + """\
+(async () => {
+  // nbForm: POST /api/notebooks, name cleared, notebook opened, btn re-enabled
+  await events.nbForm(nbFormEv);
+  if (calls.posts[0][1] !== "/api/notebooks"
+      || calls.posts[0][2].name !== "new nb")
+    { console.error("nbForm POST wrong: " + JSON.stringify(calls.posts[0])); process.exit(1) }
+  if (nbName.value !== "" || calls.opens[0] !== 9 || nbBtn.disabled)
+    { console.error("nbForm cleanup wrong: " + JSON.stringify({v: nbName.value, opens: calls.opens, d: nbBtn.disabled})); process.exit(1) }
+  // urlBtn: POST sources, input cleared, opened, button label restored
+  const label = urlBtnEl.textContent;
+  await events.urlBtn();
+  if (calls.posts[1][1] !== "/api/notebooks/9/sources"
+      || calls.posts[1][2].target !== "https://example.com/x")
+    { console.error("urlBtn POST wrong: " + JSON.stringify(calls.posts[1])); process.exit(1) }
+  if (urlInput.value !== "" || calls.opens[1] !== 9 || urlBtnEl.disabled
+      || urlBtnEl.textContent !== label)
+    { console.error("urlBtn cleanup wrong"); process.exit(1) }
+  // fileInput: upload POST with filename header, picker cleared + re-enabled
+  await events.fileInput({target: fileInputEl});
+  if (calls.posts[2][1] !== "/api/notebooks/9/upload"
+      || calls.posts[2][2] !== "a.pdf")
+    { console.error("fileInput POST wrong: " + JSON.stringify(calls.posts[2])); process.exit(1) }
+  if (fileInputEl.value !== "" || fileInputEl.disabled)
+    { console.error("fileInput cleanup wrong"); process.exit(1) }
+  // Failure path: toast fires and controls still re-enable (finally)
+  failNext = true;
+  urlInput.value = "https://again";
+  const before = calls.toasts.length;
+  await events.urlBtn();
+  if (calls.toasts.length !== before + 1 || urlBtnEl.disabled
+      || urlBtnEl.textContent !== label)
+    { console.error("error path wrong: " + JSON.stringify(calls.toasts)); process.exit(1) }
+  console.log("ok")
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_sse_frame_parser_buffers_and_dispatches(self) -> None:
         """v0.2.317: the SSE frame parser (the \\n\\n splitter + event:/data:
         accumulation inside the askForm read loop) is the one dispatch path no
