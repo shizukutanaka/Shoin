@@ -172,6 +172,67 @@ class TestUIContract(unittest.TestCase):
         self.assertTrue(ui_fmts, "expected export ?format= hrefs in index.html")
         self.assertEqual(ui_fmts, set(FORMATS))
 
+    def test_coverage_low_matches_between_server_and_ui(self) -> None:
+        """index.html hardcodes `const COVERAGE_LOW = 0.5` beside a comment
+        saying to keep it in sync with citation.COVERAGE_LOW and the export
+        threshold — a comment is not a guard. Pin the numeric equality so a
+        threshold moved on only one side can't silently mislabel low-coverage
+        answers in the UI."""
+        from shoin.citation import COVERAGE_LOW
+
+        script = _script_body(_html())
+        m = re.search(r"\bCOVERAGE_LOW\s*=\s*([0-9.]+)", script)
+        self.assertIsNotNone(m, "const COVERAGE_LOW not found in index.html")
+        assert m is not None
+        self.assertEqual(float(m.group(1)), COVERAGE_LOW)
+
+    def test_api_wrapper_maps_the_error_envelope(self) -> None:
+        """Every handler surfaces failures via toast(e.message); api() is what
+        turns the server's `{"error":{code,message}}` envelope into that
+        message, falling back to `[status] err.generic` when the body isn't
+        JSON. A regression here turns every API failure into a generic or
+        thrown-response-object toast across the whole UI."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            fn = _js_block(src, "async function api")
+        except ValueError:
+            self.fail("api() not found in index.html")
+        # The wrapper calls the global fetch(); a `next` slot swaps responses
+        # per case while api() is embedded once.
+        harness = (
+            """\
+const t = k => k;
+let next;
+const fetch = async () => next;
+const mkRes = (ok, status, body, bad) => ({
+  ok, status,
+  json: bad ? async () => { throw new Error("not json") }
+            : async () => body,
+});
+"""
+            + fn
+            + """
+(async () => {
+  next = mkRes(true, 200, {});
+  const r = await api("/x");
+  if (r !== next) { console.error("api() did not return the response"); process.exit(1) }
+  next = mkRes(false, 400, {error: {code: "VALIDATION_X", message: "bad input"}});
+  try { await api("/x"); console.error("400 did not throw"); process.exit(1) }
+  catch (e) { if (e.message !== "[VALIDATION_X] bad input")
+    { console.error("envelope mapping wrong: " + e.message); process.exit(1) } }
+  next = mkRes(false, 500, null, true);
+  try { await api("/x"); console.error("500 did not throw"); process.exit(1) }
+  catch (e) { if (e.message !== "[500] err.generic")
+    { console.error("fallback mapping wrong: " + e.message); process.exit(1) } }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_every_api_path_matches_a_registered_route(self) -> None:
         """A path the UI fetches but the server never registers is a 404 in waiting."""
         script = _script_body(_html())

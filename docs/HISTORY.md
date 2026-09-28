@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.324
+## Version History: v0.1.37 → v0.2.325
+
+### v0.2.325 (2026-09-28)
+
+- Pin the last JS↔Python duplicated constant (index.html COVERAGE_LOW ≡ citation.COVERAGE_LOW — previously kept in sync by a comment only) and the api() error-envelope contract under node (200→response passthrough, JSON `{error:{code,message}}`→`[code] msg` throw, non-JSON error body→`[status] err.generic` fallback).
 
 ### v0.2.324 (2026-09-28)
 
