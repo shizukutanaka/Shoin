@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.326
+## Version History: v0.1.37 → v0.2.327
+
+### v0.2.327 (2026-09-28)
+
+- Sync docs/spec.md to v0.2.326: STRIDE DoS row gains the accepted-socket 120s timeout, deep-nesting JSON → 400, and protocol-level errors in the JSON envelope; the information-leak row gains the full-response security headers (nosniff/Referrer-Policy/no-store, CSP/X-Frame-Options on the UI) and the Server-header Python-version suppression; SSRF row notes per-hop revalidation + DNS re-pinning; version markers and the measured-coverage line refreshed. Verified the REQ table, report key list, CLI subcommand list, 4-question default, and 9-migration schema all still match code.
 
 ### v0.2.326 (2026-09-28)
 
