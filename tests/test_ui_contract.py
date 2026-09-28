@@ -173,6 +173,33 @@ class TestUIContract(unittest.TestCase):
             f"I18N.en-only keys (ja user sees raw key): {sorted(locales['en'] - locales['ja'])}",
         )
 
+    def test_i18n_values_keep_placeholder_parity(self) -> None:
+        """Each key's `{name}` placeholder set must be identical in ja and en.
+
+        Call sites substitute manually — `t("reindex.ok").replace("{n}", v)` —
+        so a placeholder present in one locale's template but absent from the
+        other leaks the raw `{n}` into that locale's UI (the replace finds
+        nothing). Key-set symmetry (above) can't see this: both locales define
+        the key; only the placeholder names inside the values diverge.
+        """
+        script = _script_body(_html())
+        tables: dict[str, dict[str, set[str]]] = {}
+        for loc in ("ja", "en"):
+            m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
+            self.assertIsNotNone(m, f"I18N.{loc} block not found")
+            assert m is not None
+            tables[loc] = {
+                k: set(re.findall(r"\{([a-z_]+)\}", v))
+                for k, v in re.findall(r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"', m.group(1))
+            }
+        for key in sorted(tables["ja"]):
+            self.assertIn(key, tables["en"])
+            self.assertEqual(
+                tables["ja"][key],
+                tables["en"][key],
+                f"I18N[{key}] placeholders diverge: ja={tables['ja'][key]} en={tables['en'][key]}",
+            )
+
     def test_studio_kinds_match_between_server_and_ui(self) -> None:
         """The UI's `const KINDS` array must equal studio.KINDS exactly.
 

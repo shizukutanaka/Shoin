@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.336
+## Version History: v0.1.37 → v0.2.337
+
+### v0.2.337 (2026-09-28)
+
+- Pin `{name}` placeholder parity inside I18N.ja/I18N.en values (test_i18n_values_keep_placeholder_parity): UI placeholders are substituted manually per call site (t(k).replace("{n}", v)), so a placeholder present in one locale but absent from the other leaks the raw `{n}`/`{total}` into that locale's toast — the key-symmetry pin can't see it (both locales define the key; only the names inside the values diverge). Completes the placeholder-parity closure begun server-side at v0.2.336. Fail-then-pass verified (dropping {total} from en's reindex.ok fails the pin).
 
 ### v0.2.336 (2026-09-28)
 
