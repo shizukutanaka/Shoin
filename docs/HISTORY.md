@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.310
+## Version History: v0.1.37 → v0.2.311
+
+### v0.2.311 (2026-09-27)
+
+- Complete the WAI-ARIA tabs pattern: ArrowLeft/Right/Home/End keyboard navigation on the pane switcher, aria-controls on tabs, role=tabpanel + aria-labelledby on panes; pinned statically and under node
 
 ### v0.2.310 (2026-09-27)
 

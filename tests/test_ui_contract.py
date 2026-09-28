@@ -1128,6 +1128,62 @@ console.log("ok")
         found = [s for s in sinks if s in html]
         self.assertEqual(found, [], f"HTML injection sink(s) in index.html: {found}")
 
+    def test_tabs_follow_the_wai_aria_pattern(self) -> None:
+        """v0.2.311: the pane switcher declares role=tablist/tab, a contract
+        that promises keyboard interaction — ArrowLeft/Right/Home/End must
+        move focus AND selection between tabs (automatic activation), and
+        each tab must be linked to its panel via aria-controls ↔
+        aria-labelledby. Verify the wiring statically, then execute the real
+        handler under node and drive it with synthetic key events."""
+        html = _html()
+        for tid, pid in (
+            ("tabSrc", "paneSrc"),
+            ("tabChat", "paneChat"),
+            ("tabStudio", "paneStudio"),
+        ):
+            self.assertIn(f'id="{tid}"', html)
+            self.assertIn(f'aria-controls="{pid}"', html)
+            self.assertIn(f'id="{pid}" role="tabpanel" aria-labelledby="{tid}"', html)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(html)
+        block = src[src.index("const selectTab") : src.index('$("#langBtn").onclick')]
+        harness = """\
+const panes = {};
+for (const id of ["paneSrc","paneChat","paneStudio"])
+  panes[id] = {_on:false, classList:{
+    add(){ panes[id]._on = true; }, remove(){ panes[id]._on = false; }}};
+const tabs = ["paneSrc","paneChat","paneStudio"].map(p=>({
+  dataset:{pane:p}, _sel:"false", focused:false,
+  setAttribute(k,v){ if(k==="aria-selected") this._sel=v; },
+  focus(){ tabs.forEach(t=>t.focused=false); this.focused=true; },
+}));
+const document = {querySelectorAll: sel =>
+  sel===".tabs button" ? tabs : sel===".pane" ? Object.values(panes) : []};
+const $ = sel => panes[sel.slice(1)];
+""" + block + """
+const key = (tab,k)=>tab.onkeydown({key:k, preventDefault(){}});
+const state = ()=>JSON.stringify([
+  tabs.findIndex(t=>t._sel==="true"),
+  tabs.findIndex(t=>t.focused),
+  ["paneSrc","paneChat","paneStudio"].findIndex(p=>panes[p]._on)]);
+const check = (want, what)=>{ if(state()!==want){
+  console.error(what+": "+state()+" != "+want); process.exit(1); } };
+tabs[0].onclick();
+check("[0,-1,0]", "click selects tab0");
+key(tabs[0],"ArrowRight"); check("[1,1,1]", "ArrowRight moves to next tab");
+key(tabs[1],"ArrowRight"); check("[2,2,2]", "ArrowRight moves to last tab");
+key(tabs[2],"ArrowRight"); check("[0,0,0]", "ArrowRight wraps to first");
+key(tabs[0],"ArrowLeft");  check("[2,2,2]", "ArrowLeft wraps to last");
+key(tabs[2],"Home");       check("[0,0,0]", "Home jumps to first");
+key(tabs[0],"End");        check("[2,2,2]", "End jumps to last");
+key(tabs[0],"x");          check("[2,2,2]", "non-arrow keys are ignored");
+console.log("ok");
+"""
+        code, out = _run_node(harness)
+        self.assertEqual(code, 0, out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

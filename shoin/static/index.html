@@ -183,13 +183,13 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
 </header>
 <div id="banner" role="status"></div>
 <div class="tabs" role="tablist">
-  <button role="tab" aria-selected="false" data-pane="paneSrc" data-i18n="tabs.sources">資料</button>
-  <button role="tab" aria-selected="true" data-pane="paneChat" data-i18n="tabs.chat">対話</button>
-  <button role="tab" aria-selected="false" data-pane="paneStudio" data-i18n="tabs.studio">書斎</button>
+  <button role="tab" id="tabSrc" aria-selected="false" aria-controls="paneSrc" data-pane="paneSrc" data-i18n="tabs.sources">資料</button>
+  <button role="tab" id="tabChat" aria-selected="true" aria-controls="paneChat" data-pane="paneChat" data-i18n="tabs.chat">対話</button>
+  <button role="tab" id="tabStudio" aria-selected="false" aria-controls="paneStudio" data-pane="paneStudio" data-i18n="tabs.studio">書斎</button>
 </div>
 <main>
   <!-- sources -->
-  <section class="pane" id="paneSrc" data-i18n-aria="tabs.sources" aria-label="Sources">
+  <section class="pane" id="paneSrc" role="tabpanel" aria-labelledby="tabSrc">
     <div class="pane-head" data-i18n="sources.head">書 棚</div>
     <div class="pane-body">
       <ul id="nbList"></ul>
@@ -218,7 +218,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- chat -->
-  <section class="pane active" id="paneChat" data-i18n-aria="tabs.chat" aria-label="Chat">
+  <section class="pane active" id="paneChat" role="tabpanel" aria-labelledby="tabChat">
     <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span><button class="clear-chat" id="clearChat" type="button" data-i18n="chat.clear" hidden>クリア</button></div>
     <div class="pane-body" id="chat" aria-live="polite"></div>
     <div id="chatEmpty" class="empty" style="margin:14px" hidden>
@@ -235,7 +235,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- studio + notes -->
-  <section class="pane" id="paneStudio" data-i18n-aria="tabs.studio" aria-label="Studio">
+  <section class="pane" id="paneStudio" role="tabpanel" aria-labelledby="tabStudio">
     <div class="pane-head" data-i18n="studio.head">書 斎</div>
     <div class="pane-body">
       <div class="kinds" id="kinds"></div>
@@ -1125,12 +1125,23 @@ $("#urlBtn").onclick = async ()=>{
 };
 
 /* ---------- tabs / lang / health ---------- */
+const selectTab = b=>{
+  document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
+  b.setAttribute("aria-selected","true");
+  document.querySelectorAll(".pane").forEach(p=>p.classList.remove("active"));
+  $("#"+b.dataset.pane).classList.add("active");
+};
 document.querySelectorAll(".tabs button").forEach(b=>{
-  b.onclick = ()=>{
-    document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
-    b.setAttribute("aria-selected","true");
-    document.querySelectorAll(".pane").forEach(p=>p.classList.remove("active"));
-    $("#"+b.dataset.pane).classList.add("active");
+  b.onclick = ()=>selectTab(b);
+  // WAI-ARIA tabs: arrows move focus+selection, Home/End jump to the ends.
+  b.onkeydown = e=>{
+    if (!["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) return;
+    e.preventDefault();
+    const tabs=[...document.querySelectorAll(".tabs button")];
+    const i=tabs.indexOf(b);
+    const n = e.key==="Home" ? 0 : e.key==="End" ? tabs.length-1
+      : (i + (e.key==="ArrowRight"?1:-1) + tabs.length) % tabs.length;
+    tabs[n].focus(); selectTab(tabs[n]);
   };
 });
 $("#langBtn").onclick = ()=>{
