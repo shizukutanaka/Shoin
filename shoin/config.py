@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.314"
+VERSION = "0.2.315"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -18,6 +18,10 @@ CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth
 URL_TIMEOUT_SEC = 15
 URL_MAX_REDIRECTS = 3
+# Bound on any single blocking socket op on an accepted connection. Without it a
+# client that opens a socket and sends nothing (or a partial body) holds its
+# request thread forever — unbounded local connection leaks exhaust threads.
+REQUEST_SOCKET_SEC = 120
 MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
 NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI history view)
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)

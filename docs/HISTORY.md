@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.314
+## Version History: v0.1.37 → v0.2.315
+
+### v0.2.315 (2026-09-28)
+
+- Bound every blocking socket op on accepted connections (REQUEST_SOCKET_SEC=120) — an idle or partial-body client no longer pins a request thread forever; timeout closes are quiet (no traceback)
 
 ### v0.2.314 (2026-09-28)
 

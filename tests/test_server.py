@@ -728,6 +728,36 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_idle_connection_times_out_quietly(self) -> None:
+        """v0.2.315: an accepted socket that never completes its request would
+        hold its handler thread forever — REQUEST_SOCKET_SEC bounds any single
+        blocking socket op, and the timeout close must not spam a traceback
+        (idle keep-alives are expected traffic)."""
+        import io
+        import socket
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "REQUEST_SOCKET_SEC", 0.2):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            try:
+                s.sendall(b"GET / HTTP/1.1\r\n")  # deliberately incomplete
+                captured = io.StringIO()
+                with patch("sys.stderr", captured):
+                    deadline = time.time() + 10
+                    while True:
+                        got = s.recv(4096)
+                        if got == b"":
+                            break  # server closed the connection
+                        if time.time() > deadline:
+                            self.fail("idle connection never timed out")
+            finally:
+                s.close()
+        self.assertNotIn(
+            "Traceback",
+            captured.getvalue(),
+            "a socket timeout must close quietly, not log a traceback",
+        )
+
     def test_json_body_deep_nesting_returns_400(self) -> None:
         """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
         and raises RecursionError — a malformed input that must still map to

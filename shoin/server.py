@@ -25,6 +25,7 @@ from .config import (
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
     NB_MESSAGES_LIMIT,
+    REQUEST_SOCKET_SEC,
     VERSION,
     db_path,
     multi_query_enabled,
@@ -152,6 +153,11 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
 class _Handler(BaseHTTPRequestHandler):
     server_version = f"shoin/{VERSION}"
     sys_version = ""  # keep the Python runtime version out of every Server header
+
+    def setup(self) -> None:
+        super().setup()
+        self.request.settimeout(REQUEST_SOCKET_SEC)
+
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
@@ -881,7 +887,17 @@ def make_server(
             "generation_lock": threading.Lock(),
         },
     )
-    return ThreadingHTTPServer((host, port), handler)
+    return _HTTPServer((host, port), handler)
+
+
+class _HTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # Idle keep-alive connections simply hit the per-request socket timeout
+        # and get closed — not an error worth a traceback. Everything else keeps
+        # the default (print to stderr).
+        if isinstance(sys.exc_info()[1], TimeoutError):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(port: int, db: str | None = None) -> None:  # pragma: no cover (blocking loop)
