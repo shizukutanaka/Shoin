@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.318
+## Version History: v0.1.37 → v0.2.319
+
+### v0.2.319 (2026-09-28)
+
+- Pin the remaining write handlers under node: note create/delete, reindex, clear-chat, and the five studio kind buttons — including the no-sources guard and failure-path re-enable
 
 ### v0.2.318 (2026-09-28)
 

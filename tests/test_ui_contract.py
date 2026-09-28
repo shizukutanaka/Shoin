@@ -1215,6 +1215,135 @@ const nbBtn = {disabled: false};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_note_reindex_clear_handlers_disable_and_reenable(self) -> None:
+        """v0.2.319: the remaining write handlers — note create (noteForm),
+        note delete (renderNotes ×), reindex (reindexBtn), clear-chat
+        (clearChat), studio generate (buildKindButtons onclick) — share the
+        disable→call→reload→finally-re-enable contract. A dropped re-enable
+        leaves a permanently dead control; a wrong path hits a wrong route.
+        Runs all five real handlers under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        blocks = {}
+        for name, marker in (
+            ("noteForm", '$("#noteForm").onsubmit'),
+            ("renderNotes", "function renderNotes()"),
+            ("reindex", '$("#reindexBtn").onclick'),
+            ("clearChat", '$("#clearChat").onclick'),
+            ("buildKinds", "function buildKindButtons()"),
+        ):
+            try:
+                blocks[name] = _js_block(src, marker)
+            except ValueError:
+                self.fail(f"handler not found: {marker}")
+        harness = (
+            """\
+const calls = {apis: [], posts: [], opens: [], toasts: []};
+const cur = {id: 9, sources: [{id: 1}], notes: [], studio: []};
+const noteTitle = {value: "T"}, noteBody = {value: "B"};
+const reindexEl = {disabled: false, textContent: "reindex"};
+const clearEl = {disabled: false};
+const kindsEl = {kids: [], replaceChildren(){ this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const noteList = {kids: [], replaceChildren(){ this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const $ = s => s === "#noteTitle" ? noteTitle : s === "#noteBody" ? noteBody
+    : s === "#reindexBtn" ? reindexEl : s === "#clearChat" ? clearEl
+    : s === "#kinds" ? kindsEl : s === "#noteList" ? noteList : {};
+function el(t2, c, txt){ const n = {tag: t2, cls: c, text: txt,
+  textContent: txt, children: [], kids: [], append(...xs){
+  this.children.push(...xs) }, setAttribute(){}}; return n }
+const t = k => k;
+let failNext = false;
+const jpost = async (p, body) => {
+  calls.posts.push([p, body]);
+  if (failNext) throw new Error("[X] boom");
+  return {json: async () => ({})};
+};
+const api = async (p, opts) => {
+  calls.apis.push([opts && opts.method || "GET", p]);
+  if (failNext) throw new Error("[X] boom");
+  return {json: async () => ({n_embedded: 3, n_total: 5})};
+};
+async function openNotebook(id){ calls.opens.push(id) }
+function toast(m){ calls.toasts.push(m) }
+function renderWithSeals(){}
+function reportBadges(){}
+const KINDS = ["briefing","study_guide","faq","timeline","mindmap"];
+const events = {};
+"""
+            + f"events.noteForm = async e=>\n{blocks['noteForm'].split('onsubmit = async e=>',1)[1]}\n"
+            + f"events.reindex = async ()=>\n{blocks['reindex'].split('onclick = async ()=>',1)[1]}\n"
+            + f"events.clearChat = async ()=>\n{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
+            + f"{blocks['buildKinds']}\n"
+            + f"{blocks['renderNotes']}\n"
+            + """\
+const noteBtn = {disabled: false};
+const noteEv = {preventDefault(){}, target: {querySelector: () => noteBtn}};
+(async () => {
+  // noteForm: POST title+body, both fields cleared, opened, btn re-enabled
+  await events.noteForm(noteEv);
+  if (calls.posts[0][0] !== "/api/notebooks/9/notes"
+      || calls.posts[0][1].title !== "T" || calls.posts[0][1].body !== "B")
+    { console.error("noteForm POST wrong: " + JSON.stringify(calls.posts[0])); process.exit(1) }
+  if (noteTitle.value !== "" || noteBody.value !== "" || calls.opens[0] !== 9
+      || noteBtn.disabled)
+    { console.error("noteForm cleanup wrong"); process.exit(1) }
+  // note delete via renderNotes: DELETE /api/notes/{id}, reload, re-enable
+  cur.notes = [{id: 5, title: "n", body: "b"}];
+  renderNotes();
+  const delBtn = noteList.kids[0].children[0];
+  await delBtn.onclick();
+  const lastApi = calls.apis[calls.apis.length - 1];
+  if (lastApi[0] !== "DELETE" || lastApi[1] !== "/api/notes/5")
+    { console.error("note delete wrong: " + JSON.stringify(lastApi)); process.exit(1) }
+  if (calls.opens[1] !== 9 || delBtn.disabled)
+    { console.error("note delete cleanup wrong"); process.exit(1) }
+  // reindex: POST path + result toast with substituted counts + re-enable
+  await events.reindex();
+  if (calls.apis[calls.apis.length - 1][1] !== "/api/notebooks/9/reindex")
+    { console.error("reindex path wrong"); process.exit(1) }
+  if (reindexEl.disabled || reindexEl.textContent !== "reindex")
+    { console.error("reindex cleanup wrong"); process.exit(1) }
+  // clearChat: DELETE messages + reload
+  await events.clearChat();
+  if (calls.apis[calls.apis.length - 1][0] !== "DELETE"
+      || calls.apis[calls.apis.length - 1][1] !== "/api/notebooks/9/messages")
+    { console.error("clearChat wrong"); process.exit(1) }
+  if (calls.opens[calls.opens.length - 1] !== 9 || clearEl.disabled)
+    { console.error("clearChat cleanup wrong"); process.exit(1) }
+  // buildKindButtons: one button per KIND, onclick POSTs studio + reloads
+  buildKindButtons();
+  if (kindsEl.kids.length !== 5)
+    { console.error("kind buttons count wrong: " + kindsEl.kids.length); process.exit(1) }
+  const kb = kindsEl.kids[0];
+  await kb.onclick();
+  const sp = calls.posts[calls.posts.length - 1];
+  if (sp[0] !== "/api/notebooks/9/studio" || sp[1].kind !== "briefing")
+    { console.error("studio POST wrong: " + JSON.stringify(sp)); process.exit(1) }
+  if (calls.opens[calls.opens.length - 1] !== 9 || kb.disabled
+      || kb.textContent !== "studio.briefing")
+    { console.error("studio cleanup wrong"); process.exit(1) }
+  // Guard: no sources -> no POST; failure -> toast + still re-enabled
+  cur.sources = [];
+  const postsBefore = calls.posts.length;
+  await kb.onclick();
+  if (calls.posts.length !== postsBefore)
+    { console.error("no-source guard broken"); process.exit(1) }
+  cur.sources = [{id: 1}];
+  failNext = true;
+  const tb = calls.toasts.length;
+  await kb.onclick();
+  if (calls.toasts.length !== tb + 1 || kb.disabled)
+    { console.error("studio error path wrong"); process.exit(1) }
+  console.log("ok")
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_sse_frame_parser_buffers_and_dispatches(self) -> None:
         """v0.2.317: the SSE frame parser (the \\n\\n splitter + event:/data:
         accumulation inside the askForm read loop) is the one dispatch path no
