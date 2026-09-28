@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.338
+## Version History: v0.1.37 → v0.2.339
+
+### v0.2.339 (2026-09-28)
+
+- Sync product-review.md ledger to v0.2.338 (header version + test count, new v0.2.332-338 summary block covering the eval-diff follow-up recovery, README eval docs, the i18n placeholder-parity closure on both sides, the dependency-declaration pin, and the PR/branch hygiene sweep). Also verified the packaging contract end-to-end this cycle: built the wheel, installed into a clean venv, ran `shoin` → notebook new / add / ask golden path — and confirmed `requires-python>=3.11` correctly refuses install on Python 3.9.
 
 ### v0.2.338 (2026-09-28)
 
