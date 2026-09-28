@@ -1281,14 +1281,23 @@ class CacheControlTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers), exc.read()
 
-    def test_no_store_on_html_api_and_error(self) -> None:
+    def test_baseline_security_headers_on_html_api_and_error(self) -> None:
+        """v0.2.311+: the no-store guarantee extends to the other baseline
+        headers _headers() emits — X-Content-Type-Options: nosniff (stops a
+        JSON error body being sniffed as HTML) and Referrer-Policy:
+        no-referrer — on every response class, not just the HTML page."""
         for path in ("/", "/api/notebooks", "/api/nope"):
             status, headers, _ = self._req("GET", path)
-            self.assertEqual(
-                "no-store",
-                headers.get("Cache-Control"),
-                f"{path} missing no-store (status {status})",
-            )
+            for name, want in (
+                ("Cache-Control", "no-store"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+            ):
+                self.assertEqual(
+                    want,
+                    headers.get(name),
+                    f"{path} missing {name}: {want} (status {status})",
+                )
 
 
 class PostStreamStoreErrorTest(unittest.TestCase):

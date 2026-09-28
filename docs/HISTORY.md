@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.311
+## Version History: v0.1.37 → v0.2.312
+
+### v0.2.312 (2026-09-27)
+
+- Pin nosniff and Referrer-Policy on every response class (extended the Cache-Control sweep)
 
 ### v0.2.311 (2026-09-27)
 
