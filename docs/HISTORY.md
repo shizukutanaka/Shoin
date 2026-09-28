@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.342
+## Version History: v0.1.37 → v0.2.343
+
+### v0.2.343 (2026-09-28)
+
+- Fix CLAUDE.md subcommand list drift: it claimed the CLI is `notebook, add, ask, studio, questions, export, serve, reindex, note, source, health` — missing `messages` (list/clear, v0.2.73) and `eval` (v0.2.226 + `--save`/`--diff`). spec.md REQ-105 was already correct; only the developer-guide list lagged. Verified against the actual argparse subparsers (13 commands).
 
 ### v0.2.342 (2026-09-28)
 
