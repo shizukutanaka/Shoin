@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.340")
+        self.assertEqual(VERSION, "0.2.341")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -10976,6 +10976,103 @@ class TestResidualGuards(unittest.TestCase):
                         fields(entry["en"]),
                         f"{label}.{key}",
                     )
+
+    def test_python_i18n_call_sites_supply_every_placeholder(self) -> None:
+        """`_t(...)` callers must supply exactly the placeholder names their
+        template defines — nothing missing, nothing extra.
+
+        A missing kwarg raises KeyError only when that print path executes
+        (deep in an error tail — exactly where tests rarely reach); an extra
+        kwarg is dead drift. Covers both call shapes — `_t("k", kw=...)`
+        (cli.py) and `_t("k").format(kw=...)` (qa.py/studio.py) — and resolves
+        non-literal keys: `key if cond else key2` and `"prefix_" + var`
+        (concat prefixes expand to every matching table key).
+        """
+        import ast
+        from string import Formatter
+
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        def fields(template: str) -> set[str]:
+            return {
+                field_name
+                for _, field_name, _, _ in Formatter().parse(template)
+                if field_name
+            }
+
+        def table_pairs(mod: object) -> dict[str, str]:
+            table = mod._STRINGS  # type: ignore[attr-defined]
+            if set(table) == {"ja", "en"}:
+                return {
+                    k: table["ja"][k] + table["en"][k]
+                    for k in table["ja"]
+                }
+            return {k: e["ja"] + e["en"] for k, e in table.items()}
+
+        for mod in (shoin.cli, shoin.qa, shoin.studio, shoin.export, shoin.server):
+            pairs = table_pairs(mod)
+            placeholders = {k: fields(v) for k, v in pairs.items()}
+            self.assertTrue(
+                all(n.isidentifier() and not n.isdigit() for p in placeholders.values() for n in p),
+                f"{mod.__name__}: unnamed/positional placeholders make the kwarg "
+                "contract unenforceable — use named fields",
+            )
+            tree = ast.parse(
+                Path(mod.__file__).read_text(encoding="utf-8")  # type: ignore[arg-type]
+            )
+            formatted: set[int] = {
+                id(n.func.value)
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "format"
+                and isinstance(n.func.value, ast.Call)
+            }
+            for node in ast.walk(tree):
+                supplied: set[str] = set()
+                inner = node
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "format"
+                    and isinstance(node.func.value, ast.Call)
+                ):
+                    inner = node.func.value
+                    supplied |= {k.arg for k in node.keywords if k.arg}
+                elif id(node) in formatted:
+                    continue  # checked via the enclosing .format call
+                if not (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "_t"
+                ):
+                    continue
+                supplied |= {k.arg for k in inner.keywords if k.arg}
+                arg = inner.args[0] if inner.args else None
+                keys: set[str] = set()
+                if isinstance(arg, ast.Constant):
+                    keys = {arg.value}
+                elif isinstance(arg, ast.IfExp):
+                    keys = {
+                        b.value
+                        for b in (arg.body, arg.orelse)
+                        if isinstance(b, ast.Constant)
+                    }
+                elif isinstance(arg, ast.BinOp) and isinstance(arg.left, ast.Constant):
+                    prefix = arg.left.value
+                    keys = {k for k in pairs if str(k).startswith(prefix)}
+                needed = set().union(*(placeholders.get(k, set()) for k in keys))
+                self.assertEqual(
+                    supplied,
+                    needed,
+                    f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                    f"missing={sorted(needed - supplied)} "
+                    f"extra={sorted(supplied - needed)}",
+                )
 
     def test_no_assert_statements_in_package(self) -> None:
         """`python -O` strips assert — a library must never depend on one for

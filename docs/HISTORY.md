@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.340
+## Version History: v0.1.37 → v0.2.341
+
+### v0.2.341 (2026-09-28)
+
+- Pin the Python side of the call-site placeholder contract (test_python_i18n_call_sites_supply_every_placeholder): ast-walks all five modules for both call shapes — cli.py's `_t("k", kw=...)` and qa.py/studio.py's `_t("k").format(kw=...)` — and requires supplied kwarg names to equal the template's placeholder set exactly (missing → KeyError only when that print path executes, deep in error tails tests rarely reach; extra → dead drift). Resolves non-literal keys too: `key if cond else key2` unions both branches, `"prefix_" + var` expands to every matching table key. Also bans unnamed/positional template fields (`{}`, `{0}`) which would defeat the kwarg contract. Fail-then-pass verified (dropping total= from reindex.done fails the pin).
 
 ### v0.2.340 (2026-09-28)
 
