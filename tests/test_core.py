@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.343")
+        self.assertEqual(VERSION, "0.2.344")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11539,6 +11539,33 @@ class TestResidualGuards(unittest.TestCase):
             f"undeclared={sorted(third_party - declared)} "
             f"unused={sorted(declared - third_party)}",
         )
+
+    def test_docs_reference_only_real_env_vars(self) -> None:
+        """A `SHOIN_*` name in the docs that no code path reads is a silent
+        no-op for the user who sets it — rename the code and every doc that
+        cites the old name becomes a trap. Pin doc-referenced env names to
+        the set the package and scripts actually read."""
+        root = Path(__file__).resolve().parent.parent
+        real: set[str] = set()
+        for py in (root / "shoin").glob("*.py"):
+            real |= set(
+                re.findall(r'(?:_get|getenv|environ\.get)\(\s*"(SHOIN_[A-Z_]+)"', py.read_text())
+            )
+        for sh in (root / "scripts").glob("*.sh"):
+            real |= set(re.findall(r"SHOIN_[A-Z_]+", sh.read_text()))
+        self.assertTrue(real, "expected SHOIN_* env reads in code/scripts")
+
+        for md in root.rglob("*.md"):
+            if ".git" in md.parts:
+                continue
+            referenced = set(re.findall(r"\b(SHOIN_[A-Z_]+)\b", md.read_text()))
+            unknown = referenced - real
+            self.assertEqual(
+                unknown, set(),
+                f"{md.relative_to(root)} references env vars nothing reads: "
+                f"{sorted(unknown)} — users would set a no-op knob",
+            )
+
 
 
 if __name__ == "__main__":

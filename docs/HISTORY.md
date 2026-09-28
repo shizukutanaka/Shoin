@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.343
+## Version History: v0.1.37 → v0.2.344
+
+### v0.2.344 (2026-09-28)
+
+- Pin doc-referenced env vars to the set the code actually reads (test_docs_reference_only_real_env_vars): every `SHOIN_*` name in any *.md must appear in a `_get`/`getenv`/`environ.get` call in shoin/ or a scripts/*.sh reference — a doc-only name is a no-op knob users can set forever without effect. Consistent today (the only non-code names were `__SHOIN_LANG__`, an HTML meta placeholder, and `SHOIN_VERIFY_ALLOW_INCOMPLETE`, a verify.sh knob). Dead relative links also audited clean across all markdown. Fail-then-pass verified (renaming SHOIN_LANG in code flags the stale doc reference).
 
 ### v0.2.343 (2026-09-28)
 
