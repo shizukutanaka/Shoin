@@ -290,6 +290,40 @@ const mkRes = (ok, status, body, bad) => ({
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_jpost_serializes_json_request(self) -> None:
+        """v0.2.333: jpost() is the request-side half of the api() boundary
+        contract — every mutating call must reach fetch() as method=POST with
+        Content-Type: application/json and a JSON.stringify'd body. A dropped
+        header or raw-object body would silently break every write handler
+        (create/rename/notes/studio/reindex all go through jpost)."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        api_fn = _js_block(src, "async function api")
+        m = re.search(r"const jpost = [^\n]*", src)
+        if not m:
+            self.fail("jpost not found in index.html")
+        harness = """\
+const t = k => k;
+let lastCall;
+const fetch = async (path, opts) => {
+  lastCall = {path, opts};
+  return {ok: true, json: async () => ({})};
+};
+""" + api_fn + "\n" + m.group(0) + """
+(async () => {
+  await jpost("/api/x", {kind: "brief", n: 1});
+  const c = lastCall;
+  if (!c || c.path !== "/api/x" || !c.opts || c.opts.method !== "POST"
+      || !c.opts.headers || c.opts.headers["Content-Type"] !== "application/json"
+      || c.opts.body !== '{"kind":"brief","n":1}')
+    { console.error("jpost shape wrong: " + JSON.stringify(c)); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_every_api_path_matches_a_registered_route(self) -> None:
         """A path the UI fetches but the server never registers is a 404 in waiting."""
         script = _script_body(_html())

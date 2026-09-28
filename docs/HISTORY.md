@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.332
+## Version History: v0.1.37 → v0.2.333
+
+### v0.2.333 (2026-09-28)
+
+- Pin `jpost()`'s request-side contract under node (test_jpost_serializes_json_request): every mutating call must reach fetch() as method=POST + Content-Type: application/json + JSON.stringify'd body — the response-side envelope was pinned at v0.2.325, this closes the boundary in both directions (create/rename/notes/studio/reindex all go through jpost). Fail-then-pass verified: dropping the Content-Type header and dropping JSON.stringify both fail the pin. Also refreshed rollup PR #160's head to the v0.2.332 tip and rewrote its title/body (173 commits, 511→1012 tests) so one merge lands the whole v0.2.182-332 series on main. Audit-confirmed clean: export.py escapes (BibTeX specials/RIS line-fold), all list queries' ORDER BY determinism, ui_lang allowlist, env-knob validation, CLI subcommand dispatch + exit-code taxonomy (required=True, 1/130), index_source/refresh_source guards, _tail_cut relevance floor.
 
 ### v0.2.332 (2026-09-28)
 
