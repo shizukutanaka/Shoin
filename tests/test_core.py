@@ -63,7 +63,7 @@ def seed(store: Store) -> int:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.305")
+        self.assertEqual(VERSION, "0.2.306")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11032,6 +11032,38 @@ class TestResidualGuards(unittest.TestCase):
                 f"{name}={rendered}",
                 compact,
                 f"CLAUDE.md must document {name}={rendered}",
+            )
+
+    def test_requirements_dev_pins_the_gate_tools(self) -> None:
+        """v0.2.306: the gate tools were installed via unpinned
+        `pip install ruff mypy coverage detect-secrets` — a new upstream
+        release can change what "green" means overnight (the v0.2.153-era
+        ruff-rule drift) or pull a yanked release. requirements-dev.txt is
+        the single pinned source of truth (dependabot's pip ecosystem
+        watches "/"), and every install instruction must route through it
+        so no surface drifts back to floating versions."""
+        root = Path(__file__).resolve().parent.parent
+        reqs = (root / "requirements-dev.txt").read_text(encoding="utf-8")
+        pins: dict[str, str] = {}
+        for raw in reqs.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            self.assertIn("==", line, f"unpinned dev tool line: {line!r}")
+            name, _, ver = line.partition("==")
+            self.assertRegex(
+                ver,
+                r"^[0-9]+\.[0-9]+\.[0-9]+$",
+                f"{name} must be an exact ==X.Y.Z pin, got {ver!r}",
+            )
+            pins[name] = ver
+        for tool in ("ruff", "mypy", "coverage", "detect-secrets", "cyclonedx-bom"):
+            self.assertIn(tool, pins, f"requirements-dev.txt must pin {tool}")
+        for doc in ("ci/ci.yml", "CONTRIBUTING.md", "README.md", "scripts/verify.sh"):
+            self.assertIn(
+                "requirements-dev.txt",
+                (root / doc).read_text(encoding="utf-8"),
+                f"{doc} no longer installs the pinned tool list",
             )
 
 

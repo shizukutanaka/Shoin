@@ -131,7 +131,7 @@ OpenAI互換APIを話せるローカルモデルなら何でも可。動作確�
 ## Development
 
 ```bash
-pip install -e . && pip install ruff mypy coverage detect-secrets    # 依存
+pip install -e . && pip install -r requirements-dev.txt    # 依存(固定版)
 ./scripts/verify.sh                                    # 全ゲート(lint/型/テスト+カバレッジ/secret scan)
 git config core.hooksPath .githooks                    # push前に自動実行(1回だけ)
 ```

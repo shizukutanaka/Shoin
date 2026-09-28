@@ -27,8 +27,8 @@
 # say "ALL GATES PASSED" with exit 0, which is exactly the "missing tool
 # masquerades as a pass" failure this comment already claimed to guard
 # against for years). README documents these as required dev dependencies
-# for exactly this reason: `pip install -e . && pip install ruff mypy
-# coverage detect-secrets`. The narrower, previously-verified mypy "only missing-import
+# for exactly this reason: `pip install -e . && pip install -r
+# requirements-dev.txt`. The narrower, previously-verified mypy "only missing-import
 # errors" case (the project's OWN dependency, e.g. pypdf, not installed —
 # v0.2.153) is a real SKIP but does NOT block: mypy still ran and
 # type-checked everything else, unlike the tool being absent.
@@ -57,7 +57,7 @@ if have ruff; then
     # pyproject pins the rule set, so this cannot drift with the ruff version.
     run "lint (ruff check)" "$PY" -m ruff check .
 else
-    printf '\n=== lint (ruff check) ===\n  SKIP: ruff not installed (pip install ruff)\n'
+    printf '\n=== lint (ruff check) ===\n  SKIP: ruff not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 
@@ -80,7 +80,7 @@ if have mypy; then
         fail=1
     fi
 else
-    printf '\n=== types (mypy) ===\n  SKIP: mypy not installed (pip install mypy)\n'
+    printf '\n=== types (mypy) ===\n  SKIP: mypy not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 
@@ -101,7 +101,7 @@ if have detect_secrets; then
          $PY -c \"import json,sys; r=json.load(open('.verify-ds.json')).get('results',{}); n=sum(len(v) for v in r.values()); print('secrets:',n); sys.exit(1 if n else 0)\""
     rm -f .verify-ds.json
 else
-    printf '\n=== secret scan (detect-secrets) ===\n  SKIP: detect-secrets not installed (pip install detect-secrets)\n'
+    printf '\n=== secret scan (detect-secrets) ===\n  SKIP: detect-secrets not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 

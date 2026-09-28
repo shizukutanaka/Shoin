@@ -4,7 +4,7 @@
 
 ```bash
 git clone https://github.com/shizukutanaka/shoin && cd shoin
-pip install -e . && pip install ruff mypy coverage detect-secrets
+pip install -e . && pip install -r requirements-dev.txt   # ruff/mypy/coverage/detect-secrets の固定版
 ```
 
 ## テスト・品質ゲート (PR前に全通過)

@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.305
+## Version History: v0.1.37 → v0.2.306
+
+### v0.2.306 (2026-09-27)
+
+- Added requirements-dev.txt pinning the four gate tools plus
+  cyclonedx-bom (ruff==0.16.8, mypy==2.3.1, coverage==7.16.1,
+  detect-secrets==1.5.0, cyclonedx-bom==7.4.0). Every install surface —
+  ci.yml, CONTRIBUTING.md, README.md, verify.sh's SKIP hints — now routes
+  through it, so a new upstream release can no longer silently change
+  what "green" means (the v0.2.153-era ruff drift) or pull a yanked
+  release. dependabot's pip ecosystem watches the file for bumps.
+- Added test_requirements_dev_pins_the_gate_tools: every line must be an
+  exact ==X.Y.Z pin, all five tools present, and all four install
+  surfaces must reference the file.
+
 
 ### v0.2.305 (2026-09-27)
 
