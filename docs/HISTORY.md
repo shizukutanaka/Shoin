@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.322
+## Version History: v0.1.37 → v0.2.323
+
+### v0.2.323 (2026-09-28)
+
+- Sync the product-review ledger to v0.2.322: new v0.2.307-322 summary block (guard-tail completion via _RacyConn, socket timeout + send_error envelope + Server-header hygiene, all interactive handlers pinned, KINDS/FORMATS cross-language parity), weakness row 5 extended to the completed handler-pin state, header test count 978→1003.
 
 ### v0.2.322 (2026-09-28)
 
