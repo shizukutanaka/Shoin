@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.319
+## Version History: v0.1.37 → v0.2.320
+
+### v0.2.320 (2026-09-28)
+
+- Pin the language toggle under node: langBtn flips lang + persists to localStorage; applyI18n rewrites all four i18n attribute classes, the button label, and documentElement.lang
 
 ### v0.2.319 (2026-09-28)
 

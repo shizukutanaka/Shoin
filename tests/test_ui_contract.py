@@ -1215,6 +1215,76 @@ const nbBtn = {disabled: false};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_lang_toggle_rewrites_every_i18n_attribute_class(self) -> None:
+        """v0.2.320: the ja/en key sets are pinned statically, but the toggle
+        itself was unverified — langBtn must flip lang, persist the choice to
+        localStorage, and applyI18n() must rewrite ALL four attribute classes
+        ([data-i18n] text, [data-i18n-ph] placeholder, [data-i18n-title] title,
+        [data-i18n-aria] aria-label) plus the button label and
+        documentElement.lang. Runs the real applyI18n + onclick under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            apply_fn = _js_block(src, "function applyI18n()")
+            onclick = _js_block(src, '$("#langBtn").onclick')
+        except ValueError as exc:
+            self.fail(f"i18n block not found: {exc}")
+        harness = (
+            """\
+const I18N = {ja: {"tabs.chat": "対話", "a11y.lang": "言語", "f.ph": "問い"},
+              en: {"tabs.chat": "Chat", "a11y.lang": "Language", "f.ph": "Ask"}};
+let lang = "ja";
+const stored = [];
+const localStorage = {setItem(k, v){ stored.push([k, v]) }};
+const texts = [{dataset: {i18n: "tabs.chat"}, textContent: "?"},
+               {dataset: {i18n: "a11y.lang"}, textContent: "?"}];
+const phs = [{dataset: {i18nPh: "f.ph"}, placeholder: "?"}];
+const titles = [{dataset: {i18nTitle: "tabs.chat"}, title: "?"}];
+const arias = [{dataset: {i18nAria: "a11y.lang"}, setAttribute(n, v){
+  this[n] = v }}];
+const langBtn = {textContent: "?", setAttribute(n, v){ this[n] = v }};
+const document = {documentElement: {}, querySelectorAll(sel){
+  if (sel === "[data-i18n]") return texts;
+  if (sel === "[data-i18n-ph]") return phs;
+  if (sel === "[data-i18n-title]") return titles;
+  if (sel === "[data-i18n-aria]") return arias;
+  return [] }};
+const $ = s => s === "#langBtn" ? langBtn : {};
+const rebuilt = [];
+function buildKindButtons(){ rebuilt.push(1) }
+const cur = {id: 1};
+const rendered = [];
+function renderNotebook(){ rendered.push(1) }
+const t = k => (I18N[lang] && I18N[lang][k]) || I18N.ja[k] || k;
+"""
+            + apply_fn
+            + "\n"
+            + f"const langOnclick = ()=>\n{onclick.split('onclick = ()=>',1)[1]}\n"
+            + """\
+applyI18n();
+if (texts[0].textContent !== "対話" || phs[0].placeholder !== "問い"
+    || titles[0].title !== "対話" || arias[0]["aria-label"] !== "言語"
+    || langBtn.textContent !== "EN"
+    || document.documentElement.lang !== "ja")
+  { console.error("ja applyI18n wrong: " + JSON.stringify(texts)); process.exit(1) }
+langOnclick();
+if (lang !== "en" || stored.length !== 1
+    || stored[0][0] !== "shoin.lang" || stored[0][1] !== "en")
+  { console.error("toggle/persist wrong: " + JSON.stringify({lang, stored})); process.exit(1) }
+if (texts[0].textContent !== "Chat" || phs[0].placeholder !== "Ask"
+    || titles[0].title !== "Chat" || arias[0]["aria-label"] !== "Language"
+    || langBtn.textContent !== "日本語" || langBtn["aria-label"] !== "Language"
+    || document.documentElement.lang !== "en")
+  { console.error("en applyI18n wrong"); process.exit(1) }
+if (rebuilt.length !== 1 || rendered.length !== 1)
+  { console.error("rebuild hooks wrong: " + JSON.stringify({rebuilt, rendered})); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_note_reindex_clear_handlers_disable_and_reenable(self) -> None:
         """v0.2.319: the remaining write handlers — note create (noteForm),
         note delete (renderNotes ×), reindex (reindexBtn), clear-chat
