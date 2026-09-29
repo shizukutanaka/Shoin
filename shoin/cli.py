@@ -559,7 +559,11 @@ def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
 
 def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     rc = 0
-    for target in [str(t) for t in args.targets]:
+    # expanduser() on each target: `add` takes positional args so word-start
+    # `~/x.md` is shell-expanded already, but a quoted '~/x.md' arrives
+    # literally — same contract as every other Path(str(*)) in this module.
+    # URLs are unaffected (no leading ~).
+    for target in [str(Path(str(t)).expanduser()) for t in args.targets]:
         try:
             result = index_source(store, int(args.notebook_id), target, llm)
             print(
