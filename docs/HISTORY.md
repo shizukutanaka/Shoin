@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.380
+## Version History: v0.1.37 → v0.2.381
+
+### v0.2.381 (2026-09-29)
+
+- docs: sync product-review ledger to v0.2.380 — header, test count (1049→1051), and a new `v0.2.374-380` summary paragraph naming the arc ("sibling-method asymmetry on the write path + the test suite's own verification quality"): 3 real fixes (accept= parity, add_chunks touch, update_source_sha256 context rewrite) plus 4 pin-completeness items; also corrects the previous paragraph's fix count (4→5).
 
 ### v0.2.380 (2026-09-29)
 
