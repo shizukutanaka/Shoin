@@ -1194,6 +1194,78 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_a11y_lexical_contract(self) -> None:
+        """Misspelled a11y vocabulary fails *silently*: `aria-labelled`
+        (no 'by') or `role="tab-panel"` are ignored by assistive tech
+        with no error anywhere — the element simply loses its wiring.
+
+        Pins: every `aria-*` name used in markup or written via
+        `setAttribute` is a real WAI-ARIA attribute; every `role=` value
+        is a real WAI-ARIA role; and the tabs pattern stays complete —
+        each `role="tab"` carries `aria-selected` + `aria-controls`,
+        each `role="tabpanel"` carries `aria-labelledby`."""
+        html = _html()
+        aria_attrs = {
+            "aria-activedescendant", "aria-atomic", "aria-autocomplete",
+            "aria-braillelabel", "aria-brailleroledescription", "aria-busy",
+            "aria-checked", "aria-colcount", "aria-colindex",
+            "aria-colindextext", "aria-colspan", "aria-controls",
+            "aria-current", "aria-describedby", "aria-description",
+            "aria-details", "aria-disabled", "aria-dropeffect",
+            "aria-errormessage", "aria-expanded", "aria-flowto",
+            "aria-grabbed", "aria-haspopup", "aria-hidden", "aria-invalid",
+            "aria-keyshortcuts", "aria-label", "aria-labelledby",
+            "aria-level", "aria-live", "aria-modal", "aria-multiline",
+            "aria-multiselectable", "aria-orientation", "aria-owns",
+            "aria-placeholder", "aria-posinset", "aria-pressed",
+            "aria-readonly", "aria-relevant", "aria-required",
+            "aria-roledescription", "aria-rowcount", "aria-rowindex",
+            "aria-rowindextext", "aria-rowspan", "aria-selected",
+            "aria-setsize", "aria-sort", "aria-valuemax", "aria-valuemin",
+            "aria-valuenow", "aria-valuetext",
+        }
+        roles = {
+            "alert", "alertdialog", "application", "article", "banner",
+            "button", "cell", "checkbox", "columnheader", "combobox",
+            "complementary", "contentinfo", "definition", "dialog",
+            "directory", "document", "feed", "figure", "form", "grid",
+            "gridcell", "group", "heading", "img", "link", "list",
+            "listbox", "listitem", "log", "main", "marquee", "math",
+            "menu", "menubar", "menuitem", "menuitemcheckbox",
+            "menuitemradio", "navigation", "none", "note", "option",
+            "presentation", "progressbar", "radio", "radiogroup", "region",
+            "row", "rowgroup", "rowheader", "scrollbar", "search",
+            "searchbox", "separator", "slider", "spinbutton", "status",
+            "switch", "tab", "table", "tablist", "tabpanel", "term",
+            "textbox", "timer", "toolbar", "tooltip", "tree", "treegrid",
+            "treeitem",
+        }
+
+        used_aria = set(re.findall(r'\baria-[a-z]+', html))
+        self.assertEqual(
+            sorted(used_aria - aria_attrs), [],
+            "aria-* names outside the WAI-ARIA vocabulary — silently ignored",
+        )
+        used_roles = set(re.findall(r'role="([^"]+)"', html))
+        self.assertEqual(
+            sorted(used_roles - roles), [],
+            "role= values outside the WAI-ARIA vocabulary — silently ignored",
+        )
+
+        tabs = re.findall(r'<button\b(?=[^>]*role="tab")([^>]*)>', html)
+        self.assertTrue(tabs, "no role=tab buttons found — tabs pattern gone")
+        for attrs in tabs:
+            self.assertIn("aria-selected", attrs, "role=tab missing aria-selected")
+            self.assertIn("aria-controls", attrs, "role=tab missing aria-controls")
+        self.assertTrue(
+            re.search(r'role="tablist"', html), "tabs lost their tablist role"
+        )
+        for m in re.finditer(r'role="tabpanel"([^>]*)', html):
+            self.assertIn(
+                "aria-labelledby", m.group(1),
+                "role=tabpanel missing aria-labelledby",
+            )
+
     def test_css_class_names_stay_in_sync(self) -> None:
         """Both directions of the class-name contract fail silently:
 

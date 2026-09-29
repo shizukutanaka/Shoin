@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.358
+## Version History: v0.1.37 → v0.2.359
+
+### v0.2.359 (2026-09-29)
+
+- Pin the a11y lexical contract (test_a11y_lexical_contract): misspelled a11y vocabulary fails silently — `aria-labelled` (no 'by') or `role="tab-panel"` are ignored by assistive tech with no error. Every aria-* name in markup/setAttribute must be a real WAI-ARIA attribute, every role= value a real WAI-ARIA role, and the tabs pattern stays complete (each role=tab carries aria-selected + aria-controls; each role=tabpanel carries aria-labelledby). Fail-then-pass verified in four directions.
 
 ### v0.2.358 (2026-09-29)
 
