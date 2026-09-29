@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.356
+## Version History: v0.1.37 → v0.2.357
+
+### v0.2.357 (2026-09-29)
+
+- Pin version-marker parity (test_version_markers_agree): the five-file bump ritual is manual, so config.VERSION, pyproject project.version, and CLAUDE.md's Current version marker must agree — one missed file makes `shoin --version`, `pip show`, and the developer guide report different releases. VERSION itself pinned to semver shape. Fail-then-pass verified in all three directions.
 
 ### v0.2.356 (2026-09-29)
 
