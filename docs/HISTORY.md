@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.348
+## Version History: v0.1.37 → v0.2.349
+
+### v0.2.349 (2026-09-28)
+
+- Close the literal-key gap in the Python i18n pin (test_python_i18n_call_sites_supply_every_placeholder): a `_t("k")` call whose key isn't in the table resolved to needed=∅ and passed with no kwargs — yet `_t`'s runtime fallback renders the raw key string instead of raising, so a typo'd or renamed-away key is a silent missing-string (the JS side has pinned literal t() keys ⊆ I18N.ja since v0.2.329; the Python side lacked the mirror). Now every resolved literal key must exist in the source module's _STRINGS, and a BinOp prefix expanding to zero keys is flagged too. Fail-then-pass verified (_t("serve.stopped")→_t("serve.stopd") flagged with the missing key).
 
 ### v0.2.348 (2026-09-28)
 

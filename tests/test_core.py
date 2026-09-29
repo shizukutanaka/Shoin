@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.348")
+        self.assertEqual(VERSION, "0.2.349")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11084,6 +11084,22 @@ class TestResidualGuards(unittest.TestCase):
                 elif isinstance(arg, ast.BinOp) and isinstance(arg.left, ast.Constant):
                     prefix = arg.left.value
                     keys = {k for k in pairs if str(k).startswith(prefix)}
+                    self.assertTrue(
+                        keys,
+                        f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                        "prefix matches no table key (typo'd or dead prefix)",
+                    )
+                # A key absent from the table falls back to rendering the raw
+                # key at runtime — `_t` never raises for it, so a typo'd name
+                # (or a renamed key whose callers weren't updated) is a silent
+                # missing-string. The kwarg check below can't see it: an
+                # absent key resolves to needed=∅ and passes with no kwargs.
+                self.assertEqual(
+                    keys - set(pairs), set(),
+                    f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                    f"key(s) not in shoin.{src}._STRINGS: "
+                    f"{sorted(keys - set(pairs))}",
+                )
                 needed = set().union(*(placeholders.get(k, set()) for k in keys))
                 self.assertEqual(
                     supplied,
