@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.372
+## Version History: v0.1.37 → v0.2.373
+
+### v0.2.373 (2026-09-29)
+
+- Pin latest-per-kind studio output semantics (test_latest_studio_outputs_returns_latest_per_kind): the Studio tab shows latest_studio_outputs() — the MAX(id)-per-kind subquery is what makes a regenerated output REPLACE its predecessor instead of accumulating; dropping or weakening it silently stacks stale/dup outputs. Pins replacement plus kind ordering on a live store. Fail direction verified (MAX -> plain id returns the older row, caught).
 
 ### v0.2.372 (2026-09-29)
 

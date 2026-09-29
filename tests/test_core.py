@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.372")
+        self.assertEqual(VERSION, "0.2.373")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -944,6 +944,23 @@ class TestStore(unittest.TestCase):
                 with self.assertRaises(StoreError) as cm:
                     s.add_note(nb.id, "t", "b")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_latest_studio_outputs_returns_latest_per_kind(self) -> None:
+        """The Studio tab shows latest_studio_outputs() — the MAX(id)-
+        per-kind subquery is what makes a regenerated output REPLACE its
+        predecessor instead of accumulating. A drift dropping that
+        subquery (all rows back) silently stacks stale outputs; a drift
+        grouping wrong quietly returns dupes. Pin replacement + ordering."""
+        with make_store() as s:
+            nb = s.create_notebook("studio")
+            s.add_studio_output(nb.id, "faq", "old-faq", "{}")
+            s.add_studio_output(nb.id, "faq", "new-faq", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = s.latest_studio_outputs(nb.id)
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "new-faq")],
+            )
 
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
