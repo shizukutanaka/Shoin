@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.391
+## Version History: v0.1.37 → v0.2.392
+
+### v0.2.392 (2026-09-29)
+
+- Pin HISTORY.md's `Version History: … → vX.Y.Z` header tip to VERSION
+  (test_history_md_records_current_version extension) — the last ritual
+  marker no pin covered; a stale tip could survive correct entries.
+- Same-cycle audit, all already guarded: INGEST_EMPTY rejects
+  empty-extraction sources before add_source (no ghost sources);
+  messages_omitted is consumed by the UI marker (chat.earlier); studio
+  generation does not consume chat history (no stale [S#] path).
 
 ### v0.2.391 (2026-09-29)
 
