@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.389
+## Version History: v0.1.37 → v0.2.390
+
+### v0.2.390 (2026-09-29)
+
+- Surface embed-skip in the source-ingest toasts (add URL / upload / refresh). When embeddings are configured (`window._embedOn`, set by `health()` from `/api/health`'s `embed_model`) but `n_embedded < n_chunks` — endpoint failure, stored-model mismatch, or a partial batch — the toast now appends `src.embed_short` ("⚠ 埋め込み {n}/{total} 件") instead of presenting the index as complete; same defect class `pages_failed` already covers. Silent when embeddings are off, where 0 embedded is the first-class mode. The fields were already in the API responses; only the UI read was missing. New `embedNote(j)` helper + node-level pin covering zero/partial/full/zero-chunks/missing-fields/embed-off cases plus the three wire sites; the existing refresh/add-handler harnesses now inject the real helper.
 
 ### v0.2.389 (2026-09-29)
 
