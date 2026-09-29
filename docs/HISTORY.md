@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.345
+## Version History: v0.1.37 → v0.2.346
+
+### v0.2.346 (2026-09-28)
+
+- Pin literal id references to real elements (test_every_id_reference_resolves_to_an_element): every $("#id")/getElementById("id") in index.html must resolve to an id= attribute — a renamed element leaves lookups returning null and the next interaction dies on a TypeError with no build-time signal. All 37 current references resolve; fail-then-pass verified (askBtn→askBtnX flagged).
 
 ### v0.2.345 (2026-09-28)
 
