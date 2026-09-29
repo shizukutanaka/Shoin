@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.379")
+        self.assertEqual(VERSION, "0.2.380")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -11964,12 +11964,16 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(violations, [], "\n".join(violations))
 
     def test_storeerror_raises_assert_a_code(self) -> None:
-        """Every `assertRaises(StoreError)` must capture and assert
-        `.exception.code` — StoreError paths are distinguished by code
-        (NOT_FOUND→404, ALREADY_EXISTS→409, SYSTEM_*→500, else→400), so a
-        raise without a code check passes on ANY error from the call,
-        letting a semantic regression (e.g. collision → wrong code)
-        stay green."""
+        """Every `assertRaises(<coded error>)` must capture and assert
+        `.exception.code` — StoreError/LLMError/IngestError paths are
+        distinguished by code (NOT_FOUND→404, ALREADY_EXISTS→409,
+        SYSTEM_*→500, else→400), so a raise without a code check passes
+        on ANY error from the call, letting a semantic regression (e.g.
+        collision → wrong code) stay green. Exempted: the
+        `with (..., assertRaises(E), ...)` tuple form — a line whose
+        match ends with a comma — where the raise is incidental plumbing
+        (a fake that always raises) and the assertions below verify the
+        captured side-effects instead."""
         root = Path(__file__).resolve().parents[1]
         # Skip this test's own body — its regex literals and messages mention
         # the pattern by name. Span = from this def to the next def.
@@ -11979,10 +11983,19 @@ class TestResidualGuards(unittest.TestCase):
         if own_end < 0:
             own_end = len(own_src)
         bad: list[str] = []
+        coded = r"(?:StoreError|LLMError|IngestError)"
         for f in (root / "tests").glob("test_*.py"):
             src = f.read_text()
-            for m in re.finditer(r"assertRaises\(StoreError\)(?:\s+as\s+(\w+))?", src):
+            for m in re.finditer(
+                rf"assertRaises\({coded}\)(?:\s+as\s+(\w+))?", src
+            ):
                 if f.name == "test_core.py" and own_start <= m.start() < own_end:
+                    continue
+                line_end = src.find("\n", m.end())
+                if line_end < 0:
+                    line_end = len(src)
+                # tuple-form with-item: the raise is incidental (see docstring)
+                if src[m.end():line_end].strip() == ",":
                     continue
                 var = m.group(1)
                 if not var:
@@ -11992,7 +12005,7 @@ class TestResidualGuards(unittest.TestCase):
                 if not re.search(rf"\b{re.escape(var)}\.exception\.code\b", block):
                     bad.append(f"{f.name}:{src[:m.start()].count(chr(10)) + 1}")
         self.assertEqual(
-            bad, [], f"assertRaises(StoreError) without a .exception.code check: {bad}"
+            bad, [], f"coded-error assertRaises without a .exception.code check: {bad}"
         )
 
     def test_error_codes_follow_the_domain_detail_taxonomy(self) -> None:
