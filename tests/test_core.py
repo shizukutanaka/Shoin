@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.406")
+        self.assertEqual(VERSION, "0.2.407")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2389,6 +2389,26 @@ class TestIngest(unittest.TestCase):
             "http://192.168.1.1/admin",
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]/",
+        ):
+            with self.assertRaises(IngestError) as cm:
+                validate_public_url(url)
+            self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_ssrf_malformed_port_blocked(self) -> None:
+        """A malformed port must raise INGEST_URL_BLOCKED, not escape as 500.
+
+        urlparse is lazy about the port field: ':abc', out-of-range, and
+        negative ports only raise ValueError when .port is first accessed —
+        which used to happen inside fetch_url's request loop, outside the
+        IngestError handling, so the raw ValueError reached _dispatch's
+        catch-all as HTTP 500 SYSTEM_INTERNAL_ERROR instead of the correct
+        HTTP 400 INGEST_URL_BLOCKED (same defect class as zone-scoped IPv6,
+        v0.2.45). Validating .port inside validate_public_url — before any
+        DNS resolution — maps it to the input-error code."""
+        for url in (
+            "http://example.com:99999/x",
+            "http://example.com:abc/x",
+            "http://example.com:-1/x",
         ):
             with self.assertRaises(IngestError) as cm:
                 validate_public_url(url)
