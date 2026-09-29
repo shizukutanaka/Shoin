@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.374
+## Version History: v0.1.37 → v0.2.375
+
+### v0.2.375 (2026-09-29)
+
+- UI ファイルピッカーの `accept=` が `.markdown` と `.htm` を提供していなかった実欠陥を修正 —— `ingest._EXT_KIND` は両拡張子をサポートするのに選択不能だった。既存の `accept=` ⊆ `_EXT_KIND` ピンを双方向（完全同値）へ強化。
 
 ### v0.2.374 (2026-09-29)
 
