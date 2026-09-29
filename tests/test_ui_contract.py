@@ -425,13 +425,28 @@ const fetch = async (path, opts) => {
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element
-        never reach the lookups. Pin literal id references to real ids."""
+        never reach the lookups. The same applies to markup references:
+        for=, aria-labelledby/controls/describedby/owns/activedescendant, and
+        href="#id" — a stale one silently unwires the a11y tree. Pin every
+        literal id reference to a real id."""
         html = _html()
         ids = set(re.findall(r'\bid="([^"]+)"', html))
         refs = set(re.findall(r'\$\(\s*"#([A-Za-z0-9_-]+)"\s*\)', html))
         refs |= set(
             re.findall(r'getElementById\(\s*["\']([A-Za-z0-9_-]+)["\']\s*\)', html)
         )
+        for attr in (
+            "for",
+            "aria-labelledby",
+            "aria-controls",
+            "aria-describedby",
+            "aria-owns",
+            "aria-activedescendant",
+        ):
+            for value in re.findall(rf'\b{attr}="([^"]+)"', html):
+                # These attributes hold space-separated id lists.
+                refs.update(value.split())
+        refs |= set(re.findall(r'href="#([A-Za-z0-9_-]+)"', html))
         self.assertTrue(refs, "expected id lookups in index.html")
         missing = refs - ids
         self.assertEqual(

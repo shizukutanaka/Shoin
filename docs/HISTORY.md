@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.346
+## Version History: v0.1.37 → v0.2.347
+
+### v0.2.347 (2026-09-28)
+
+- Extend the id-reference pin to markup references (test_every_id_reference_resolves_to_an_element): for=, aria-labelledby/controls/describedby/owns/activedescendant (space-separated id lists) and href="#id" now resolve against id= too — a stale one silently unwires the a11y tree (the v0.2.311 tabs wiring depends on all six being live). All current references resolve; fail-then-pass verified (tabChat→tabChatX in aria-labelledby flagged).
 
 ### v0.2.346 (2026-09-28)
 
