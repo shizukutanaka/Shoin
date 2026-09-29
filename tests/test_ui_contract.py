@@ -441,6 +441,47 @@ const fetch = async (path, opts) => {
                 "but no matching server route accepts that method",
             )
 
+    def test_route_table_and_request_metadata_are_consistent(self) -> None:
+        """The last contract edges. Server-side, `_dispatch` resolves
+        handlers as `getattr(self, f"_h_{name}")` — a route whose name
+        has no `_h_*` method AttributeErrors into a 500 at call time, and
+        a verb with no `do_<VERB>` method is a 501 before that.
+        Client-side, request *metadata* names — custom `X-*` headers and
+        `?query=` params — are dictionary lookups on the server: a typo
+        doesn't 400, the `.get` returns None and the handler silently
+        falls back (`"upload.txt"` as filename, or a default format).
+        Pin the route table's internal integrity and the metadata names
+        the JS actually sends."""
+        server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
+        script = _script_body(_html())
+
+        # Route table: every name has a handler, every verb a do_* method.
+        handlers = set(re.findall(r"def (_h_[a-z_]+)\(", server))
+        do_verbs = {d[3:] for d in re.findall(r"def (do_[A-Z]+)\(", server)}
+        missing = [f"_h_{name}" for _, _, name in _Handler._ROUTES
+                   if f"_h_{name}" not in handlers]
+        self.assertEqual(missing, [], f"routes name handlers that don't exist: {missing}")
+        uncovered = {v for v, _, _ in _Handler._ROUTES} - do_verbs
+        self.assertEqual(uncovered, set(), f"route verbs with no do_* method: {uncovered}")
+
+        # Request metadata: every X-* header and ?param= the JS sends is
+        # one the server reads. Standard headers (Content-Type) are the
+        # client's business; custom X-* ones are the contract.
+        sent_headers = set(re.findall(r'"(X-[A-Za-z-]+)"\s*:', script))
+        read_headers = set(re.findall(r'self\.headers\.get\("([^"]+)"', server))
+        self.assertEqual(
+            sent_headers - read_headers, set(),
+            f"X-* headers the UI sends but the server never reads: "
+            f"{sorted(sent_headers - read_headers)}",
+        )
+        sent_params = set(re.findall(r"/api/[^`\"?\s]*\?(\w+)=", script))
+        read_params = set(re.findall(r'self\._query\.get\("([^"]+)"', server))
+        self.assertEqual(
+            sent_params - read_params, set(),
+            f"?params the UI sends but the server never reads: "
+            f"{sorted(sent_params - read_params)}",
+        )
+
     def test_request_body_fields_match_server_reads(self) -> None:
         """Every JSON key the UI sends must be a field the handler actually
         reads, and every field the handler requires must be sent. A typo'd

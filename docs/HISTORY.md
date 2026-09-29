@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.352
+## Version History: v0.1.37 → v0.2.353
+
+### v0.2.353 (2026-09-29)
+
+- Pin the route table's internal integrity and request-metadata names (test_route_table_and_request_metadata_are_consistent): every _ROUTES name must resolve to a _h_* method (getattr → 500 on a typo) and every verb to a do_* method (501 before dispatch); every custom X-* header and ?param= the JS sends must be a name the server reads via headers.get/_query.get — a typo there doesn't 400, the .get returns None and the handler silently falls back ("upload.txt" as filename, default format). Fail-then-pass verified in four directions: handler-name typo, X- header typo, ?param typo, removed do_* method.
 
 ### v0.2.352 (2026-09-29)
 
