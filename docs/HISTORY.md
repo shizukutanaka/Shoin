@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.347
+## Version History: v0.1.37 → v0.2.348
+
+### v0.2.348 (2026-09-28)
+
+- Pin data-i18n* attribute-kind coverage (test_every_i18n_attribute_kind_is_applied): markup attribute kinds (data-i18n, -ph, -title, -aria, …) must be a subset of the kinds applyI18n's querySelectorAll list handles — a new kind (e.g. data-i18n-value) with no selector stays unlocalized forever and, before this change, the key-scan regex's hardcoded alternation also skipped it. The key scan now matches data-i18n[a-z-]* generically. Fail-then-pass verified (data-i18n-ph→data-i18n-value flagged).
 
 ### v0.2.347 (2026-09-28)
 

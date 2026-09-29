@@ -102,8 +102,8 @@ class TestUIContract(unittest.TestCase):
         """A key referenced by the HTML but missing from a locale renders blank."""
         html = _html()
         script = _script_body(html)
-        # Keys the markup asks for, via any of the four attribute flavours.
-        used = set(re.findall(r'data-i18n(?:-aria|-ph|-title)?="([^"]+)"', html))
+        # Keys the markup asks for, via any data-i18n* attribute flavour.
+        used = set(re.findall(r'data-i18n[a-z-]*="([^"]+)"', html))
         self.assertTrue(used, "expected data-i18n attributes in index.html")
 
         # Keys each locale defines. The I18N table is `ja: { "k":"v", ... }`.
@@ -117,6 +117,24 @@ class TestUIContract(unittest.TestCase):
         for loc, defined in locales.items():
             missing = sorted(used - defined)
             self.assertEqual(missing, [], f"data-i18n keys missing from I18N.{loc}: {missing}")
+
+    def test_every_i18n_attribute_kind_is_applied(self) -> None:
+        """applyI18n localizes each data-i18n* attribute *kind* via a fixed
+        querySelectorAll list. A markup attr whose kind has no selector —
+        e.g. data-i18n-value added later — sits unlocalized forever: no key
+        lookup ever runs on it. Pin the used kinds to the handled ones."""
+        html = _html()
+        script = _script_body(html)
+        used = set(re.findall(r'\b(data-i18n[a-z-]*)="', html))
+        handled = set(
+            re.findall(r'querySelectorAll\("\[(data-i18n[a-z-]*)\]"\)', script)
+        )
+        self.assertTrue(handled, "expected applyI18n selectors in index.html")
+        self.assertEqual(
+            used - handled, set(),
+            f"data-i18n* attribute kinds applyI18n never applies: "
+            f"{sorted(used - handled)} — markup would stay unlocalized",
+        )
 
     def test_every_studio_kind_has_a_label_in_both_locales(self) -> None:
         """studio.KINDS (Python) and the UI's i18n table are a cross-language contract.
