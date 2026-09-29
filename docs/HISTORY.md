@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.362
+## Version History: v0.1.37 → v0.2.363
+
+### v0.2.363 (2026-09-29)
+
+- Pin migration version ordering (test_migration_versions_strictly_increase): _migrate_once skips `version <= current`, so a migration committed with a duplicate or out-of-order version silently never applies on any already-migrated database — schema drift with no error anywhere. Versions must stay unique and strictly ascending. Audited clean (1-9); fail-direction verified by mutation.
 
 ### v0.2.362 (2026-09-29)
 

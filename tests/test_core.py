@@ -102,7 +102,19 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.362")
+        self.assertEqual(VERSION, "0.2.363")
+
+    def test_migration_versions_strictly_increase(self) -> None:
+        """_migrate_once skips `version <= current` — so a migration added
+        with a duplicate or out-of-order version never applies on any
+        already-migrated DB: silent schema drift with no error. Versions
+        must be unique and strictly ascending (append-only)."""
+        versions = [v for v, _ in MIGRATIONS]
+        self.assertEqual(
+            versions,
+            sorted(set(versions)),
+            "MIGRATIONS versions must be unique and strictly ascending",
+        )
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
