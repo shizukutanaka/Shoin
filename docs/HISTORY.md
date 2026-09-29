@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.354
+## Version History: v0.1.37 → v0.2.355
+
+### v0.2.355 (2026-09-29)
+
+- Pin markup health and offline scope (test_markup_health_and_offline_scope): id= must be unique ($("#x") binds the first element — a duplicate silently re-routes every lookup), <html lang> must name a supported locale and documentElement.lang must be assigned on toggle (screen readers otherwise pronounce EN text as JA), every <button> inside <form> needs an explicit type= (default is submit — a click becomes a form post), and no src/href="http…" may appear (the app is offline by design and CSP would break the reference anyway). Fail-then-pass verified in four directions: duplicate id, removed lang assignment, button-without-type in a form, external http reference.
 
 ### v0.2.354 (2026-09-29)
 
