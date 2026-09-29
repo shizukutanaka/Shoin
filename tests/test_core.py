@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.415")
+        self.assertEqual(VERSION, "0.2.416")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1026,6 +1026,29 @@ class TestStore(unittest.TestCase):
             self.assertEqual(
                 [(str(r["kind"]), str(r["body"])) for r in rows],
                 [("briefing", "b1"), ("faq", "new-faq")],
+            )
+
+    def test_add_studio_output_prunes_superseded_kind_rows(self) -> None:
+        """v0.2.416: latest_studio_outputs() is the only reader, so every
+        regeneration left its predecessor as an unreadable dead row — the
+        table grew per generate() call with nothing able to reach the old
+        versions. add_studio_output must delete superseded same-kind rows in
+        the same transaction; other kinds must be untouched."""
+        with make_store() as s:
+            nb = s.create_notebook("prune")
+            for i in range(3):
+                s.add_studio_output(nb.id, "faq", f"faq-{i}", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = list(
+                s.conn.execute(
+                    "SELECT kind, body FROM studio_outputs"
+                    " WHERE notebook_id=? ORDER BY kind",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "faq-2")],
             )
 
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
