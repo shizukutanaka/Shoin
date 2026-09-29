@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.359
+## Version History: v0.1.37 → v0.2.360
+
+### v0.2.360 (2026-09-29)
+
+- Give the four primary inputs durable accessible names + pin the contract (test_form_controls_have_accessible_names): nbName/askInput/noteTitle/noteBody were placeholder-only — a name that disappears the moment the user types — while file/url already used data-i18n-aria. All six controls now carry data-i18n-aria (new keys a11y.nbname/ask/notetitle/notebody in both locales); the notebook-delete × button gains the aria-label its source-delete twin already had. Pin requires every markup form control to have a non-placeholder name (aria-label, aria-labelledby, data-i18n-aria, label for=, wrapping label, or title); fail-then-pass verified.
 
 ### v0.2.359 (2026-09-29)
 

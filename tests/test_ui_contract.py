@@ -1194,6 +1194,47 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_form_controls_have_accessible_names(self) -> None:
+        """A control whose only name is its placeholder loses that name
+        the moment the user types — assistive tech then announces an
+        unlabeled field. Every markup <input>/<textarea>/<select> needs
+        a durable name: aria-label, aria-labelledby, the data-i18n-aria
+        indirection, an associated <label for=>, a wrapping <label>, or
+        a title. (type=hidden controls exempt.) Found in v0.2.360: the
+        four primary inputs were placeholder-only while file/url used
+        the data-i18n-aria pattern."""
+        html = _html()
+        markup = re.sub(
+            r"<script.*?</script>|<style.*?</style>", "", html, flags=re.S
+        )
+        labeled_ids = set(
+            re.findall(r'<label\b[^>]*\bfor="([^"]+)"', markup)
+        )
+        wrapped: set[str] = set()
+        for m in re.finditer(r"<label\b[^>]*>(.*?)</label>", markup, re.S):
+            for im in re.finditer(r'id="([^"]+)"', m.group(1)):
+                wrapped.add(im.group(1))
+        violations: list[str] = []
+        for m in re.finditer(r"<(input|textarea|select)\b([^>]*)>", markup):
+            tag, attrs = m.group(1), m.group(2)
+            if 'type="hidden"' in attrs:
+                continue
+            id_m = re.search(r'id="([^"]+)"', attrs)
+            named = (
+                "aria-label" in attrs
+                or "aria-labelledby" in attrs
+                or "data-i18n-aria" in attrs
+                or "title=" in attrs
+                or (id_m and id_m.group(1) in labeled_ids)
+                or (id_m and id_m.group(1) in wrapped)
+            )
+            if not named:
+                violations.append(
+                    f"<{tag}{attrs}> has no accessible name "
+                    "(placeholder is not durable)"
+                )
+        self.assertEqual(violations, [], "\n".join(violations))
+
     def test_a11y_lexical_contract(self) -> None:
         """Misspelled a11y vocabulary fails *silently*: `aria-labelled`
         (no 'by') or `role="tab-panel"` are ignored by assistive tech

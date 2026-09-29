@@ -194,7 +194,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
       <ul id="nbList"></ul>
       <form id="nbForm" class="adders" autocomplete="off">
         <div class="row">
-          <input id="nbName" class="field" data-i18n-ph="nb.placeholder" placeholder="新しい書院の名前" required>
+          <input id="nbName" class="field" data-i18n-ph="nb.placeholder" data-i18n-aria="a11y.nbname" aria-label="書院名" placeholder="新しい書院の名前" required>
           <button class="btn primary" type="submit" data-i18n="nb.create">作成</button>
         </div>
       </form>
@@ -227,7 +227,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
     <div id="composer">
       <div id="qs" data-i18n-aria="a11y.questions" aria-label="Suggested questions"></div>
       <form id="askForm">
-        <input id="askInput" class="field" data-i18n-ph="chat.placeholder" data-i18n-title="chat.hint" placeholder="資料への質問…" title="ヒント: -語 で除外検索(例: Python -legacy)" autocomplete="off">
+        <input id="askInput" class="field" data-i18n-ph="chat.placeholder" data-i18n-title="chat.hint" data-i18n-aria="a11y.ask" aria-label="質問" placeholder="資料への質問…" title="ヒント: -語 で除外検索(例: Python -legacy)" autocomplete="off">
         <button class="btn primary" id="askBtn" type="submit" data-i18n="chat.ask">尋ねる</button>
       </form>
     </div>
@@ -242,8 +242,8 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
       <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
       <div class="pane-head" style="border:0;padding:0 0 8px" data-i18n="notes.head">ノ ー ト</div>
       <form class="note-form" id="noteForm">
-        <input id="noteTitle" class="field" data-i18n-ph="notes.title" placeholder="題" required>
-        <textarea id="noteBody" class="field" rows="3" data-i18n-ph="notes.body" placeholder="本文"></textarea>
+        <input id="noteTitle" class="field" data-i18n-ph="notes.title" data-i18n-aria="a11y.notetitle" aria-label="題" placeholder="題" required>
+        <textarea id="noteBody" class="field" rows="3" data-i18n-ph="notes.body" data-i18n-aria="a11y.notebody" aria-label="本文" placeholder="本文"></textarea>
         <button class="btn" type="submit" data-i18n="notes.save">ノートを保存</button>
       </form>
       <div id="noteList"></div>
@@ -308,7 +308,7 @@ const I18N = {
     "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)",
     "a11y.lang":"言語切替","a11y.upload":"ファイルをアップロード","a11y.url":"URL",
     "a11y.questions":"推奨質問","a11y.delsrc":"ソースを削除","a11y.viewsrc":"ソースを表示: ",
-    "a11y.citation":"引用 S","a11y.delnote":"ノートを削除"
+    "a11y.citation":"引用 S","a11y.delnote":"ノートを削除","a11y.nbname":"書院名","a11y.ask":"質問","a11y.notetitle":"題","a11y.notebody":"本文"
   },
   en: {
     "app.title":"Shoin","app.lamp.on":"LLM connected","app.lamp.off":"LLM offline",
@@ -344,7 +344,7 @@ const I18N = {
     "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy)",
     "a11y.lang":"Switch language","a11y.upload":"Upload file","a11y.url":"URL",
     "a11y.questions":"Suggested questions","a11y.delsrc":"Delete source","a11y.viewsrc":"View source: ",
-    "a11y.citation":"Citation S","a11y.delnote":"Delete note"
+    "a11y.citation":"Citation S","a11y.delnote":"Delete note","a11y.nbname":"Notebook name","a11y.ask":"Question","a11y.notetitle":"Title","a11y.notebody":"Body"
   }
 };
 // Precedence: an explicit toggle click (persisted to localStorage) always wins;
@@ -426,7 +426,7 @@ async function loadNotebooks(){
       }catch(e){ toast(e.message); ren.disabled = false; del.disabled = false; }
     };
     const del = el("button","ren del",null); del.textContent="×"; del.type="button";
-    del.title=t("nb.delete");
+    del.title=t("nb.delete"); del.setAttribute("aria-label", t("nb.delete"));
     del.onclick = async ev=>{
       ev.stopPropagation();
       if (!confirm(t("nb.delete"))) return;
