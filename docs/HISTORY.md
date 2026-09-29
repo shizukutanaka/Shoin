@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.387
+## Version History: v0.1.37 → v0.2.388
+
+### v0.2.388 (2026-09-29)
+
+- `docs/product-review.md` ledger synced to v0.2.386 (was v0.2.380 — 6 versions behind, at the ~7-15-version sync cadence boundary). Header version and test count updated (1051→1059); the v0.2.381-386 arc is summarized as the 「境界入力の字句契約 + 書込み語彙ガードの確立」period: tilde expansion across every CLI path arg with the source-scan pin that seals the defect class, the `, c.id` retrieval tie-break, and the `add_studio_output` kind guard with its single-sourced `STUDIO_KINDS` vocabulary. The ledger is the product's own audit dashboard — its freshness is itself covered by the 文書主張≡実挙動 principle, so a stale ledger is a defect in the same class it exists to catch. Concurrent audit of the notes/upload/refresh/PRF/vector paths found all already guarded.
 
 ### v0.2.387 (2026-09-29)
 
