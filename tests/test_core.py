@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.381")
+        self.assertEqual(VERSION, "0.2.382")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9026,6 +9026,23 @@ class TestCLI(unittest.TestCase):
         from shoin.cli import _pos_int
 
         self.assertEqual(_pos_int("3"), 3)
+
+    def test_db_arg_expands_tilde_and_passes_none(self) -> None:
+        """--db=~/x.db arrives unexpanded (shell only expands a tilde at word
+        start, not after =), and Path("~/x.db") would create a literal `~`
+        directory in the cwd. _db_arg must expand it — same contract
+        SHOIN_DATA_DIR already follows inside db_path()."""
+        import argparse
+
+        from shoin.cli import _db_arg
+
+        ns = argparse.Namespace(db="~/x.db")
+        self.assertEqual(_db_arg(ns), str(Path("~/x.db").expanduser()))
+        self.assertTrue(_db_arg(ns).startswith(str(Path.home())))  # not a literal ~
+        ns = argparse.Namespace(db="/abs/x.db")
+        self.assertEqual(_db_arg(ns), "/abs/x.db")
+        ns = argparse.Namespace(db=None)
+        self.assertIsNone(_db_arg(ns))
 
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError

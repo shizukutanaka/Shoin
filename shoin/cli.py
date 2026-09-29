@@ -380,6 +380,14 @@ def _report_has_output(report: CitationReport) -> bool:
     )
 
 
+def _db_arg(args: argparse.Namespace) -> str | None:
+    """The --db override with ~ expansion. Shell only expands a tilde at word
+    start, so `--db=~/x.db` arrives literally and Path() would create a real
+    `~` directory in the cwd — while SHOIN_DATA_DIR is already expanded inside
+    db_path(). Expanding here keeps the override consistent with the default."""
+    return str(Path(str(args.db)).expanduser()) if args.db else None
+
+
 def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     """Headless equivalent of GET /api/health (REQ-103 CLI parity) — a user
     running only the CLI previously had no way to check LLM reachability or
@@ -681,7 +689,7 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         from .server import serve
 
         try:
-            serve(int(args.port), str(args.db) if args.db else None)
+            serve(int(args.port), _db_arg(args))
         except OSError as exc:
             print(_t("err.prefix", code="SYSTEM_PORT_IN_USE", msg=str(exc)), file=sys.stderr)
             return 1
@@ -699,12 +707,12 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         # command never crashes with a raw traceback instead of a clean
         # err.prefix message, matching every other subcommand's guarantee.
         try:
-            return _cmd_health(backend, str(args.db) if args.db else None)
+            return _cmd_health(backend, _db_arg(args))
         except Exception as exc:  # noqa: BLE001 - see comment above
             print(_t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=str(exc)), file=sys.stderr)
             return 1
     try:
-        with Store(str(args.db) if args.db else db_path()) as store:
+        with Store(_db_arg(args) or db_path()) as store:
             command = str(args.command)
             if command == "notebook":
                 return _cmd_notebook(store, args)

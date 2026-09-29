@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.381
+## Version History: v0.1.37 → v0.2.382
+
+### v0.2.382 (2026-09-29)
+
+- fix: expand `~` in the `--db` override — the shell only expands a tilde at word start, so `--db=~/x.db` arrived literally and `Store()` would create a real `~` directory in the cwd, while `SHOIN_DATA_DIR` was already expanded inside `db_path()`. New `_db_arg()` helper is used by all three call sites (serve/health/Store) so the override and the default follow the same contract.
 
 ### v0.2.381 (2026-09-29)
 
