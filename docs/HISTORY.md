@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.353
+## Version History: v0.1.37 → v0.2.354
+
+### v0.2.354 (2026-09-29)
+
+- Pin template-placeholder and value-level contracts (test_template_placeholder_and_value_contracts): __SHOIN_LANG__ must appear exactly once (the blind byte replace in _h_ui would corrupt every occurrence — the handler's own comment claimed this pin existed; it didn't) and must survive in the server's b"..." replace literal, the meta[name=] JS selector must match a real meta name=, accept= extensions ⊆ ingest._EXT_KIND (a selectable file that ingest then rejects), and ?format= values ⊆ export.FORMATS (a link that 400s at click time). Fail-then-pass verified in five directions: duplicate placeholder, renamed server literal, meta-selector typo, accept=".docx", ?format=docx.
 
 ### v0.2.353 (2026-09-29)
 
