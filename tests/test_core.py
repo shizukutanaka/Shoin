@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.407")
+        self.assertEqual(VERSION, "0.2.408")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12426,6 +12426,61 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the pin must not go vacuous — store.py actually holds the writes.
         store_text = (root / "store.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(len(verb.findall(store_text)), 10)
+
+    def test_read_json_results_flow_through_validators(self) -> None:
+        """`_read_json()`'s dict must only be consumed via _require() /
+        _optional_str(). Those helpers exist because JSON's dynamic typing
+        meets Python's attribute access badly: `data.get("title").strip()`
+        raises AttributeError→500 on a list body field where
+        _require()→VALIDATION_FIELD_FORMAT_INVALID→400 is the contract
+        (the type-confusion class v0.2.38 closed for required fields,
+        _optional_str for optional ones). A bound variable holding the raw
+        body dict is the only place a bypass can hide — pin that every
+        reference to it is as an argument to a validator. (# comments exempt.)
+        """
+        src = (Path(__file__).resolve().parent.parent / "shoin" / "server.py").read_text(
+            encoding="utf-8"
+        )
+        lines = src.splitlines()
+        # Each bound var is only meaningful inside the function that assigned
+        # it — the same name elsewhere (the `data` param of the validators,
+        # `_read_json`'s own local) is unrelated. Record each bound var with
+        # the line range of its enclosing `def` (to the next `def` or EOF).
+        spans: list[tuple[str, int, int]] = []
+        assign = re.compile(r"(\w+)\s*=\s*self\._read_json\(\)")
+        for i, line in enumerate(lines):
+            m = assign.search(line)
+            if not m:
+                continue
+            start = i
+            while start > 0 and not re.match(r"\s+def \w+\(", lines[start]):
+                start -= 1
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if re.match(r"\s+def \w+\(", lines[j]):
+                    end = j
+                    break
+            spans.append((m.group(1), start, end))
+        offenders = []
+        for var, lo, hi in spans:
+            ok = re.compile(rf"self\._(?:require|optional_str)\(\s*{var}\b")
+            for i in range(lo, hi):
+                line = lines[i]
+                if line.lstrip().startswith("#"):
+                    continue
+                if not re.search(rf"\b{var}\b", line):
+                    continue
+                if "self._read_json()" in line or ok.search(line):
+                    continue
+                offenders.append(f"{i + 1}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            f"request-body dict accessed outside _require/_optional_str: {offenders}",
+        )
+        # Floor: the invariant must bind to real code — at least one bound body
+        # dict exists today (_h_note_add reads title+body through the helpers).
+        self.assertGreaterEqual(len(spans), 1)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.407
+## Version History: v0.1.37 → v0.2.408
+
+### v0.2.408 (2026-09-29)
+
+- pin that _read_json() results only flow through _require() /
+  _optional_str(): a bound body dict read directly (data.get/key) skips
+  the type checks those helpers exist for — a list/dict/bool field then
+  reaches .strip()/str-concat as AttributeError->500 instead of
+  VALIDATION_FIELD_FORMAT_INVALID->400 (the v0.2.38 class). Scope:
+  each bound var is checked only within its assigning def.
 
 ### v0.2.407 (2026-09-29)
 
