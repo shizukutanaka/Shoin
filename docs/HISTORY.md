@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.388
+## Version History: v0.1.37 → v0.2.389
+
+### v0.2.389 (2026-09-29)
+
+- `docs/spec.md` synced to v0.2.388 (was v0.2.326 — 62 versions behind). The spec is the REQ-level contract doc; changes at spec level since the last sync are now documented: write-time vocabulary guards on `messages.role` / `studio_outputs.kind` (STUDIO_KIND_INVALID) / `sources.kind` with the single-sourced vocabularies and the StoreError→HTTP taxonomy (`*_NOT_FOUND`→404, `*_ALREADY_EXISTS`→409, `SYSTEM_*`→500, else→400), and the `, c.id` deterministic tie-break in both retrieval ORDER BYs. Coverage figure refreshed (99%, 1061 tests). Concurrent audit of the config getters (`port`/`embed_batch`/`chunk_tokens`/`chunk_overlap`), `expand_query` bound, CLI subparser coverage, and every store ORDER BY found all already guarded — invalid→default contracts, MAX_QUESTION_LEN clamp, `required=True` subcommands, explicit deterministic ordering.
 
 ### v0.2.388 (2026-09-29)
 

@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.326 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.388 時点に同期)
 
 ## プロダクト定義
 
@@ -75,6 +75,8 @@ schema_migrations(version)
 
 マイグレーション: 整数連番(1, 2, 3, ...)・append-only・up専用。全DDLは`IF NOT EXISTS`等で冪等化し、同一バージョンの重複適用や複数プロセスからの同時マイグレーションでもクラッシュしない(v0.2.33で確立)。SQLiteではdownマイグレーションは一般に危険なため意図的に非対応。
 
+語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。
+
 ## 検索パイプライン
 
 ```
@@ -87,6 +89,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 
 - 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合(`fuse()`)/`adaptive_alpha()`はv0.2.150で削除(retrieve()はv0.2.56以降RRFのみ使用しており死コードだった)
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
+- 決定性: 両レーンのORDER BYは `, c.id` で同点を最古チャンク優先にブレイク(v0.2.385)——同点群の行順依存でクエリ間に順位が揺れ、LIKEプール2000件キャップ境界では同点チャンクが任意に選捨される経路を閉塞
 - プロンプト: ソースを `[S1]..[Sn]` で番号付け、順位比例のトークン予算配分(v0.2.200: 上位ソースへ大きく配分)
 
 ## 引用検証仕様 (差別化の核、機械検証スイート)
@@ -120,7 +123,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.326時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.388時点の実測: shoin/ 99%、未カバー5行は到達不能証明済み、テスト1061件)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
