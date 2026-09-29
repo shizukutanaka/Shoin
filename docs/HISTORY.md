@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.415
+## Version History: v0.1.37 → v0.2.416
+
+### v0.2.416 (2026-09-29)
+
+- prune superseded studio_outputs in add_studio_output: every
+  regeneration left a predecessor row that no read path can reach
+  (latest_studio_outputs is the only reader) — unbounded dead
+  storage per generate() call; delete same-kind rows in the same
+  transaction
 
 ### v0.2.415 (2026-09-29)
 

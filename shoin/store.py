@@ -969,6 +969,13 @@ class Store:
             raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
+            # latest_studio_outputs() is the only reader (UI, export), so the
+            # superseded same-kind row each regeneration leaves behind is
+            # unreadable dead storage — delete it in the same transaction.
+            self.conn.execute(
+                "DELETE FROM studio_outputs WHERE notebook_id=? AND kind=?",
+                (notebook_id, kind),
+            )
             cur = self.conn.execute(
                 "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
                 " created_at) VALUES (?,?,?,?,?)",
