@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.392
+## Version History: v0.1.37 → v0.2.393
+
+### v0.2.393 (2026-09-29)
+
+- Sync the product-review ledger to v0.2.392 — header version/test count
+  and a new v0.2.387-392 summary paragraph (vocabulary-guard completion,
+  spec.md contract sync, embed-skip surfacing, wire-pin strengthenings).
+- Same-cycle audit: bind stays 127.0.0.1-only (spec STRIDE), source
+  titles carry filename/URL fallbacks (never blank), no stray files.
 
 ### v0.2.392 (2026-09-29)
 
