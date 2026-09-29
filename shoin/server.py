@@ -649,10 +649,12 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)
             # Suggestions change when the source SET or its content changes;
             # cache per notebook so reopening the UI does not re-run the LLM
-            # every time. sha256 moves on refresh/reindex (same-source-id
-            # content rewrite — including a CLI reindex from another process,
-            # which the per-request fingerprint is the only check that can see)
-            # and title feeds the chunk contexts suggest_questions() reads.
+            # every time. sha256 moves on refresh (same-source-id content
+            # rewrite — including `shoin src refresh` from another process,
+            # which the per-request fingerprint is the only check that can
+            # see) and title feeds the chunk contexts suggest_questions()
+            # reads. `shoin reindex` only re-embeds; suggestions read chunk
+            # text/context, not vectors, so reindex does not move it.
             fingerprint = tuple(
                 (s.id, s.sha256, s.title) for s in store.sources_for_notebook(nb_id)
             )

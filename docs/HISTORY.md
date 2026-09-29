@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.395
+## Version History: v0.1.37 → v0.2.396
+
+### v0.2.396 (2026-09-29)
+
+- Pin the eval baseline round-trip: report_from_dict(report_to_dict(rep, k))
+  must read back every written field identically. Writer/reader key or dtype
+  drift would surface only at --diff time, far from the edit that caused it.
+- Correct the v0.2.395 comment: `shoin src refresh` (same-id content rewrite
+  bumping sha256) is the cross-process writer the fingerprint guards against;
+  `shoin reindex` only re-embeds vectors, which suggestions never read.
+- Same-cycle audit, all clean: every store getter carries an explicit ORDER BY,
+  all 133 UI function/const names are referenced by tests, fetch_url bounds the
+  decoded body (_check_size after decode), refresh/rename title paths fully
+  guarded, suggest_questions validates every filter.
 
 ### v0.2.395 (2026-09-29)
 
