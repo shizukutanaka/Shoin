@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.394
+## Version History: v0.1.37 → v0.2.395
+
+### v0.2.395 (2026-09-29)
+
+- Make the questions cache fingerprint content-aware: (id, sha256,
+  title) per source instead of ids only. A same-id content rewrite
+  from another process (CLI reindex/refresh while serve runs) left
+  the fingerprint matching, so the server kept serving suggestions
+  generated from dead chunks indefinitely — only the in-process
+  refresh/delete pops covered it. Fail-first verified (id-only
+  fingerprint serves a stale hit: chat_count stays 1).
+- Same-cycle audit, all clean: zero dead I18N.ja keys, zero
+  unreferenced element ids, _STRINGS keys all dynamically reachable,
+  port-0 banner prints the actual bound port, every except Exception
+  site documented, cli.py:765 is the mypy-required fallthrough, and
+  citation.py's zero-bigram tail is provably unreachable under
+  _MIN_CLAIM_CHARS=5.
 
 ### v0.2.394 (2026-09-29)
 

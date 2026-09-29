@@ -160,7 +160,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     llm: ChatBackend  # set by make_server
     db: str
-    questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
+    questions_cache: dict[
+        int, tuple[tuple[tuple[int, str, str], ...], list[str]]
+    ]  # set by make_server; fingerprint = (source id, sha256, title) per source
     questions_cache_lock: threading.Lock  # guards questions_cache across threads
     generation_lock: threading.Lock  # serializes LLM generation (spec.md STRIDE DoS control)
 
@@ -603,8 +605,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_src_refresh(self, src_id: int) -> None:
         with Store(self.db) as store:
             result = refresh_source(store, src_id, self.llm)
-        # Source content changed: evict stale question suggestions (fingerprint = source
-        # ID tuple, which is unchanged on refresh, so the cache would never self-expire).
+        # Source content changed: evict stale question suggestions eagerly. The
+        # content-aware fingerprint (id + sha256 + title) would already miss on
+        # the next read, but the explicit pop keeps the dict small.
         nb_id = result.source.notebook_id
         with self.questions_cache_lock:
             self.questions_cache.pop(nb_id, None)
@@ -644,9 +647,15 @@ class _Handler(BaseHTTPRequestHandler):
     def _h_questions(self, nb_id: int) -> None:
         with Store(self.db) as store:
             store.get_notebook(nb_id)
-            # Suggestions only change when the source set changes; cache per
-            # notebook so reopening the UI does not re-run the LLM every time.
-            fingerprint = tuple(s.id for s in store.sources_for_notebook(nb_id))
+            # Suggestions change when the source SET or its content changes;
+            # cache per notebook so reopening the UI does not re-run the LLM
+            # every time. sha256 moves on refresh/reindex (same-source-id
+            # content rewrite — including a CLI reindex from another process,
+            # which the per-request fingerprint is the only check that can see)
+            # and title feeds the chunk contexts suggest_questions() reads.
+            fingerprint = tuple(
+                (s.id, s.sha256, s.title) for s in store.sources_for_notebook(nb_id)
+            )
             with self.questions_cache_lock:
                 cached = self.questions_cache.get(nb_id)
             if cached is not None and cached[0] == fingerprint:
