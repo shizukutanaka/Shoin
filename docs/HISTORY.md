@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.375
+## Version History: v0.1.37 → v0.2.376
+
+### v0.2.376 (2026-09-29)
+
+- `add_chunks` が `touch_notebook` を呼ばなかった実欠陥を修正 —— 全書込み op のうち唯一 updated_at を進めていなかった（今日は直前の `add_source` が bump するため不可視だが、op レベルの不変条件として欠陥）。併せてタッチ契約ピンを `rename_notebook`・`clear_messages`・`add_chunks` へ拡張（後2件は既に bump するが回帰検出不能だった）。
 
 ### v0.2.375 (2026-09-29)
 

@@ -743,6 +743,7 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -753,6 +754,7 @@ class Store:
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) — this is the genuine
