@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.366
+## Version History: v0.1.37 → v0.2.367
+
+### v0.2.366
+
+### v0.2.367 (2026-09-29)
+
+- Pin chunk-projection getter shapes (test_chunk_projection_getters_shapes): id_seq_text_chunks_for_source (the source viewer's cited-passage marks) and id_context_text_chunks_for_notebook (the reindex path) had only indirect coverage — selecting a wrong column silently feeds callers swapped data. Asserts exact (id, seq, text) / (id, context, text) values on a live store. Fail direction verified.
 
 ### v0.2.366 (2026-09-29)
 

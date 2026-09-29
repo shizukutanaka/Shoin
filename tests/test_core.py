@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.366")
+        self.assertEqual(VERSION, "0.2.367")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -495,6 +495,26 @@ class TestStore(unittest.TestCase):
             c = s.counts(nb.id)
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
+
+    def test_chunk_projection_getters_shapes(self) -> None:
+        """The (id, seq, text) / (id, context, text) projections feed the
+        source viewer's cited-passage marks and the reindex path — a
+        SELECT column-order slip silently swaps id<->seq for every
+        caller with no error. Pin shapes against real values."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            ids = s.add_chunks(src.id, ["first", "second"], ["t > a", "t > b"])
+            rows = s.id_seq_text_chunks_for_source(src.id)
+            self.assertEqual(
+                [(i, sq, tx) for i, sq, tx in rows],
+                [(ids[0], 0, "first"), (ids[1], 1, "second")],
+            )
+            rows2 = s.id_context_text_chunks_for_notebook(nb.id)
+            self.assertEqual(
+                [(i, c, tx) for i, c, tx in rows2],
+                [(ids[0], "t > a", "first"), (ids[1], "t > b", "second")],
+            )
 
     def test_every_write_bumps_notebook_timestamp(self) -> None:
         """list_notebooks orders by updated_at DESC — a write path that
