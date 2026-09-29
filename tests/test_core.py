@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.385")
+        self.assertEqual(VERSION, "0.2.386")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1004,6 +1004,29 @@ class TestStore(unittest.TestCase):
                 with self.assertRaises(StoreError) as cm:
                     s.add_studio_output(nb.id, "briefing", "body", "{}")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_studio_output_rejects_unknown_kind(self) -> None:
+        """Kind-vocabulary guard, same class as add_message()'s role check.
+
+        latest_studio_outputs() GROUP BYs on kind, so a typo'd literal
+        ('audoo') would persist as a phantom kind — grouped out of every UI
+        section and exported under a nonsense heading — that no caller can
+        ever overwrite. The store must fail loudly at the write."""
+        with make_store() as s:
+            nb = s.create_notebook("kind-vocab")
+            with self.assertRaises(StoreError) as cm:
+                s.add_studio_output(nb.id, "audoo", "body", "{}")
+            self.assertEqual(cm.exception.code, "STUDIO_KIND_INVALID")
+            self.assertEqual(s.latest_studio_outputs(nb.id), [])
+
+    def test_studio_kind_vocabulary_is_single_sourced(self) -> None:
+        """studio.KINDS must BE store.STUDIO_KINDS — the store guards on its own
+        constant because it cannot import studio.py back; two spellings would
+        let one drift (a new kind addable via studio.generate() but rejected at
+        the write, or vice versa)."""
+        from shoin import store, studio
+
+        self.assertIs(studio.KINDS, store.STUDIO_KINDS)
 
     def test_list_notebooks_with_counts_single_query(self) -> None:
         with make_store() as s:
