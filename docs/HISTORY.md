@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.401
+## Version History: v0.1.37 → v0.2.402
+
+### v0.2.402 (2026-09-29)
+
+- sync spec.md to v0.2.401 (test count, coverage misses 5→3,
+  daemon-threads row in the DoS table with the corrected mechanism)
 
 ### v0.2.401 (2026-09-29)
 
