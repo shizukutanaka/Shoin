@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.405
+## Version History: v0.1.37 → v0.2.406
+
+### v0.2.406 (2026-09-29)
+
+- sync product-review.md to v0.2.405 (adds the v0.2.403-405 summary:
+  workflow-instruction truthfulness fix in docs/agents + the
+  write-SQL-lives-in-store.py locality pin; header/test count refreshed)
 
 ### v0.2.405 (2026-09-29)
 
