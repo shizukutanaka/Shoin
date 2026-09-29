@@ -25,6 +25,7 @@ from .config import (
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
     NB_MESSAGES_LIMIT,
+    NB_NOTES_LIMIT,
     REQUEST_SOCKET_SEC,
     VERSION,
     db_path,
@@ -119,6 +120,15 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     if len(recent_msgs) > NB_MESSAGES_LIMIT:
         recent_msgs = recent_msgs[len(recent_msgs) - NB_MESSAGES_LIMIT :]
         omitted = store.count_messages(nb_id) - len(recent_msgs)
+    # Same cap for notes: they embed verbatim in this payload, so an
+    # accumulating notes pane would otherwise make every detail fetch
+    # (openNotebook, the SSE-drop recovery refetch) heavier forever. Newest
+    # NB_NOTES_LIMIT are kept — dropping the oldest means the note a user
+    # just added is always visible; notes_omitted discloses the hidden count
+    # and export() still writes the full record.
+    all_notes = store.list_notes(nb_id)
+    notes_omitted = max(0, len(all_notes) - NB_NOTES_LIMIT)
+    notes = all_notes[notes_omitted:]
     return {
         "id": nb.id,
         "name": nb.name,
@@ -128,8 +138,9 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
             for s in store.sources_for_notebook(nb_id)
         ],
         "notes": [
-            {"id": n["id"], "title": n["title"], "body": n["body"]} for n in store.list_notes(nb_id)
+            {"id": n["id"], "title": n["title"], "body": n["body"]} for n in notes
         ],
+        "notes_omitted": notes_omitted,
         "studio": [
             {
                 "kind": o["kind"],

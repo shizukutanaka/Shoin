@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.408
+## Version History: v0.1.37 → v0.2.409
+
+### v0.2.409 (2026-09-29)
+
+- cap notes embedded in GET /api/notebooks/{id} at NB_NOTES_LIMIT=500,
+  disclosing notes_omitted — the same unbounded-embed defect the
+  messages cap closed (v0.2.250): every detail fetch (openNotebook,
+  the SSE-drop recovery refetch) round-tripped every note body, so an
+  accumulating notes pane made each click heavier forever. Newest 500
+  kept so a just-added note is always visible; UI shows the
+  notes.earlier disclosure line; export()/DB keep the full record
 
 ### v0.2.408 (2026-09-29)
 
