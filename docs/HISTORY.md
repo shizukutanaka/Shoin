@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.412
+## Version History: v0.1.37 → v0.2.413
+
+### v0.2.413 (2026-09-29)
+
+- sync spec.md to v0.2.412: REQ-103's ノート化 now genuinely exists
+  (v0.2.412), malformed-port -> INGEST_URL_BLOCKED(400) in the SSRF
+  row (v0.2.407), embedded messages/notes caps + *_omitted disclosure
+  in the DoS row (v0.2.250/409), write-SQL locality (v0.2.405),
+  _read_json validator contract (v0.2.408), zero-marker pin
+  (v0.2.411), test count 1075
 
 ### v0.2.412 (2026-09-29)
 
