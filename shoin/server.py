@@ -249,9 +249,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _drain(self, n: int) -> None:
         """Discard an oversize request body (bounded) so the error reaches the client.
 
-        If Content-Length exceeds our drain cap, leftover bytes in the socket
-        would corrupt the next HTTP/1.1 keep-alive request, so we force a
-        connection close in that case.
+        Responding and closing while a large undrained body still sits in the
+        socket's receive buffer makes the kernel send RST, which can destroy
+        the error response before the client reads it — drain bounded bytes
+        first. The cap bounds the read work; beyond it we stop draining and
+        force a close (already the HTTP/1.0 default, kept as a guard for any
+        future protocol_version change).
         """
         remaining = min(n, MAX_UPLOAD_BYTES + 65536)
         while remaining > 0:

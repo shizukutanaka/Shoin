@@ -805,7 +805,7 @@ class ServerTest(unittest.TestCase):
         """v0.2.315: an accepted socket that never completes its request would
         hold its handler thread forever — REQUEST_SOCKET_SEC bounds any single
         blocking socket op, and the timeout close must not spam a traceback
-        (idle keep-alives are expected traffic)."""
+        (clients that stall mid-request are expected traffic)."""
         import io
         import socket
         import shoin.server as srv_mod
@@ -1811,7 +1811,7 @@ class PostStreamStoreErrorTest(unittest.TestCase):
     def test_handle_error_quiets_timeout_failures(self) -> None:
         """Symmetric contract: a TimeoutError escaping a request thread (e.g. a
         stalled write in finish(), outside handle_one_request's own catch) must
-        be swallowed — idle keep-alive timeouts are routine, not failures."""
+        be swallowed — stalled-client socket timeouts are routine, not failures."""
         import io
         from unittest.mock import patch
 
