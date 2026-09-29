@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.390
+## Version History: v0.1.37 → v0.2.391
+
+### v0.2.391 (2026-09-29)
+
+- Strengthened the ingest-toast wire pin: beyond counting `embedNote(j)` call sites, the test now scans every `toast(` line announcing a completed ingest (`sources.added` / `src.refresh.ok`) and requires the embed-skip suffix on each — a future ingest path that forgets `embedNote` fails even when the call count is unchanged (the class of drift a count-only pin misses). Same-cycle audit: `_embed_chunks` model-version ordering (`set_setting` only when `done and (not force or done == len(texts))` — a partial force-reindex keeps the OLD model recorded so the mismatch guard stays armed), `_file_config` type filtering, `snums` S# numbering single-sourced from `enumerate(order)`, per-request `Store` (default `check_same_thread` safe by construction), and all Content-Length parsing — already guarded.
 
 ### v0.2.390 (2026-09-29)
 
