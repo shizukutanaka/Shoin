@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.413
+## Version History: v0.1.37 → v0.2.414
+
+### v0.2.414 (2026-09-29)
+
+- sync product-review.md ledger to v0.2.413: the
+  "documented-but-half-true -> implemented + spec-synced" span
+  (zero-marker pin, REQ-103 save-as-note, spec drift fold)
 
 ### v0.2.413 (2026-09-29)
 
