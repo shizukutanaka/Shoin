@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.396
+## Version History: v0.1.37 → v0.2.397
+
+### v0.2.397 (2026-09-29)
+
+- Sync the product-review ledger to v0.2.396 (four versions): the
+  cross-process questions-cache staleness fix, the store.py defensive-
+  tail proofs, and the eval baseline round-trip pin. Same-cycle audit
+  all clean: every store getter carries an explicit ORDER BY; all 133
+  UI function/const names referenced by tests; zero inline event
+  handlers (all addEventListener/arrow); fetch_url bounds the decoded
+  body; export fmt validated 400 server-side + ValueError in lib;
+  studio.generate fully guarded; suggest_questions filters all live.
 
 ### v0.2.396 (2026-09-29)
 
