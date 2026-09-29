@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.393
+## Version History: v0.1.37 → v0.2.394
+
+### v0.2.394 (2026-09-29)
+
+- Cover store.py's last two defensive tails with _RacyConn race tests:
+  add_chunks' FOREIGN KEY -> SOURCE_NOT_FOUND mapping (the third
+  sibling replace_chunks_for_source already proved) and
+  update_source_sha256's in-transaction re-read catching a concurrent
+  delete. Both mutants verified fail-first. Remaining misses are the
+  provably unreachable AssertionError and citation.py/cli.py's
+  defensive edges.
 
 ### v0.2.393 (2026-09-29)
 

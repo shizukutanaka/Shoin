@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.393")
+        self.assertEqual(VERSION, "0.2.394")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -442,6 +442,41 @@ class TestStore(unittest.TestCase):
                 s.replace_chunks_for_source(src.id, ["orphaned chunk"])
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
             self.assertIn("chunk replacement", str(cm.exception))
+
+    def test_add_chunks_fk_violation_maps_to_not_found(self) -> None:
+        """add_chunks must translate a FOREIGN KEY violation — the source row
+        deleted between its get_source() pre-check and the chunk INSERT — into
+        SOURCE_NOT_FOUND, not let it escape as a raw sqlite3 error. Same
+        mapping replace_chunks_for_source proves above; this third sibling's
+        branch was never exercised (coverage tail: store.py)."""
+        with make_store() as s:
+            nb = s.create_notebook("race-fk-add")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-fk-add")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "INSERT INTO chunks", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, ["orphaned chunk"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("during chunk insertion", str(cm.exception))
+
+    def test_update_source_sha256_reread_concurrent_delete_raises(self) -> None:
+        """update_source_sha256 re-reads the title inside its transaction so the
+        context rewrite keys off the live row; when the source vanishes between
+        get_source() and that re-read it must raise SOURCE_NOT_FOUND, not
+        proceed on a stale snapshot. The earlier of its two concurrent-delete
+        guards — the rowcount tail is pinned in test_rowcount_guards above
+        (coverage tail: store.py)."""
+        with make_store() as s:
+            nb = s.create_notebook("race-reread")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-rr")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SELECT title FROM sources", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src.id, "sha-rr2", "t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("concurrently", str(cm.exception))
 
     def test_replace_chunks_contexts_must_match_texts(self) -> None:
         """contexts shorter/longer than texts is a caller bug — rejected before
