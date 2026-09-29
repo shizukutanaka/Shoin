@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.377")
+        self.assertEqual(VERSION, "0.2.378")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -521,11 +521,12 @@ class TestStore(unittest.TestCase):
         forgets touch_notebook() leaves the notebook ranked as untouched
         forever (stale ordering, no error). Every mutating op must bump:
         rename_notebook, add_source, update_source_title,
-        update_source_sha256, add_chunks, delete_source, add_note,
-        delete_note, add_studio_output, add_message, clear_messages.
-        (set_embedding/set_setting/migrate deliberately don't: derived
-        data, not user content.) Behavioral pin: run each op and assert
-        the stamp moved forward."""
+        update_source_sha256, add_chunks, replace_chunks_for_source,
+        delete_source, add_note, delete_note, add_studio_output,
+        add_message, clear_messages. (create_notebook/delete_notebook set
+        or remove the row itself; set_embedding/set_setting/migrate
+        deliberately don't: derived data, not user content.) Behavioral
+        pin: run each op and assert the stamp moved forward."""
         import time
 
         def stamp(s: Store, nb_id: int) -> str:
@@ -545,6 +546,9 @@ class TestStore(unittest.TestCase):
             ("add_chunks",
              lambda s, nb: s.add_chunks(
                  s.sources_for_notebook(nb.id)[0].id, ["extra-chunk"])),
+            ("replace_chunks_for_source",
+             lambda s, nb: s.replace_chunks_for_source(
+                 s.sources_for_notebook(nb.id)[0].id, ["replaced-chunk"])),
             ("add_note", lambda s, nb: s.add_note(nb.id, "nt", "nb-body")),
             ("delete_note",
              lambda s, nb: s.delete_note(
