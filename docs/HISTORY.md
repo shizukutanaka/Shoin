@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.350
+## Version History: v0.1.37 → v0.2.351
+
+### v0.2.351 (2026-09-28)
+
+- Pin the request-body field contract (test_request_body_fields_match_server_reads): per api()/jpost() call site, resolves the JSON body keys (jpost's second arg, api's body:JSON.stringify({…}), shorthand `{k}` handled; raw non-JSON bodies like the file upload carry no fields) and asserts required ⊆ sent ⊆ allowed against the route's handler — where required/allowed come from _require/_optional_str/data.get keys AST-collected from _h_<route>. A typo'd key is silently ignored server-side; a missing required key 400s every call. Fail-then-pass verified both directions (JS-side namE typo and server-side kind→knd rename each flagged).
 
 ### v0.2.350 (2026-09-28)
 

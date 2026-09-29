@@ -440,6 +440,150 @@ const fetch = async (path, opts) => {
                 "but no matching server route accepts that method",
             )
 
+    def test_request_body_fields_match_server_reads(self) -> None:
+        """Every JSON key the UI sends must be a field the handler actually
+        reads, and every field the handler requires must be sent. A typo'd
+        key (`{titl}` for `title`) is silently ignored server-side; a dropped
+        required key 400s on every call. Bodies arrive as jpost(url, {…}) or
+        api(url, {…, body: JSON.stringify({…})}); a non-JSON body (the file
+        upload's raw bytes) carries no fields. Resolving per call site:
+        jpost→POST, api→GET unless {method:"X"}."""
+        script = _script_body(_html())
+
+        def match_brace(src: str, i: int) -> int:
+            """i points at '{'; return the index just past its match."""
+            depth = 0
+            while i < len(src):
+                if src[i] == "{":
+                    depth += 1
+                elif src[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i + 1
+                i += 1
+            return len(src)
+
+        def top_level_keys(obj_src: str) -> set[str]:
+            """Top-level keys of an object literal: `k:` pairs and `{k}` shorthand."""
+            keys: set[str] = set()
+            depth = 0
+            part = ""
+            for c in obj_src:
+                if c in "{[(":
+                    depth += 1
+                elif c in "}])":
+                    depth -= 1
+                if c == "," and depth == 0:
+                    m = re.match(r"\s*([A-Za-z_$][\w$]*)", part)
+                    if m:
+                        keys.add(m.group(1))
+                    part = ""
+                    continue
+                part += c
+            m = re.match(r"\s*([A-Za-z_$][\w$]*)", part)
+            if m:
+                keys.add(m.group(1))
+            return keys
+
+        # (verb, concrete_path, body-keys-or-None) per call site
+        calls: list[tuple[str, str, set[str] | None, str]] = []
+        for m in re.finditer(r'(api|jpost)\(\s*[`"](/api/[^`"?]*)', script):
+            fn, raw = m.group(1), m.group(2)
+            rest_i = m.end()
+            # past the closing quote
+            while rest_i < len(script) and script[rest_i] in "`\"":
+                rest_i += 1
+            while rest_i < len(script) and script[rest_i] in " \t":
+                rest_i += 1
+            verb = "POST" if fn == "jpost" else "GET"
+            body_keys: set[str] | None = None
+            if rest_i < len(script) and script[rest_i] == ",":
+                brace = script.find("{", rest_i)
+                if brace >= 0:
+                    end = match_brace(script, brace)
+                    obj = script[brace + 1:end - 1]
+                    if fn == "jpost":
+                        body_keys = top_level_keys(obj)
+                    else:
+                        sm = re.search(r'method\s*:\s*"([A-Z]+)"', obj)
+                        if sm:
+                            verb = sm.group(1)
+                        bm = re.search(r"body\s*:\s*JSON\.stringify\(", obj)
+                        if bm:
+                            inner_brace = obj.find("{", bm.end())
+                            if inner_brace >= 0:
+                                inner_end = match_brace(obj, inner_brace)
+                                body_keys = top_level_keys(obj[inner_brace + 1:inner_end - 1])
+            concrete = re.sub(r"\$\{[^}]*\}", "1", raw).rstrip("/")
+            calls.append((verb, concrete, body_keys, f"line {script[:m.start()].count(chr(10)) + 1}"))
+
+        # Per handler: fields it reads from the JSON body.
+        import ast
+        import shoin.server
+        server_src = Path(shoin.server.__file__).read_text(encoding="utf-8")
+        handlers: dict[str, ast.AST] = {
+            n.name: n
+            for n in ast.walk(ast.parse(server_src))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("_h_")
+        }
+        routes = {name: (v, p) for v, p, name in _Handler._ROUTES}
+
+        for verb, path, sent, where in calls:
+            name = next(
+                (n for n, (v, p) in routes.items() if v == verb and re.match(p, path)),
+                None,
+            )
+            self.assertIsNotNone(name, f"{where}: no route for {verb} {path}")
+            assert name is not None
+            fn = handlers.get(f"_h_{name}")
+            self.assertIsNotNone(fn, f"{where}: route {name} has no handler")
+            required: set[str] = set()
+            allowed: set[str] = set()
+            assert fn is not None
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                key = (
+                    node.args[1].value
+                    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                    else None
+                )
+                if not isinstance(key, str):
+                    key = None
+                if node.func.attr == "_require" and key:
+                    required.add(key)
+                    allowed.add(key)
+                elif node.func.attr == "_optional_str" and key:
+                    allowed.add(key)
+                elif (
+                    node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "data"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    allowed.add(node.args[0].value)
+
+            if sent is None:
+                self.assertEqual(
+                    required, set(),
+                    f"{where}: {verb} {path} sends no JSON body but "
+                    f"_h_{name} requires {sorted(required)}",
+                )
+            else:
+                self.assertEqual(
+                    sent - allowed, set(),
+                    f"{where}: {verb} {path} sends {sorted(sent - allowed)} "
+                    f"that _h_{name} never reads (allowed: {sorted(allowed)})",
+                )
+                self.assertEqual(
+                    required - sent, set(),
+                    f"{where}: {verb} {path} omits required field(s) "
+                    f"{sorted(required - sent)} — every call 400s",
+                )
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element
