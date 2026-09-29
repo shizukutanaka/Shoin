@@ -831,6 +831,41 @@ class ServerTest(unittest.TestCase):
             "a socket timeout must close quietly, not log a traceback",
         )
 
+    def test_server_close_does_not_join_idle_handler_threads(self) -> None:
+        """daemon_threads=True: server_close() must not stall on idle clients.
+
+        A browser's keep-alive connection parks its handler thread in
+        rfile.read() for up to REQUEST_SOCKET_SEC (120s). With the default
+        daemon_threads=False, server_close() JOINS that thread — Ctrl+C
+        would hang for the full socket timeout whenever any connection is
+        open. Daemon handler threads die with the process instead."""
+        import http.client
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "REQUEST_SOCKET_SEC", 3.0):
+            srv = srv_mod.make_server(
+                port=0, db=str(Path(self.tmp.name) / "s-close.db"), llm=FakeLLM()
+            )
+            th = _th.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05})
+            th.start()
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+            try:
+                conn.request("GET", "/api/health")
+                conn.getresponse().read()  # request done; socket stays open (keep-alive)
+                srv.shutdown()
+                started = time.monotonic()
+                srv.server_close()
+                elapsed = time.monotonic() - started
+            finally:
+                conn.close()
+                th.join(timeout=5)
+        # Non-daemon close would join the parked handler for ~3s (patched
+        # REQUEST_SOCKET_SEC); daemon close returns immediately.
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(srv.daemon_threads)
+
     def test_json_body_deep_nesting_returns_400(self) -> None:
         """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
         and raises RecursionError — a malformed input that must still map to

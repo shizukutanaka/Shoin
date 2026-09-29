@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.397
+## Version History: v0.1.37 → v0.2.398
+
+### v0.2.398 (2026-09-29)
+
+- Set daemon_threads=True on the HTTP server: a browser's idle
+  keep-alive connection parks its handler thread in rfile.read()
+  for up to REQUEST_SOCKET_SEC (120s), and non-daemon threads are
+  JOINED by server_close() — Ctrl+C stalled for the full socket
+  timeout whenever any browser connection was open. Fail-first
+  verified (non-daemon close joins the parked handler past the 2s
+  bound). Same choice python -m http.server makes.
+- Same-cycle audit, all clean: spec.md verified still current (no
+  contract-level change since v0.2.388; toasts/cache internals are
+  not spec-level), generation_lock context-managed on every site,
+  health is report-only by design (API/CLI parity), _read_json
+  bounded + drain + close-on-overrun, Store.__exit__ closes only
+  (all writes self-commit), eval baseline round-trip now pinned.
 
 ### v0.2.397 (2026-09-29)
 

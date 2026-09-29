@@ -919,6 +919,14 @@ def make_server(
 
 
 class _HTTPServer(ThreadingHTTPServer):
+    # Handler threads are daemons: a browser's idle keep-alive connection parks
+    # its handler in rfile.read() for up to REQUEST_SOCKET_SEC, and non-daemon
+    # threads are JOINED by server_close() — Ctrl+C would stall for the full
+    # socket timeout whenever any browser connection is open. Local single-user
+    # server semantics make a dead-at-exit thread strictly correct (the same
+    # choice python -m http.server makes).
+    daemon_threads = True
+
     def handle_error(self, request: Any, client_address: Any) -> None:
         # Idle keep-alive connections simply hit the per-request socket timeout
         # and get closed — not an error worth a traceback. Everything else keeps
