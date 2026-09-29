@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.403
+## Version History: v0.1.37 → v0.2.404
+
+### v0.2.404 (2026-09-29)
+
+- fix agent-doc push instructions: HEAD:main would bypass the entire
+  stacked-PR chain (and direct main pushes are not permitted anyway);
+  both docs now describe the stacked-PR flow (PR per cycle, base=prior
+  branch, main lands via the rollup PR only)
 
 ### v0.2.403 (2026-09-29)
 
