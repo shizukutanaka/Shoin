@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.364")
+        self.assertEqual(VERSION, "0.2.365")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -495,6 +495,27 @@ class TestStore(unittest.TestCase):
             c = s.counts(nb.id)
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
+
+    def test_fts_tracks_chunk_context_update(self) -> None:
+        """The migration-6 chunks_au trigger keeps chunks_fts in sync when
+        update_source_title rewrites chunk contexts — without it the FTS
+        index would keep answering the old title forever (stale index, no
+        error). Assert the renamed title matches and the old one doesn't."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "旧題名アルファ", "o", "h")
+            s.add_chunks(src.id, ["本文のテキスト"], ["旧題名アルファ > 節1"])
+            s.update_source_title(src.id, "新題名ベータ", "o")
+            new_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:新題名ベータ'"
+            ).fetchone()["n"]
+            old_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:旧題名アルファ'"
+            ).fetchone()["n"]
+            self.assertEqual(int(new_hits), 1)
+            self.assertEqual(int(old_hits), 0)
 
     def test_cascade_delete_cleans_fts(self) -> None:
         with make_store() as s:
