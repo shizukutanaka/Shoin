@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.369
+## Version History: v0.1.37 → v0.2.370
+
+### v0.2.370 (2026-09-29)
+
+- Pin counts-path parity (test_counts_paths_agree): counts() (detail header) and list_notebooks_with_counts() (list view) compute sources/chunks through two different SQL paths; a join-direction or filter drift on either side makes the list row and the detail header silently disagree. Asserts equality on real data including an empty notebook (the LEFT JOIN edge). Fail direction verified (INNER JOIN mutation drops the empty row -> caught).
 
 ### v0.2.369 (2026-09-29)
 

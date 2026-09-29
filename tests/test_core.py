@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.369")
+        self.assertEqual(VERSION, "0.2.370")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -966,6 +966,20 @@ class TestStore(unittest.TestCase):
             self.assertEqual(row["id"], nb_id)
             self.assertEqual(row["counts"]["sources"], 2)
             self.assertGreater(row["counts"]["chunks"], 0)
+
+    def test_counts_paths_agree(self) -> None:
+        """counts() (notebook detail) and list_notebooks_with_counts() (the
+        list view) compute sources/chunks through two different SQL paths —
+        a join/filter drift on either side makes the list row and the detail
+        header silently disagree. Pin them equal on real data, including an
+        empty notebook (LEFT JOIN edge)."""
+        with make_store() as s:
+            nb_id = seed(s)
+            empty = s.create_notebook("empty")
+            by_id = {r["id"]: r["counts"] for r in s.list_notebooks_with_counts()}
+            self.assertEqual(by_id[nb_id], s.counts(nb_id))
+            self.assertEqual(by_id[empty.id], s.counts(empty.id))
+            self.assertEqual(by_id[empty.id], {"sources": 0, "chunks": 0})
 
     def test_set_embedding_missing_chunk_raises(self) -> None:
         with make_store() as s:
