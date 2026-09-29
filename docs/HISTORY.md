@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.378
+## Version History: v0.1.37 → v0.2.379
+
+### v0.2.379 (2026-09-29)
+
+- test: require a `.exception.code` check on every `assertRaises(StoreError)` — StoreError paths are distinguished by code (NOT_FOUND→404, ALREADY_EXISTS→409, SYSTEM_*→500, else→400), so a bare raise assertion passes on *any* error and lets a semantic regression stay green. Fixed the 3 unverified sites (one real weakness: the refresh sha-collision test would have passed on NOTEBOOK_NOT_FOUND too) and added a static scanner over tests/ so the pattern cannot regress.
 
 ### v0.2.378 (2026-09-29)
 

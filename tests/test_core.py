@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.378")
+        self.assertEqual(VERSION, "0.2.379")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -214,8 +214,9 @@ class TestStore(unittest.TestCase):
             self.assertEqual(s.get_notebook(nb.id).name, "論文")
             self.assertEqual(len(s.list_notebooks()), 1)
             s.delete_notebook(nb.id)
-            with self.assertRaises(StoreError):
+            with self.assertRaises(StoreError) as cm:
                 s.get_notebook(nb.id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_empty_name_rejected(self) -> None:
         with make_store() as s:
@@ -9474,8 +9475,9 @@ class TestCLINoteSourceParity(unittest.TestCase):
             self.assertEqual(rc, 0)
 
             with Store(db_file) as s:
-                with self.assertRaises(StoreError):
+                with self.assertRaises(StoreError) as cm:
                     s.get_source(src_id)
+                self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
         finally:
             os.unlink(db_file)
 
@@ -11128,8 +11130,9 @@ class TestResidualGuards(unittest.TestCase):
             s.add_source(nb.id, "url", "b", "https://x/b", "sha-b")
             fake = types.SimpleNamespace(sha256="sha-b", title="b", text="x")
             with patch.object(pl, "extract_url", return_value=fake):
-                with self.assertRaises(StoreError):
+                with self.assertRaises(StoreError) as cm:
                     pl.refresh_source(s, src_a.id)
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
 
     def test_python_i18n_tables_have_ja_en_parity(self) -> None:
         """Every server-side string table must define both locales — the UI
@@ -11959,6 +11962,38 @@ class TestResidualGuards(unittest.TestCase):
                                 "shapes (int(), literal join, numeric constant)"
                             )
         self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_storeerror_raises_assert_a_code(self) -> None:
+        """Every `assertRaises(StoreError)` must capture and assert
+        `.exception.code` — StoreError paths are distinguished by code
+        (NOT_FOUND→404, ALREADY_EXISTS→409, SYSTEM_*→500, else→400), so a
+        raise without a code check passes on ANY error from the call,
+        letting a semantic regression (e.g. collision → wrong code)
+        stay green."""
+        root = Path(__file__).resolve().parents[1]
+        # Skip this test's own body — its regex literals and messages mention
+        # the pattern by name. Span = from this def to the next def.
+        own_src = Path(__file__).read_text()
+        own_start = own_src.index("def test_storeerror_raises_assert_a_code")
+        own_end = own_src.find("\n    def ", own_start)
+        if own_end < 0:
+            own_end = len(own_src)
+        bad: list[str] = []
+        for f in (root / "tests").glob("test_*.py"):
+            src = f.read_text()
+            for m in re.finditer(r"assertRaises\(StoreError\)(?:\s+as\s+(\w+))?", src):
+                if f.name == "test_core.py" and own_start <= m.start() < own_end:
+                    continue
+                var = m.group(1)
+                if not var:
+                    bad.append(f"{f.name}:{src[:m.start()].count(chr(10)) + 1}")
+                    continue
+                block = src[m.end():m.end() + 900]
+                if not re.search(rf"\b{re.escape(var)}\.exception\.code\b", block):
+                    bad.append(f"{f.name}:{src[:m.start()].count(chr(10)) + 1}")
+        self.assertEqual(
+            bad, [], f"assertRaises(StoreError) without a .exception.code check: {bad}"
+        )
 
     def test_error_codes_follow_the_domain_detail_taxonomy(self) -> None:
         """The UI toasts raw `error.code`, so the taxonomy is
