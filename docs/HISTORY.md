@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.373
+## Version History: v0.1.37 → v0.2.374
+
+### v0.2.374 (2026-09-29)
+
+- `docs/product-review.md` を v0.2.373 時点へ同期 —— 35版分の契約ピン区間 (v0.2.339-373: HTTP双方向・i18n値・文書参照・DB意味論の全層) を要約段落として追記し、ヘッダ版数・テスト件数 (1018→1049) を更新。
 
 ### v0.2.373 (2026-09-29)
 
