@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.357
+## Version History: v0.1.37 → v0.2.358
+
+### v0.2.358 (2026-09-29)
+
+- Fix two dead-CSS findings + pin the class-name contract (test_css_class_names_stay_in_sync): `.toast` in `.msg,.toast{animation:rise}` was dead because the toast div only carried `id=` — the intended rise animation never ran (added `class="toast"`); `.btn.danger` was defined for a button variant nothing constructs (deleted). Pin checks both directions: every class markup/JS uses (class=, classList.*, className, el() args, composed `"seal "+k` suffixes) must exist in the stylesheet, and every styled class must be constructed by some literal. Fail-then-pass verified in three directions.
 
 ### v0.2.357 (2026-09-29)
 

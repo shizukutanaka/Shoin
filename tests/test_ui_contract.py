@@ -1194,6 +1194,63 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_css_class_names_stay_in_sync(self) -> None:
+        """Both directions of the class-name contract fail silently:
+
+        - JS toggles a class CSS never defines (`classList.add("foo")`
+          with no `.foo` rule) — the visual state it was meant to paint
+          just doesn't happen.
+        - CSS defines a class nothing constructs (`.toast` on a rule
+          whose element only carried `id=` — found here in v0.2.358) —
+          dead styling that reads as if it works.
+
+        Class names travel through `el("div","cls")`, `className`,
+        `classList.*`, `class="..."`, and composed strings like
+        `"seal "+k`, so "constructed" means: appears as a word inside
+        any quoted literal in the file."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", style))
+        self.assertTrue(defined, "no CSS classes found — <style> scan broken")
+
+        class_ctx: set[str] = set()
+
+        def absorb(v: str) -> None:
+            for w in v.split():
+                if w and not w.startswith(("$", "{")):
+                    class_ctx.add(w)
+
+        for m in re.finditer(
+            r'class\s*=\s*"([^"]*)"|class\s*=\s*\'([^\']*)\'', html
+        ):
+            absorb(m.group(1) or m.group(2) or "")
+        for m in re.finditer(
+            r'classList\.(?:add|remove|toggle|contains)\("([^"]+)"\)', html
+        ):
+            absorb(m.group(1))
+        for m in re.finditer(r"className\s*=\s*([^;]+);", html):
+            for lit in re.findall(r'"([^"]*)"', m.group(1)):
+                absorb(lit)
+        for m in re.finditer(r'el\("[a-z0-9]+",\s*((?:"[^"]*"|[^,])+)', html):
+            argtext = re.sub(r'el\("[a-z0-9]+"', "", m.group(1))
+            for lit in re.findall(r'"([^"]*)"', argtext):
+                absorb(lit)
+
+        self.assertEqual(
+            sorted(class_ctx - defined),
+            [],
+            "markup/JS uses classes the stylesheet never defines",
+        )
+
+        words: set[str] = set()
+        for lit in re.findall(r'"([^"\n]*)"', html) + re.findall(r"'([^'\n]*)'", html):
+            words.update(lit.split())
+        self.assertEqual(
+            sorted(defined - words),
+            [],
+            "CSS classes nothing constructs — dead styling",
+        )
+
     def test_markup_health_and_offline_scope(self) -> None:
         """Markup invariants that fail silently rather than loudly.
 
