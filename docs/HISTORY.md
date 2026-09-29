@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.410
+## Version History: v0.1.37 → v0.2.411
+
+### v0.2.411 (2026-09-29)
+
+- pin that production code ships zero TODO/FIXME markers: a committed
+  marker is a known issue left unfixed — every gate was blind to one
+  landing in a PR. Scan shoin/**/*.py + the shipped index.html,
+  word-boundary, comments or not
 
 ### v0.2.410 (2026-09-29)
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.410")
+        self.assertEqual(VERSION, "0.2.411")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12426,6 +12426,28 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the pin must not go vacuous — store.py actually holds the writes.
         store_text = (root / "store.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(len(verb.findall(store_text)), 10)
+
+    def test_no_todo_fixme_markers_in_production(self) -> None:
+        """A committed TODO/FIXME marker is a known issue left unfixed — the
+        completion criterion (zero known bugs) says none may ship. Until this
+        pin existed every gate was blind to one: a marker could land in any
+        PR undetected. Scan production code + the shipped UI for the two
+        canonical markers, word-boundary, comment or not — an inline "TODO:"
+        in a docstring or a stray <!-- TODO --> in index.html is the same
+        violation. Test fixtures live in tests/, so this file is naturally
+        exempt."""
+        marker = re.compile(r"\b(?:TODO|FIXME)\b")
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        for f in sorted(root.rglob("*")):
+            if f.suffix not in (".py", ".html"):
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if marker.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()[:80]}")
+        self.assertEqual(
+            offenders, [], f"TODO/FIXME marker committed in production: {offenders}"
+        )
 
     def test_read_json_results_flow_through_validators(self) -> None:
         """`_read_json()`'s dict must only be consumed via _require() /
