@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.414
+## Version History: v0.1.37 → v0.2.415
+
+### v0.2.415 (2026-09-29)
+
+- README feature list omitted two shipped REQs entirely — notes
+  (REQ-103) and export (REQ-104) were invisible to new users; add
+  bullets covering both (including the v0.2.412 save-as-note path)
 
 ### v0.2.414 (2026-09-29)
 
