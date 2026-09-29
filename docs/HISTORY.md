@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.361
+## Version History: v0.1.37 → v0.2.362
+
+### v0.2.362 (2026-09-29)
+
+- Pin script hygiene + focus visibility (test_script_hygiene_and_focus_visibility): the :focus-visible outline rule is the only way keyboard users see focus — its silent removal leaves them blind — and debug/eval constructs (console.*, debugger, eval, new Function, document.write, javascript: URLs, inline on*= handlers) ship noise or injection surface. Audited clean today; now pinned both directions.
 
 ### v0.2.361 (2026-09-29)
 

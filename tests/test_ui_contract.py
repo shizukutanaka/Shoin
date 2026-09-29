@@ -1194,6 +1194,40 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_script_hygiene_and_focus_visibility(self) -> None:
+        """Two quiet-degradation classes: (a) the visible focus
+        indicator — remove the :focus-visible rule or blanket
+        outline:none and keyboard users can no longer see where focus
+        is; one scoped exemption (.src-rename, whose border is the
+        indicator) is the maximum. (b) script hygiene — console.*,
+        debugger, eval/new Function, document.write, javascript: URLs,
+        and inline on*= handlers all fail CSP-style review and ship
+        noise or injection surface to users."""
+        html = _html()
+        style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        self.assertRegex(
+            style,
+            r":focus(-visible)?\s*\{[^}]*outline",
+            "no visible focus indicator rule in <style>",
+        )
+        self.assertLessEqual(
+            style.count("outline:none"),
+            1,
+            "more than the one sanctioned scoped outline:none",
+        )
+        self.assertEqual(
+            re.findall(r"console\.\w+|debugger\b|\beval\s*\(|new Function|"
+                       r"document\.write", script),
+            [],
+            "debug/eval constructs in <script>",
+        )
+        self.assertEqual(
+            re.findall(r'javascript:|\son\w+="', html),
+            [],
+            "javascript: URL or inline on*= handler present",
+        )
+
     def test_document_structure_contract(self) -> None:
         """Document chrome and outline: the structural bits AT and
         browsers lean on that degrade silently — found in v0.2.361
