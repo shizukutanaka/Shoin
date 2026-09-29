@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.384")
+        self.assertEqual(VERSION, "0.2.385")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -3368,6 +3368,36 @@ class TestSearch(unittest.TestCase):
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
+
+    def test_like_ties_order_by_chunk_id(self) -> None:
+        """Equal LIKE scores must order deterministically by chunk id. LIKE
+        scores are small integers (occurrence counts), so tie groups are
+        common — without the `, c.id` key SQLite picks an unspecified order,
+        and at the 2000-row cap arbitrarily includes/excludes tied chunks.
+        Same convention list_notebooks already uses for updated_at ties."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["aa 猫 aa", "猫 bb", "cc 猫 cc"])
+            hits = bm25_search(s, nb.id, "猫", 10)
+            ids = [h.chunk_id for h in hits]
+            self.assertEqual(len(ids), 3)
+            self.assertEqual(ids, sorted(ids))
+
+    def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
+        """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
+        `ORDER BY score` leaves equal-key order unspecified in SQLite —
+        deterministic in practice but never contractual, and silently
+        arbitrary at every LIMIT boundary."""
+        import inspect
+        import re
+
+        import shoin.search
+
+        src = inspect.getsource(shoin.search)
+        self.assertIn("ORDER BY rank, c.id", src)
+        like_orders = re.findall(r'ORDER BY \{score_expr\} DESC([^"]*)', src)
+        self.assertEqual(like_orders, [", c.id"], like_orders)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""

@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.384
+## Version History: v0.1.37 → v0.2.385
+
+### v0.2.385 (2026-09-29)
+
+- fix: deterministic tie-break in both retrieval ORDER BYs — `ORDER BY rank` (FTS) and `ORDER BY score DESC` (LIKE pool) left equal-key order unspecified in SQLite; LIKE scores are small integers so tie groups are common, and at the 2000-row cap tied chunks were arbitrarily included/excluded. `, c.id` (oldest-first) matches the list_notebooks convention from v0.2.308.
 
 ### v0.2.384 (2026-09-29)
 
