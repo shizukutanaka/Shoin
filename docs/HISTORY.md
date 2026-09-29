@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.409
+## Version History: v0.1.37 → v0.2.410
+
+### v0.2.410 (2026-09-29)
+
+- sync the product-review ledger to v0.2.409 (v0.2.406-409 summary:
+  error-mapping boundary closure + embed-cap symmetry — port 400,
+  notes cap + notes_omitted, body-validator pin)
 
 ### v0.2.409 (2026-09-29)
 
