@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.382")
+        self.assertEqual(VERSION, "0.2.383")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9043,6 +9043,59 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(_db_arg(ns), "/abs/x.db")
         ns = argparse.Namespace(db=None)
         self.assertIsNone(_db_arg(ns))
+
+    def test_every_cli_path_arg_expands_tilde(self) -> None:
+        """The tilde contract is per-arg, not per-command: a new path-accepting
+        flag added later must expand the same way or `--flag=~/x` silently
+        reads/writes a literal `~` directory. Pin every Path(str(args.*)) in
+        cli.py to carry .expanduser()."""
+        import inspect
+        import re
+
+        import shoin.cli
+
+        src = inspect.getsource(shoin.cli)
+        sites = re.findall(r"Path\(str\(args\.\w+\)\)(?:\.\w+\(\))?", src)
+        self.assertGreaterEqual(len(sites), 4)  # cases, save, diff, db
+        for site in sites:
+            self.assertIn(".expanduser()", site, site)
+
+    def test_eval_reads_tilde_cases(self) -> None:
+        """`eval nb ~/cases.json --save ~/base.json` must open the real home
+        paths — the same expansion _db_arg guarantees for --db. Without it the
+        cases read fails SYSTEM_IO_ERROR and --save writes a literal `~`
+        directory under the cwd."""
+        import json
+        import os
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            Path(td, "cases.json").write_text(
+                json.dumps([{"q": "q", "sources": [1]}]), encoding="utf-8"
+            )
+            home = os.environ.get("HOME")
+            os.environ["HOME"] = td
+            try:
+                rc = main(
+                    ["--db", db_file, "eval", str(nb.id), "~/cases.json",
+                     "--save", "~/base.json"],
+                    llm=FakeLLM(),
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(Path(td, "base.json").exists())
+            finally:
+                if home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = home
+        self.assertFalse(Path("~").exists(), "literal ~ dir must not be created in cwd")
 
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError

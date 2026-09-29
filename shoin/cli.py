@@ -384,7 +384,7 @@ def _db_arg(args: argparse.Namespace) -> str | None:
     """The --db override with ~ expansion. Shell only expands a tilde at word
     start, so `--db=~/x.db` arrives literally and Path() would create a real
     `~` directory in the cwd — while SHOIN_DATA_DIR is already expanded inside
-    db_path(). Expanding here keeps the override consistent with the default."""
+    db_path(). Every Path(str(args.*)) in this module expands the same way."""
     return str(Path(str(args.db)).expanduser()) if args.db else None
 
 
@@ -434,7 +434,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     from .evaluate import evaluate, parse_cases
 
     try:
-        raw = _json.loads(Path(str(args.cases)).read_text(encoding="utf-8"))
+        raw = _json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
     except _json.JSONDecodeError as exc:
@@ -455,7 +455,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     if args.save:
         from .evaluate import report_to_dict
 
-        Path(str(args.save)).write_text(
+        Path(str(args.save)).expanduser().write_text(
             _json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
@@ -464,7 +464,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         from .evaluate import diff_reports, report_from_dict
 
         try:
-            base_raw = _json.loads(Path(str(args.diff)).read_text(encoding="utf-8"))
+            base_raw = _json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
         except _json.JSONDecodeError as exc:
