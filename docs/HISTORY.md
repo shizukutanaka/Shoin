@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.368
+## Version History: v0.1.37 → v0.2.369
+
+### v0.2.369 (2026-09-29)
+
+- Single-source the embed_model settings key (test_embed_model_setting_key_is_single_sourced): the key naming which model built the stored vectors was a bare literal at three sites (pipeline write+read, qa read). A typo at any one silently breaks the model-mismatch guard — reads return None forever so the warning never fires (or writes land under a key nobody reads). Now config.EMBED_MODEL_SETTING_KEY; a static pin fails if any get_setting/set_setting call uses the literal outside config.py. Fail direction verified.
 
 ### v0.2.368 (2026-09-29)
 
