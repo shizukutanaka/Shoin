@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.351
+## Version History: v0.1.37 → v0.2.352
+
+### v0.2.352 (2026-09-29)
+
+- Pin the response-field contract (test_response_fields_match_server_emissions): every `v.<field>` chain the UI reads off a fetch/json() result is resolved through scope-aware bindings (const/assign/for-of/method-arrow params) to the payload shape of the route it came from — AST-merged from all `_json({…})` sites per handler with cross-module resolution (`_notebook_json`, `list_notebooks_with_counts`, `_safe_report`), multi-path handlers contributing the INTERSECTION of their keysets — and must exist in the emitted keys. A renamed key (`{sources}`→`{items}`) silently turns `cur.sources` into `undefined`; there is no 400, no error, just an empty list. Fail-then-pass verified at every level: server-side key rename (4 `cur.sources` sites flagged), JS payload typo, element-field typo inside a method arrow, and a nested `counts.*` chain.
 
 ### v0.2.351 (2026-09-28)
 
