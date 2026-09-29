@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.349
+## Version History: v0.1.37 → v0.2.350
+
+### v0.2.350 (2026-09-28)
+
+- Pin the SSE payload envelope both directions (test_sse_payload_fields_match_the_envelope): AST-collects every `_sse("ev", {...})` emission site's top-level payload keys and (a) requires all sites of an event symmetric — a union would hide one path dropping a key (e.g. the no_hit done frame losing `degraded` while the normal path keeps it — that path's badge silently wrong) — and (b) requires the JS dispatcher's `j.*` reads per `ev==="x"` block ⊆ the emitted keys (renaming `report`→`summary` kills every seal with no error). Fail-then-pass verified both directions (site-level `deg` asymmetry and JS-side `j.dgd` typo each flagged).
 
 ### v0.2.349 (2026-09-28)
 
