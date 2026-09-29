@@ -831,15 +831,17 @@ class ServerTest(unittest.TestCase):
             "a socket timeout must close quietly, not log a traceback",
         )
 
-    def test_server_close_does_not_join_idle_handler_threads(self) -> None:
-        """daemon_threads=True: server_close() must not stall on idle clients.
+    def test_server_close_does_not_join_inflight_handler_threads(self) -> None:
+        """daemon_threads=True: server_close() must not stall on in-flight reads.
 
-        A browser's keep-alive connection parks its handler thread in
-        rfile.read() for up to REQUEST_SOCKET_SEC (120s). With the default
-        daemon_threads=False, server_close() JOINS that thread — Ctrl+C
-        would hang for the full socket timeout whenever any connection is
-        open. Daemon handler threads die with the process instead."""
-        import http.client
+        The server speaks HTTP/1.0, so every connection closes after one
+        request — the parked-thread scenario is a client that stalls
+        mid-request (partial request line, abandoned connection), which parks
+        its handler in rfile.read() for up to REQUEST_SOCKET_SEC (120s). With
+        the default daemon_threads=False, server_close() JOINS that thread —
+        Ctrl+C would hang for the full socket timeout while any request is
+        still in flight. Daemon handler threads die with the process instead."""
+        import socket
         import threading as _th
 
         import shoin.server as srv_mod
@@ -850,19 +852,24 @@ class ServerTest(unittest.TestCase):
             )
             th = _th.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05})
             th.start()
-            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+            sock = socket.create_connection(("127.0.0.1", srv.server_address[1]))
             try:
-                conn.request("GET", "/api/health")
-                conn.getresponse().read()  # request done; socket stays open (keep-alive)
+                # Partial request line: the handler parks in rfile.read() until
+                # the (patched) socket timeout, so it is still parked when
+                # server_close() runs — exactly what daemon_threads avoids
+                # joining.
+                sock.sendall(b"GET /api/health HT")
+                time.sleep(0.3)
                 srv.shutdown()
                 started = time.monotonic()
                 srv.server_close()
                 elapsed = time.monotonic() - started
             finally:
-                conn.close()
+                sock.close()
                 th.join(timeout=5)
-        # Non-daemon close would join the parked handler for ~3s (patched
-        # REQUEST_SOCKET_SEC); daemon close returns immediately.
+        # Non-daemon close joins the parked handler until its read times out
+        # (~2.7s here: 3s socket timeout minus the 0.3s head start); daemon
+        # close returns immediately.
         self.assertLess(elapsed, 2.0)
         self.assertTrue(srv.daemon_threads)
 
