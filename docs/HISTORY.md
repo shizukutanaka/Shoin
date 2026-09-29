@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.365
+## Version History: v0.1.37 → v0.2.366
+
+### v0.2.366 (2026-09-29)
+
+- Pin the updated_at touch contract behaviorally (test_every_write_bumps_notebook_timestamp): list_notebooks orders by updated_at DESC, so a write path that forgets touch_notebook() leaves the notebook ranked as untouched forever — stale ordering, no error. All eight mutating ops (add_source, update_source_title, update_source_sha256, delete_source, add_note, delete_note, add_studio_output, add_message) run against a live store and must move the stamp forward. Fail direction verified.
 
 ### v0.2.365 (2026-09-29)
 

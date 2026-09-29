@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.365")
+        self.assertEqual(VERSION, "0.2.366")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -495,6 +495,54 @@ class TestStore(unittest.TestCase):
             c = s.counts(nb.id)
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
+
+    def test_every_write_bumps_notebook_timestamp(self) -> None:
+        """list_notebooks orders by updated_at DESC — a write path that
+        forgets touch_notebook() leaves the notebook ranked as untouched
+        forever (stale ordering, no error). Every mutating op must bump:
+        add_source, update_source_title, update_source_sha256,
+        delete_source, add_note, delete_note, add_studio_output,
+        add_message. Behavioral pin: run each op and assert the stamp
+        moved forward."""
+        import time
+
+        def stamp(s: Store, nb_id: int) -> str:
+            return s.get_notebook(nb_id).updated_at
+
+        ops = [
+            ("add_source",
+             lambda s, nb: s.add_source(nb.id, "txt", "t2", "o2", "h2")),
+            ("update_source_title",
+             lambda s, nb: s.update_source_title(
+                 s.sources_for_notebook(nb.id)[0].id, "new-t", "o")),
+            ("update_source_sha256",
+             lambda s, nb: s.update_source_sha256(
+                 s.sources_for_notebook(nb.id)[0].id, "h-new", "t")),
+            ("add_note", lambda s, nb: s.add_note(nb.id, "nt", "nb-body")),
+            ("delete_note",
+             lambda s, nb: s.delete_note(
+                 s.list_notes(nb.id)[0]["id"])),
+            ("add_studio_output",
+             lambda s, nb: s.add_studio_output(nb.id, "briefing", "b", "{}")),
+            ("add_message",
+             lambda s, nb: s.add_message(nb.id, "user", "hi")),
+            ("delete_source",
+             lambda s, nb: s.delete_source(
+                 s.sources_for_notebook(nb.id)[0].id)),
+        ]
+        for name, op in ops:
+            with make_store() as s:
+                nb = s.create_notebook("nb-" + name)
+                src = s.add_source(nb.id, "txt", "t", "o", "h")
+                s.add_chunks(src.id, ["body"])
+                s.add_note(nb.id, "seed-note", "b")
+                time.sleep(0.011)  # _now() second+ms resolution
+                before = stamp(s, nb.id)
+                op(s, nb)
+                self.assertGreater(
+                    stamp(s, nb.id), before,
+                    f"{name} did not bump updated_at",
+                )
 
     def test_fts_tracks_chunk_context_update(self) -> None:
         """The migration-6 chunks_au trigger keeps chunks_fts in sync when
