@@ -29,6 +29,12 @@ _T = TypeVar("_T")
 # re-exports it as KINDS for its callers.
 STUDIO_KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
 
+# The source kind vocabulary: ingest._EXT_KIND values plus "url". The store
+# guards writes on it for the same reason as STUDIO_KINDS — export's RIS TY
+# mapping (_RIS_TYPE), the md legend, and the UI badge all consume kind, so a
+# typo'd literal silently degrades exported citations and the source list.
+SOURCE_KINDS = ("txt", "md", "html", "pdf", "url")
+
 
 def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     """Retry `fn` when SQLite reports 'database is locked'.
@@ -508,6 +514,13 @@ class Store:
     def add_source(
         self, notebook_id: int, kind: str, title: str, origin: str, sha256: str
     ) -> Source:
+        if kind not in SOURCE_KINDS:
+            # Same fail-at-the-write class as add_message()'s role guard and
+            # add_studio_output()'s kind guard: kind drives the RIS TY mapping
+            # in export and the UI badge — a typo'd literal silently exports
+            # wrong citation types and renders a nonsense badge with no
+            # corrective path (kind is immutable post-insert).
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown source kind: {kind!r}")
         title = title[:MAX_TITLE_LEN]  # silently truncate; titles come from external content
         self.get_notebook(notebook_id)
         dup = self.conn.execute(

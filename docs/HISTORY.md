@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.386
+## Version History: v0.1.37 → v0.2.387
+
+### v0.2.387 (2026-09-29)
+
+- `add_source` now rejects kinds outside `SOURCE_KINDS` ({"txt","md","html","pdf","url"}) with `VALIDATION_FIELD_FORMAT_INVALID` — third and last of the store-write vocabulary guards (v0.2.368 role, v0.2.386 studio kind). kind is immutable post-insert and is consumed by export's RIS `TY` mapping (url/html→ELEC), the md legend, and the UI source badge, so a typo'd literal silently exported wrong citation types and rendered a nonsense badge with no corrective path. `SOURCE_KINDS` is pinned bidirectionally against what ingest can emit (`_EXT_KIND` values ∪ {"url"}): a new extension kind added without updating the vocabulary is rejected at the write; a ghost value ingest never produces is rejected by the equality pin. Ten test fixtures that seeded sources with the nonexistent kind "file" (all modeling .txt files) were corrected to "txt" — production never emits "file", so fixtures asserting under it covered a value real sources can never carry. Fail-then-pass verified.
 
 ### v0.2.386 (2026-09-29)
 
