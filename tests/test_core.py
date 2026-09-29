@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.398")
+        self.assertEqual(VERSION, "0.2.399")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9174,6 +9174,40 @@ class TestCLI(unittest.TestCase):
         self.assertGreaterEqual(len(sites), 5)  # cases, save, diff, db, add targets
         for site in sites:
             self.assertIn(".expanduser()", site, site)
+
+    def test_every_cli_subcommand_has_a_dispatch_branch(self) -> None:
+        """A parser entry without a dispatch branch silently no-ops (rc=0).
+
+        argparse `required=True` only forces SOME subcommand — if
+        `sub.add_parser("foo")` (or a nested `Xsub.add_parser("bar")`) lands
+        without a matching `command ==` / `action ==` branch, `shoin foo`
+        parses fine and main() falls through to `return 0` doing nothing.
+        Pin every declared subcommand to a dispatch comparison."""
+        import inspect
+        import re
+
+        import shoin.cli
+
+        src = inspect.getsource(shoin.cli)
+        # Root level: `sub.add_parser(` — \bsub excludes the nested Xsub objects.
+        top = set(re.findall(r"\bsub\.add_parser\(\"([a-z]+)\"", src))
+        self.assertGreaterEqual(len(top), 13)  # REQ-105's full command surface
+        for name in top:
+            self.assertRegex(
+                src,
+                rf"command\)?\s*==\s*\"{name}\"",
+                f"subcommand {name!r} has no dispatch branch in main()",
+            )
+        # Nested action parsers (nbsub/msgssub/notesub/srcsub): same contract
+        # against the `action ==` chains inside the _cmd_* handlers.
+        nested = set(re.findall(r"\b\w+sub\.add_parser\(\"([a-z]+)\"", src))
+        self.assertGreaterEqual(len(nested), 7)  # unique names across notebook/note/source/messages
+        for name in nested:
+            self.assertRegex(
+                src,
+                rf"action\s*==\s*\"{name}\"",
+                f"action {name!r} has no dispatch branch in its _cmd_* handler",
+            )
 
     def test_eval_reads_tilde_cases(self) -> None:
         """`eval nb ~/cases.json --save ~/base.json` must open the real home
