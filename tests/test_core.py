@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.367")
+        self.assertEqual(VERSION, "0.2.368")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -605,6 +605,18 @@ class TestStore(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             self.assertEqual(s.get_chunk(chunk.id).embedding, [1.0, 0.0])
+
+    def test_add_message_rejects_unknown_role(self) -> None:
+        """history_messages() coerces any non-"user" role to "assistant" —
+        a typo'd role literal would silently corrupt turn alternation, so
+        add_message must refuse it at the write instead of storing it."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            with self.assertRaises(StoreError) as cm:
+                s.add_message(nb.id, "sysetm", "hi")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            # ...and nothing was stored.
+            self.assertEqual(s.count_messages(nb.id), 0)
 
     def test_add_message_touches_notebook(self) -> None:
         with make_store() as s:
