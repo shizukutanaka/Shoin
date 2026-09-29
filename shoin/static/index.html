@@ -294,6 +294,7 @@ const I18N = {
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
+    "studio.savenote":"ノートに保存","studio.savenote.ok":"ノートに保存しました",
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "notes.earlier":"— 以前の {n} 件は省略 —",
@@ -331,6 +332,7 @@ const I18N = {
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
+    "studio.savenote":"Save as note","studio.savenote.ok":"Saved as note",
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "notes.earlier":"— {n} earlier notes not shown —",
@@ -1063,6 +1065,18 @@ function renderStudio(){
     if (o.report) reportBadges(h, o.report);
     card.append(h);
     const bd = el("div","bd"); renderWithSeals(bd, o.body, o.report); card.append(bd);
+    // REQ-103's "studio output -> note": without this button the only path was
+    // manual copy-paste into the note form — the spec capability existed in
+    // name only. Saves via the same POST /notes endpoint the form uses; the
+    // raw body (not the seal-rendered DOM) is what a note should store.
+    const sn = el("button","btn",t("studio.savenote"));
+    sn.setAttribute("aria-label", t("studio.savenote"));
+    sn.onclick = async ()=>{ sn.disabled = true;
+      try{
+        await jpost(`/api/notebooks/${cur.id}/notes`, {title: t("studio."+o.kind), body: o.body});
+        toast(t("studio.savenote.ok")); openNotebook(cur.id);
+      }catch(e){ toast(e.message); } finally{ sn.disabled = false; } };
+    card.append(sn);
     out.append(card);
   });
 }
