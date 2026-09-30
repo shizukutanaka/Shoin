@@ -441,6 +441,112 @@ const fetch = async (path, opts) => {
                 "but no matching server route accepts that method",
             )
 
+    def test_route_table_and_request_metadata_are_consistent(self) -> None:
+        """The last contract edges. Server-side, `_dispatch` resolves
+        handlers as `getattr(self, f"_h_{name}")` — a route whose name
+        has no `_h_*` method AttributeErrors into a 500 at call time, and
+        a verb with no `do_<VERB>` method is a 501 before that.
+        Client-side, request *metadata* names — custom `X-*` headers and
+        `?query=` params — are dictionary lookups on the server: a typo
+        doesn't 400, the `.get` returns None and the handler silently
+        falls back (`"upload.txt"` as filename, or a default format).
+        Pin the route table's internal integrity and the metadata names
+        the JS actually sends."""
+        server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
+        script = _script_body(_html())
+
+        # Route table: every name has a handler, every verb a do_* method.
+        handlers = set(re.findall(r"def (_h_[a-z_]+)\(", server))
+        do_verbs = {d[3:] for d in re.findall(r"def (do_[A-Z]+)\(", server)}
+        missing = [f"_h_{name}" for _, _, name in _Handler._ROUTES
+                   if f"_h_{name}" not in handlers]
+        self.assertEqual(missing, [], f"routes name handlers that don't exist: {missing}")
+        uncovered = {v for v, _, _ in _Handler._ROUTES} - do_verbs
+        self.assertEqual(uncovered, set(), f"route verbs with no do_* method: {uncovered}")
+
+        # Request metadata: every X-* header and ?param= the JS sends is
+        # one the server reads. Standard headers (Content-Type) are the
+        # client's business; custom X-* ones are the contract.
+        sent_headers = set(re.findall(r'"(X-[A-Za-z-]+)"\s*:', script))
+        read_headers = set(re.findall(r'self\.headers\.get\("([^"]+)"', server))
+        self.assertEqual(
+            sent_headers - read_headers, set(),
+            f"X-* headers the UI sends but the server never reads: "
+            f"{sorted(sent_headers - read_headers)}",
+        )
+        sent_params = set(re.findall(r"/api/[^`\"?\s]*\?(\w+)=", script))
+        read_params = set(re.findall(r'self\._query\.get\("([^"]+)"', server))
+        self.assertEqual(
+            sent_params - read_params, set(),
+            f"?params the UI sends but the server never reads: "
+            f"{sorted(sent_params - read_params)}",
+        )
+
+    def test_template_placeholder_and_value_contracts(self) -> None:
+        """Value-level contracts below the field-name layer.
+
+        `_h_ui` substitutes `__SHOIN_LANG__` with the server locale — it
+        must appear EXACTLY once (a second occurrence is also corrupted
+        by the blind byte replace) and the literal must survive in the
+        server's replace call, or language seeding silently dies — the
+        exact half-true bug this file's header warns about. Likewise the
+        meta name itself: `meta[name="X"]` JS selectors ⊆ `meta name="X"`
+        in markup. Below that, two value sets the UI offers must be ones
+        the pipeline honours: `accept=` extensions ⊆ `_EXT_KIND` (a
+        selectable file that ingest then rejects), and `?format=` values
+        ⊆ export `FORMATS` (a link that 400s at click time)."""
+        html = _html()
+        script = _script_body(html)
+        server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
+        ingest = (_UI.parent.parent / "ingest.py").read_text(encoding="utf-8")
+        export_mod = (_UI.parent.parent / "export.py").read_text(encoding="utf-8")
+
+        # Server template placeholder: exactly one occurrence, server
+        # substitutes it, JS reads the same meta name.
+        self.assertEqual(
+            html.count("__SHOIN_LANG__"), 1,
+            "__SHOIN_LANG__ must appear exactly once — the byte replace "
+            "would corrupt every occurrence equally",
+        )
+        self.assertIn(
+            'b"__SHOIN_LANG__"', server,
+            "server must substitute the __SHOIN_LANG__ placeholder",
+        )
+        meta_sel = set(re.findall(r'meta\[name="([^"]+)"\]', script))
+        meta_names = set(re.findall(r'<meta name="([^"]+)"', html))
+        self.assertEqual(
+            meta_sel - meta_names, set(),
+            f"meta names the JS reads but the markup lacks: "
+            f"{sorted(meta_sel - meta_names)}",
+        )
+
+        # accept= ⊆ ingest _EXT_KIND
+        accept_m = re.search(r'accept="([^"]+)"', html)
+        self.assertIsNotNone(accept_m, "file input needs an accept list")
+        assert accept_m is not None
+        offered = {x.strip() for x in accept_m.group(1).split(",") if x.strip()}
+        kind_m = re.search(r"_EXT_KIND\s*=\s*\{([^}]*)\}", ingest)
+        self.assertIsNotNone(kind_m, "ingest._EXT_KIND dict expected")
+        assert kind_m is not None
+        supported = set(re.findall(r'"(\.\w+)"\s*:', kind_m.group(1)))
+        self.assertEqual(
+            offered - supported, set(),
+            f"accept= offers extensions ingest rejects: "
+            f"{sorted(offered - supported)}",
+        )
+
+        # ?format= values ⊆ FORMATS
+        sent_fmts = set(re.findall(r"/api/[^`\"?\s]*\?format=(\w+)", script))
+        formats_m = re.search(r'FORMATS\s*=\s*\(([^)]*)\)', export_mod)
+        self.assertIsNotNone(formats_m, "export.FORMATS tuple expected")
+        assert formats_m is not None
+        formats = set(re.findall(r'"(\w+)"', formats_m.group(1)))
+        self.assertEqual(
+            sent_fmts - formats, set(),
+            f"?format= values the UI sends but export rejects: "
+            f"{sorted(sent_fmts - formats)}",
+        )
+
     def test_request_body_fields_match_server_reads(self) -> None:
         """Every JSON key the UI sends must be a field the handler actually
         reads, and every field the handler requires must be sent. A typo'd
@@ -1087,6 +1193,105 @@ const fetch = async (path, opts) => {
             [],
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
+
+    def test_css_class_names_stay_in_sync(self) -> None:
+        """Both directions of the class-name contract fail silently:
+
+        - JS toggles a class CSS never defines (`classList.add("foo")`
+          with no `.foo` rule) — the visual state it was meant to paint
+          just doesn't happen.
+        - CSS defines a class nothing constructs (`.toast` on a rule
+          whose element only carried `id=` — found here in v0.2.358) —
+          dead styling that reads as if it works.
+
+        Class names travel through `el("div","cls")`, `className`,
+        `classList.*`, `class="..."`, and composed strings like
+        `"seal "+k`, so "constructed" means: appears as a word inside
+        any quoted literal in the file."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", style))
+        self.assertTrue(defined, "no CSS classes found — <style> scan broken")
+
+        class_ctx: set[str] = set()
+
+        def absorb(v: str) -> None:
+            for w in v.split():
+                if w and not w.startswith(("$", "{")):
+                    class_ctx.add(w)
+
+        for m in re.finditer(
+            r'class\s*=\s*"([^"]*)"|class\s*=\s*\'([^\']*)\'', html
+        ):
+            absorb(m.group(1) or m.group(2) or "")
+        for m in re.finditer(
+            r'classList\.(?:add|remove|toggle|contains)\("([^"]+)"\)', html
+        ):
+            absorb(m.group(1))
+        for m in re.finditer(r"className\s*=\s*([^;]+);", html):
+            for lit in re.findall(r'"([^"]*)"', m.group(1)):
+                absorb(lit)
+        for m in re.finditer(r'el\("[a-z0-9]+",\s*((?:"[^"]*"|[^,])+)', html):
+            argtext = re.sub(r'el\("[a-z0-9]+"', "", m.group(1))
+            for lit in re.findall(r'"([^"]*)"', argtext):
+                absorb(lit)
+
+        self.assertEqual(
+            sorted(class_ctx - defined),
+            [],
+            "markup/JS uses classes the stylesheet never defines",
+        )
+
+        words: set[str] = set()
+        for lit in re.findall(r'"([^"\n]*)"', html) + re.findall(r"'([^'\n]*)'", html):
+            words.update(lit.split())
+        self.assertEqual(
+            sorted(defined - words),
+            [],
+            "CSS classes nothing constructs — dead styling",
+        )
+
+    def test_markup_health_and_offline_scope(self) -> None:
+        """Markup invariants that fail silently rather than loudly.
+
+        - `id=` must be unique: `$("#x")` binds the FIRST element, so a
+          duplicate silently re-routes every lookup to the wrong node.
+        - `<html lang>` seeds the initial a11y locale and
+          `documentElement.lang` must be written on toggle — a removed
+          assignment leaves screen readers pronouncing EN text as JA.
+        - `<button>` inside `<form>` defaults to type="submit": one added
+          without an explicit type turns every click into a form post.
+        - No `src`/`href="http…"` anywhere: the app is offline by design
+          and CSP `connect-src 'self'` + `default-src 'none'` would break
+          the reference anyway — one sneaks in only as a dead feature."""
+        html = _html()
+        script = _script_body(html)
+
+        ids = re.findall(r'\bid="([^"]+)"', html)
+        dup = sorted({x for x in ids if ids.count(x) > 1})
+        self.assertEqual(dup, [], f"duplicate id= values: {dup}")
+
+        html_m = re.search(r'<html lang="([a-z]+)"', html)
+        self.assertIsNotNone(html_m, "<html> needs a lang attribute")
+        assert html_m is not None
+        self.assertIn(html_m.group(1), ("ja", "en"),
+                      f"html lang={html_m.group(1)!r} outside the supported locales")
+        self.assertTrue(
+            re.search(r"documentElement\.lang\s*=", script),
+            "applyI18n must update documentElement.lang on toggle",
+        )
+
+        for m in re.finditer(r"<form\b[^>]*>(.*?)</form>", html, re.S):
+            for b in re.finditer(r"<button\b([^>]*)>", m.group(1)):
+                self.assertIn(
+                    "type=", b.group(1),
+                    f"<button> inside <form> defaults to submit — "
+                    f"give it an explicit type: {b.group(0)!r}",
+                )
+
+        external = re.findall(r'(?:src|href)\s*=\s*"(https?://[^"]+)"', html)
+        self.assertEqual(external, [],
+                         f"external resource references (offline + CSP): {external}")
 
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is

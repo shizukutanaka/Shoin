@@ -29,7 +29,31 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.352
+## Version History: v0.1.37 → v0.2.358
+
+### v0.2.358 (2026-09-29)
+
+- Fix two dead-CSS findings + pin the class-name contract (test_css_class_names_stay_in_sync): `.toast` in `.msg,.toast{animation:rise}` was dead because the toast div only carried `id=` — the intended rise animation never ran (added `class="toast"`); `.btn.danger` was defined for a button variant nothing constructs (deleted). Pin checks both directions: every class markup/JS uses (class=, classList.*, className, el() args, composed `"seal "+k` suffixes) must exist in the stylesheet, and every styled class must be constructed by some literal. Fail-then-pass verified in three directions.
+
+### v0.2.357 (2026-09-29)
+
+- Pin version-marker parity (test_version_markers_agree): the five-file bump ritual is manual, so config.VERSION, pyproject project.version, and CLAUDE.md's Current version marker must agree — one missed file makes `shoin --version`, `pip show`, and the developer guide report different releases. VERSION itself pinned to semver shape. Fail-then-pass verified in all three directions.
+
+### v0.2.356 (2026-09-29)
+
+- Pin SQL interpolation safety and the error-code taxonomy (test_sql_literals_stay_interpolation_free, test_error_codes_follow_the_domain_detail_taxonomy): user-controlled strings flow into every query, so f-string/+/% inside execute() args is an injection path — sanctioned interpolations are int(), module-level numeric constants, `"literal".join()` over literal fragments or `"?" * n`, and name.strip() inside executescript only (DDL composition). Error codes must match DOMAIN_DETAIL UPPER_SNAKE — the UI toasts them raw. Fail-then-pass verified: param interpolation, +-concat, needle-in-fragment, lowercase code.
+
+### v0.2.355 (2026-09-29)
+
+- Pin markup health and offline scope (test_markup_health_and_offline_scope): id= must be unique ($("#x") binds the first element — a duplicate silently re-routes every lookup), <html lang> must name a supported locale and documentElement.lang must be assigned on toggle (screen readers otherwise pronounce EN text as JA), every <button> inside <form> needs an explicit type= (default is submit — a click becomes a form post), and no src/href="http…" may appear (the app is offline by design and CSP would break the reference anyway). Fail-then-pass verified in four directions: duplicate id, removed lang assignment, button-without-type in a form, external http reference.
+
+### v0.2.354 (2026-09-29)
+
+- Pin template-placeholder and value-level contracts (test_template_placeholder_and_value_contracts): __SHOIN_LANG__ must appear exactly once (the blind byte replace in _h_ui would corrupt every occurrence — the handler's own comment claimed this pin existed; it didn't) and must survive in the server's b"..." replace literal, the meta[name=] JS selector must match a real meta name=, accept= extensions ⊆ ingest._EXT_KIND (a selectable file that ingest then rejects), and ?format= values ⊆ export.FORMATS (a link that 400s at click time). Fail-then-pass verified in five directions: duplicate placeholder, renamed server literal, meta-selector typo, accept=".docx", ?format=docx.
+
+### v0.2.353 (2026-09-29)
+
+- Pin the route table's internal integrity and request-metadata names (test_route_table_and_request_metadata_are_consistent): every _ROUTES name must resolve to a _h_* method (getattr → 500 on a typo) and every verb to a do_* method (501 before dispatch); every custom X-* header and ?param= the JS sends must be a name the server reads via headers.get/_query.get — a typo there doesn't 400, the .get returns None and the handler silently falls back ("upload.txt" as filename, default format). Fail-then-pass verified in four directions: handler-name typo, X- header typo, ?param typo, removed do_* method.
 
 ### v0.2.352 (2026-09-29)
 
