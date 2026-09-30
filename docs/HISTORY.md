@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.379
+## Version History: v0.1.37 → v0.2.380
+
+### v0.2.380 (2026-09-29)
+
+- test: extend the coded-error raise scanner to `LLMError` and `IngestError` — the same "raise without a code check passes on any error" weakness applied to the other two code-bearing exception types. Audit: LLMError 27/27 already verified; the 3 bare `IngestError` sites are the `with (..., assertRaises(E), ...)` tuple form where the raise is incidental plumbing and the assertions below verify captured side-effects — the scanner now exempts exactly that shape (match line ending with `,`).
 
 ### v0.2.379 (2026-09-29)
 
