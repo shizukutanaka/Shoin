@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.418
+## Version History: v0.1.37 → v0.2.419
+
+### v0.2.419 (2026-09-30)
+
+- close the pending-transaction leak family: every multi-write
+  Store method that paired a bare write with a late commit left
+  the write pending when the second statement (touch_notebook /
+  embedding_norm) failed — a later commit on the same connection
+  would publish or erase it. add_source, delete_source, add_note,
+  delete_note, add_message, clear_messages and set_embedding's
+  commit path now wrap write+touch in `with self.conn:` (the
+  same atomic block add_studio_output uses), and add_studio_output's
+  touch moved inside its `with` for one atomic unit. 7 rollback
+  regression tests pin every site (fail-verified both directions)
 
 ### v0.2.418 (2026-09-30)
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.418")
+        self.assertEqual(VERSION, "0.2.419")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1104,6 +1104,126 @@ class TestStore(unittest.TestCase):
             )
             self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
 
+    def test_add_source_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_source's INSERT+touch must commit atomically — a
+        failed touch leaving the INSERT pending would publish the source on
+        the next commit (caller saw an error, yet the row appears). Same
+        leak class as the v0.2.417-418 add_studio_output fixes."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-src")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_source(nb.id, "txt", "t", "o", "sha-x")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not publish it
+            self.assertEqual(s.sources_for_notebook(nb.id), [])
+
+    def test_delete_source_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave delete_source's DELETE
+        pending — the next commit would silently finish the deletion the
+        caller believes failed."""
+        with make_store() as s:
+            nb_id = seed(s)
+            src_id = s.sources_for_notebook(nb_id)[0].id
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.delete_source(src_id)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            remaining = [src.id for src in s.sources_for_notebook(nb_id)]
+            self.assertIn(src_id, remaining)  # the failed delete rolled back
+            self.assertEqual(len(remaining), 2)
+
+    def test_add_note_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_note's INSERT+touch must commit atomically."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-note")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_note(nb.id, "t", "body")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.list_notes(nb.id), [])
+
+    def test_delete_note_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave delete_note's DELETE
+        pending."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-delnote")
+            nid = s.add_note(nb.id, "t", "body")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.delete_note(nid)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual([int(r["id"]) for r in s.list_notes(nb.id)], [nid])
+
+    def test_add_message_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_message's INSERT+touch must commit atomically."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-msg")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_message(nb.id, "user", "hello")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.list_messages(nb.id), [])
+
+    def test_clear_messages_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave clear_messages' DELETE
+        pending."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-clear")
+            s.add_message(nb.id, "user", "hello")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.clear_messages(nb.id)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.count_messages(nb.id), 1)
+
+    def test_set_embedding_failed_norm_does_not_publish(self) -> None:
+        """v0.2.419: the vector+norm pair must land atomically — a failed
+        norm write leaving the vector pending would publish an unnormed
+        embedding on the next commit."""
+        with make_store() as s:
+            nb_id = seed(s)
+            cid = s.chunks_for_notebook(nb_id)[0].id
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE chunks SET embedding_norm",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.set_embedding(cid, [1.0, 0.0])
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertIsNone(s.chunks_for_notebook(nb_id)[0].embedding)
+
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
         from unittest.mock import patch
@@ -1503,6 +1623,11 @@ class TestStore(unittest.TestCase):
                         "UNIQUE constraint failed: sources.notebook_id, sources.sha256"
                     )
                 return self._real.execute(sql, *args, **kwargs)
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
@@ -1532,6 +1657,11 @@ class TestStore(unittest.TestCase):
                 if "INSERT INTO sources" in sql:
                     raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
                 return self._real.execute(sql, *args, **kwargs)
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
