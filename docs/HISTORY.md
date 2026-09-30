@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.465
+## Version History: v0.1.37 → v0.2.466
+
+### v0.2.466 (2026-09-30)
+
+- fold the v0.2.465 error-code catalog pin into spec.md's
+  invariants paragraph; header and quality line (1110 tests)
+  refreshed. Audit notes from this cycle: emit-side response
+  meta, SSRF redirect re-pinning per hop, questions-cache
+  invalidation, sqlite busy_timeout, bidirectional env-var
+  doc parity, and deterministic ORDER BY are all verified
+  already-covered.
 
 ### v0.2.465 (2026-09-30)
 
