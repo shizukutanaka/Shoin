@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.461
+## Version History: v0.1.37 → v0.2.462
+
+### v0.2.462 (2026-09-30)
+
+- document `python -m shoin` in the README installation block —
+  the v0.2.459 __main__ entry point was invisible in the docs,
+  so running from the source tree without `pip install` was
+  undiscoverable. One sentence noting both invocations delegate
+  to the same `cli.main`.
 
 ### v0.2.461 (2026-09-30)
 
