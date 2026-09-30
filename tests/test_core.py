@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.462")
+        self.assertEqual(VERSION, "0.2.474")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13699,6 +13699,400 @@ class TestResidualGuards(unittest.TestCase):
             n, 15, f"non-vacuous: expected >=15 source files (got {n})"
         )
 
+    def test_error_codes_match_the_declared_taxonomy(self) -> None:
+        """Catalog every error code the package raises or emits.
+
+        `_dispatch` maps codes by suffix/prefix — a new code spelled
+        without the `_NOT_FOUND` / `_ALREADY_EXISTS` / `SYSTEM_`
+        convention silently lands in the 400 bucket (a typo'd
+        `*_NOTFOUND` would emit HTTP 400 instead of 404 and no test
+        would see it). Assert the complete code set, so adding a code
+        requires updating this catalog — a documented-rationale edit —
+        and every code conforms to the name-family taxonomy."""
+        import ast
+
+        declared = {
+            # store.py raises (StoreError)
+            "CHUNK_NOT_FOUND",
+            "EMBEDDING_INVALID",
+            "INGEST_REFRESH_NOT_URL",
+            "NOTEBOOK_EMPTY",
+            "NOTEBOOK_NOT_FOUND",
+            "NOTE_NOT_FOUND",
+            "SOURCE_ALREADY_EXISTS",
+            "SOURCE_NOT_FOUND",
+            "STUDIO_KIND_INVALID",
+            "SYSTEM_DB_LOCKED",
+            "SYSTEM_IO_ERROR",
+            "SYSTEM_SERVICE_UNAVAILABLE",
+            # ingest.py / pipeline.py / server.py raises (IngestError)
+            "INGEST_EMPTY",
+            "INGEST_FILE_TOO_LARGE",
+            "INGEST_NOTEBOOK_FULL",
+            "INGEST_PDF_SUPPORT_MISSING",
+            "INGEST_FETCH_FAILED",
+            "INGEST_PARSE_FAILED",
+            "INGEST_UNSUPPORTED_FORMAT",
+            "INGEST_URL_BLOCKED",
+            # llm.py raises (LLMError)
+            "SYSTEM_EMBED_DISABLED",
+            "SYSTEM_LLM_TIMEOUT",
+            "SYSTEM_LLM_BAD_RESPONSE",
+            "SYSTEM_LLM_HTTP_ERROR",
+            # server.py raises (StoreError) + emit literals
+            "METHOD_NOT_ALLOWED",
+            "ROUTE_NOT_FOUND",
+            "SECURITY_CROSS_ORIGIN_BLOCKED",
+            "SECURITY_HOST_NOT_ALLOWED",
+            "SYSTEM_INTERNAL_ERROR",
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            "VALIDATION_INTEGER_OVERFLOW",
+            "VALIDATION_REQUIRED_FIELD_MISSING",
+        }
+        taxonomy = re.compile(
+            r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
+            r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
+        )
+        root = Path(__file__).resolve().parent.parent
+        found: set[str] = set()
+        problems: list[str] = []
+        for path in sorted((root / "shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise):
+                    call = node.exc
+                    if not (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id in {"StoreError", "LLMError", "IngestError"}
+                        and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        continue
+                    code = call.args[0].value
+                    if not isinstance(code, str) or not code.isupper():
+                        continue
+                    found.add(code)
+                    if code not in declared:
+                        problems.append(f"{path.name}:{node.lineno}: {code}")
+                    if not taxonomy.match(code):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: "
+                            f"{code} outside the name taxonomy"
+                        )
+                elif isinstance(node, ast.Constant) and isinstance(
+                    node.value, str
+                ):
+                    v = node.value
+                    if v in declared and v not in found:
+                        found.add(v)
+        self.assertEqual(
+            found, declared,
+            f"raised/emitted codes != declared catalog: "
+            f"missing={declared - found}, extra={found - declared}",
+        )
+        self.assertEqual(problems, [], f"undeclared or ill-formed codes: {problems}")
+        self.assertGreaterEqual(
+            len(found), 30, f"non-vacuous: expected >=30 codes (got {len(found)})"
+        )
+
+    def test_header_values_have_no_interpolated_user_data(self) -> None:
+        """Every send_header value must be a constant or provably safe —
+        a future `extra={"X": f"...{user_value}..."}` is a CRLF/header-
+        injection sink that no behavior test sees (BaseHTTPRequestHandler
+        writes the bytes verbatim; http.client never validates).
+
+        Safe shapes today: str(len(body)), constants, `_EXPORT_*[fmt]`
+        subscripts (closed maps), `safe_lang` (ja|en whitelist), and
+        f-strings interpolating only route-captured ints ({nb_id} —
+        the route regex is \\d+, so it is always digits)."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        n_sites = 0
+
+        def safe_value(v: ast.expr) -> bool:
+            if isinstance(v, ast.Constant):
+                return isinstance(v.value, str)
+            if (
+                isinstance(v, ast.Call)
+                and isinstance(v.func, ast.Name)
+                and v.func.id == "str"
+                and len(v.args) == 1
+            ):
+                inner = v.args[0]
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "len":
+                    return True  # str(len(body)) — byte count
+                if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                    return True  # route-regex ints
+                return False
+            if isinstance(v, ast.Subscript):
+                return True  # closed lookup maps (_EXPORT_MIME/_EXPORT_EXT)
+            if isinstance(v, ast.Name) and v.id == "safe_lang":
+                return True  # whitelisted ja|en
+            if isinstance(v, ast.JoinedStr):
+                for part in v.values:
+                    if not isinstance(part, ast.FormattedValue):
+                        continue
+                    inner = part.value
+                    if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                        continue  # route-regex ints
+                    if isinstance(inner, ast.Subscript):
+                        continue  # closed lookup maps
+                    return False
+                return True
+            return False
+
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr == "send_header" and len(node.args) >= 2:
+                n_sites += 1
+                # The (extra or {}).items() loop is the only dynamic site;
+                # direct calls must carry a constant value.
+                if not safe_value(node.args[1]) and not isinstance(
+                    node.args[1], (ast.Name, ast.Tuple)
+                ):
+                    problems.append(f"server.py:{node.lineno}: non-constant header value")
+            if node.func.attr == "_headers" and len(node.args) >= 3:
+                third = node.args[2]
+                if isinstance(third, ast.Dict):
+                    n_sites += 1
+                    for v in third.values:
+                        if not safe_value(v):
+                            problems.append(
+                                f"server.py:{node.lineno}: interpolated extra-header value"
+                            )
+        self.assertEqual(
+            problems, [], f"header values outside the safe shapes: {problems}"
+        )
+        self.assertGreaterEqual(
+            n_sites, 5, f"non-vacuous: expected >=5 header sites (got {n_sites})"
+        )
+
+    def test_set_iteration_builds_no_ordered_output(self) -> None:
+        """Iterating a set emits PYTHONHASHSEED-ordered elements — fine for
+        order-insensitive bodies (count/membership accumulation like
+        `counts[g] += 1` in _prf_terms), but `lst.append(x)` / `lst += [x]` /
+        `yield x` inside the loop bakes per-process hash order into output:
+        flag lists, exports, and JSON arrays would reshuffle per run with no
+        test failure. Ordered escapes must go through sorted() — the codebase
+        idiom `return sorted(out)`. This pins the iteration surface: no
+        for-loop/comprehension over a set-bound name may append/extend/
+        list-+=/yield, and no list()/tuple()/.join() call may consume a
+        set-bound name."""
+        import ast
+
+        problems: list[str] = []
+        n_loops = 0
+        for path in sorted(Path("shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for func in ast.walk(tree):
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                bound: set[str] = set()
+                for node in ast.walk(func):
+                    val: ast.expr | None = None
+                    targets: list[ast.expr] = []
+                    if isinstance(node, ast.Assign):
+                        val, targets = node.value, list(node.targets)
+                    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                        val, targets = node.value, [node.target]
+                    if val is None:
+                        continue
+                    if isinstance(val, ast.SetComp) or (
+                        isinstance(val, ast.Call)
+                        and isinstance(val.func, ast.Name)
+                        and val.func.id == "set"
+                    ):
+                        for t in targets:
+                            if isinstance(t, ast.Name):
+                                bound.add(t.id)
+                for node in ast.walk(func):
+                    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        it = node.iter
+                        name: str | None = None
+                        if isinstance(it, ast.Name) and it.id in bound:
+                            name = it.id
+                        if name is None:
+                            continue
+                        n_loops += 1
+                        body = node.body if isinstance(node, (ast.For, ast.AsyncFor)) else []
+                        for sub in ast.walk(ast.Module(body=body, type_ignores=[])):
+                            if isinstance(sub, ast.Yield) or isinstance(sub, ast.YieldFrom):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: yield inside for over set {name}"
+                                )
+                            if (
+                                isinstance(sub, ast.Call)
+                                and isinstance(sub.func, ast.Attribute)
+                                and sub.func.attr in ("append", "extend", "insert")
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: "
+                                    f"{sub.func.attr}() inside for over set {name}"
+                                )
+                            if isinstance(sub, ast.AugAssign) and isinstance(
+                                sub.target, ast.Name
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: += on {sub.target.id} "
+                                    f"inside for over set {name}"
+                                )
+                    if isinstance(node, ast.Call):
+                        fn = node.func
+                        cname = (
+                            fn.id
+                            if isinstance(fn, ast.Name)
+                            else (fn.attr if isinstance(fn, ast.Attribute) else None)
+                        )
+                        if cname in ("list", "tuple", "join"):
+                            for a in node.args:
+                                if isinstance(a, ast.Name) and a.id in bound:
+                                    problems.append(
+                                        f"{path.name}:{node.lineno}: {cname}({a.id})"
+                                    )
+        self.assertEqual(
+            problems,
+            [],
+            f"set iteration producing ordered output unsorted: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_loops, 1,
+            f"non-vacuous: expected >=1 for-over-set loop (got {n_loops})",
+        )
+
+
+    def test_library_prints_never_pollute_stdout(self) -> None:
+        """Stdout is a machine-readable contract: `shoin eval` and
+        structured CLI output must stay parseable when piped. A `print()`
+        buried in the library layer writes progress chatter straight into
+        a consumer's JSON/parser — invisible to every unit test, since
+        nothing asserts on streams. Pin the rule the code already
+        follows: outside `cli.py` (which legitimately owns stdout), every
+        `print()` must redirect to `file=sys.stderr` — the only exception
+        is `server.serve()`, whose startup banner is its user-facing
+        surface."""
+        import ast
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_stderr = 0
+        n_serve = 0
+        for f in sorted(root.glob("*.py")):
+            if f.name == "cli.py":
+                continue
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=f.name)
+            parents: dict[ast.AST, ast.AST] = {}
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    parents[child] = node
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                ):
+                    continue
+                to_stderr = any(
+                    kw.arg == "file"
+                    and isinstance(kw.value, ast.Attribute)
+                    and kw.value.attr == "stderr"
+                    and isinstance(kw.value.value, ast.Name)
+                    and kw.value.value.id == "sys"
+                    for kw in node.keywords
+                )
+                if to_stderr:
+                    n_stderr += 1
+                    continue
+                owner = parents.get(node)
+                while owner is not None and not isinstance(
+                    owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    owner = parents.get(owner)
+                if owner is not None and owner.name == "serve":
+                    n_serve += 1
+                    continue
+                problems.append(f"{f.name}:{node.lineno}: print() to stdout")
+            # Twin routes around print(): a bare `sys.stdout` reference
+            # (write()/reassignment) bypasses the same contract — ban the
+            # attribute entirely outside cli.py. `import logging` is also
+            # banned: the codebase's diagnostic convention is prints to
+            # stderr; a logging call would emit under a logger nobody
+            # configures (lastResort stderr or silence), and a handler
+            # wired to stdout would reopen the pollution class.
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys"
+                ):
+                    problems.append(f"{f.name}:{node.lineno}: sys.stdout access")
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.name == "logging" or a.name.startswith("logging."):
+                            problems.append(f"{f.name}:{node.lineno}: import logging")
+                if isinstance(node, ast.ImportFrom) and (
+                    node.module or ""
+                ).startswith("logging"):
+                    problems.append(f"{f.name}:{node.lineno}: import logging")
+        self.assertEqual(problems, [])
+        self.assertGreaterEqual(
+            n_stderr, 5,
+            f"non-vacuous: expected >=5 stderr prints (got {n_stderr})",
+        )
+        self.assertGreaterEqual(
+            n_serve, 1,
+            f"non-vacuous: expected the serve() banner (got {n_serve})",
+        )
+
+    def test_fts_match_expression_is_fully_quoted(self) -> None:
+        """FTS5 MATCH is its own query language: `AND`, `OR`, `NEAR`, `:`,
+        `*`, and bare `"` are operators, not literals. A term interpolated
+        unquoted lets a query like `x:y` or `" jailbreak` silently change
+        WHERE's semantics (no exception, wrong rows — invisible to tests).
+        The contract: `fts_query` emits ONLY double-quoted atoms (inner
+        quotes doubled by `_fts_escape` post-variant) OR-joined, and the
+        single `MATCH` site binds the expression through `?`."""
+        from shoin.search import fts_query
+        probes = [
+            "rain AND drop",
+            "x:y",
+            '"literal"',
+            "a*b",
+            "温度上昇 rate 3%",
+            "fullwidth\uff02quote",
+            "NEAR/3 one two",
+            "col:text",
+        ]
+        for probe in probes:
+            out = fts_query(probe)
+            if not out:
+                continue  # tokenizer dropped every term — LIKE fallback path
+            atoms = out.split(" OR ")
+            for a in atoms:
+                self.assertRegex(
+                    a, r'\A"(?:[^"]|"")*"\Z',
+                    f"unquoted FTS5 atom {a!r} for query {probe!r}",
+                )
+            # Nothing outside quoted atoms + the OR separator.
+            self.assertEqual(" OR ".join(atoms), out)
+        # Structural: exactly one MATCH site, bound through ?.
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        sites = []
+        for f in sorted(root.glob("*.py")):
+            for i, line in enumerate(
+                f.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
+                    sites.append(f"{f.name}:{i}")
+        self.assertEqual(
+            sites, ["search.py:556"],
+            f"MATCH sites drifted: {sites}",
+        )
+
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
         completion criterion (zero known bugs) says none may ship. Until this
@@ -13775,7 +14169,6 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the invariant must bind to real code — at least one bound body
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
