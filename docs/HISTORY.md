@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.431
+## Version History: v0.1.37 → v0.2.432
+
+### v0.2.432 (2026-09-30)
+
+- pin that Store's context dunders never touch the
+  transaction: a commit inside __exit__ would republish
+  writes left pending by a failed `with self.conn:` block —
+  the fourth wall of the pending-TX defect family was the
+  one unpinned surface. AST-pins __enter__ and __exit__ to
+  contain no execute/commit/rollback call.
+- correct CLAUDE.md's stale fusion claim: the bullet still
+  said fuse()/adaptive_alpha() "exist in search.py" — both
+  were deleted in v0.2.150 (the file's own later section
+  already said so)
 
 ### v0.2.431 (2026-09-30)
 
