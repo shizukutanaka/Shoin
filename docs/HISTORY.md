@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.446
+## Version History: v0.1.37 → v0.2.447
+
+### v0.2.447 (2026-09-30)
+
+- sync spec.md to v0.2.446 (sqlite3.connect single-ownership pin,
+  caller-side TX-verb pin; test count 1102).
 
 ### v0.2.446 (2026-09-30)
 
