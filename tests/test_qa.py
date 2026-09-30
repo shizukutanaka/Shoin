@@ -1137,6 +1137,35 @@ class TestLLMClient(unittest.TestCase):
             tokens = list(client.chat_stream([{"role": "user", "content": "q"}]))
         self.assertEqual(tokens, ["ok"])
 
+    def test_chat_stream_tolerates_non_object_delta(self) -> None:
+        """A non-dict delta must not crash the stream.
+
+        The OpenAI shape is {"delta": {"content": ...}}, but compatible
+        servers emit a bare string and null deltas appear on role chunks.
+        .get() on a non-dict raised AttributeError — outside the tolerated
+        (JSONDecodeError, KeyError, IndexError, TypeError) set, so it
+        escaped as a raw 500 instead of being skipped/normalized.
+        """
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        client = LLMClient()
+        payload = (
+            b'data: {"choices": [{"delta": "bare"}]}\n'
+            b'data: {"choices": [{"delta": null}]}\n'
+            b'data: {"choices": [{"delta": 42}]}\n'
+            b'data: {"choices": [{"delta": {"content": "ok"}}]}\n'
+            b"data: [DONE]\n\n"
+        )
+        mock_resp = io.BytesIO(payload)
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            tokens = list(client.chat_stream([{"role": "user", "content": "q"}]))
+        self.assertEqual(tokens, ["bare", "ok"])
+
     def test_chat_stream_http_error_raises_llm_http_error(self) -> None:
         """HTTPError during streaming must raise SYSTEM_LLM_HTTP_ERROR."""
         import io
