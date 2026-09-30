@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.420
+## Version History: v0.1.37 → v0.2.421
+
+### v0.2.421 (2026-09-30)
+
+- tolerate non-object `delta` shapes in chat_stream: a bare-string
+  or null delta made choice[delta].get raise AttributeError —
+  outside the tolerated (JSONDecodeError, KeyError, IndexError,
+  TypeError) set — escaping the stream as a raw 500 instead of
+  being normalized or skipped. dict → .get(content), str →
+  content verbatim (some compatible servers emit it that way),
+  anything else → skip
 
 ### v0.2.420 (2026-09-30)
 
