@@ -57,7 +57,7 @@ class FakeLLM:
 def seed_notebook(store: Store, n_sources: int = 2, chunks_per_source: int = 4) -> int:
     nb = store.create_notebook("研究")
     for s in range(n_sources):
-        src = store.add_source(nb.id, "file", f"資料{s + 1}", f"/tmp/s{s}.txt", f"sha{s}")
+        src = store.add_source(nb.id, "txt", f"資料{s + 1}", f"/tmp/s{s}.txt", f"sha{s}")
         store.add_chunks(
             src.id, [f"資料{s + 1}の段落{c}。内容テキスト。" for c in range(chunks_per_source)]
         )
@@ -81,7 +81,7 @@ class StudioTest(unittest.TestCase):
         """Long sources: sampled chunks must include content from end, not just start."""
         store = Store(":memory:")
         nb = store.create_notebook("n")
-        src = store.add_source(nb.id, "file", "長文資料", "/t", "h0")
+        src = store.add_source(nb.id, "txt", "長文資料", "/t", "h0")
         texts = [f"段落{i}" for i in range(10)]  # 10 chunks, seq 0–9
         store.add_chunks(src.id, texts)
         hits = overview_hits(store, nb.id, per_source=3)
@@ -592,7 +592,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(result.n_embedded, result.n_chunks)
 
     def test_embed_partial_failure_keeps_progress(self) -> None:
-        src = self.store.add_source(self.nb, "file", "t", "/tmp/t", "x")
+        src = self.store.add_source(self.nb, "txt", "t", "/tmp/t", "x")
         texts = ["a", "b", "c", "d"]
         ids = self.store.add_chunks(src.id, texts)
         llm = FakeLLM(embedding_model="m", fail_embed_after=1)
@@ -602,7 +602,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_embed_partial_failure_records_model(self) -> None:
         """embed_model is recorded even on partial LLM failure so future model-change warnings fire."""
-        src = self.store.add_source(self.nb, "file", "tp", "/tmp/tp", "xp")
+        src = self.store.add_source(self.nb, "txt", "tp", "/tmp/tp", "xp")
         texts = ["a", "b", "c", "d"]
         ids = self.store.add_chunks(src.id, texts)
         llm = FakeLLM(embedding_model="nomic-embed-text", fail_embed_after=1)
@@ -613,7 +613,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_embed_model_change_warns_and_returns_zero(self) -> None:
         """Changing SHOIN_EMBED_MODEL prints a warning and skips embedding to keep DB coherent."""
-        src = self.store.add_source(self.nb, "file", "t2", "/tmp/t2", "y")
+        src = self.store.add_source(self.nb, "txt", "t2", "/tmp/t2", "y")
         ids = self.store.add_chunks(src.id, ["text"])
         # Seed a first embedding run with model-A.
         self.store.set_setting("embed_model", "model-A")
@@ -631,7 +631,7 @@ class PipelineTest(unittest.TestCase):
     def test_reindex_notebook_re_embeds_all_chunks(self) -> None:
         """reindex_notebook re-embeds every chunk and returns (n, total)."""
         # PipelineTest has no sources by default; seed one first.
-        src = self.store.add_source(self.nb, "file", "t", "/tmp/t", "hash-ri")
+        src = self.store.add_source(self.nb, "txt", "t", "/tmp/t", "hash-ri")
         self.store.add_chunks(src.id, ["段落A。", "段落B。", "段落C。"])
         llm = FakeLLM(embedding_model="nomic-embed-text")
         n, total = reindex_notebook(self.store, llm, self.nb)
@@ -657,7 +657,7 @@ class PipelineTest(unittest.TestCase):
         current_model, blocking the one command meant to fix that mismatch.
         Fix: reindex_notebook passes force=True to _embed_chunks.
         """
-        src = self.store.add_source(self.nb, "file", "t-rm", "/tmp/t-rm", "hash-rm")
+        src = self.store.add_source(self.nb, "txt", "t-rm", "/tmp/t-rm", "hash-rm")
         ids = self.store.add_chunks(src.id, ["段落X。"])
         # First pass: embed with model-A, store records "model-A".
         llm_a = FakeLLM(embedding_model="model-A")
@@ -680,7 +680,7 @@ class PipelineTest(unittest.TestCase):
 
         from shoin.store import StoreError as SE
 
-        src = self.store.add_source(self.nb, "file", "td", "/tmp/td", "zz")
+        src = self.store.add_source(self.nb, "txt", "td", "/tmp/td", "zz")
         ids = self.store.add_chunks(src.id, ["a", "b", "c", "d"])
         llm = FakeLLM(embedding_model="model-x")
         call_count = 0
@@ -703,7 +703,7 @@ class PipelineTest(unittest.TestCase):
 
         from shoin.store import StoreError as SE
 
-        src = self.store.add_source(self.nb, "file", "tc", "/tmp/tc", "zz2")
+        src = self.store.add_source(self.nb, "txt", "tc", "/tmp/tc", "zz2")
         ids = self.store.add_chunks(src.id, ["p", "q", "r", "s"])
         llm = FakeLLM(embedding_model="model-y")
         call_count = 0

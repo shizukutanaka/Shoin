@@ -554,7 +554,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
-            " ORDER BY rank LIMIT ?",
+            " ORDER BY rank, c.id LIMIT ?",
             (expr, notebook_id, k),
         ).fetchall()
         for r in rows:
@@ -633,7 +633,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
-        f" ORDER BY {score_expr} DESC"
+        f" ORDER BY {score_expr} DESC, c.id"
         f" LIMIT ?",
         [notebook_id, *like_params, *score_params, like_cap],
     ).fetchall()

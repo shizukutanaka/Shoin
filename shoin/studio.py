@@ -17,9 +17,11 @@ from .config import MAX_QUESTION_LEN, ui_lang
 from .llm import LLMError
 from .qa import _LIST_PREFIX_RE, _t as _qa_t, ChatBackend, build_context
 from .search import Hit
-from .store import Store, StoreError
+from .store import STUDIO_KINDS, Store, StoreError
 
-KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
+# Re-export of store.STUDIO_KINDS — the vocabulary lives in store.py because
+# add_studio_output() guards on it, and store.py cannot import this module back.
+KINDS = STUDIO_KINDS
 
 _INSTRUCTIONS: dict[str, dict[str, str]] = {
     "briefing": {
