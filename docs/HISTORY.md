@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.463
+## Version History: v0.1.37 → v0.2.464
+
+### v0.2.464 (2026-09-30)
+
+- sync spec.md to v0.2.463 — REQ-105 notes the python -m
+  equivalence, the pin paragraph gains the catch-all bypass
+  closure (v0.2.460) and the 3.11 grammar replay (v0.2.461),
+  and the quality line reflects 1109 tests.
 
 ### v0.2.463 (2026-09-30)
 
