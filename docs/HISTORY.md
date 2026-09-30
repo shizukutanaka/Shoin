@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.423
+## Version History: v0.1.37 → v0.2.424
+
+### v0.2.424 (2026-09-30)
+
+- pin the call-site side of the callee-transaction contract:
+  touch_notebook / _rewrite_chunk_context_titles /
+  _set_embedding_pair carry bare writes by design because their
+  docstrings make the caller own the transaction — the C250 pin
+  checked the callees' statements but couldn't see whether every
+  call site actually sits inside `with self.conn:`. All 13
+  touch + 2 rewrite sites verified covered; _set_embedding_pair
+  pinned single-caller (set_embedding only — its commit=False
+  branch is the documented contract for _embed_chunks' batch
+  transaction). A future caller that forgets the with or calls
+  the pair helper from elsewhere now fails the gate
 
 ### v0.2.423 (2026-09-30)
 

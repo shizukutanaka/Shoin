@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.423")
+        self.assertEqual(VERSION, "0.2.424")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12720,6 +12720,92 @@ class TestResidualGuards(unittest.TestCase):
         )
         # Floor: allowlisted single-statement writes exist — non-vacuous.
         self.assertTrue(bare, "expected some allowlisted bare writes")
+
+    def test_callee_transaction_contract_call_sites_covered(self) -> None:
+        """Callee-transacted helpers (`touch_notebook`,
+        `_rewrite_chunk_context_titles`, `_set_embedding_pair`) contain
+        bare write-executes by design — their docstrings make the CALLER
+        own the transaction. The C250 pin checks the callees' statements
+        against the allowlist, but cannot see whether every call site
+        actually sits inside `with self.conn:` — a new caller that forgets
+        the with silently reopens the pending-write leak class even
+        though every individual scan still passes. Pin the call-site
+        side of the contract: every call must be covered by an enclosing
+        `with self.conn:`, except `_set_embedding_pair`'s documented
+        `commit=False` branch inside `set_embedding` (whose only caller,
+        `_embed_chunks`, owns the batch transaction).
+        """
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        call = re.compile(
+            r"self\.(touch_notebook|_rewrite_chunk_context_titles|_set_embedding_pair)\s*\("
+        )
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        with_indent: int | None = None
+        sites: dict[str, list[tuple[int, str, bool]]] = {}
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            for hit in call.finditer(line):
+                callee = hit.group(1)
+                sites.setdefault(callee, []).append(
+                    (i, method, with_indent is not None)
+                )
+
+        problems = []
+        for callee, found in sites.items():
+            for lineno, caller, covered in found:
+                if callee == "_set_embedding_pair":
+                    # May only ever be invoked from `set_embedding` — the
+                    # commit=False contract is meaningful only because
+                    # that one caller documents who owns the transaction.
+                    # A call from anywhere else has no documented owner.
+                    if caller != "set_embedding":
+                        problems.append(
+                            f"{callee}:{lineno} (called from {caller})"
+                        )
+                    continue
+                if not covered:
+                    problems.append(f"{callee}:{lineno} (uncovered in {caller})")
+        self.assertEqual(
+            problems,
+            [],
+            f"callee-transacted helper call sites must sit inside "
+            f"`with self.conn:`: {problems}",
+        )
+        # Floors: the contract is exercised — touch sites are numerous.
+        self.assertGreaterEqual(
+            len(sites.get("touch_notebook", [])),
+            10,
+            "expected >=10 touch_notebook call sites — non-vacuous",
+        )
+        self.assertTrue(sites.get("_rewrite_chunk_context_titles"), "non-vacuous")
+        self.assertTrue(sites.get("_set_embedding_pair"), "non-vacuous")
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
