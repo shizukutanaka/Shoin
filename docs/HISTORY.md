@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.384
+## Version History: v0.1.37 → v0.2.387
+
+### v0.2.387 (2026-09-29)
+
+- `add_source` now rejects kinds outside `SOURCE_KINDS` ({"txt","md","html","pdf","url"}) with `VALIDATION_FIELD_FORMAT_INVALID` — third and last of the store-write vocabulary guards (v0.2.368 role, v0.2.386 studio kind). kind is immutable post-insert and is consumed by export's RIS `TY` mapping (url/html→ELEC), the md legend, and the UI source badge, so a typo'd literal silently exported wrong citation types and rendered a nonsense badge with no corrective path. `SOURCE_KINDS` is pinned bidirectionally against what ingest can emit (`_EXT_KIND` values ∪ {"url"}): a new extension kind added without updating the vocabulary is rejected at the write; a ghost value ingest never produces is rejected by the equality pin. Ten test fixtures that seeded sources with the nonexistent kind "file" (all modeling .txt files) were corrected to "txt" — production never emits "file", so fixtures asserting under it covered a value real sources can never carry. Fail-then-pass verified.
+
+### v0.2.386 (2026-09-29)
+
+- `add_studio_output` now rejects kinds outside `STUDIO_KINDS` with `STUDIO_KIND_INVALID` at the write — the store-side sibling of v0.2.368's `add_message` role guard. A typo'd kind literal previously persisted as a phantom `GROUP BY kind` row that `latest_studio_outputs()` returned but no UI section claimed and export rendered under a nonsense heading — invisible dead data with no corrective path. The vocabulary is single-sourced in `store.STUDIO_KINDS` (studio.py re-exports it as `KINDS`; the store cannot import studio.py back), pinned by an identity test so the guard and the generator vocabulary can never drift. Fail-then-pass verified: removing the guard writes the phantom row and fails the test.
+
+### v0.2.385 (2026-09-29)
+
+- fix: deterministic tie-break in both retrieval ORDER BYs — `ORDER BY rank` (FTS) and `ORDER BY score DESC` (LIKE pool) left equal-key order unspecified in SQLite; LIKE scores are small integers so tie groups are common, and at the 2000-row cap tied chunks were arbitrarily included/excluded. `, c.id` (oldest-first) matches the list_notebooks convention from v0.2.308.
 
 ### v0.2.384 (2026-09-29)
 

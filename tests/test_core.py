@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.384")
+        self.assertEqual(VERSION, "0.2.387")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -649,7 +649,7 @@ class TestStore(unittest.TestCase):
     def test_update_source_title(self) -> None:
         with make_store() as s:
             nb = s.create_notebook("nb")
-            src = s.add_source(nb.id, "file", "tmp.txt", "/tmp/tmp.txt", "h1")
+            src = s.add_source(nb.id, "txt", "tmp.txt", "/tmp/tmp.txt", "h1")
             t0 = s.get_notebook(nb.id).updated_at
             s.update_source_title(src.id, "report.txt", "report.txt")
             updated = s.get_source(src.id)
@@ -1004,6 +1004,56 @@ class TestStore(unittest.TestCase):
                 with self.assertRaises(StoreError) as cm:
                     s.add_studio_output(nb.id, "briefing", "body", "{}")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_studio_output_rejects_unknown_kind(self) -> None:
+        """Kind-vocabulary guard, same class as add_message()'s role check.
+
+        latest_studio_outputs() GROUP BYs on kind, so a typo'd literal
+        ('audoo') would persist as a phantom kind — grouped out of every UI
+        section and exported under a nonsense heading — that no caller can
+        ever overwrite. The store must fail loudly at the write."""
+        with make_store() as s:
+            nb = s.create_notebook("kind-vocab")
+            with self.assertRaises(StoreError) as cm:
+                s.add_studio_output(nb.id, "audoo", "body", "{}")
+            self.assertEqual(cm.exception.code, "STUDIO_KIND_INVALID")
+            self.assertEqual(s.latest_studio_outputs(nb.id), [])
+
+    def test_studio_kind_vocabulary_is_single_sourced(self) -> None:
+        """studio.KINDS must BE store.STUDIO_KINDS — the store guards on its own
+        constant because it cannot import studio.py back; two spellings would
+        let one drift (a new kind addable via studio.generate() but rejected at
+        the write, or vice versa)."""
+        from shoin import store, studio
+
+        self.assertIs(studio.KINDS, store.STUDIO_KINDS)
+
+    def test_add_source_rejects_unknown_kind(self) -> None:
+        """Kind-vocabulary guard, same class as add_message()'s role check and
+        add_studio_output()'s kind check.
+
+        kind is immutable post-insert and consumed by export's RIS TY mapping
+        (_RIS_TYPE: url/html→ELEC, other→GEN), the md legend, and the UI badge —
+        a typo'd literal silently exports wrong citation types and renders a
+        nonsense badge forever. The store must fail loudly at the write."""
+        with make_store() as s:
+            nb = s.create_notebook("src-kind-vocab")
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "urll", "t", "o", "sha-bad")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            self.assertEqual(s.sources_for_notebook(nb.id), [])
+
+    def test_source_kind_vocabulary_matches_ingest(self) -> None:
+        """store.SOURCE_KINDS must exactly cover what ingest can emit —
+        _EXT_KIND values for files plus the 'url' kind — in both directions:
+        a new extension kind added to _EXT_KIND but not SOURCE_KINDS would be
+        rejected at the write; a vocabulary kind ingest never produces is a
+        ghost value the guard would wrongly accept."""
+        from shoin import ingest, store
+
+        self.assertEqual(
+            set(store.SOURCE_KINDS), set(ingest._EXT_KIND.values()) | {"url"}
+        )
 
     def test_list_notebooks_with_counts_single_query(self) -> None:
         with make_store() as s:
@@ -3368,6 +3418,36 @@ class TestSearch(unittest.TestCase):
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
+
+    def test_like_ties_order_by_chunk_id(self) -> None:
+        """Equal LIKE scores must order deterministically by chunk id. LIKE
+        scores are small integers (occurrence counts), so tie groups are
+        common — without the `, c.id` key SQLite picks an unspecified order,
+        and at the 2000-row cap arbitrarily includes/excludes tied chunks.
+        Same convention list_notebooks already uses for updated_at ties."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["aa 猫 aa", "猫 bb", "cc 猫 cc"])
+            hits = bm25_search(s, nb.id, "猫", 10)
+            ids = [h.chunk_id for h in hits]
+            self.assertEqual(len(ids), 3)
+            self.assertEqual(ids, sorted(ids))
+
+    def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
+        """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
+        `ORDER BY score` leaves equal-key order unspecified in SQLite —
+        deterministic in practice but never contractual, and silently
+        arbitrary at every LIMIT boundary."""
+        import inspect
+        import re
+
+        import shoin.search
+
+        src = inspect.getsource(shoin.search)
+        self.assertIn("ORDER BY rank, c.id", src)
+        like_orders = re.findall(r'ORDER BY \{score_expr\} DESC([^"]*)', src)
+        self.assertEqual(like_orders, [", c.id"], like_orders)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
