@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.399
+## Version History: v0.1.37 → v0.2.400
+
+### v0.2.400 (2026-09-29)
+
+- correct the daemon_threads test+comments: the server speaks HTTP/1.0
+  (no keep-alive), so the parked-handler scenario is a client stalled
+  mid-request, not an idle keep-alive connection; rewrite the test to
+  park a handler via a raw partial request so the elapsed assertion
+  actually fails under the mutant
 
 ### v0.2.399 (2026-09-29)
 
