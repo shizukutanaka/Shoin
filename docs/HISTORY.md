@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.383
+## Version History: v0.1.37 → v0.2.384
+
+### v0.2.384 (2026-09-29)
+
+- fix: expand `~` in `add`'s targets — the last CLI path-accepting arg. A quoted `add nb '~/doc.md'` arrives unexpanded (shell expands a tilde only at word start) and failed INGEST_FETCH_FAILED; URLs pass through unchanged. The scan pin now covers `Path(str(<var>))` on loop variables too, closing the class for every current and future CLI path arg.
 
 ### v0.2.383 (2026-09-29)
 

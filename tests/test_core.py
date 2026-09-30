@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.383")
+        self.assertEqual(VERSION, "0.2.384")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9055,8 +9055,8 @@ class TestCLI(unittest.TestCase):
         import shoin.cli
 
         src = inspect.getsource(shoin.cli)
-        sites = re.findall(r"Path\(str\(args\.\w+\)\)(?:\.\w+\(\))?", src)
-        self.assertGreaterEqual(len(sites), 4)  # cases, save, diff, db
+        sites = re.findall(r"Path\(str\((?:args\.\w+|\w+)\)\)(?:\.\w+\(\))?", src)
+        self.assertGreaterEqual(len(sites), 5)  # cases, save, diff, db, add targets
         for site in sites:
             self.assertIn(".expanduser()", site, site)
 
@@ -9096,6 +9096,64 @@ class TestCLI(unittest.TestCase):
                 else:
                     os.environ["HOME"] = home
         self.assertFalse(Path("~").exists(), "literal ~ dir must not be created in cwd")
+
+    def test_add_expands_quoted_tilde_target(self) -> None:
+        """`add nb '~/doc.md'` (tilde inside quotes → unexpanded argv) must
+        ingest the real home file, not fail INGEST_FETCH_FAILED on the
+        literal path."""
+        import os
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            Path(td, "doc.md").write_text("# t\n\nbody text here", encoding="utf-8")
+            home = os.environ.get("HOME")
+            os.environ["HOME"] = td
+            try:
+                rc = main(
+                    ["--db", db_file, "add", str(nb.id), "~/doc.md"],
+                    llm=FakeLLM(),
+                )
+                self.assertEqual(rc, 0)
+                with Store(db_file) as s:
+                    self.assertEqual(s.counts(nb.id)["sources"], 1)
+            finally:
+                if home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = home
+
+    def test_add_passes_url_target_through_unchanged(self) -> None:
+        """Tilde expansion in `add` must not route URL targets through Path(),
+        which collapses "https://" to "https:/" and breaks URL ingest."""
+        import tempfile
+
+        from shoin import cli
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        seen: list[str] = []
+
+        def fake_index(store: object, nb_id: int, target: str, llm: object) -> object:
+            seen.append(target)
+            raise cli.IngestError("INGEST_FETCH_FAILED", "stub")
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with patch.object(cli, "index_source", fake_index):
+                cli.main(
+                    ["--db", db_file, "add", str(nb.id), "https://example.com/a/b?q=1"],
+                    llm=FakeLLM(),
+                )
+        self.assertEqual(seen, ["https://example.com/a/b?q=1"])
 
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError
