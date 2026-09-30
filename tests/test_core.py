@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.450")
+        self.assertEqual(VERSION, "0.2.451")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13354,6 +13354,75 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"network calls without timeout: {problems}")
         self.assertGreaterEqual(
             n_sites, 5, f"non-vacuous: expected >=5 network call sites (got {n_sites})"
+        )
+
+    def test_module_level_mutable_globals_are_declared(self) -> None:
+        """Module-level mutable collections (dict/set literals, or
+        dict/set/OrderedDict/defaultdict constructors) are shared mutable
+        state across handler threads. The only genuinely mutable one is
+        qa._QUERY_VEC_CACHE — guarded under _QUERY_VEC_LOCK and pinned by
+        the lock-coverage tests. Everything else is a constant lookup table
+        (_STRINGS, _INSTRUCTIONS, unit/era/kanji tables, MIGRATIONS, …) that
+        is never written after import. A NEW module-level mutable added
+        without the allowlist update is a shared-state defect the lock pins
+        cannot see — single-threaded tests all pass while concurrent access
+        races. Pin the exact (file, name) set so any addition is deliberate."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        allowed = {
+            "__init__.py": {"__all__"},
+            "citation.py": {
+                "_MAG_SUFFIX", "_KANJI_DIGIT", "_KANJI_PLACE", "_EN_SMALL",
+                "_EN_BIG", "_SCALE_FAMILIES", "_UNIT_ALIASES", "_ANT",
+            },
+            "cli.py": {"_STRINGS"},
+            "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
+            "ingest.py": {"_EXT_KIND"},
+            "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
+            "search.py": {"_SHIN_TO_KYU"},
+            "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
+            "store.py": {"MIGRATIONS"},
+            "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
+        }
+        ctor_names = {"dict", "set", "list", "OrderedDict", "defaultdict", "Counter"}
+
+        def mutable_value(node: ast.expr) -> bool:
+            if isinstance(node, (ast.Dict, ast.Set, ast.List)):
+                return True
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = f.attr if isinstance(f, ast.Attribute) else (
+                    f.id if isinstance(f, ast.Name) else ""
+                )
+                return name in ctor_names
+            return False
+
+        problems: list[str] = []
+        n_found = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                target_ids: list[str] = []
+                value: ast.expr | None = None
+                if isinstance(node, ast.Assign):
+                    value = node.value
+                    target_ids = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    value = node.value
+                    if isinstance(node.target, ast.Name):
+                        target_ids = [node.target.id]
+                if value is None or not mutable_value(value):
+                    continue
+                for name in target_ids:
+                    n_found += 1
+                    if name not in allowed.get(path.name, set()):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: undeclared module-level mutable {name}"
+                        )
+        self.assertEqual(problems, [], f"undeclared module-level mutables: {problems}")
+        self.assertGreaterEqual(
+            n_found, 15, f"non-vacuous: expected >=15 mutable globals (got {n_found})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:

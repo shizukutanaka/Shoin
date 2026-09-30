@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.450
+## Version History: v0.1.37 → v0.2.451
+
+### v0.2.451 (2026-09-30)
+
+- pin that module-level mutable collections are only the declared
+  (file, name) set — the one truly mutable global
+  (_QUERY_VEC_CACHE) is lock-guarded and lock-pinned; a new
+  unguarded shared mutable races under per-request threads while
+  every single-threaded test passes.
 
 ### v0.2.450 (2026-09-30)
 
