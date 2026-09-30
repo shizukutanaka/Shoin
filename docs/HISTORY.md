@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.422
+## Version History: v0.1.37 → v0.2.423
+
+### v0.2.423 (2026-09-30)
+
+- pin that multi-statement writes run inside `with self.conn:`:
+  a bare write-execute outside a with-block reopens the
+  pending-write leak class (v0.2.419 was behavioral; this is
+  structural — a future writer can't silently regress). The
+  scan's own blind spot found during fail-verification:
+  multi-line signatures close at `) -> T:` (indent 4), which
+  ended method tracking early and made every multi-line
+  signature method invisible
 
 ### v0.2.422 (2026-09-30)
 
