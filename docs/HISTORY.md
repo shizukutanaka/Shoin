@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.440
+## Version History: v0.1.37 → v0.2.441
+
+### v0.2.441 (2026-09-30)
+
+- sync the product-review ledger to v0.2.440 — name the
+  boundary-invariant section (stat-before-read fix +
+  gzip-bomb pin + generation_lock pin, v0.2.436-440);
+  header/test counts updated.
 
 ### v0.2.440 (2026-09-30)
 
