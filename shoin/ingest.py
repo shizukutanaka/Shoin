@@ -311,6 +311,15 @@ def validate_public_url(url: str) -> tuple[urllib.parse.ParseResult, str]:
         raise IngestError("INGEST_URL_BLOCKED", f"scheme not allowed: {parsed.scheme!r}")
     if not parsed.hostname:
         raise IngestError("INGEST_URL_BLOCKED", "URL has no host")
+    try:
+        # .port is lazy: urlparse does not validate the port field until it is
+        # accessed, so ':abc' / out-of-range / negative ports raise ValueError
+        # here rather than mid-request (fetch_url reads .port outside its
+        # IngestError handling — this is the same 400-vs-500 defect class as
+        # the zone-scoped IPv6 fix, v0.2.45).
+        parsed.port
+    except ValueError as exc:
+        raise IngestError("INGEST_URL_BLOCKED", f"invalid port: {exc}") from exc
     pinned = _validate_resolved(parsed.hostname)
     return parsed, pinned
 
