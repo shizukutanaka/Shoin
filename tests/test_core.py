@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.391")
+        self.assertEqual(VERSION, "0.2.392")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -11615,6 +11615,14 @@ class TestResidualGuards(unittest.TestCase):
             f"### v{VERSION}",
             history,
             "HISTORY.md has no entry for the current version — the bump ritual dropped it",
+        )
+        # v0.2.392: the header's range tip is the one version marker no pin
+        # covered — entries could be correct while the `→ v…` header still
+        # reported a stale tip.
+        self.assertIn(
+            f"→ v{VERSION}",
+            history,
+            "HISTORY.md's 'Version History: … → vX.Y.Z' header drifted from VERSION",
         )
 
     @unittest.skipIf(os.name != "posix", "POSIX file modes")
