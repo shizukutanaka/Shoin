@@ -46,23 +46,37 @@ Every answer and Studio output cites sources as `[S1]`, `[S2]`, etc. These are *
 - Examples: `[S1]`, `[Ｓ１]`, `[S1, S2]`, `[S1 and S3]` all parse correctly
 - First pass: extract all cited numbers, validate they fall in range 1..N_sources
 
-### Citation Verification: Four-Layer Machine Checks
+### Citation Verification: Machine Checks
 
-Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions) is one of the most user-visible LLM failure modes. Shoin runs four dependency-free, LLM-free checks on every assistant response and Studio output:
+Citation hallucination (fabricated quotes, wrong numbers, unsupported assertions) is one of the most user-visible LLM failure modes. Shoin runs dependency-free, LLM-free checks on every assistant response and Studio output:
 
 **1. Range Check** (`validate_citations`): Detect `[S99]` when only 5 sources exist. Out-of-range numbers are the narrowest, highest-confidence hallucination signal.
 
-**2. Grounding Confirmation** (`verify_grounding`): A cited sentence's wording is compared to the source text using character-bigram overlap. When overlap >= 30% (CONFIRM_MIN, calibrated for CJK), the citation is flagged `confirmed` — strong positive evidence the claim is lexically supported.
+**2. Grounding Confirmation** (`verify_grounding`): A cited sentence's wording is compared to the source text using character-bigram overlap. When overlap >= 30% (CONFIRM_MIN=0.30, calibrated for CJK), the citation is flagged `confirmed` — strong positive evidence the claim is lexically supported.
 
-**3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP), the citation number is flagged `misattributed` — the model likely cited the wrong source.
+**3. Mis-numbering Detection** (`verify_grounding`): When a sentence does *not* match its cited source but *does* strongly match a *different* source (with a 20% gap margin, MISMATCH_GAP=0.20), the citation number is flagged `misattributed` — the model likely cited the wrong source.
 
 **4. Uncited-Assertion Detection** (`uncited_sentences`, v0.2.65): Checks 2 and 3 only ever examine sentences that *already* carry a citation. A hallucinated or simply unsupported claim with *zero* citations anywhere in it is invisible to those checks — this was docs/product-review.md's top-priority open gap. `uncited_sentences()` scans for sentences with no `[S#]` marker, resolving the common trailing-citation pattern ("Sentence. [S1]") the same way `verify_grounding()` does, and excludes trivial filler and explicit "not in the source" disclaimers (the *correct* response to missing facts, not an unsupported assertion).
 
-**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, and `uncited` lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
+**5. Numeric-Consistency Check** (`numeric_mismatches`, v0.2.184): a cited claim asserting a digit string (≥2 digits or a decimal) the source never contains is flagged — the fabricated-statistic failure shape the citation literature flags as dominant (arXiv:2510.20303).
+
+**6. Quote-Mismatch Check** (`quote_mismatches`, v0.2.187): a 「…」/"…" span cited to S_n but appearing verbatim in a *different* source is exact-string proof of misattribution — folded into `misattributed`.
+
+**7. Degeneration Check** (`degenerate_spans`, v0.2.188): verbatim ≥3× repetition in the answer itself — the repeat-loop failure small local LLMs are prone to; the only check that inspects the answer rather than its citations.
+
+**8. Unit-Consistency Check** (`unit_mismatches`, v0.2.190-191): a number present in the source but asserted under an incompatible unit ("100km" vs "100m", "100億円" vs "100万円") — invisible to check 5's presence test.
+
+**9. Negation-Flip Check** (`negation_mismatches`, v0.2.201-202): a cited claim that mirrors the source's wording with its polarity inverted or an antonym/degree word swapped — "Xは有効である" → "Xは有効ではない". Number-true but assertion-false, invisible to every presence-based check.
+
+**10. Self-Contradiction Check** (`self_contradictions`, v0.2.204/215): two sentences in the same answer asserting opposite polarities of the same claim (single-diff structural check); with `history=` it also catches cross-turn flips where the model contradicts its own previous answer.
+
+**Supporting machinery** (v0.2.203-229): framing/structural lines, enumeration items under a cited lead-in, fenced *and* indented code blocks are exempted from uncited/degen/contra checks (CommonMark blank-line rules, shared `_strip_fences`); `uncited_supported` splits grounded uncited sentences (citation omission) from ungrounded ones (the dangerous kind) and `uncited_supported_source`/`misattributed_suggested` name the likely right source; numeric expansion bridges magnitude shorthand, kanji numerals, spelled-out English, 歩合, rate notation and era-name years (令和6年 ≡ 2024年) so equal values aren't flagged. `source_detail` carries retrieval provenance (which RRF channel surfaced each source) through the report to the viewer/CLI/export.
+
+**Key Design Decision**: Lexical overlap is asymmetric. High overlap reliably *confirms* support. Low overlap is inconclusive—a correct synonym paraphrase and a true misattribution both score ~0. So the checks only *assert* what they can stand behind (confirmation, or a wrong number, or a bare unfounded assertion) and *stay silent otherwise* rather than falsely accusing a correctly paraphrased answer. No aggregate grounding score is emitted; the `confirmed`, `misattributed`, `uncited`, numeric/unit/negation/quote/self-contradiction/degenerate lists are the complete signal. See CHANGELOG v0.1.4 for the design rationale.
 
 ### History Management: Stripping Stale Citations, Deduplicating Roles
 
-Shoin supports multi-turn conversation by including up to 6 recent prior turns in the prompt context (HISTORY_MESSAGES=6, each truncated to 160 tokens to keep total budget ~2.4K). Challenges:
+Shoin supports multi-turn conversation by including up to 6 recent prior turns in the prompt context (HISTORY_MESSAGES=6 candidate turns, each truncated to HISTORY_TOKENS_EACH=160 tokens, and all together capped at HISTORY_TOKENS_TOTAL=400 tokens to keep the ~2.4K total budget). Challenges:
 
 **Stale Citation Stripping**: When including message N-1 in the prompt for query N, the [S1]..[Sn] numbers from the previous context are stale—they don't match the fresh retrieval for query N. If the model echoes stale numbers, they become meaningless. Solution: remove all `[S#]` markers from history messages before re-prompting.
 
@@ -138,10 +152,10 @@ Code: `ingest.py` `fetch_url()` and `_check_ip_pinning()`.
 
 ### Token-Aware Truncation
 
-The context window is budgeted: 2400 tokens, allocated as:
+The context window is budgeted: CONTEXT_TOKENS=2400 tokens, allocated as:
 - ~900 tokens: system prompt + source headers
-- ~1000 tokens: source text (split equally across TOP_K sources)
-- ~400 tokens: recent history (6 messages, 160 each)
+- SOURCE_TEXT_TOKENS=1000 tokens: source text, shared rank-proportionally across up to TOP_K=8 sources (harmonic 1/i weights over a MIN_PER_SOURCE_TOKENS=64 floor)
+- HISTORY_TOKENS_TOTAL=400 tokens: recent history — up to HISTORY_MESSAGES=6 turns, each ≤ HISTORY_TOKENS_EACH=160 tokens (the total binds first, so only the few most recent turns fit)
 - ~100 tokens: user query
 
 When truncating source text to fit the budget, naive character truncation would split mid-word or mid-UTF-8-sequence. Solution: `chunk.py` `_truncate_tokens(text, limit)` scans left-to-right, counts tokens via `estimate_tokens()` (which models LLM tokenizer behavior for CJK and punctuation), and stops exactly at the limit without mangling characters.
@@ -238,7 +252,8 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `verify_grounding()`: sentence-by-sentence comparison (source text vs. claim)
 - `uncited_sentences()`: sentences with zero [S#] anywhere in them — catches unsupported assertions `verify_grounding()` never looks at (v0.2.65)
 - `make_report()`: construct CitationReport with confirmed/misattributed/uncited lists
-- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed, uncited
+- `found_bits()`: ordered (channel, value) pairs from a source_detail map — the single extraction CLI and export share (v0.2.229)
+- `CitationReport` TypedDict: cited, invalid, coverage, source_map, source_id_map, confirmed, misattributed (+misattributed_suggested), uncited (+uncited_supported, +uncited_supported_source), numeric_mismatch, quote_mismatch, unit_mismatch, negation_mismatch, self_contradiction, degenerate, degraded, source_excerpts, source_contexts, source_chunk_ids, source_detail
 
 **`chunk.py`** (Text Chunking & Tokenization)
 - `is_cjk()`: Unicode range check (East Asian blocks + Thai/Lao/Myanmar/Khmer)
@@ -299,7 +314,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127)
+- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -307,7 +322,8 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - Formats: Markdown (full notebook dump), BibTeX, RIS
 - Handles malformed JSON in citation_report gracefully
 - Escapes special characters (backslash, newlines) per format spec
-- `_status_line()`: renders confirmed/misattributed/uncited/degraded status inline for chat messages and Studio outputs in the Markdown export, so citation verification survives outside the app (v0.2.66)
+- `_status_line()`: renders the full warning surface — confirmed/misattributed(+suggested)/numeric/unit/negation/uncited(+supported hints)/degenerate/contradict/degraded/coverage — inline for chat messages and Studio outputs in the Markdown export, so citation verification survives outside the app (v0.2.66, suggested hints v0.2.223)
+- `_legend()`: `S#=title (§ section) [検出: 全文 #2 + 意味 #5]` — section breadcrumb + retrieval provenance shared by chat and Studio sections (v0.2.130/229)
 
 ---
 
@@ -326,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.181** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.349** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 

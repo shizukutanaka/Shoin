@@ -5,7 +5,7 @@
 ## Features
 
 - **Notebook**: PDF / Markdown / TXT / HTML / URL をソースとして束ね、その範囲だけを根拠に回答
-- **引用付き回答 + 四段の引用検証**: 回答中の `[S1][S2]` をクリックで原文へジャンプ。(1) 存在しないソース番号を検出、(2) 引用文がソース本文に字句的に裏付けられていれば「根拠確認済み」と表示、(3) 引用文が**別の**ソースに強く一致する場合は番号の取り違えとして検出、(4) 引用が一切ない断定文(無出典の主張)を検出。字句信号の限界(同義語言い換えは判定不能)を踏まえ、確信できる場合のみ提示し正しい回答を誤って咎めない。LLM不要・依存ゼロ
+- **引用付き回答 + 機械的な引用検証**: 回答中の `[S1][S2]` をクリックで原文へジャンプ——引用に使われたチャンク自体がハイライトされ、節名・検出経路(全文/意味)まで表示。(1) 存在しないソース番号の検出、(2) 字句的裏付けの「根拠確認済み」表示、(3) **別の**ソースとの強一致による番号取り違え検出(正しい出典を提示)、(4) 無出典断定文の検出(出典内一致は引用欠落として区別し最尤出典を提示)に加え、数値(倍率/漢数字/英数詞/歩合/率表記/元号橋渡し)・単位・否定反転・逐語引用の改竄・回答内自己矛盾・繰返し退化まで機械検査。字句信号の限界(同義語言い換えは判定不能)を踏まえ、確信できる場合のみ提示し正しい回答を誤って咎めない。LLM不要・依存ゼロ
 - **Studio出力**: ブリーフィング / 学習ガイド / FAQ / 年表 / マインドマップをソースから生成
 - **完全ローカル**: 文書・質問・生成物は外部サービスへ送信されない。オフライン動作
 - **軽量**: 8GB RAM級のPCで動く軽量LLM(Qwen3-4B等、≤8B)を前提に設計。Docker不要・単一プロセス
@@ -17,7 +17,7 @@
 git clone https://github.com/shizukutanaka/Shoin.git && cd Shoin
 pip install .
 
-shoin serve              # http://localhost:7440 が開く
+shoin serve              # 起動したら http://localhost:7440 をブラウザで開く
 ```
 
 > **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
@@ -45,6 +45,7 @@ shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
 shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
+# その他: questions / messages / note / source (rename・refresh・delete) / reindex
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
@@ -84,6 +85,16 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
   {"q": "和紙はどう作られるか", "sources": [1]},
   {"q": "活版印刷の仕組みは", "sources": [2, 3]}
 ]
+```
+
+ベースライン比較: `--save` で基準実行を保存し、`--diff` で差分を表示する。
+差分の集計は両実行に共通する質問のみで計算し、追加・削除された質問は別枠で一覧する
+(質問文の一致で対応付けるため、casesファイルの行順変更や編集で偽の回帰は出ない)。
+同一質問の重複は出現順にペアリングされる。
+
+```bash
+shoin eval 1 cases.json --save before.json   # 設定変更前
+shoin eval 1 cases.json --diff before.json   # 設定変更後: recall/MRR の ± を表示
 ```
 
 `config.json` の例:
@@ -130,8 +141,8 @@ OpenAI互換APIを話せるローカルモデルなら何でも可。動作確�
 ## Development
 
 ```bash
-pip install -e . && pip install ruff mypy coverage    # 依存
-./scripts/verify.sh                                    # 全ゲート(lint/型/テスト+カバレッジ)
+pip install -e . && pip install -r requirements-dev.txt    # 依存(固定版)
+./scripts/verify.sh                                    # 全ゲート(lint/型/テスト+カバレッジ/secret scan)
 git config core.hooksPath .githooks                    # push前に自動実行(1回だけ)
 ```
 

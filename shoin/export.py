@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .citation import COVERAGE_LOW
+from .citation import COVERAGE_LOW, found_bits
 from .config import ui_lang
 from .store import Store
 
@@ -15,10 +15,21 @@ _STRINGS: dict[str, dict[str, str]] = {
     "chat_section": {"ja": "チャット履歴", "en": "Chat History"},
     "source_label": {"ja": "引用元", "en": "sources"},
     "status_degraded": {"ja": "検索のみ", "en": "search only"},
+    "status_truncated": {"ja": "⚠出力打切の可能性", "en": "⚠ possibly truncated"},
     "status_invalid": {"ja": "⚠検証失敗", "en": "⚠ invalid citations"},
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
+    "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
+    "status_unit": {"ja": "⚠単位が出典と不一致", "en": "⚠ unit differs from source"},
+    "status_negation": {"ja": "⚠出典と逆の主張の可能性", "en": "⚠ possible contradiction with source"},
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
+    "status_uncited_supported": {"ja": "⚠出典内一致=引用欠落", "en": "⚠ source match — missing citation"},
+    "found_label": {"ja": "検出: ", "en": "found: "},
+    "found_fts": {"ja": "全文", "en": "full-text"},
+    "found_vec": {"ja": "意味", "en": "semantic"},
+    "found_lex": {"ja": "語彙", "en": "lexical"},
+    "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
+    "status_contradict": {"ja": "⚠前後の記述が矛盾", "en": "⚠ contradictory statements"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
 }
 
@@ -42,18 +53,57 @@ def _status_line(report: dict[str, object]) -> str:
     bits: list[str] = []
     if report.get("degraded"):
         bits.append(_t("status_degraded"))
+    if report.get("truncated"):
+        # finish_reason "length": the generation stopped at the token limit —
+        # the same caveat the UI badge shows, kept on the exported record.
+        bits.append(_t("status_truncated"))
     invalid = report.get("invalid")
     if isinstance(invalid, list) and invalid:
         bits.append(f"{_t('status_invalid')}: " + ", ".join(f"S{i}" for i in invalid))
     misattr = report.get("misattributed")
     if isinstance(misattr, list) and misattr:
-        bits.append(f"{_t('status_misattr')}: " + ", ".join(f"S{i}" for i in misattr))
+        # v0.2.223: carry the right-source hint like the CLI/UI do — an
+        # exported 'S3 is wrong' without 'S1 is right' makes the reader
+        # re-verify every source by hand.
+        sugg_raw = report.get("misattributed_suggested")
+        sugg = sugg_raw if isinstance(sugg_raw, dict) else {}
+        bits.append(
+            f"{_t('status_misattr')}: "
+            + ", ".join(f"S{i}" + (f"\u2192{sugg[f'S{i}']}" if sugg.get(f"S{i}") else "") for i in misattr)
+        )
+    numeric = report.get("numeric_mismatch")
+    if isinstance(numeric, list) and numeric:
+        bits.append(f"{_t('status_numeric')}: " + ", ".join(f"S{i}" for i in numeric))
+    unit = report.get("unit_mismatch")
+    if isinstance(unit, list) and unit:
+        bits.append(f"{_t('status_unit')}: " + ", ".join(f"S{i}" for i in unit))
+    negation = report.get("negation_mismatch")
+    if isinstance(negation, list) and negation:
+        bits.append(f"{_t('status_negation')}: " + ", ".join(f"S{i}" for i in negation))
     confirmed = report.get("confirmed")
     if isinstance(confirmed, list) and confirmed:
         bits.append(f"{_t('status_confirmed')}: " + ", ".join(f"S{i}" for i in confirmed))
     uncited = report.get("uncited")
     if isinstance(uncited, list) and uncited:
         bits.append(f"{_t('status_uncited')} ({len(uncited)})")
+        # Grounded uncited = citation omission, distinguishable from the
+        # dangerous ungrounded kind (v0.2.212).
+        supported = report.get("uncited_supported")
+        if isinstance(supported, list) and supported:
+            # v0.2.223: same parity — name the source each grounded sentence
+            # should cite (deduped, first-seen order).
+            sup_raw = report.get("uncited_supported_source")
+            sup_src = sup_raw if isinstance(sup_raw, dict) else {}
+            targets = [t for s in supported if isinstance((t := sup_src.get(s, "")), str)]
+            targets = list(dict.fromkeys(targets))
+            hint = "\u2192" + ",".join(targets) if targets else ""
+            bits.append(f"{_t('status_uncited_supported')} ({len(supported)}){hint}")
+    degenerate = report.get("degenerate")
+    if isinstance(degenerate, list) and degenerate:
+        bits.append(f"{_t('status_degenerate')} ({len(degenerate)})")
+    contra = report.get("self_contradiction")
+    if isinstance(contra, list) and contra:
+        bits.append(f"{_t('status_contradict')} ({len(contra)})")
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. Warned in the Web UI
     # since early on but silently dropped from exports until v0.2.138 — an
@@ -97,8 +147,26 @@ def _legend(report: dict[str, object]) -> str:
     section_map: dict[str, str] = (
         {k: str(v) for k, v in raw_ctx.items()} if isinstance(raw_ctx, dict) else {}
     )
+    # Retrieval provenance (v0.2.229): which channel surfaced each source — the
+    # same line the app's seal viewer draws, kept when the answer is archived.
+    raw_det = report.get("source_detail")
+    detail_map: dict[str, dict[str, float]] = (
+        raw_det if isinstance(raw_det, dict) else {}
+    )
+
+    def _legend_item(k: str, v: str) -> str:
+        sec = f" (§ {section_map[k]})" if section_map.get(k) else ""
+        bits = [
+            f"{_t('found_' + kind)} #{int(val)}"
+            if kind != "lex"
+            else f"{_t('found_' + kind)} {val:.2f}"
+            for kind, val in found_bits(detail_map.get(k))
+        ]
+        prov = f" [{_t('found_label')}{' + '.join(bits)}]" if bits else ""
+        return f"{k}={v}{sec}{prov}"
+
     return ", ".join(
-        f"{k}={v}" + (f" (§ {section_map[k]})" if section_map.get(k) else "")
+        _legend_item(k, v)
         for k, v in sorted(
             ((str(k), str(v)) for k, v in raw_map.items()),
             key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0,

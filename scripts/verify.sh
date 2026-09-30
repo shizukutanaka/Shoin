@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
-# Shoin verification gate — the same checks ci/ci.yml runs, in one command.
+# Shoin verification gate — every PASS/FAIL check ci/ci.yml has, in one command
+# (lint, mypy --strict, tests+coverage, secret scan). ci.yml's SBOM step is a
+# build-artifact step, not a gate, so it stays CI-side only.
 #
 # Why this exists: GitHub Actions cannot be activated from an automated agent
 # (pushing .github/workflows/ is refused without the App's `workflows`
@@ -25,8 +27,8 @@
 # say "ALL GATES PASSED" with exit 0, which is exactly the "missing tool
 # masquerades as a pass" failure this comment already claimed to guard
 # against for years). README documents these as required dev dependencies
-# for exactly this reason: `pip install -e . && pip install ruff mypy
-# coverage`. The narrower, previously-verified mypy "only missing-import
+# for exactly this reason: `pip install -e . && pip install -r
+# requirements-dev.txt`. The narrower, previously-verified mypy "only missing-import
 # errors" case (the project's OWN dependency, e.g. pypdf, not installed —
 # v0.2.153) is a real SKIP but does NOT block: mypy still ran and
 # type-checked everything else, unlike the tool being absent.
@@ -55,7 +57,7 @@ if have ruff; then
     # pyproject pins the rule set, so this cannot drift with the ruff version.
     run "lint (ruff check)" "$PY" -m ruff check .
 else
-    printf '\n=== lint (ruff check) ===\n  SKIP: ruff not installed (pip install ruff)\n'
+    printf '\n=== lint (ruff check) ===\n  SKIP: ruff not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 
@@ -78,7 +80,7 @@ if have mypy; then
         fail=1
     fi
 else
-    printf '\n=== types (mypy) ===\n  SKIP: mypy not installed (pip install mypy)\n'
+    printf '\n=== types (mypy) ===\n  SKIP: mypy not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 
@@ -89,6 +91,17 @@ if have coverage; then
 else
     run "tests" "$PY" -m unittest discover -s tests -p 'test_*.py'
     printf '  SKIP: coverage not installed; ran tests without the 90%% threshold\n'
+    skipped=1
+fi
+
+if have detect_secrets; then
+    # Same scan + zero-finding assertion ci.yml runs.
+    run "secret scan (detect-secrets)" sh -c \
+        "$PY -m detect_secrets scan shoin/ tests/ > .verify-ds.json && \
+         $PY -c \"import json,sys; r=json.load(open('.verify-ds.json')).get('results',{}); n=sum(len(v) for v in r.values()); print('secrets:',n); sys.exit(1 if n else 0)\""
+    rm -f .verify-ds.json
+else
+    printf '\n=== secret scan (detect-secrets) ===\n  SKIP: detect-secrets not installed (pip install -r requirements-dev.txt)\n'
     skipped=1
 fi
 

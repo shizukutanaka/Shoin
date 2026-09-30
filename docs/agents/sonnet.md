@@ -12,24 +12,27 @@
 
 ## 1. 必読の儀式（省略禁止 — Opus 用と同一内容）
 
-1. **バージョンbump三点セット** — 1つの変更セットにつき:
+1. **バージョンbump五点セット** — 1つの変更セットにつき5ファイルを更新:
    - `shoin/config.py` の `VERSION`
    - `pyproject.toml` の `version`
    - `tests/test_core.py` の `test_version` のアサーション
-   さらに `docs/HISTORY.md` の Version History 節の**先頭**にエントリを追記し
-   （v0.2.172 以降、詳細な bug-by-bug エントリはここに書く — CLAUDE.md 本体には書かない）、
-   `CLAUDE.md` 側の一行ポインタ("Current version: **v0.2.NNN**")も更新する。
+   - `docs/HISTORY.md` — 見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端更新と、
+     その直下への `### v0.2.NNN` エントリ追記（v0.2.172 以降、詳細な bug-by-bug
+     エントリはここに書く — CLAUDE.md 本体には書かない）
+   - `CLAUDE.md` の一行ポインタ("Current version: **v0.2.NNN**")
    書式は直近エントリに倣う。
 2. **fail-then-pass 検証** — バグ修正には必ず回帰テストを書き、
    `git stash push <修正ファイル>` で修正前コードに戻して**テストが落ちる**ことを
    確認してから `git stash pop` する。落ちないテストは回帰テストではない。
 3. **UI 変更は実ブラウザで検証** — `shoin/static/index.html` を変えたら
    Playwright（chromium は `/opt/pw-browsers/chromium`）+ 実サーバーで
-   操作を再現して確認する。pytest にブラウザテストは残さない。
+   操作を再現して確認する。テストスイートにブラウザテストは残さない。
    （自信がなければ UI 変更自体を見送り、発見として記録する。）
-4. **静的検査** — 変更ファイルで `python -m ruff check` と `python -m mypy shoin/`
+4. **静的検査** — 変更ファイルで `python -m ruff check` と `python -m mypy --strict shoin/`
    をクリーンに保つ。**`ruff format` は絶対に実行しない**（手整形スタイル）。
-5. **完了条件** — `python -m unittest discover -s tests` 全緑。
+5. **完了条件** — `./scripts/verify.sh` 全ゲート全緑（lint / mypy --strict /
+   unittest+coverage≥90% / detect-secrets。`python3` が 3.11+ でない環境では
+   `PYTHON=.venv/bin/python ./scripts/verify.sh`）。unittest 単独では残り4ゲートを通らない。
 6. **push** — 指定作業ブランチに push し、`git push origin HEAD:main` で
    公開 `main` を追従。タグ push・`.github/workflows/` 書き込みは権限上不可。
 
@@ -86,11 +89,12 @@
 4. 修正を実装
 5. python -m unittest <新テスト> で「通る」ことを確認
 6. git stash push shoin/<修正ファイル> → 新テスト再実行 → 落ちることを確認 → git stash pop
-7. バージョンbump三点（config.py / pyproject.toml / test_version）
+7. バージョンbump五点（config.py / pyproject.toml / test_version /
+   HISTORY.md 見出し+エントリ / CLAUDE.md ポインタ）
 8. docs/HISTORY.md の Version History 先頭にエントリ追記（§5のテンプレート）、
    CLAUDE.md 側のポインタ行も更新
-9. python -m unittest discover -s tests   # 全緑が完了条件
-10. python -m ruff check shoin/<変更ファイル> && python -m mypy shoin/
+9. PYTHON=.venv/bin/python ./scripts/verify.sh   # 全ゲート全緑が完了条件
+10. （verify.sh が ruff check . / mypy --strict / coverage / detect-secrets を兼ねるため追加の手実行は不要）
 11. commit → push 指定ブランチ → git push origin HEAD:main
 ```
 
@@ -115,7 +119,7 @@
 - N regression test(s) added (`test_...`), fail-then-pass verified via `git stash`
   on `shoin/<file>`.
 
-`pytest tests/` now runs NNN tests. `mypy shoin/` and `ruff check <files>` remain clean.
+`./scripts/verify.sh` is all-green (ruff, mypy --strict, NNN tests at coverage ≥90%, detect-secrets clean).
 ```
 
 （機能追加は `**Fixed**` を `**Added**` に。追記先は `docs/HISTORY.md`。

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="shoin-lang" content="__SHOIN_LANG__">
+<!-- REQ-007: 3-pane Web UI (sources / chat / studio) -->
 <title>Shoin 書院</title>
 <style>
 :root{
@@ -182,13 +183,13 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
 </header>
 <div id="banner" role="status"></div>
 <div class="tabs" role="tablist">
-  <button role="tab" aria-selected="false" data-pane="paneSrc" data-i18n="tabs.sources">資料</button>
-  <button role="tab" aria-selected="true" data-pane="paneChat" data-i18n="tabs.chat">対話</button>
-  <button role="tab" aria-selected="false" data-pane="paneStudio" data-i18n="tabs.studio">書斎</button>
+  <button role="tab" id="tabSrc" aria-selected="false" aria-controls="paneSrc" data-pane="paneSrc" data-i18n="tabs.sources">資料</button>
+  <button role="tab" id="tabChat" aria-selected="true" aria-controls="paneChat" data-pane="paneChat" data-i18n="tabs.chat">対話</button>
+  <button role="tab" id="tabStudio" aria-selected="false" aria-controls="paneStudio" data-pane="paneStudio" data-i18n="tabs.studio">書斎</button>
 </div>
 <main>
   <!-- sources -->
-  <section class="pane" id="paneSrc" data-i18n-aria="tabs.sources" aria-label="Sources">
+  <section class="pane" id="paneSrc" role="tabpanel" aria-labelledby="tabSrc">
     <div class="pane-head" data-i18n="sources.head">書 棚</div>
     <div class="pane-body">
       <ul id="nbList"></ul>
@@ -217,7 +218,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- chat -->
-  <section class="pane active" id="paneChat" data-i18n-aria="tabs.chat" aria-label="Chat">
+  <section class="pane active" id="paneChat" role="tabpanel" aria-labelledby="tabChat">
     <div class="pane-head"><span data-i18n="chat.head">文 机</span><span id="degBadge" class="badge warn" hidden data-i18n="chat.degraded">検索のみ</span><button class="clear-chat" id="clearChat" type="button" data-i18n="chat.clear" hidden>クリア</button></div>
     <div class="pane-body" id="chat" aria-live="polite"></div>
     <div id="chatEmpty" class="empty" style="margin:14px" hidden>
@@ -234,7 +235,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   </section>
 
   <!-- studio + notes -->
-  <section class="pane" id="paneStudio" data-i18n-aria="tabs.studio" aria-label="Studio">
+  <section class="pane" id="paneStudio" role="tabpanel" aria-labelledby="tabStudio">
     <div class="pane-head" data-i18n="studio.head">書 斎</div>
     <div class="pane-body">
       <div class="kinds" id="kinds"></div>
@@ -279,15 +280,18 @@ const I18N = {
     "tabs.sources":"資料","tabs.chat":"対話","tabs.studio":"書斎",
     "sources.head":"書 棚","sources.empty.title":"書棚が空",
     "sources.empty.body":"ファイルかURLを加えると、引用付きで対話できる。",
-    "sources.addurl":"取込","sources.added":"取込完了",
+    "sources.addurl":"取込","sources.added":"取込完了","src.pages_failed":"⚠ {n} ページの抽出に失敗（索引が不完全です）",
     "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.rename":"名前を変更","nb.delete":"この書院を削除",
     "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
     "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
     "chat.coverage.low":"引用被覆 低","chat.invalid":"検証失敗の引用",
-    "chat.misattr":"誤ソースの可能性","chat.confirmed":"根拠確認済み",
-    "chat.uncited":"無出典の断定文",
+    "chat.misattr":"誤ソースの可能性","chat.numeric":"数値が出典に無し","chat.unit":"単位が出典と不一致","chat.negation":"出典と逆の主張の可能性","chat.confirmed":"根拠確認済み",
+    "chat.uncited":"無出典の断定文","chat.uncited_supported":"出典内一致=引用欠落","chat.degenerate":"繰り返し生成の疑い","chat.contradict":"前後の記述が矛盾",
+    "chat.truncated":"出力が途中で打ち切られた可能性","chat.truncated_hint":"トークン上限に達して生成が停止した応答です",
+    "chat.stream_dropped":"応答ストリームが途中で切れました",
+    "chat.earlier":"— 以前の {n} 件は省略 —",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
@@ -297,7 +301,7 @@ const I18N = {
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
     "reindex.ok":"{n}/{total} チャンクを再埋め込みしました",
-    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所",
+    "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所","viewer.match_label":"検出:","viewer.match_fts":"全文","viewer.match_vec":"意味","viewer.match_lex":"語彙",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
@@ -312,15 +316,18 @@ const I18N = {
     "tabs.sources":"Sources","tabs.chat":"Chat","tabs.studio":"Studio",
     "sources.head":"SHELF","sources.empty.title":"The shelf is empty",
     "sources.empty.body":"Add a file or URL to start a cited conversation.",
-    "sources.addurl":"Fetch","sources.added":"Source added",
+    "sources.addurl":"Fetch","sources.added":"Source added","src.pages_failed":"⚠ {n} page(s) could not be extracted — index is incomplete",
     "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.rename":"Rename","nb.delete":"Delete this notebook",
     "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
     "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
     "chat.coverage.low":"low citation coverage","chat.invalid":"unverified citations",
-    "chat.misattr":"possible wrong source","chat.confirmed":"grounding confirmed",
-    "chat.uncited":"uncited assertions",
+    "chat.misattr":"possible wrong source","chat.numeric":"number not in source","chat.unit":"unit differs from source","chat.negation":"possible contradiction with source","chat.confirmed":"grounding confirmed",
+    "chat.uncited":"uncited assertions","chat.uncited_supported":"source match — missing citation","chat.degenerate":"possible generation loop","chat.contradict":"contradictory statements",
+    "chat.truncated":"possibly truncated answer","chat.truncated_hint":"generation stopped at the token limit",
+    "chat.stream_dropped":"answer stream ended early",
+    "chat.earlier":"— {n} earlier messages not shown —",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
@@ -330,7 +337,7 @@ const I18N = {
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
     "reindex.ok":"Re-embedded {n}/{total} chunks",
-    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here",
+    "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here","viewer.match_label":"found:","viewer.match_fts":"full-text","viewer.match_vec":"semantic","viewer.match_lex":"lexical",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
@@ -442,11 +449,18 @@ async function loadNotebooks(){
     ul.append(e0);
   } else if (!cur){ openNotebook(notebooks[0].id); }
 }
+// Requests can resolve out of order (click notebook A, then B; B's response
+// arrives first) — last-write-wins would then leave the user looking at the
+// notebook they did NOT select last.  Same _sealSeq-style guard openSeal uses
+// for its async excerpt probes: the newest call wins; stale resolves discard.
+let _nbSeq = 0;
 async function openNotebook(id){
+  const seq = ++_nbSeq;
   try{
     const j = await (await api(`/api/notebooks/${id}`)).json();
+    if (seq !== _nbSeq) return;
     cur = j; renderNotebook(); loadNotebooks();
-  }catch(e){ toast(e.message); }
+  }catch(e){ if (seq === _nbSeq) toast(e.message); }
 }
 // Enters inline-rename mode for a source row. Factored out of the dblclick
 // handler so renderNotebook() can also call it to RESTORE an in-progress,
@@ -573,7 +587,9 @@ function renderNotebook(){
             renameInput.onblur = null; renameInput.onkeydown = null;
           }
           ref.disabled = true; ref.textContent = "…";
-          try { await api(`/api/sources/${s.id}/refresh`,{method:"POST"}); toast(t("src.refresh.ok")); openNotebook(cur.id); }
+          try { const j = await (await api(`/api/sources/${s.id}/refresh`,{method:"POST"})).json();
+            toast(t("src.refresh.ok") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : ""));
+            openNotebook(cur.id); }
           catch(e){ toast(e.message); ref.disabled=false; ref.textContent="↻"; } };
         row.append(ref);
       }
@@ -632,12 +648,16 @@ function renderWithSeals(container, text, report){
   text = text.normalize("NFKC");
   const invalid = new Set((report && report.invalid) || []);
   const misattr = new Set((report && report.misattributed) || []);
+  const numeric = new Set((report && report.numeric_mismatch) || []);
+  const unit = new Set((report && report.unit_mismatch) || []);
+  const negation = new Set((report && report.negation_mismatch) || []);
   const confirmed = new Set((report && report.confirmed) || []);
   const srcMap = (report && report.source_map) || {};
   const idMap = (report && report.source_id_map) || null;
   const excerpts = (report && report.source_excerpts) || {};
   const contexts = (report && report.source_contexts) || {};
   const chunkIds = (report && report.source_chunk_ids) || {};
+  const details = (report && report.source_detail) || {};
   // Match a whole bracket group, then pull every S-number inside it so that
   // combined citations like "[S1, S2]" render as two seals (matches backend).
   const reB = /\[([^\[\]]+)\]/g; let last = 0, m;
@@ -647,7 +667,7 @@ function renderWithSeals(container, text, report){
     if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
     nums.forEach((n, i) => {
       if (i) container.append(document.createTextNode(" "));
-      const cls = invalid.has(n) ? " bad" : (misattr.has(n) ? " mis" : (confirmed.has(n) ? " ok" : ""));
+      const cls = invalid.has(n) ? " bad" : ((misattr.has(n)||numeric.has(n)||unit.has(n)||negation.has(n)) ? " mis" : (confirmed.has(n) ? " ok" : ""));
       const chip = el("button","seal" + cls, `S${n}`);
       chip.type="button";
       const name = srcMap[`S${n}`] || "";
@@ -655,26 +675,52 @@ function renderWithSeals(container, text, report){
       const nameSec = name + (section ? " › " + section : "");
       chip.title = invalid.has(n) ? t("chat.invalid")
         : misattr.has(n) ? t("chat.misattr") + (name ? " — " + nameSec : "")
+        : numeric.has(n) ? t("chat.numeric") + (name ? " — " + nameSec : "")
+        : unit.has(n) ? t("chat.unit") + (name ? " — " + nameSec : "")
+        : negation.has(n) ? t("chat.negation") + (name ? " — " + nameSec : "")
         : confirmed.has(n) ? t("chat.confirmed") + (name ? " — " + nameSec : "")
         : nameSec;
       chip.setAttribute("aria-label", t("a11y.citation") + n + (name ? ": " + nameSec : ""));
-      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds);
+      chip.onclick = () => openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details);
       container.append(chip);
     });
     last = reB.lastIndex;
   }
   if (last < text.length) container.append(document.createTextNode(text.slice(last)));
 }
-function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds){
+let _sealSeq = 0;
+async function openSeal(n, srcMap, idMap, excerpts, contexts, chunkIds, details){
   // Prefer the authoritative source_id_map (avoids title collisions); fall back to title scan.
   const sid = idMap && idMap[`S${n}`];
   const title = srcMap[`S${n}`];
   const excerpt = (excerpts && excerpts[`S${n}`]) || null;
   const section = (contexts && contexts[`S${n}`]) || null;
   const cited = (chunkIds && chunkIds[`S${n}`]) || null;
-  if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited); return; }
-  for (const [id, info] of srcIndex){ if (info.title === title){ showSource(id, title, excerpt, section, cited); return; } }
-  if (title) toast(title);
+  const detail = (details && details[`S${n}`]) || null;
+  if (sid){ showSource(sid, title || `S${n}`, excerpt, section, cited, detail); return; }
+  const candidates = [];
+  for (const [id, info] of srcIndex){ if (info.title === title) candidates.push(id); }
+  if (candidates.length === 1){ showSource(candidates[0], title, excerpt, section, cited, detail); return; }
+  if (!candidates.length){ if (title) toast(title); return; }
+  // Title collision (only reachable on pre-source_id_map reports): the first
+  // match is not necessarily the cited source, and opening the wrong one is
+  // silent misattribution on the surface built to prevent it.  When the stored
+  // excerpt is available, pick the candidate whose chunks actually contain it —
+  // the same provable check renderFullSource applies to chunk ids (v0.2.230).
+  // _sealSeq guards the async probes against a second seal click racing in.
+  const seq = ++_sealSeq;
+  if (excerpt){
+    for (const id of candidates){
+      try{
+        const j = await (await api(`/api/sources/${id}/text`)).json();
+        if (seq !== _sealSeq) return;
+        if ((j.chunks || []).some(c => excerpt.includes(String(c.text).slice(0, 24)))){
+          showSource(id, title, excerpt, section, cited, detail); return;
+        }
+      }catch(e){ /* probe failed — try the next candidate */ }
+    }
+  }
+  if (seq === _sealSeq) showSource(candidates[0], title, excerpt, section, cited, detail);
 }
 let _srcAbort = null, _viewerOpener = null;
 function closeViewer(){
@@ -686,13 +732,21 @@ function closeViewer(){
 // to the first one. This is the last mile of "verifiable citation": the reader
 // sees the cited wording in its original position, not just a detached excerpt.
 // citedIds absent (old persisted report / Studio output) → plain text, unmarked.
-function renderFullSource(container, chunks, citedIds){
+function renderFullSource(container, chunks, citedIds, excerpt){
   container.replaceChildren();
   const marked = new Set(citedIds || []);
+  // chunks.id is a plain rowid (no AUTOINCREMENT) — a refreshed source's new
+  // chunks can REUSE the ids an old report stored, so an id match alone can
+  // pin the "cited here" mark on text the citation never saw (silent
+  // misattribution). When the report's stored excerpt is available, only mark
+  // a chunk whose head actually appears in it (v0.2.230); without an excerpt
+  // there is nothing to verify against, so the old id-only behavior stays.
+  const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
   chunks.forEach((c, i) => {
     if (i) container.append(el("div","chunk-sep","⋯"));
-    const isCited = marked.has(c.id);
+    const isCited = marked.has(c.id) &&
+      (!provable || excerpt.includes(String(c.text).slice(0, 24)));
     const block = el("div", isCited ? "src-chunk cited-chunk" : "src-chunk", c.text);
     if (isCited){
       block.prepend(el("div","cited-label", t("viewer.cited_chunk")));
@@ -704,7 +758,7 @@ function renderFullSource(container, chunks, citedIds){
   // manual scanning. Guarded: no cited chunks (or an old report) → no scroll.
   if (first) first.scrollIntoView({block:"nearest"});
 }
-async function showSource(id, title, excerpt, section, citedIds){
+async function showSource(id, title, excerpt, section, citedIds, detail){
   if (_srcAbort) _srcAbort.abort();
   _srcAbort = new AbortController();
   const sig = _srcAbort.signal;
@@ -717,6 +771,18 @@ async function showSource(id, title, excerpt, section, citedIds){
   // persisted reports or sources with no heading structure.
   if (section){
     vt.append(el("div","section-label", t("viewer.section") + " " + section));
+  }
+  // Retrieval provenance (v0.2.228): which channel surfaced this source —
+  // BM25 rank and/or vector rank, plus the term-presence signal. A source
+  // found only semantically (no full-text rank) is exactly the class where
+  // unsupported claims live, so the why-it-surfaced signal sits next to the
+  // what-it-said excerpt. Absent on old persisted reports.
+  if (detail){
+    const found = [];
+    if (detail.rrf_bm25_rank) found.push(t("viewer.match_fts") + " #" + detail.rrf_bm25_rank);
+    if (detail.rrf_vec_rank) found.push(t("viewer.match_vec") + " #" + detail.rrf_vec_rank);
+    if (detail.lex) found.push(t("viewer.match_lex") + " " + Number(detail.lex).toFixed(2));
+    if (found.length) vt.append(el("div","section-label", t("viewer.match_label") + " " + found.join(" + ")));
   }
   if (excerpt){
     // Show the retrieved passage immediately — no network round-trip needed.
@@ -734,7 +800,7 @@ async function showSource(id, title, excerpt, section, citedIds){
       try{
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
-        renderFullSource(body, j.chunks, citedIds);
+        renderFullSource(body, j.chunks, citedIds, excerpt);
       }catch(e){ if (!sig.aborted) body.textContent = e.message; }
     });
     vt.append(det);
@@ -768,6 +834,62 @@ $("#viewer").addEventListener("keydown", e=>{
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeViewer(); });
 
 /* ---------- chat ---------- */
+// The badge row beneath an assistant message or Studio card. Lives in one
+// place because it is the SAME chain for all three surfaces (chat SSE, chat
+// history, Studio) — when a new check lands, one copy per surface is how flags
+// end up warning in one place and staying silent in another (v0.2.234-235).
+function reportBadges(c, report){
+  if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
+  if (report.invalid && report.invalid.length){
+    const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
+    c.append(b);
+  }
+  if (report.misattributed && report.misattributed.length){
+    const sugg = report.misattributed_suggested || {};
+    c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i+(sugg["S"+i]?"→"+sugg["S"+i]:"")).join(", ")));
+  }
+  if (report.numeric_mismatch && report.numeric_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.numeric")}: ` + report.numeric_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.unit_mismatch && report.unit_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.unit")}: ` + report.unit_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.negation_mismatch && report.negation_mismatch.length){
+    c.append(el("span","badge err", `⚠ ${t("chat.negation")}: ` + report.negation_mismatch.map(i=>"S"+i).join(", ")));
+  }
+  if (report.confirmed && report.confirmed.length){
+    c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
+  }
+  if (report.uncited && report.uncited.length){
+    const sup = new Set(report.uncited_supported || []);
+    const supSrc = report.uncited_supported_source || {};
+    const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
+    // Grounded uncited = citation omission; ungrounded = the dangerous kind.
+    b.title = report.uncited.map(s => sup.has(s) ? s + ` [${t("chat.uncited_supported")}→${supSrc[s] || ""}]` : s).join("\n");
+    c.append(b);
+  }
+  if (report.degenerate && report.degenerate.length){
+    const b = el("span","badge warn", `⚠ ${t("chat.degenerate")}: ${report.degenerate.length}`);
+    b.title = report.degenerate.join("\n");
+    c.append(b);
+  }
+  if (report.self_contradiction && report.self_contradiction.length){
+    const b = el("span","badge warn", `⚠ ${t("chat.contradict")}: ${report.self_contradiction.length}`);
+    b.title = report.self_contradiction.join("\n");
+    c.append(b);
+  }
+  // report.truncated = the LLM answered to MAX_TOKENS (finish_reason "length").
+  // The text is genuine but clipped mid-generation — warn rather than present
+  // a truncated answer as complete (v0.2.245).
+  if (report.truncated){
+    const b = el("span","badge warn", `⚠ ${t("chat.truncated")}`);
+    b.title = t("chat.truncated_hint");
+    c.append(b);
+  }
+  if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < COVERAGE_LOW){
+    c.append(el("span","badge warn", t("chat.coverage.low")));
+  }
+}
 function addMsg(role, body, report){
   const wrap = el("div","msg "+role);
   wrap.append(el("div","who", role==="user" ? t("chat.you") : t("chat.shoin")));
@@ -776,25 +898,7 @@ function addMsg(role, body, report){
   wrap.append(bd);
   if (report && role!=="user"){
     const c = el("div","cites");
-    if (report.degraded) c.append(el("span","badge dim", t("chat.degraded")));
-    if (report.invalid && report.invalid.length){
-      const b = el("span","badge err", `⚠ ${t("chat.invalid")}: ` + report.invalid.map(i=>"S"+i).join(", "));
-      c.append(b);
-    }
-    if (report.misattributed && report.misattributed.length){
-      c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: ` + report.misattributed.map(i=>"S"+i).join(", ")));
-    }
-    if (report.confirmed && report.confirmed.length){
-      c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: ` + report.confirmed.map(i=>"S"+i).join(", ")));
-    }
-    if (report.uncited && report.uncited.length){
-      const b = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${report.uncited.length}`);
-      b.title = report.uncited.join("\n");
-      c.append(b);
-    }
-    if (typeof report.coverage==="number" && report.cited && report.cited.length && report.coverage < COVERAGE_LOW){
-      c.append(el("span","badge warn", t("chat.coverage.low")));
-    }
+    reportBadges(c, report);
     if (c.children.length) wrap.append(c);
   }
   $("#chat").append(wrap);
@@ -804,6 +908,11 @@ function addMsg(role, body, report){
 function renderChatHistory(){
   $("#degBadge").hidden = true;
   $("#chat").replaceChildren();
+  // Disclose the server-side history cap (messages_omitted) rather than
+  // silently rendering a partial log — same honesty convention as the
+  // budget-cut marker and truncated badge.
+  if (cur.messages_omitted)
+    $("#chat").prepend(el("div","empty", t("chat.earlier").replace("{n}", cur.messages_omitted)));
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
   const hasChat = (cur.messages||[]).length > 0;
   $("#chatEmpty").hidden = hasChat;
@@ -843,7 +952,7 @@ $("#askForm").onsubmit = async e=>{
   const bd = addMsg("ai", "", null);
   bd.append(el("span","spin", t("busy")));
   $("#askBtn").disabled = true;
-  let acc = "", meta=null;
+  let acc = "", gotDone = false, failed = false;
   try{
     const r = await jpost(`/api/notebooks/${nbId}/ask`, {question:q});
     const reader = r.body.getReader(); const dec = new TextDecoder();
@@ -861,30 +970,48 @@ $("#askForm").onsubmit = async e=>{
         }
         if (!data) continue;
         let j; try{ j = JSON.parse(data); }catch(_e){ continue; }
-        if (ev==="meta") meta = j;
-        else if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
+        // meta frames carry the source list, but every field is also present in
+        // the done frame's report (source_map/source_id_map) — nothing to store.
+        if (ev==="delta"){ acc += j.text ?? ""; bd.textContent = acc; $("#chat").scrollTop = $("#chat").scrollHeight; }
         else if (ev==="done"){
+          gotDone = true;
           const rpt = j.report || {};
+          // Pane-head degraded badge: the done frame carries `degraded` — this
+          // is the per-answer retrieval-only signal (LLM nominally on but the
+          // call errored), distinct from the global banner's "LLM off".
+          $("#degBadge").hidden = !j.degraded;
           renderWithSeals(bd, acc, rpt);
           const wrap = bd.parentElement, c = el("div","cites");
-          if (rpt.degraded) c.append(el("span","badge dim", t("chat.degraded")));
-          if (rpt.invalid?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.invalid")}: `+rpt.invalid.map(x=>"S"+x).join(", ")));
-          if (rpt.misattributed?.length)
-            c.append(el("span","badge err", `⚠ ${t("chat.misattr")}: `+rpt.misattributed.map(x=>"S"+x).join(", ")));
-          if (rpt.confirmed?.length)
-            c.append(el("span","badge dim", `✓ ${t("chat.confirmed")}: `+rpt.confirmed.map(x=>"S"+x).join(", ")));
-          if (rpt.uncited?.length){
-            const ub = el("span","badge warn", `⚠ ${t("chat.uncited")}: ${rpt.uncited.length}`);
-            ub.title = rpt.uncited.join("\n");
-            c.append(ub);
-          }
-          if (rpt.cited?.length && rpt.coverage < COVERAGE_LOW)
-            c.append(el("span","badge warn", t("chat.coverage.low")));
+          reportBadges(c, rpt);
           if (c.children.length) wrap.append(c);
           $("#chat").scrollTop = $("#chat").scrollHeight;
         }
+        else if (ev==="error"){
+          // The server can fail mid-stream: without this branch the partial
+          // answer just freezes with zero signal (the catch path only sees
+          // network-level errors, not an SSE "error" frame).
+          failed = true;
+          toast(j.message || j.code || "");
+        }
       }
+    }
+    if (!gotDone && !failed){
+      // Stream ended without a done frame (a proxy or network cut): the server
+      // persists the full assistant message + report anyway, so re-render the
+      // stored answer instead of leaving a seal-less partial text behind.
+      try{
+        const d = await (await api(`/api/notebooks/${nbId}`)).json();
+        const last = (d.messages||[]).filter(m=>m.role==="assistant").pop();
+        if (last){
+          acc = last.body || "";
+          bd.replaceChildren();
+          renderWithSeals(bd, acc, last.report || null);
+          const c = el("div","cites"); reportBadges(c, last.report || {});
+          if (c.children.length) bd.parentElement.append(c);
+          $("#degBadge").hidden = !(last.report && last.report.degraded);
+        }
+        else { toast(t("chat.stream_dropped")); }
+      }catch(_e){ toast(t("chat.stream_dropped")); }
     }
   }catch(err){ bd.textContent=""; toast(err.message); }
   finally{
@@ -921,15 +1048,7 @@ function renderStudio(){
   items.forEach(o=>{
     const card = el("div","card");
     const h = el("h4",null,t("studio."+o.kind));
-    if (o.report && o.report.invalid && o.report.invalid.length) h.append(el("span","badge err","⚠"));
-    if (o.report && o.report.misattributed && o.report.misattributed.length) h.append(el("span","badge err", t("chat.misattr")));
-    if (o.report && o.report.uncited && o.report.uncited.length){
-      const ub = el("span","badge warn", `${t("chat.uncited")}: ${o.report.uncited.length}`);
-      ub.title = o.report.uncited.join("\n");
-      h.append(ub);
-    }
-    if (o.report && o.report.cited && o.report.cited.length && o.report.coverage < COVERAGE_LOW)
-      h.append(el("span","badge warn", t("chat.coverage.low")));
+    if (o.report) reportBadges(h, o.report);
     card.append(h);
     const bd = el("div","bd"); renderWithSeals(bd, o.body, o.report); card.append(bd);
     out.append(card);
@@ -988,9 +1107,9 @@ $("#fileInput").onchange = async e=>{
   const nbId = cur.id;
   e.target.disabled = true;
   try{
-    await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
-      headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f});
-    e.target.value=""; toast(t("sources.added")); openNotebook(nbId);
+    const j = await (await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
+      headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f})).json();
+    e.target.value=""; toast(t("sources.added") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : "")); openNotebook(nbId);
   }catch(err){ e.target.value=""; toast(err.message); }
   finally{ e.target.disabled = false; }
 };
@@ -999,19 +1118,30 @@ $("#urlBtn").onclick = async ()=>{
   const nbId = cur.id;
   const btn = $("#urlBtn");
   btn.disabled = true; const old = btn.textContent; btn.textContent = t("busy");
-  try{ await jpost(`/api/notebooks/${nbId}/sources`, {target:u});
-    $("#urlInput").value=""; toast(t("sources.added")); openNotebook(nbId);
+  try{ const j = await (await jpost(`/api/notebooks/${nbId}/sources`, {target:u})).json();
+    $("#urlInput").value=""; toast(t("sources.added") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : "")); openNotebook(nbId);
   }catch(err){ toast(err.message); }
   finally{ btn.disabled = false; btn.textContent = old; }
 };
 
 /* ---------- tabs / lang / health ---------- */
+const selectTab = b=>{
+  document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
+  b.setAttribute("aria-selected","true");
+  document.querySelectorAll(".pane").forEach(p=>p.classList.remove("active"));
+  $("#"+b.dataset.pane).classList.add("active");
+};
 document.querySelectorAll(".tabs button").forEach(b=>{
-  b.onclick = ()=>{
-    document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
-    b.setAttribute("aria-selected","true");
-    document.querySelectorAll(".pane").forEach(p=>p.classList.remove("active"));
-    $("#"+b.dataset.pane).classList.add("active");
+  b.onclick = ()=>selectTab(b);
+  // WAI-ARIA tabs: arrows move focus+selection, Home/End jump to the ends.
+  b.onkeydown = e=>{
+    if (!["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) return;
+    e.preventDefault();
+    const tabs=[...document.querySelectorAll(".tabs button")];
+    const i=tabs.indexOf(b);
+    const n = e.key==="Home" ? 0 : e.key==="End" ? tabs.length-1
+      : (i + (e.key==="ArrowRight"?1:-1) + tabs.length) % tabs.length;
+    tabs[n].focus(); selectTab(tabs[n]);
   };
 });
 $("#langBtn").onclick = ()=>{
@@ -1035,7 +1165,17 @@ async function health(){
     // Re-fetch questions when LLM goes from off→on (e.g. first health check
     // completes after notebook was already loaded, or LLM restarts).
     if (!wasOn && j.llm) refreshQuestions();
-  }catch(_e){ window._llmOn=false; }
+  }catch(_e){
+    window._llmOn=false;
+    // Unreachable/invalid health response: the lamp must not keep claiming the
+    // LLM is on while _llmOn says otherwise — show the same offline state the
+    // !j.llm branch uses instead of leaving a stale green light.
+    $("#lamp").classList.remove("on");
+    $("#lampText").textContent = t("app.lamp.off");
+    const b = $("#banner");
+    b.style.display = "block";
+    b.textContent = t("banner.offline");
+  }
 }
 
 /* ---------- boot ---------- */

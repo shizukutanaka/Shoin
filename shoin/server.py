@@ -24,6 +24,8 @@ from .config import (
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
+    NB_MESSAGES_LIMIT,
+    REQUEST_SOCKET_SEC,
     VERSION,
     db_path,
     multi_query_enabled,
@@ -107,6 +109,16 @@ def _safe_report(raw: Any) -> dict[str, Any]:
 
 def _notebook_json(store: Store, nb_id: int) -> Json:
     nb = store.get_notebook(nb_id)
+    # Chats grow monotonically; without a cap every mutation round-trips the
+    # whole history (and the SSE-drop recovery refetches it too). Embed only the
+    # newest NB_MESSAGES_LIMIT and report how many were omitted — the UI shows
+    # an honest "earlier N not shown" line rather than silently dropping them;
+    # export() and the DB still hold the full record.
+    recent_msgs = store.list_messages_recent(nb_id, NB_MESSAGES_LIMIT + 1)
+    omitted = 0
+    if len(recent_msgs) > NB_MESSAGES_LIMIT:
+        recent_msgs = recent_msgs[len(recent_msgs) - NB_MESSAGES_LIMIT :]
+        omitted = store.count_messages(nb_id) - len(recent_msgs)
     return {
         "id": nb.id,
         "name": nb.name,
@@ -132,13 +144,20 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 "body": m["body"],
                 "report": _safe_report(m["citation_report"]),
             }
-            for m in store.list_messages(nb_id)
+            for m in recent_msgs
         ],
+        "messages_omitted": omitted,
     }
 
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = f"shoin/{VERSION}"
+    sys_version = ""  # keep the Python runtime version out of every Server header
+
+    def setup(self) -> None:
+        super().setup()
+        self.request.settimeout(REQUEST_SOCKET_SEC)
+
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[int, tuple[tuple[int, ...], list[str]]]  # set by make_server
@@ -155,6 +174,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Nothing here is cacheable: index.html must not outlive the server
+        # build serving it (stale JS vs new API), and API responses are
+        # live notebook state. Was SSE-only; hoisted to cover every response.
+        self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -166,6 +189,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, code: str, message: str) -> None:
         self._json({"error": {"code": code, "message": message}}, status)
+
+    def send_error(
+        self, code: int, message: str | None = None, explain: str | None = None
+    ) -> None:
+        # Base's send_error emits a bare HTML page that bypasses _headers() —
+        # no nosniff, no no-store, no Referrer-Policy. Route every protocol-level
+        # error (bad request line, unimplemented method, oversized headers)
+        # through the shared JSON envelope so the baseline headers always apply.
+        self.close_connection = True
+        try:
+            self._error(
+                code, f"HTTP_{code}", message or self.responses.get(code, ("Error",))[0]
+            )
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _safe_error(self, status: int, code: str, message: str) -> None:
         """_error(), but swallows a dead-connection write failure.
@@ -198,7 +236,9 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         try:
             data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            # RecursionError: a deeply nested body exceeds json.loads' depth —
+            # still a 400 input defect, not a 500.
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"bad JSON body: {exc}") from exc
         if not isinstance(data, dict):
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", "JSON object required")
@@ -423,6 +463,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_rename(self, nb_id: int) -> None:
         name = self._require(self._read_json(), "name")
+        # Echo the normalized name, not the raw request value — store strips
+        # whitespace before persisting, so echoing `name` would report a name
+        # the row never had (same response-vs-stored class as v0.2.93's
+        # _h_src_patch truncation).
+        name = name.strip()
         with Store(self.db) as store:
             store.rename_notebook(nb_id, name)
         self._json({"id": nb_id, "name": name})
@@ -455,6 +500,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "source": {"id": result.source.id, "title": result.source.title},
                     "n_chunks": result.n_chunks,
                     "n_embedded": result.n_embedded,
+                    # PDF pages whose text extraction failed — the response
+                    # must not present a partial index as a complete one.
+                    "pages_failed": result.pages_failed,
                 },
                 201,
             )
@@ -514,6 +562,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "source": {"id": result.source.id, "title": result.source.title},
                         "n_chunks": result.n_chunks,
                         "n_embedded": result.n_embedded,
+                        "pages_failed": result.pages_failed,
                     },
                     201,
                 )
@@ -562,6 +611,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "source": {"id": result.source.id, "title": result.source.title},
                 "n_chunks": result.n_chunks,
                 "n_embedded": result.n_embedded,
+                # Same pages_failed surfacing as add/upload (v0.2.257): a URL
+                # source that IS a PDF re-extracts on refresh and can lose
+                # pages on the second pass too.
+                "pages_failed": result.pages_failed,
             },
             200,
         )
@@ -651,6 +704,13 @@ class _Handler(BaseHTTPRequestHandler):
         change without dropping to a terminal (Plan.md REQ-103: CLI/Web parity)."""
         with Store(self.db) as store:
             n_embedded, n_total = reindex_notebook(store, self.llm, nb_id)
+        # Reindex changes every chunk's embedding, so overview_hits() can surface
+        # different chunks — cached suggestions were generated against the old
+        # retrieval substrate. The fingerprint (source-id tuple) is unchanged by
+        # reindex, so without this the stale suggestions would never self-expire
+        # (same invalidation gap _h_src_refresh's pop covers for content changes).
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
         self._json({"n_embedded": n_embedded, "n_total": n_total})
 
     # --- SSE ask --------------------------------------------------------
@@ -688,7 +748,7 @@ class _Handler(BaseHTTPRequestHandler):
             store.add_message(nb_id, "user", question, "{}")
 
             try:
-                self._headers(200, "text/event-stream; charset=utf-8", {"Cache-Control": "no-store"})
+                self._headers(200, "text/event-stream; charset=utf-8")
             except ConnectionError:
                 # Client disconnected before SSE headers could even be sent. Save an
                 # empty assistant message so the orphaned user turn (already
@@ -756,6 +816,7 @@ class _Handler(BaseHTTPRequestHandler):
 
             parts: list[str] = []
             degraded = False
+            truncated = False
             client_gone = False
             try:
                 # spec.md STRIDE DoS control: serialize actual LLM generation so
@@ -766,6 +827,10 @@ class _Handler(BaseHTTPRequestHandler):
                     for token in self._stream_chat(build_messages(question, context, history)):
                         parts.append(token)
                         self._sse("delta", {"text": token})
+                    # Read last_finish_reason while still holding the lock — the
+                    # shared llm resets it at the start of every chat/stream call,
+                    # so reading after release races with the next queued request.
+                    truncated = getattr(self.llm, "last_finish_reason", None) == "length"
             except LLMError:
                 degraded = True
                 text = _degraded_text(hits)
@@ -784,10 +849,21 @@ class _Handler(BaseHTTPRequestHandler):
                 context.source_bodies,
                 context.source_contexts,
                 context.source_chunk_ids,
+                context.source_detail,
                 check_uncited=not degraded,
+                # Same history join qa.ask() passes — without it the
+                # cross-turn checks (degenerate_spans/self_contradictions)
+                # silently never fire on the streamed path.
+                history="\n".join(
+                    m["content"] for m in history if m["role"] == "assistant"
+                ),
             )
             if degraded:
                 report["degraded"] = True
+            # finish_reason "length" = the stream ended at MAX_TOKENS — surface
+            # it like degraded so a clipped answer is not shown as complete.
+            if truncated:
+                report["truncated"] = True
             if not client_gone:
                 try:
                     self._sse("done", {"report": dict(report), "degraded": degraded})
@@ -826,7 +902,17 @@ def make_server(
             "generation_lock": threading.Lock(),
         },
     )
-    return ThreadingHTTPServer((host, port), handler)
+    return _HTTPServer((host, port), handler)
+
+
+class _HTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # Idle keep-alive connections simply hit the per-request socket timeout
+        # and get closed — not an error worth a traceback. Everything else keeps
+        # the default (print to stderr).
+        if isinstance(sys.exc_info()[1], TimeoutError):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(port: int, db: str | None = None) -> None:  # pragma: no cover (blocking loop)

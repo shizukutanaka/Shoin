@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import fnmatch
+import json
 import math
+import os
+import re
 import socket
 import sqlite3
 import sys
@@ -37,7 +41,7 @@ from shoin.search import (
 )
 from shoin.llm import LLMError
 from shoin.pipeline import _embed_chunks, _embed_input, rename_source
-from shoin.search import Hit, _char_bigrams, _fallback_needles, vector_search
+from shoin.search import Hit, _char_bigrams, _fallback_needles, _kanji_skeleton, vector_search
 from shoin.store import MIGRATIONS, Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -57,9 +61,48 @@ def seed(store: Store) -> int:
     return nb.id
 
 
+class _RacyConn:
+    """sqlite3.Connection proxy that injects one concurrent write (or failure)
+    the first time a statement containing `trigger` executes — a deterministic
+    single-threaded reproduction of the TOCTOU races Store's rowcount and
+    IntegrityError guards exist to translate into typed StoreErrors."""
+
+    def __init__(
+        self,
+        inner: sqlite3.Connection,
+        trigger: str,
+        pre_sql: str | None = None,
+        pre_params: tuple = (),
+        raise_exc: Exception | None = None,
+    ) -> None:
+        self._inner, self._trigger = inner, trigger
+        self._pre_sql, self._pre_params = pre_sql, pre_params
+        self._raise_exc = raise_exc
+        self.fired = False
+
+    def __getattr__(self, name: str):  # delegate commit/execute-free members
+        return getattr(self._inner, name)
+
+    def __enter__(self) -> "_RacyConn":
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *a):  # type: ignore[no-untyped-def]
+        return self._inner.__exit__(*a)
+
+    def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+        if not self.fired and self._trigger in sql:
+            self.fired = True
+            if self._raise_exc is not None:
+                raise self._raise_exc
+            if self._pre_sql is not None:
+                self._inner.execute(self._pre_sql, self._pre_params)
+        return self._inner.execute(sql, params)
+
+
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.181")
+        self.assertEqual(VERSION, "0.2.349")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -298,6 +341,93 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.delete_note(note_id)  # note is already gone
             self.assertEqual(cm.exception.code, "NOTE_NOT_FOUND")
+
+    def test_rowcount_guards_catch_mid_transaction_deletes(self) -> None:
+        """The `rowcount == 0` tails in update_source_title / update_source_sha256 /
+        replace_chunks_for_source / delete_note fire only when the row disappears
+        BETWEEN the method's own existence read and its write — inside the same
+        transaction. _RacyConn lands that delete deterministically; without the
+        mapping each would surface as silent success or a bare sqlite3 error."""
+        with make_store() as s:
+            nb = s.create_notebook("race-title")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-t")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "UPDATE sources SET title", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_title(src.id, "new", "o2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("concurrently", str(cm.exception))
+
+        with make_store() as s:
+            nb = s.create_notebook("race-sha")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-s")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SET sha256", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src.id, "sha-new", "t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+        with make_store() as s:
+            nb = s.create_notebook("race-meta")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-m")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SET sha256", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["new chunk"], sha256="sha-m2", title="t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+        with make_store() as s:
+            nb = s.create_notebook("race-note")
+            nid = s.add_note(nb.id, "n", "b")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "DELETE FROM notes", "DELETE FROM notes WHERE id=?", (nid,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.delete_note(nid)
+            self.assertEqual(cm.exception.code, "NOTE_NOT_FOUND")
+
+    def test_replace_chunks_fk_violation_maps_to_not_found(self) -> None:
+        """Deleting the source between get_source() and the chunk INSERT surfaces
+        as IntegrityError 'FOREIGN KEY constraint failed' — mapped to
+        SOURCE_NOT_FOUND rather than escaping as a raw sqlite3 error."""
+        with make_store() as s:
+            nb = s.create_notebook("race-fk")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-fk")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "INSERT INTO chunks", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["orphaned chunk"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("chunk replacement", str(cm.exception))
+
+    def test_replace_chunks_contexts_must_match_texts(self) -> None:
+        """contexts shorter/longer than texts is a caller bug — rejected before
+        any row is touched rather than silently misaligning breadcrumbs."""
+        with make_store() as s:
+            nb = s.create_notebook("ctx")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-ctx")
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(src.id, ["a", "b"], contexts=["only one"])
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_add_source_unexpected_integrity_error_is_system_internal(self) -> None:
+        """A constraint failure that is neither UNIQUE nor FOREIGN KEY (e.g. a
+        future CHECK) must surface as SYSTEM_INTERNAL_ERROR — not be misreported
+        as SOURCE_ALREADY_EXISTS or NOTEBOOK_NOT_FOUND."""
+        with make_store() as s:
+            nb = s.create_notebook("chk")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "INSERT INTO sources",
+                raise_exc=sqlite3.IntegrityError("CHECK constraint failed: sources"),
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "txt", "t", "o", "sha-c")
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
 
     def test_counts_empty_notebook(self) -> None:
         """counts() must return zeros for a notebook with no sources or chunks."""
@@ -1056,6 +1186,21 @@ class TestStore(unittest.TestCase):
             with Store(path) as s2:
                 self.assertEqual(s2.list_notebooks()[0].name, "disk")
 
+    def test_migrate_propagates_non_duplicate_schema_errors(self) -> None:
+        """Only the documented 'duplicate column name' race may be swallowed by
+        migrate()'s OperationalError handler — any other failure (here
+        schema_migrations replaced by a view, so the version INSERT fails with
+        'cannot modify ... because it is a view') must propagate rather than
+        leave a silently half-migrated database."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.db"
+            raw = sqlite3.connect(str(path))
+            raw.execute("CREATE VIEW schema_migrations AS SELECT 0 AS version WHERE 0")
+            raw.commit()
+            raw.close()
+            with self.assertRaises(sqlite3.OperationalError):
+                Store(path)
+
 
 class TestRetryOnLock(unittest.TestCase):
     """Deterministic coverage for _retry_on_lock(); the only prior coverage was
@@ -1140,6 +1285,23 @@ class TestChunk(unittest.TestCase):
     def test_pathological_unbroken(self) -> None:
         chunks = split_text("x" * 5000, chunk_tokens=100, overlap_tokens=10)
         self.assertGreater(len(chunks), 0)
+
+    def test_newline_dense_input_splits_without_content_loss(self) -> None:
+        """v0.2.289+: newline-dense input (one token per line) used to make
+        _hard_split rescan the whole buffer per sentence — ~5s for 100k lines.
+        The incremental token counter fixes the stall; this pins the output
+        contract it must preserve: every line's content lands in exactly one
+        chunk, no chunk exceeds the token budget (+1 boundary slack for an
+        ASCII run split across the merge point)."""
+        text = "\n".join(f"line{i}" for i in range(3000))
+        chunks = split_text(text, chunk_tokens=100, overlap_tokens=0)
+        self.assertGreater(len(chunks), 20)
+        for c in chunks:
+            self.assertLessEqual(estimate_tokens(c), 101)
+        joined = " ".join(" ".join(c.splitlines()) for c in chunks)
+        for i in (0, 1500, 2999):
+            self.assertIn(f"line{i}", joined)
+        self.assertEqual(len(joined.split()), 3000)
 
     def test_southeast_asian_scripts_counted_as_tokens(self) -> None:
         """Thai, Myanmar, Khmer, Lao chars must each count as one token (REQ-003)."""
@@ -1809,6 +1971,36 @@ class TestIngest(unittest.TestCase):
         self.assertNotIn("NameValue", text)
         self.assertNotIn("Alice42", text)
 
+    def test_html_boilerplate_tags_excluded(self) -> None:
+        """v0.2.256: nav/footer/form chrome must not be chunked, embedded, and
+        cited as document content — the boilerplate removal standard extractors
+        (trafilatura/readability) apply before retrieval. header/aside keep
+        their text: articles use them for lead paragraphs and real sidebars."""
+        html = (
+            "<html><head><title>T</title></head><body>"
+            "<nav><a>Home</a><a>MenuJunk</a></nav>"
+            "<main><p>実際の本文です。</p></main>"
+            "<aside>SidebarKept</aside>"
+            "<footer>CopyrightJunk 2024</footer>"
+            "<form><button>SubmitJunk</button></form>"
+            "</body></html>"
+        )
+        _, text = html_to_text(html)
+        self.assertIn("実際の本文", text)
+        self.assertIn("SidebarKept", text)
+        self.assertNotIn("MenuJunk", text)
+        self.assertNotIn("CopyrightJunk", text)
+        self.assertNotIn("SubmitJunk", text)
+
+    def test_html_unclosed_nav_does_not_swallow_rest(self) -> None:
+        """An unclosed <nav> must not skip_depth-swallow the rest of the page —
+        the balance pass closes it empty, degrading to keep-the-boilerplate
+        rather than lose-the-body."""
+        html = "<body><nav><a>SiteMenu</a><p>本文がnavの後に続く"
+        _, text = html_to_text(html)
+        self.assertIn("本文", text)
+        self.assertIn("SiteMenu", text)  # degradation keeps the boilerplate
+
     def test_html_semantic_tags_produce_newline_boundaries(self) -> None:
         """nav, aside, main, figure, figcaption, dd/dt must produce line breaks."""
         html = (
@@ -2019,6 +2211,25 @@ class TestIngest(unittest.TestCase):
             ing.validate_public_url("http://linklocal.example/")
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
 
+    def test_ssrf_unparseable_resolved_address_blocked(self) -> None:
+        """A resolver token that is not an IP literal at all — a corrupt
+        getaddrinfo tuple, or a resolver backend returning a name — must fail
+        closed with INGEST_URL_BLOCKED, same as every other non-public address.
+        (On Python ≥3.9 the zone-scoped case above parses via scope_id and is
+        rejected by the is_link_local check; the ValueError branch below it is
+        the catch-all this test pins.)"""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("not-an-ip", 0, 0, 0))]
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.validate_public_url("http://corrupt.example/")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
     def test_redirect_cycle_detected(self) -> None:
         """fetch_url must raise INGEST_URL_BLOCKED when it detects a redirect cycle."""
         import shoin.ingest as ing
@@ -2059,6 +2270,150 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
         self.assertIn("cycle", str(cm.exception))
 
+    def test_fetch_url_decodes_content_encoding(self) -> None:
+        """v0.2.248: a server replying Content-Encoding: gzip/deflate without
+        being asked must still be decoded — http.client does not do it
+        transparently, and raw compressed bytes would otherwise pass _decode()'s
+        cp932 fallback and index mojibake silently. Unknown encodings (br) must
+        fail cleanly instead of poisoning the notebook."""
+        import gzip as _gzip
+        import zlib as _zlib
+
+        import shoin.ingest as ing
+
+        plain = "圧縮された本文。" * 20
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            def __init__(self, encoding: str, body: bytes) -> None:
+                self.status = 200
+                self._enc = encoding
+                self._body = body
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Content-Encoding":
+                    return self._enc
+                if name == "Content-Type":
+                    return "text/plain"
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return self._body
+
+        class FakeConn:
+            resp: FakeResp | None = None
+
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> FakeResp:
+                assert FakeConn.resp is not None
+                return FakeConn.resp
+
+            def close(self) -> None:
+                pass
+
+        def fetch_with(enc: str, body: bytes) -> bytes:
+            FakeConn.resp = FakeResp(enc, body)
+            with (
+                patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+                patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+            ):
+                return ing.fetch_url("http://example.com/page")[0]
+
+        self.assertEqual(fetch_with("gzip", _gzip.compress(plain.encode())), plain.encode())
+        self.assertEqual(fetch_with("identity", plain.encode()), plain.encode())
+        # Raw-deflate variant (no zlib wrapper) must decode too.
+        co = _zlib.compressobj(9, _zlib.DEFLATED, -_zlib.MAX_WBITS)
+        raw_deflate = co.compress(plain.encode()) + co.flush()
+        self.assertEqual(fetch_with("deflate", _zlib.compress(plain.encode())), plain.encode())
+        self.assertEqual(fetch_with("deflate", raw_deflate), plain.encode())
+        with self.assertRaises(IngestError) as cm:
+            fetch_with("br", b"\x00\x01")
+        self.assertEqual(cm.exception.code, "INGEST_UNSUPPORTED_FORMAT")
+        with self.assertRaises(IngestError) as cm:
+            fetch_with("gzip", b"not-a-gzip")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
+    def test_decode_content_encoding_bounds_inflated_size(self) -> None:
+        """A compression bomb must be rejected while inflating (bounded output),
+        including stacked encodings; truncated and multi-member gzip behave like
+        gzip.decompress."""
+        import gzip as _gzip
+        import zlib as _zlib
+
+        import shoin.ingest as ing
+
+        with patch.object(ing, "MAX_UPLOAD_BYTES", 1000):
+            bomb = _gzip.compress(b"\0" * 100_000)
+            for enc, body in (
+                ("gzip", bomb),
+                ("deflate", _zlib.compress(b"\0" * 100_000)),
+                ("gzip, gzip", _gzip.compress(bomb)),
+            ):
+                with self.assertRaises(IngestError) as cm:
+                    ing._decode_content_encoding(enc, body)
+                self.assertEqual(cm.exception.code, "INGEST_FILE_TOO_LARGE", enc)
+        members = _gzip.compress(b"ab") + _gzip.compress(b"cd")
+        self.assertEqual(ing._decode_content_encoding("gzip", members), b"abcd")
+        with self.assertRaises(IngestError) as cm:
+            ing._decode_content_encoding("gzip", _gzip.compress(b"x" * 500)[:-10])
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
+    def test_validate_resolved_zone_scoped_addr_blocked(self) -> None:
+        """A getaddrinfo result like 'fe80::1%eth0' is rejected by ip_address() —
+        the ValueError tail must map to INGEST_URL_BLOCKED, not escape."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1%eth0", 0, 0, 0))]
+
+        with patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo):
+            with self.assertRaises(IngestError) as cm:
+                ing._validate_resolved("example.com")
+        self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_fetch_url_corrupt_deflate_raises(self) -> None:
+        """A deflate body that fails decompression must raise
+        INGEST_FETCH_FAILED — never index the raw compressed bytes."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            status = 200
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Content-Encoding":
+                    return "deflate"
+                if name == "Content-Type":
+                    return "text/plain"
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return b"\x00\x01corrupt"
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+        ):
+            with self.assertRaises(IngestError) as cm:
+                ing.fetch_url("http://example.com/page")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
     def test_extracted_dataclass(self) -> None:
         ex = Extracted("txt", "t", "body", "o", "h")
         self.assertEqual(ex.title, "t")
@@ -2071,11 +2426,12 @@ class TestIngest(unittest.TestCase):
         fake_body = b"%PDF-1.4 fake"
         with (
             patch.object(ing, "fetch_url", return_value=(fake_body, "application/octet-stream", "http://x/f.pdf")),
-            patch.object(ing, "pdf_to_text", return_value="parsed pdf content") as mock_pdf,
+            patch.object(ing, "pdf_to_text", return_value=("parsed pdf content", 0)) as mock_pdf,
         ):
             result = ing.extract_url("http://x/f.pdf")
         mock_pdf.assert_called_once_with(fake_body)
         self.assertIn("parsed pdf content", result.text)
+        self.assertEqual(result.pages_failed, 0)
 
     def test_extract_url_uses_final_url_as_title_after_redirect(self) -> None:
         """When a URL redirects, the title must be the *final* URL, not the original.
@@ -2092,7 +2448,7 @@ class TestIngest(unittest.TestCase):
                 "fetch_url",
                 return_value=(fake_body, "application/pdf", "https://journal.example/paper.pdf"),
             ),
-            patch.object(ing, "pdf_to_text", return_value="paper content"),
+            patch.object(ing, "pdf_to_text", return_value=("paper content", 0)),
         ):
             result = ing.extract_url("https://doi.org/10.9999/fake")
         self.assertEqual(
@@ -2199,9 +2555,12 @@ class TestIngest(unittest.TestCase):
         fake_reader.pages = [good1, bad, good2]
 
         with patch("pypdf.PdfReader", return_value=fake_reader):
-            result = pdf_to_text(b"fake pdf bytes")
-        self.assertIn("quarterly revenue grew by 12 percent", result)
-        self.assertIn("board approved a new dividend policy", result)
+            text, pages_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertIn("quarterly revenue grew by 12 percent", text)
+        self.assertIn("board approved a new dividend policy", text)
+        # v0.2.256: the failure is COUNTED, not just tolerated — callers must
+        # be able to warn that the index holds less than the document.
+        self.assertEqual(pages_failed, 1)
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
@@ -2550,6 +2909,94 @@ class TestSearch(unittest.TestCase):
             self.assertTrue(vh)
             self.assertEqual(vh[0].context, "生物 > 光合成")
 
+    def test_heading_matched_chunk_outranks_body_matched(self) -> None:
+        """A term in the section breadcrumb is a stronger topicality signal
+        than a body occurrence, so the FTS path weights context 2x text
+        (v0.2.218).  Without the weight both docs tie at one match and the
+        body-matched one wins on column-length idf, burying the section whose
+        heading actually names the term."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src_a = s.add_source(nb, "txt", "body-a", "o", "sha-a")
+            # Term in body only.
+            s.add_chunks(src_a.id, ["光合成についての詳細な記述が続く文章。"],
+                         ["植物学 > 葉緑体"])
+            src_b = s.add_source(nb, "txt", "ctx-b", "o", "sha")
+            # Same term in the heading breadcrumb only — one occurrence each.
+            s.add_chunks(src_b.id, ["葉緑体でのエネルギー変換について説明する。"],
+                         ["植物学 > 光合成"])
+            hits = bm25_search(s, nb, "光合成", k=5)
+            self.assertEqual(len(hits), 2)
+            self.assertEqual(hits[0].source_id, src_b.id)
+
+    def test_heading_match_weighted_in_like_path(self) -> None:
+        """The LIKE fallback (terms < 3 chars skip FTS5 — every 2-char Japanese
+        compound) must apply the SAME context weight: an equal-1.0 fallback
+        would quietly un-rank heading matches for exactly the most common JA
+        query shape (v0.2.218)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src_a = s.add_source(nb, "txt", "body-a", "o", "sha-a")
+            s.add_chunks(src_a.id, ["効果についての記述。"], ["分野 > 実験"])
+            src_b = s.add_source(nb, "txt", "ctx-b", "o", "sha-b")
+            s.add_chunks(src_b.id, ["作用についての記述。"], ["分野 > 効果"])
+            hits = bm25_search(s, nb, "効果", k=5)
+            self.assertEqual(len(hits), 2)
+            self.assertEqual(hits[0].source_id, src_b.id)
+
+    def test_conjugated_query_retrieves_dictionary_form_via_kanji_skeleton(self) -> None:
+        """v0.2.224: "泳いだ" and "泳ぐ" share ZERO trigrams, so a past-tense
+        query could never find a dictionary-form document.  The kanji-skeleton
+        variant ("泳") forces the LIKE fallback, where '%泳%' bridges every
+        inflection of the stem — a dictionary-free version of what Sudachi's
+        dictionary-form normalisation does."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            src = s.add_source(nb, "txt", "swim", "o", "sha-a")
+            s.add_chunks(src.id, ["彼は毎朝プールで泳ぐ習慣を続けている。"],
+                         ["生活 > 運動"])
+            decoy = s.add_source(nb, "txt", "decoy", "o", "sha-b")
+            s.add_chunks(decoy.id, ["山道を徒歩で進む記録。"], ["生活 > 登山"])
+            hits = bm25_search(s, nb, "泳いだ", k=5)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0].source_id, src.id)
+
+    def test_kanji_skeleton_ignores_pure_kana_terms(self) -> None:
+        """The skeleton is only meaningful while a kanji stem remains —
+        "みーつ" would otherwise emit a '%ー%' needle that LIKE-matches every
+        long-vowel word in the notebook."""
+        self.assertEqual(_kanji_skeleton("みーつ"), "")
+        self.assertEqual(_kanji_skeleton("泳いだ"), "泳")
+        self.assertEqual(_kanji_skeleton("切り替える"), "切替")
+
+    def test_kyujitai_retrieval_both_directions(self) -> None:
+        """v0.2.227: "學校" and "学校" share ZERO trigrams — a modern query could
+        not find a pre-war/classically-styled quotation and vice versa.  The
+        2-char variants stay below the trigram floor, so they pull the query
+        into the LIKE path where the needles bridge the orthography."""
+        with make_store() as s:
+            nb = s.create_notebook("nb").id
+            old_doc = s.add_source(nb, "txt", "old", "o", "sha-a")
+            s.add_chunks(old_doc.id, ["學校は國學院の建物である。"], ["歴史"])
+            new_doc = s.add_source(nb, "txt", "new", "o", "sha-b")
+            s.add_chunks(new_doc.id, ["学校の建物は国立である。"], ["現代"])
+            decoy = s.add_source(nb, "txt", "decoy", "o", "sha-c")
+            s.add_chunks(decoy.id, ["山道の徒歩記録。"], ["登山"])
+            # Either orthography must surface BOTH documents — the bridge is
+            # symmetric. The decoy (no mapped chars at all) stays absent.
+            for q in ("学校", "學校"):
+                hits = bm25_search(s, nb, q, k=5)
+                got = {h.source_id for h in hits}
+                self.assertEqual(got, {old_doc.id, new_doc.id}, q)
+
+    def test_kyujitai_variants_emit_both_directions(self) -> None:
+        """The table maps both ways; a term with no mappable char is unchanged."""
+        self.assertIn("學校", term_variants("学校"))
+        self.assertIn("学校", term_variants("學校"))
+        self.assertIn("廣島縣", term_variants("広島県"))
+        self.assertIn("広島県", term_variants("廣島県"))
+        self.assertEqual(term_variants("言語"), ["言語"])
+
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
         # ＧＰＵ and ２０２４ are ordinary in Japanese prose, and without this the
@@ -2578,9 +3025,12 @@ class TestSearch(unittest.TestCase):
         self.assertIn('"書院は"', three_char)   # original hiragana trigram
         self.assertIn('"書院ハ"', three_char)   # katakana alternate (は→ハ)
 
-        # Pure-kanji 3-char term: no kana → single trigram, no alternate
-        pure_kanji = fts_query("書院学")  # all kanji
-        self.assertIn('"書院学"', pure_kanji)
+        # Pure-kanji 3-char term: no kana and no kyujitai-mappable char →
+        # single trigram, no alternate (v0.2.227: a kanji term whose chars all
+        # have old forms now contributes the kyujitai gram too, so this term
+        # deliberately avoids them).
+        pure_kanji = fts_query("言語理")  # all kanji, none kyujitai-mappable
+        self.assertIn('"言語理"', pure_kanji)
         self.assertNotIn("OR", pure_kanji)     # no alternate for pure kanji
 
         four_char = fts_query("書院はな")  # 4-char → 2 original + 2 alternate trigrams
@@ -2646,6 +3096,22 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb_id = seed(s)
             self.assertEqual(vector_search(s, nb_id, None, 10), [])
+
+    def test_vector_search_dim_mismatch_scores_zero(self) -> None:
+        """v0.2.261: cosine() returns 0.0 for mismatched dimensions, but the
+        hot path _cosine_with_norms truncated the dot product at the shorter
+        vector — a 1024-dim query against 768-dim stored embeddings (user
+        switched SHOIN_EMBED_MODEL without reindexing) fabricated a plausible
+        score from the leading dims instead of degrading to 0.0."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            chunk = s.chunks_for_notebook(nb_id)[0]
+            s.set_embedding(chunk.id, [1.0, 0.0])
+            hits = vector_search(s, nb_id, [0.9, 0.1, -100.0], k=5)
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].vec, 0.0)
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""
@@ -2812,6 +3278,211 @@ class TestSearch(unittest.TestCase):
             nb_id = seed(s)
             self.assertEqual(bm25_search(s, nb_id, "", k=5), [])
 
+    # --- pseudo-relevance feedback (bm25_prf_search, v0.2.182) --------------
+
+    def test_prf_expands_recall_for_vocabulary_mismatch(self) -> None:
+        """A chunk sharing topical vocabulary with the top hits — but no query
+        term — must surface via the feedback expansion (RM3-style PRF)."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは儒学教育を行う学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            base = bm25_search(s, nb_id, "書院", k=5)
+            self.assertTrue(base)
+            self.assertFalse(any("中心科目" in h.text for h in base),
+                             "baseline must not find the vocabulary-mismatch chunk")
+
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            self.assertTrue(any("中心科目" in h.text for h in hits),
+                            "PRF expansion must surface the mismatch chunk")
+
+    def test_prf_skips_when_fewer_than_min_feedback_docs(self) -> None:
+        """Fewer than PRF_MIN_DOCS feedback hits means no expansion evidence —
+        the result list must be returned unchanged (single-doc drift guard)."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf1").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            base = bm25_search(s, nb_id, "書院", k=5)
+            self.assertEqual(len(base), 1)
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            self.assertEqual([h.chunk_id for h in hits], [h.chunk_id for h in base],
+                             "with one feedback doc the result must not change")
+
+    def test_prf_skips_when_pool_already_filled(self) -> None:
+        """A first pass at capacity has no recall head-room: no second pass."""
+        from unittest.mock import patch
+        from shoin import search as search_mod
+
+        with make_store() as s:
+            nb_id = seed(s)
+            with patch.object(search_mod, "bm25_search", wraps=search_mod.bm25_search) as spy:
+                hits = search_mod.bm25_prf_search(s, nb_id, "書斎", k=1)
+            self.assertTrue(hits)
+            # First pass fills k=1 → the expanded pass must never run.
+            self.assertEqual(spy.call_count, 1)
+
+    def test_prf_respects_neg_terms(self) -> None:
+        """A negated term must suppress expansion-surfaced chunks too."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-neg").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が科目だった。"])
+
+            hits = bm25_prf_search(s, nb_id, "書院 -儒学", k=5)
+            self.assertFalse(any("儒学" in h.text for h in hits),
+                             "negated term must still exclude expansion hits")
+
+    def test_prf_terms_excludes_query_vocabulary(self) -> None:
+        """_prf_terms must not propose grams the user already typed (variants
+        included): re-adding existing query terms wastes the OR budget."""
+        from shoin.search import _prf_terms
+
+        hits = [
+            Hit(1, 1, "書院は近世日本の学問所である", 1.0),
+            Hit(2, 1, "書院の多くは学問所だった", 0.9),
+        ]
+        terms = _prf_terms(hits, "書院 学問所")
+        self.assertNotIn("書院", terms)
+        self.assertNotIn("学問", terms)
+        self.assertNotIn("問所", terms)
+        self.assertEqual(terms, [], "every df>=2 gram is already in the query")
+
+    # --- term proximity (v0.2.183) -------------------------------------------
+
+    def test_proximity_single_term_returns_zero(self) -> None:
+        """One-term queries have no pair to be near: prox must be 0.0 and the
+        score path byte-identical to before the signal existed."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        self.assertEqual(
+            _proximity_from_norm(_norm_query_terms("免疫"), "免疫は免疫である。"), 0.0
+        )
+
+    def test_proximity_tight_window_scores_above_scattered(self) -> None:
+        """Terms co-occurring in one phrase must outscore the same terms
+        scattered far apart in the text."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        terms = _norm_query_terms("気候変動 影響")
+        tight = "気候変動の影響について述べる。"
+        scattered = "気候変動。" + "補足の長文。" * 30 + "影響も考察した。"
+        p_tight = _proximity_from_norm(terms, tight)
+        p_scattered = _proximity_from_norm(terms, scattered)
+        self.assertGreater(p_tight, p_scattered)
+        self.assertGreater(p_tight, 0.5)
+
+    def test_proximity_zero_when_fewer_than_two_terms_present(self) -> None:
+        """A chunk containing only one of the query terms has no co-occurrence."""
+        from shoin.search import _proximity_from_norm, _norm_query_terms
+
+        self.assertEqual(
+            _proximity_from_norm(_norm_query_terms("気候変動 影響"), "気候変動について。"),
+            0.0,
+        )
+
+    def test_rerank_proximity_bonus_multi_term(self) -> None:
+        """rerank() must prefer the hit whose terms co-occur tightly when the
+        retrieval scores are otherwise equal."""
+        from shoin.search import rerank
+
+        hits = [
+            Hit(1, 1, "気候変動。" + "余白。" * 40 + "影響。", 0.5),
+            Hit(2, 1, "気候変動の影響について。", 0.5),
+        ]
+        result = rerank("気候変動 影響", hits)
+        self.assertEqual(result[0].chunk_id, 2)
+        self.assertIn("prox", result[0].detail)
+        self.assertGreater(result[0].detail["prox"], result[1].detail["prox"])
+
+    def test_rerank_single_term_scores_unchanged_by_prox(self) -> None:
+        """prox=0 for single-term queries — score must equal the pure blend."""
+        from shoin.search import rerank
+
+        hits = [Hit(1, 1, "免疫は免疫である。", 0.8)]
+        rerank("免疫", hits)
+        self.assertNotIn("prox", hits[0].detail)
+        self.assertAlmostEqual(hits[0].score, 0.7 * 0.8 + 0.3 * hits[0].detail["lex"])
+
+    # --- pool-local IDF weighting (v0.2.186) ----------------------------------
+
+    def test_pool_idf_common_term_weighs_less_than_rare(self) -> None:
+        """A term present in most candidates is what got them retrieved — it
+        must carry less rerank weight than a term few candidates contain."""
+        from shoin.search import _norm_query_terms, _pool_idf
+
+        terms = _norm_query_terms("共通 希少")
+        idf = _pool_idf(terms, ["共通だけ。", "共通のみ。", "共通と希少。"])
+        self.assertLess(idf["共通"], idf["希少"])
+
+    def test_pool_idf_absent_term_finite_and_harmless(self) -> None:
+        """df=0 gives the largest weight, but every saturated tf for that term
+        is 0, so it contributes nothing to any hit's score."""
+        from shoin.search import _norm_query_terms, _pool_idf
+
+        idf = _pool_idf(_norm_query_terms("実在 不在語"), ["実在だけ。"])
+        self.assertGreater(idf["不在語"], idf["実在"])
+
+    def test_rerank_idf_rare_term_hit_beats_repetitive_common(self) -> None:
+        """The discriminating case: chunk A repeats only the common term
+        (uniform lex high), chunk B holds the rare term once (uniform lex
+        low).  Uniform overlap preferred A; pool-IDF weighting must flip it."""
+        from shoin.search import rerank
+
+        query = "共有語 希少語"
+        hits = [
+            Hit(1, 1, "共有語共有語共有語共有語共有語。", 0.5),
+            Hit(2, 1, "希少語が一度出る。", 0.5),
+            Hit(3, 1, "共有語が一度出る。", 0.5),  # makes 共有語 df=2/3
+        ]
+        a_lex = lexical_overlap(query, hits[0].text)
+        b_lex = lexical_overlap(query, hits[1].text)
+        self.assertGreater(a_lex, b_lex, "uniform overlap must prefer A — else no flip")
+        result = rerank(query, hits)
+        self.assertEqual(result[0].chunk_id, 2, "pool-IDF must promote the rare-term hit")
+        self.assertIn("lexw", result[0].detail)
+        self.assertGreater(hits[1].detail["lexw"], hits[0].detail["lexw"])
+
+    def test_rerank_idf_equal_df_matches_uniform_overlap(self) -> None:
+        """Every query term in the same number of candidates → the weighted
+        mean degenerates to the uniform mean exactly."""
+        from shoin.search import rerank
+
+        hits = [
+            Hit(1, 1, "気候変動の影響。", 0.5),
+            Hit(2, 1, "気候変動と影響の関係。", 0.5),
+        ]
+        rerank("気候変動 影響", hits)
+        for h in hits:
+            self.assertAlmostEqual(h.detail["lexw"], h.detail["lex"], places=12)
+
+    def test_rerank_single_term_no_lexw(self) -> None:
+        """One-term queries skip the machinery: no lexw key, pure blend score."""
+        from shoin.search import rerank
+
+        hits = [Hit(1, 1, "免疫は免疫である。", 0.8)]
+        rerank("免疫", hits)
+        self.assertNotIn("lexw", hits[0].detail)
+        self.assertAlmostEqual(hits[0].score, 0.7 * 0.8 + 0.3 * hits[0].detail["lex"])
+
     def test_sim_empty_text_returns_zero(self) -> None:
         """_sim() must return 0.0 when a Hit has empty text (no bigrams to compare)."""
         from shoin.search import _sim
@@ -2873,6 +3544,30 @@ class TestSearch(unittest.TestCase):
             self.assertTrue(hits, "LIKE fallback must find the needle chunk")
             self.assertTrue(any("猫" in h.text for h in hits))
 
+    def test_fallback_cap_picks_best_pool(self) -> None:
+        """The LIKE pool cap must keep the BEST 2000 candidates, not the first.
+
+        like_cap bounds the SQL scan pool; before v0.2.237 the LIMIT applied in
+        insertion order, so on a notebook with >cap matching chunks the densest
+        late-added chunk was silently dropped before Python ever scored it.
+        ORDER BY the _needle_score formula inside SQL fixes which rows enter
+        the pool.  2005 filler chunks each matching "猫" once fill the cap; a
+        final chunk containing "猫" 20× must still rank first.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("pool-test").id
+            src = s.add_source(nb_id, "txt", "big pool", "t", "sha-pool")
+            texts = [f"猫を含む行{i}" for i in range(2005)] + ["猫" * 20]
+            s.add_chunks(src.id, texts)
+            # "猫" is 1 char → FTS5 trigram can't match → LIKE fallback fires
+            hits = bm25_search(s, nb_id, "猫", k=5)
+            self.assertTrue(hits, "LIKE fallback must return hits")
+            self.assertEqual(
+                hits[0].text,
+                "猫" * 20,
+                "densest chunk beyond the row cap must still win",
+            )
+
     def test_fallback_like_wildcards_escaped(self) -> None:
         """Underscore in a needle must be escaped so LIKE treats it as a literal.
 
@@ -2898,6 +3593,78 @@ class TestSearch(unittest.TestCase):
                              "underscore must not act as LIKE wildcard (false positive)")
             self.assertFalse(any("exactmatch no separator" in t for t in texts),
                              "chunk without underscore must not match")
+
+    def test_fallback_skips_ascii_stopword_needles(self) -> None:
+        """v0.2.244: English stopwords (the/is/of/…) ≥2 chars became LIKE
+        needles, and _needle_score counts raw occurrences — so a chunk dense
+        in 'the' could outscore a chunk dense in the real term, a divergence
+        the FTS path never has (BM25's IDF deweights ubiquitous terms
+        automatically). The LIKE needles now apply the standard Lucene stop
+        list when other terms remain; a query made ONLY of stopwords keeps
+        them (zero recall is worse than noisy recall)."""
+        with make_store() as s:
+            nb_id = s.create_notebook("stopword-nb").id
+            src = s.add_source(nb_id, "txt", "doc", "o", "sha-sw")
+            s.add_chunks(
+                src.id,
+                [
+                    "capital markets and capital flows",  # dense in real term
+                    # Only <3-char stopwords: ≥3-char ones (the/and/for/…)
+                    # reach FTS5's trigram index and would surface via the FTS
+                    # side regardless of LIKE-needle filtering.
+                    "is of to in on at by or it no as be",
+                ],
+            )
+            hits = bm25_search(s, nb_id, "what is the capital", k=5)
+            texts = [h.text for h in hits]
+            self.assertIn("capital markets and capital flows", texts)
+            self.assertNotIn(
+                "is of to in on at by or it no as be",
+                texts,
+                "a stopword-only chunk must not be recalled via stopword needles",
+            )
+
+        # All-stopword query keeps its needles: noisy recall beats zero recall.
+        with make_store() as s:
+            nb_id = s.create_notebook("only-stop-nb").id
+            src = s.add_source(nb_id, "txt", "doc2", "o", "sha-sw2")
+            s.add_chunks(src.id, ["to be or not to be", "completely unrelated text"])
+            hits = bm25_search(s, nb_id, "to be", k=5)
+            self.assertIn("to be or not to be", [h.text for h in hits])
+
+    def test_neg_filter_ascii_word_boundary(self) -> None:
+        """ASCII negated terms must exclude whole-word matches only.
+
+        Before v0.2.238 the neg filter used plain substring matching on the
+        folded text: `-api` also suppressed "capital", `-net` suppressed
+        "network", `-ai` suppressed "train" — silent false exclusion, the
+        asymmetric harm of positive-match overreach.  ASCII negs now require
+        word boundaries (query_terms' [0-9A-Za-z_]); CJK negs keep substring
+        semantics since CJK text has no word boundaries.
+        """
+        with make_store() as s:
+            nb_id = s.create_notebook("neg-boundary").id
+            src = s.add_source(nb_id, "txt", "boundary", "t", "sha-negb")
+            s.add_chunks(src.id, [
+                "api design patterns with data",
+                "capital markets and data",
+                "train your data daily",
+            ])
+            hits = bm25_search(s, nb_id, "data -api", k=5)
+            texts = [h.text for h in hits]
+            self.assertFalse(
+                any("api design" in t for t in texts),
+                "chunk containing the word 'api' must be excluded",
+            )
+            self.assertTrue(
+                any("capital markets" in t for t in texts),
+                "'capital' must survive — 'api' inside it is not the word",
+            )
+            hits = bm25_search(s, nb_id, "data -ai", k=5)
+            self.assertTrue(
+                any("train your data daily" in t for t in [h.text for h in hits]),
+                "'-ai' must not suppress 'train/daily' — no standalone 'ai' word",
+            )
 
     def test_fallback_needles_drops_single_ascii_chars(self) -> None:
         """Single-char ASCII terms must be excluded from LIKE needles.
@@ -2989,8 +3756,10 @@ class TestSearch(unittest.TestCase):
         from shoin.search import fts_query, _kana_alt
         # Pure kanji term — no kana characters → unchanged
         self.assertEqual(_kana_alt("書院"), "書院")
-        # fts_query for 3-char pure kanji: one trigram (itself), no alternate
-        expr = fts_query("書院学")
+        # fts_query for 3-char pure kanji: one trigram (itself), no alternate.
+        # "言語理" deliberately avoids kyujitai-mappable chars — since v0.2.227 a
+        # kanji term whose chars have old forms contributes that gram too.
+        expr = fts_query("言語理")
         self.assertNotIn("OR", expr, "Pure kanji must not produce alternate OR branch")
         # Each trigram must appear exactly once (no duplication)
         expr2 = fts_query("書院はな")
@@ -3071,6 +3840,98 @@ class TestSearch(unittest.TestCase):
                 0.5,
                 f"top hit score ({top.score:.4f}) must be > 0.5 after RRF normalization; "
                 f"unnormalized ceiling is ~0.33 (lex overwhelms raw RRF ≈ 0.016).",
+            )
+
+
+class TestTailCut(unittest.TestCase):
+    """_tail_cut() (v0.2.189): score-gap (elbow) cutoff on the reranked pool.
+
+    Applied between rerank() and mmr() in both retrieve() and
+    retrieve_multi().  Fires only where an ADAPTIVE_GAP adjacent drop lands
+    on a chunk with detail["lex"] == 0 (zero query-term presence, reached
+    the pool via vector/RRF position alone) — a term-bearing chunk is never
+    cut, since minmax normalization makes large blended gaps routine even
+    between legitimate hits.
+    """
+
+    @staticmethod
+    def _h(cid: int, score: float, lex: float) -> Hit:
+        h = Hit(cid, 1, "t", score)
+        if lex:
+            h.detail["lex"] = lex
+        return h
+
+    def test_cliff_onto_term_free_chunk_drops_tail(self) -> None:
+        """Gap >=0.25 landing on a lex=0 chunk = the relevance boundary."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.9, lex=0.5),
+            self._h(2, 0.8, lex=0.4),
+            self._h(3, 0.5, lex=0.0),  # 0.3 drop -> first tail item
+            self._h(4, 0.45, lex=0.0),
+        ]
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1, 2])
+
+    def test_cliff_onto_term_bearing_chunk_never_cuts(self) -> None:
+        """A big score gap alone is NOT evidence — minmax stretches RRF over
+        [0,1] for any pool, so legitimate hits routinely sit a cliff apart."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.95, lex=0.8),
+            self._h(2, 0.6, lex=0.5),  # 0.35 gap, but carries query terms
+            self._h(3, 0.3, lex=0.2),
+        ]
+        self.assertEqual(len(_tail_cut(hits)), 3)
+
+    def test_first_gap_wins(self) -> None:
+        """The earliest qualifying cliff is the boundary."""
+        from shoin.search import _tail_cut
+
+        hits = [
+            self._h(1, 0.9, lex=0.5),
+            self._h(2, 0.2, lex=0.0),
+            self._h(3, 0.19, lex=0.0),
+        ]
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1])
+
+    def test_smooth_pool_passes_through(self) -> None:
+        """Gradual decay (an all-relevant pool) is never cut."""
+        from shoin.search import _tail_cut
+
+        hits = [self._h(i, 1.0 - i * 0.05, lex=0.0) for i in range(10)]
+        self.assertEqual(len(_tail_cut(hits)), 10)
+
+    def test_empty_and_singleton_pass_through(self) -> None:
+        from shoin.search import _tail_cut
+
+        self.assertEqual(_tail_cut([]), [])
+        self.assertEqual(len(_tail_cut([self._h(1, 0.9, lex=0.0)])), 1)
+
+    def test_retrieve_drops_vector_tail(self) -> None:
+        """End-to-end via the vector list: semantically-near chunks sharing
+        zero query terms are clipped at the cliff instead of padding the
+        [S#] source list."""
+        with make_store() as s:
+            nb_id = s.create_notebook("tail-cut-test").id
+            src = s.add_source(nb_id, "txt", "rel", "mem://rel", "sha-rel")
+            chunk_ids = s.add_chunks(
+                src.id,
+                ["量子力学の基礎と観測問題。"]  # carries the query term
+                + [f"雑多な雑記その{i}。" for i in range(3)],  # term-free
+            )
+            # Relevant chunk at the query direction; tails near but off it —
+            # the vector list ranks all four, RRF fuses them, and the
+            # relevance cliff lands right after the term-bearing head.
+            s.set_embedding(chunk_ids[0], [1.0, 0.0])
+            for i, cid in enumerate(chunk_ids[1:]):
+                s.set_embedding(cid, [0.6 - i * 0.2, 0.8])
+            hits = retrieve(s, nb_id, "量子", query_vec=[1.0, 0.0], k=8)
+            self.assertEqual(
+                [h.chunk_id for h in hits],
+                [chunk_ids[0]],
+                "term-free vector tail must be clipped at the score cliff",
             )
 
 
@@ -3305,6 +4166,191 @@ class TestQA(unittest.TestCase):
         self.assertGreater(estimate_tokens(body), estimate_tokens(short_text),
                            "truncated hit1 must have been appended, not dropped")
 
+    def test_build_context_rank_proportional_budget(self) -> None:
+        """v0.2.200: the per-source budget is rank-proportional — every source
+        keeps the MIN_PER_SOURCE floor, and the surplus splits by harmonic
+        rank weight 1/i so the #1 source's slice beats the #2's.
+
+        Budget 200 across 2 sources → floor 64 each, surplus 72 split
+        1 : 1/2 → shares 112 and 88 (not the old uniform 100/100)."""
+        from shoin.chunk import estimate_tokens
+        from shoin.qa import MIN_PER_SOURCE_TOKENS, build_context
+        from shoin.search import Hit
+
+        big_text = "word " * 500  # ~500 tokens, always truncated to the share
+        with make_store() as s:
+            nb = s.create_notebook("ctx-rank")
+            src1 = s.add_source(nb.id, "txt", "Top", "o1", "sha1")
+            src2 = s.add_source(nb.id, "txt", "Next", "o2", "sha2")
+            hit1 = Hit(chunk_id=1, source_id=src1.id, text=big_text, score=1.0)
+            hit2 = Hit(chunk_id=2, source_id=src2.id, text=big_text, score=0.9)
+            ctx = build_context(s, [hit1, hit2], budget_tokens=200)
+
+        self.assertEqual(len(ctx.source_bodies), 2)
+        top, nxt = (estimate_tokens(b) for b in ctx.source_bodies)
+        self.assertGreater(top, nxt, "rank-1 source must get the larger share of the surplus")
+        self.assertGreaterEqual(nxt, MIN_PER_SOURCE_TOKENS - 5,
+                                "the floor must still hold for the lower-ranked source")
+
+    def test_build_context_labels_each_segment_section(self) -> None:
+        """v0.2.222: v0.2.221 put the § label in the source header — but a
+        source whose hits span several sections got one label that is
+        misinformation for every other segment. Labels are per segment now:
+        each excerpt block names the section its own leading chunk came from.
+        Absent context leaves the block unchanged."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-sec")
+            src = s.add_source(nb.id, "txt", "免疫レポート", "o", "sha1")
+            ctx = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text="防御機構の説明である。",
+                    score=1.0, seq=0, context="免疫レポート > 免疫の基礎"),
+                Hit(chunk_id=2, source_id=src.id, text="投与量の注意点である。",
+                    score=0.9, seq=9, context="免疫レポート > 副作用"),
+            ])
+            bare = build_context(s, [
+                Hit(chunk_id=3, source_id=src.id, text="防御機構の説明である。",
+                    score=1.0),
+            ])
+        self.assertIn("§ 免疫の基礎\n防御機構の説明である。", ctx.block)
+        self.assertIn("§ 副作用\n投与量の注意点である。", ctx.block)
+        self.assertNotIn("§ 免疫の基礎\n投与量", ctx.block)
+        self.assertIn("[S1] 免疫レポート\n", bare.block)
+
+    def test_build_context_records_source_detail(self) -> None:
+        """v0.2.228: the report should be able to say WHICH retrieval channel
+        surfaced a citation, so each source's top-hit detail is carried
+        through alongside the excerpt bodies."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-detail")
+            src = s.add_source(nb.id, "txt", "T", "o", "sha1")
+            ctx = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text="説明。", score=1.0,
+                    detail={"rrf_bm25_rank": 2.0, "lex": 0.4}),
+            ])
+        self.assertEqual(ctx.source_detail, [{"rrf_bm25_rank": 2.0, "lex": 0.4}])
+
+    def test_report_carries_source_detail(self) -> None:
+        """v0.2.228: source_detail lands in the report keyed per S#; reports
+        built without it (old persisted, no-context paths) omit the field."""
+        from shoin.citation import make_report
+
+        rep = make_report(
+            "x [S1]", ["T"], source_ids=[1],
+            source_detail=[{"rrf_bm25_rank": 2.0, "lex": 0.4}],
+        )
+        self.assertEqual(
+            rep["source_detail"]["S1"], {"rrf_bm25_rank": 2.0, "lex": 0.4}
+        )
+        rep2 = make_report("x [S1]", ["T"])
+        self.assertNotIn("source_detail", rep2)
+
+    def test_build_context_merges_consecutive_seq_hits(self) -> None:
+        """v0.2.207: adjacent-chunk hits share a ~CHUNK_OVERLAP boundary, so a
+        consecutive-seq pair must merge into continuous text — not be joined by
+        the "\n…\n" gap marker that claims a discontinuity which doesn't exist
+        AND bills the shared boundary to the budget twice."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。"
+        c2 = "全く別の段落です。距離があります。"
+        with make_store() as s:
+            nb = s.create_notebook("ctx-merge")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            hits = [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0, seq=0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9, seq=1),
+                Hit(chunk_id=3, source_id=src.id, text=c2, score=0.8, seq=2),
+            ]
+            ctx = build_context(s, hits, budget_tokens=1000)
+
+        body = ctx.source_bodies[0]
+        # The shared boundary appears exactly once — the overlap is deduplicated.
+        self.assertEqual(body.count(tail), 1)
+        # Continuous reading: c0's tail flows straight into c1's new content.
+        self.assertIn(tail + "と、隣接チャンク", body)
+        # All three seqs are consecutive — one merged segment, no "…" marker.
+        self.assertNotIn("…", body)
+        self.assertEqual(ctx.source_chunk_ids[0], [1, 2, 3])
+
+    def test_build_context_doc_order_merges_reversed_hits(self) -> None:
+        """v0.2.208: hits are assembled in document order — a pair that arrives
+        reversed (rank k+1 above rank k) merges too, and unknown-seq hits
+        (-1, test-constructed) sort last and never merge."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。"
+        with make_store() as s:
+            nb = s.create_notebook("ctx-docorder")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            reversed_ = build_context(s, [
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=1.0, seq=1),
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=0.9, seq=0),
+            ])
+            unknown = build_context(s, [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9),
+            ])
+        body = reversed_.source_bodies[0]
+        # Reversed arrival still merges: boundary deduplicated, doc order kept.
+        self.assertEqual(body.count(tail), 1)
+        self.assertIn(tail + "と、隣接チャンク", body)
+        self.assertNotIn("…", body)
+        self.assertIn("…", unknown.source_bodies[0])
+
+    def test_build_context_truncated_segment_marks_only_surviving_chunks(self) -> None:
+        """A merged segment truncated by the budget marks only the chunk ids
+        whose text actually survived the cut — the tail chunk may be dropped."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        tail = "これは共有される境界領域のテキストです。十分な長さがあります。"
+        c0 = "最初のチャンクです。" + tail + " word " * 60
+        c1 = tail + "と、隣接チャンクの新規部分が続きます。" + " word " * 60
+        with make_store() as s:
+            nb = s.create_notebook("ctx-trunc")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            hits = [
+                Hit(chunk_id=1, source_id=src.id, text=c0, score=1.0, seq=0),
+                Hit(chunk_id=2, source_id=src.id, text=c1, score=0.9, seq=1),
+            ]
+            # ~100-token segment into a 70-token budget → tail chunk cut.
+            ctx = build_context(s, hits, budget_tokens=70)
+
+        ids = ctx.source_chunk_ids[0]
+        self.assertEqual(ids, [1], "only the leading chunk survives the 70-token cut")
+
+    def test_build_context_truncated_excerpt_gets_cut_marker(self) -> None:
+        """v0.2.211: a segment truncated by the budget ends with "…" — without
+        the marker a mid-sentence fragment reads as a COMPLETE passage and the
+        model may quote it as such."""
+        from shoin.qa import build_context
+        from shoin.search import Hit
+
+        with make_store() as s:
+            nb = s.create_notebook("ctx-cut")
+            src = s.add_source(nb.id, "txt", "Doc", "o", "sha1")
+            big = "word " * 500  # ~500 tokens, far over budget
+            ctx = build_context(
+                s,
+                [Hit(chunk_id=1, source_id=src.id, text=big, score=1.0)],
+                budget_tokens=80,
+            )
+        body = ctx.source_bodies[0]
+        self.assertTrue(body.endswith("…"), "truncated excerpt must carry the cut marker")
+        self.assertLess(len(body), len(big))
+
 
     def test_degraded_text_s_numbers_match_unique_sources_not_hits(self) -> None:
         """_degraded_text must assign S-numbers per unique source, not per hit.
@@ -3410,6 +4456,56 @@ class TestQA(unittest.TestCase):
                     with self.assertRaises(_StoreError) as cm:
                         ask(s, _NoLLM(), nb_id, "notebook", persist=False)
             self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+
+    def test_ask_flags_truncated_answer(self) -> None:
+        """v0.2.245: finish_reason "length" must land in report.truncated.
+
+        OpenAI-compatible endpoints report token-limit truncation via
+        finish_reason; chat()/chat_stream() record it as last_finish_reason and
+        ask() must carry it into the citation report — otherwise an answer cut
+        mid-sentence by MAX_TOKENS is presented as complete on every surface
+        (UI badge, export status line, CLI report). A "stop" finish and a
+        backend without the attribute must both leave the flag unset.
+        """
+        from shoin.qa import ask
+
+        class _TruncLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                self.last_finish_reason = "length"
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        class _StopLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                self.last_finish_reason = "stop"
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        class _NoAttrLLM:
+            embedding_model = ""
+
+            def chat(self, messages, temperature=0.2):  # type: ignore[override]
+                return "書院の説明の途中 [S1]。"
+
+            def embed_one(self, text):  # type: ignore[override]
+                raise LLMError("SYSTEM_EMBED_DISABLED", "disabled")
+
+        with make_store() as s:
+            nb_id = seed(s)
+            truncated = ask(s, _TruncLLM(), nb_id, "書院とは何か", persist=False)
+            complete = ask(s, _StopLLM(), nb_id, "書院とは何か", persist=False)
+            plain = ask(s, _NoAttrLLM(), nb_id, "書院とは何か", persist=False)
+        self.assertTrue(truncated.report.get("truncated"))
+        self.assertNotIn("truncated", complete.report)
+        self.assertNotIn("truncated", plain.report)
 
     def test_studio_generate_build_context_db_lock_raises_store_error(self) -> None:
         """studio.generate() must have the same sqlite3.OperationalError guard
@@ -3647,6 +4743,40 @@ class TestCitation(unittest.TestCase):
             "[S1] after '. ' must be flagged misattributed when claim matches S2 far better",
         )
 
+    def test_verify_grounding_suggested_names_the_right_source(self) -> None:
+        """The argmax that produced the flag must be exportable (v0.2.220):
+        'wrong number' alone makes the user re-read every source."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "Washi paper is made from kozo fiber by traditional craftspeople.",
+            2: "The study found significant results in the experiment.",
+        }
+        text = "The study found significant results. [S1]"
+        sugg: dict[int, int] = {}
+        _, misattributed = verify_grounding(text, sources, suggested=sugg)
+        self.assertIn(1, misattributed)
+        self.assertEqual(sugg, {1: 2}, "the suggestion must name S2 — where the claim lives")
+
+    def test_make_report_emits_misattributed_suggested(self) -> None:
+        """Report field is 'S#'-keyed for JSON round-trip; absent when nothing
+        is flagged (NotRequired)."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "The study found significant results. [S1]",
+            ["paper", "study"],
+            source_bodies=[
+                "Washi paper is made from kozo fiber by traditional craftspeople.",
+                "The study found significant results in the experiment.",
+            ],
+        )
+        self.assertIn(1, report.get("misattributed", []))
+        self.assertEqual(report.get("misattributed_suggested"), {"S1": "S2"})
+
+        clean = make_report("Cats are cute.", ["a"], source_bodies=["cats"])
+        self.assertNotIn("misattributed_suggested", clean)
+
     def test_bigrams_single_char_returns_empty_set(self) -> None:
         """_bigrams of a single character must return set(), not {'x'}.
 
@@ -3663,6 +4793,825 @@ class TestCitation(unittest.TestCase):
         # Two chars must still produce exactly one bigram
         self.assertEqual(_bigrams("ab"), {"ab"})
         self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
+
+
+class TestNumericMismatches(unittest.TestCase):
+    """numeric_mismatches() (v0.2.184): a cited claim asserting a number the
+    source never contains — the fabricated-statistic failure shape the
+    citation literature flags as dominant (arXiv:2510.20303, CiteFix)."""
+
+    def test_flags_number_absent_from_source(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        text = "採用率は37%だった。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [1])
+
+    def test_no_flag_when_number_present(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        text = "採用率は63%だった。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_single_digit_never_flagged(self) -> None:
+        """Bare single digits are ubiquitous (第3版, 3月) — noise, not signal."""
+        from shoin.citation import numeric_mismatches
+
+        text = "第3版の内容である。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "第5版の内容である。"}), [])
+
+    def test_comma_and_fullwidth_digits_compare_equal(self) -> None:
+        """"1,234" and "1234" and "１２３４" must all match the same source number."""
+        from shoin.citation import numeric_mismatches
+
+        src = "導入数は1234件だった。"
+        self.assertEqual(numeric_mismatches("導入数は1,234件だった。[S1]", {1: src}), [])
+        self.assertEqual(numeric_mismatches("導入数は１２３４件だった。[S1]", {1: src}), [])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the citation whose clause carries the absent
+        number is flagged — the correctly-numbered clause stays clean."""
+        from shoin.citation import numeric_mismatches
+
+        sources = {
+            1: "売上は100億円だった。",
+            2: "従業員数は40人だった。",
+        }
+        text = "売上は100億円であり[S1]、従業員数は80人だった[S2]。"
+        self.assertEqual(numeric_mismatches(text, sources), [2])
+
+    def test_trailing_citation_fragment_inherits_claim(self) -> None:
+        """"Claim. [S1]" splits to a citation-only fragment — the previous
+        sentence's numbers are still checked against it."""
+        from shoin.citation import numeric_mismatches
+
+        text = "The model reached 92 percent accuracy. [S1]"
+        self.assertEqual(
+            numeric_mismatches(text, {1: "The model reached 95 percent accuracy."}), [1]
+        )
+
+    def test_spelled_out_numbers_silent(self) -> None:
+        """Word-form numbers (三, three) are deliberately unchecked — ambiguous."""
+        from shoin.citation import numeric_mismatches
+
+        text = "三つの理由がある。[S1]"
+        self.assertEqual(numeric_mismatches(text, {1: "四つの理由がある。"}), [])
+
+    def test_report_carries_numeric_mismatch_field(self) -> None:
+        """make_report() must attach numeric_mismatch when the check fires."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "採用率は37%だった。[S1]",
+            ["調査"],
+            source_bodies=["採用率は63%だった。"],
+        )
+        self.assertEqual(report.get("numeric_mismatch"), [1])
+
+    def test_magnitude_shorthand_matches_spelled_out(self) -> None:
+        """"3.2万" and "32000" assert the same value — expanding shorthand
+        must not flag a correct restatement in either direction (v0.2.192)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}), [])
+        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}), [])
+
+    def test_magnitude_expansion_oku_and_sen(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}), [])
+        self.assertEqual(numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}), [])
+
+    def test_real_value_swap_still_flags(self) -> None:
+        """Expansion must not mask a genuine error: 3.2万 ≠ 3.4万."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}), [1])
+        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}), [1])
+
+    def test_rounding_tolerance_preserved(self) -> None:
+        """"63" inside "63.5%" stays silent — substring tolerance is kept so
+        a rounded restatement does not flag (v0.2.184 behaviour)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}), [])
+
+    def test_kanji_numeral_shorthand_matches(self) -> None:
+        """"一万" and "10000" assert the same value — single-kanji shorthand
+        expands like digit shorthand (v0.2.193)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}), [])
+        self.assertEqual(numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}), [])
+        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}), [])
+
+    def test_multi_kanji_numerals_parsed(self) -> None:
+        """Multi-kanji numerals parse positionally (v0.2.195): "二十億" = 20億,
+        "百三万" = 103万 — equal values stay silent, differing values flag."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [])
+        self.assertEqual(numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}), [])
+        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
+        self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
+
+    def test_kanji_and_mixed_chains(self) -> None:
+        """"一億二千万" and mixed "一億2000万" both = 120,000,000 (v0.2.195)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+
+    def test_bare_kanji_numerals(self) -> None:
+        """"十二人" ↔ "12人" — a bare multi-char kanji numeral expands too;
+        "二三" ("a few") is a counting sequence, not a numeral (v0.2.195)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}), [])
+        self.assertEqual(numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}), [])
+        self.assertEqual(numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}), [1])
+
+    def test_spelled_english_numerals(self) -> None:
+        """"three million" ↔ "3000000", "twenty-one" ↔ "21" — English numeral
+        words expand like kanji and digit shorthand (v0.2.196)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("The city has 3000000 people. [S1]", {1: "The city has three million people."}), [])
+        self.assertEqual(numeric_mismatches("The city has three million people. [S1]", {1: "The city has 3000000 people."}), [])
+        self.assertEqual(numeric_mismatches("21 participants joined. [S1]", {1: "Twenty-one participants joined."}), [])
+        self.assertEqual(numeric_mismatches("Sales hit 325000 yen. [S1]", {1: "Sales hit three hundred twenty five thousand yen."}), [])
+        self.assertEqual(numeric_mismatches("The city has 4000000 people. [S1]", {1: "The city has three million people."}), [1])
+
+    def test_wari_percentage_notation(self) -> None:
+        """"6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8% — 歩合 notation
+        expands to the percent value (v0.2.197). "五分五分" is 50-50 odds,
+        not a percentage, and stays unchecked."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}), [])
+        self.assertEqual(numeric_mismatches("確率は50%だった。[S1]", {1: "確率は五割だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}), [])
+        self.assertEqual(numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}), [1])
+        self.assertEqual(numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}), [1])
+
+    def test_unit_conversion_equivalence(self) -> None:
+        """"180分" ↔ "3時間", "1.5km" ↔ "1500m" — deterministic same-family
+        conversions stay silent; a different value or a different dimension
+        still flags (v0.2.198)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}), [])
+        self.assertEqual(numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}), [])
+        self.assertEqual(numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}), [])
+        self.assertEqual(numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}), [])
+        # Cross-dimension: 300円 is not 300 minutes — must still flag.
+        self.assertEqual(numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}), [1])
+        self.assertEqual(numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}), [1])
+
+    def test_chained_magnitudes_sum(self) -> None:
+        """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
+        value, so a claim spelling it out no longer false-flags (v0.2.194)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}), [])
+        self.assertEqual(numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}), [])
+        self.assertEqual(numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}), [])
+
+    def test_chained_magnitudes_wrong_value_still_flags(self) -> None:
+        """A claim chain whose sum differs from the source's still flags."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+
+    def test_rate_notation_equivalence(self) -> None:
+        """v0.2.214: percent ↔ fraction ↔ wari restatements of one rate stay
+        silent — a cited claim asserting "0.5" against a source writing "50%"
+        asserted the same value."""
+        from shoin.citation import numeric_mismatches
+
+        # Claim fraction <-> source rate-marked value.
+        self.assertEqual(numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}), [])
+        self.assertEqual(numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}), [])
+        # Claim rate-marked <-> source bare fraction.
+        self.assertEqual(numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+        self.assertEqual(numeric_mismatches("成長率は50パーセントであった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+
+    def test_rate_notation_asymmetry_still_flags(self) -> None:
+        """The bridge is directional: unmarked "50" does not match a bare "0.5",
+        and a fraction claim only reaches a RATE-marked source value."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}), [1])
+        self.assertEqual(numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}), [1])
+        # "percentile" is not a rate marker.
+        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}), [1])
+
+
+class TestUnitMismatches(unittest.TestCase):
+    """unit_mismatches() (v0.2.190): a cited claim asserting a number the source
+    DOES carry — but under a different unit ("100km" vs "100m"). Same magnitude
+    of fabrication as an absent number, structurally invisible to
+    numeric_mismatches()' presence check."""
+
+    def test_flags_metric_unit_swap(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "距離は100kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は100mだった。"}), [1])
+
+    def test_no_flag_when_unit_matches(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "採用率は63%だった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_magnitude_counter_swap_flagged(self) -> None:
+        """100億円 vs 100万円 — a real 1000× error, not a unit spelling variant."""
+        from shoin.citation import unit_mismatches
+
+        text = "売上は100億円だった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "売上は100万円だった。"}), [1])
+
+    def test_silent_when_source_occurrence_has_no_unit(self) -> None:
+        """A bare "100" in the source proves nothing about its unit — the unit
+        may live in the surrounding text. Inconclusive → silent."""
+        from shoin.citation import unit_mismatches
+
+        text = "距離は100kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は100あった。"}), [])
+
+    def test_silent_when_number_absent_entirely(self) -> None:
+        """Number not in source at all → numeric_mismatches()' signal, not ours."""
+        from shoin.citation import unit_mismatches
+
+        text = "荷重は37kgだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "採用率は63%だった。"}), [])
+
+    def test_prefix_extension_units_compatible(self) -> None:
+        """'1億' → '1億円' and '3回' → '3回目' are elaboration, not a swap."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("資産は12億円あった。[S1]", {1: "資産は12億あった。"}), [])
+        self.assertEqual(unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}), [])
+
+    def test_katakana_unit_swap_flagged(self) -> None:
+        from shoin.citation import unit_mismatches
+
+        text = "速度は40キロだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "速度は40メートルだった。"}), [1])
+
+    def test_single_digit_never_checked(self) -> None:
+        """Same ≥2-digit threshold as numeric_mismatches — '5km' vs '5m' silent."""
+        from shoin.citation import unit_mismatches
+
+        text = "距離は5kmだった。[S1]"
+        self.assertEqual(unit_mismatches(text, {1: "距離は5mだった。"}), [])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the clause carrying the swapped unit flags."""
+        from shoin.citation import unit_mismatches
+
+        sources = {
+            1: "売上は100億円だった。",
+            2: "従業員数は40人だった。",
+        }
+        text = "売上は100億円であり[S1]、従業員数は40台だった[S2]。"
+        self.assertEqual(unit_mismatches(text, sources), [2])
+
+    def test_report_carries_unit_mismatch_field(self) -> None:
+        """make_report() must attach unit_mismatch when the check fires."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "距離は100kmだった。[S1]",
+            ["調査"],
+            source_bodies=["距離は100mだった。"],
+        )
+        self.assertEqual(report.get("unit_mismatch"), [1])
+
+    def test_cross_script_aliases_silent(self) -> None:
+        """km↔キロメートル, m↔メートル, %↔パーセント: same unit, other script."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}), [])
+        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}), [])
+        self.assertEqual(unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}), [])
+        self.assertEqual(unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}), [])
+
+    def test_counter_kanji_aliases_silent(self) -> None:
+        """歳↔才, 名↔人, 棟↔軒: same count in another spelling."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}), [])
+        self.assertEqual(unit_mismatches("委員は12名だった。[S1]", {1: "委員は12人だった。"}), [])
+        self.assertEqual(unit_mismatches("被害は25棟だった。[S1]", {1: "被害は25軒だった。"}), [])
+
+    def test_ambiguous_abbreviation_silent_both_ways(self) -> None:
+        """キロ reads as km or kg — ambiguous, so it can only under-flag."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は40キロだった。[S1]", {1: "距離は40kmだった。"}), [])
+        self.assertEqual(unit_mismatches("重量は40キロだった。[S1]", {1: "重量は40kgだった。"}), [])
+
+    def test_precise_units_still_flag_through_ambiguous_alias(self) -> None:
+        """The directional table must not join the precise readings: km and kg
+        share the ambiguous alias キロ but are not aliases of each other."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}), [1])
+        self.assertEqual(unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}), [1])
+
+    def test_ascii_case_preserved(self) -> None:
+        """MW vs mW differ by 9 orders of magnitude — case is meaning."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}), [1])
+
+    def test_non_alias_counter_pairs_still_flag(self) -> None:
+        """本/冊 and 番/位 are deliberately excluded — they can differ."""
+        from shoin.citation import unit_mismatches
+
+        self.assertEqual(unit_mismatches("冊数は30冊だった。[S1]", {1: "冊数は30本だった。"}), [1])
+        self.assertEqual(unit_mismatches("順位は12位だった。[S1]", {1: "順位は12番だった。"}), [1])
+
+
+class TestQuoteMismatches(unittest.TestCase):
+    """quote_mismatches() (v0.2.187): a verbatim quote (「…」/"…") cited to a
+    source that does not contain it while a different source does — the
+    exact-string cousin of the misattributed flag (arXiv:2510.20303's quoted-
+    fabrication failure shape)."""
+
+    def test_flags_quote_living_in_other_source(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く別の内容である。",
+            2: "本文には完全な捏造テキストと記述がある。",
+        }
+        text = "出典では「完全な捏造テキスト」と書かれている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_no_flag_when_quote_in_cited_source(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "本文には完全な捏造テキストと記述がある。"}
+        text = "出典では「完全な捏造テキスト」と書かれている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
+    def test_absent_quote_stays_silent(self) -> None:
+        """A span in no source could be fabricated — or emphasis-「」."""
+        from shoin.citation import quote_mismatches
+
+        self.assertEqual(
+            quote_mismatches("「存在しない長い引用文」である[S1]。", {1: "無関係。"}),
+            [],
+        )
+
+    def test_short_concept_name_stays_silent(self) -> None:
+        """「…」 under 8 chars is a concept name, not a quotation claim."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "無関係な内容。", 2: "重要な設計原則という概念がある。"}
+        self.assertEqual(quote_mismatches("「重要な設計原則」が鍵だ[S1]。", sources), [])
+
+    def test_ascii_double_quotes_also_checked(self) -> None:
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "nothing matching here",
+            2: "the verbatim quote text appears inside",
+        }
+        text = 'It says "verbatim quote text" in the report [S1].'
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_clause_level_attribution(self) -> None:
+        """Co-cited sentence: only the citation whose clause carries the
+        foreign-source quote is flagged."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "売上は100億円だった。従業員数は40人だった。",
+            2: "無関係な内容である。",
+        }
+        text = "売上は100億円だった[S1]、そして「従業員数は40人だった」と引用している[S2]。"
+        self.assertEqual(quote_mismatches(text, sources), [2])
+
+    def test_doctored_quote_cited_source(self) -> None:
+        """v0.2.199: a ≥12-char span sharing ≥60% bigrams with the CITED source
+        while matching none verbatim is a paraphrase wearing quotes — flag."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "ハイブリッド検索は両手法の長所を組み合わせる手法である。"}
+        # One-word swap inside the quote: ~70%+ bigram overlap, not verbatim.
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_doctored_quote_other_source(self) -> None:
+        """Near-verbatim of a DIFFERENT source cited to n is the same error
+        shape as the verbatim-in-m case — flag n."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く関係のない記述だけが書かれている。",
+            2: "ハイブリッド検索は両手法の長所を組み合わせる手法である。",
+        }
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_loose_paraphrase_quote_stays_silent(self) -> None:
+        """Below the 0.6 overlap bound a quoted span could be a legitimate
+        quote-adjacent paraphrase — inconclusive, stays silent."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "ハイブリッド検索は両手法の長所を組み合わせる手法である。"}
+        text = "出典の考え方は「意味検索と語彙検索を融合させた方式」だ[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
+    def test_short_doctored_span_stays_silent(self) -> None:
+        """Under 12 chars a near-verbatim span could still be a topic-term
+        emphasis — the doctored check stays silent (verbatim rules unchanged)."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "重要な設計原則という概念が文書にある。"}
+        text = "「重要な設計原理」が鍵だ[S1]。"  # 8 chars, near-miss of 原則 — silent
+        self.assertEqual(quote_mismatches(text, sources), [])
+
+    def test_trailing_citation_fragment_inherits_claim(self) -> None:
+        """"Claim. [S1]" splits to a citation-only fragment — the previous
+        sentence's quotes are still checked against it."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "other content", 2: "the verbatim quote text lives here"}
+        text = 'The report says "verbatim quote text" is real. [S1]'
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_report_merges_into_misattributed_and_records_field(self) -> None:
+        """make_report() merges quote flags into misattributed (same evidence
+        shape) while recording quote_mismatch for inspection."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "出典では「完全な捏造テキスト」と書かれている[S1]。",
+            ["調査A", "調査B"],
+            source_bodies=[
+                "全く別の内容である。",
+                "本文には完全な捏造テキストと記述がある。",
+            ],
+        )
+        self.assertEqual(report.get("quote_mismatch"), [1])
+        self.assertIn(1, report.get("misattributed", []))
+        # Verbatim provenance names the true source too (v0.2.220).
+        self.assertEqual(report.get("misattributed_suggested"), {"S1": "S2"})
+
+
+class TestNegationMismatches(unittest.TestCase):
+    """negation_mismatches() (v0.2.201): a claim mirroring a source sentence
+    with the negation flipped — bigram overlap confirms it as grounded while
+    the polarity is inverted."""
+
+    def test_flags_negation_flip(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "治療の効果はないことが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_positive_claim_against_negative_source(self) -> None:
+        """The flip is symmetric — a positive claim citing a negative source
+        is the same inversion."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はないことが分かった。"}
+        text = "治療の効果はあることが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_matching_polarity_stays_silent(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "治療の効果はあることが分かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_subset_claim_of_bipolar_source_stays_silent(self) -> None:
+        """A claim restating only half of a bipolar source sentence
+        ("Aは効果があるがBはない") is a subset, not a flip — src coverage
+        below 0.5 stays silent."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療Aは効果があるが治療Bは効果がなかった。"}
+        text = "治療Aは効果がある[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_contrastive_negation_stays_silent(self) -> None:
+        """"AではなくB" asserts the same B the source asserts — exempt."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "会議は大阪で開催された。"}
+        text = "会議は東京ではなく大阪で開催された[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_double_negation_reads_positive(self) -> None:
+        """"なくはない" counts two markers → even → positive parity."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療には効果がある。"}
+        text = "この治療には効果がなくはない[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_english_negation_flip(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the treatment does improve survival rates."}
+        text = "the treatment does not improve survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_low_overlap_claim_stays_silent(self) -> None:
+        """A loosely paraphrased negative claim could disagree OR discuss a
+        different aspect — inconclusive below the mirror bound."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "治療の効果はあることが分かった。"}
+        text = "効果は観察されなかった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_report_records_negation_mismatch(self) -> None:
+        from shoin.citation import make_report
+
+        report = make_report(
+            "治療の効果はないことが分かった[S1]。",
+            ["調査A"],
+            source_bodies=["治療の効果はあることが分かった。"],
+        )
+        self.assertEqual(report.get("negation_mismatch"), [1])
+
+    def test_flags_antonym_swap_japanese(self) -> None:
+        """v0.2.202: same mirror, same negation parity, but a scale term is
+        swapped for its opposite — a polarity inversion bigrams confirm."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療の効果は低かった。"}
+        text = "この治療の効果は高かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_trend_inversion(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "今年の売上は減少した。"}
+        text = "今年の売上は増加した[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_flags_english_antonym_swap(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the treatment decreased survival rates."}
+        text = "the treatment increased survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_matching_antonym_stays_silent(self) -> None:
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この治療の効果は高かった。"}
+        text = "この治療の効果は高かった[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+    def test_unshared_antonym_class_stays_silent(self) -> None:
+        """A class present on only one side is a lexical difference, not an
+        inversion — the claim may just phrase the scale differently."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "この機能は重要である。"}
+        text = "この機能は重要だ[S1]。"
+        self.assertEqual(negation_mismatches(text, sources), [])
+
+
+class TestSelfContradictions(unittest.TestCase):
+    """self_contradictions() (v0.2.204): the answer asserts both polarities
+    of the same claim — the answer-internal counterpart of negation_mismatches.
+    Only fires on a single contiguous difference so different-subject
+    contrasts stay silent."""
+
+    def test_flags_negation_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "治療の効果はあることが分かった。治療の効果はないことが分かった。"
+        self.assertEqual(self_contradictions(text), ["治療の効果はないことが分かった。"])
+
+    def test_flags_antonym_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "この治療の効果は高かった。一方でこの治療の効果は低かったと述べている。"
+        # prefix "一方で" adds a second diff span — the single-difference rule
+        # correctly keeps this silent (attribution contrast, not a bare flip)
+        self.assertEqual(self_contradictions(text), [])
+        text = "この治療の効果は高かった。この治療の効果は低かった。"
+        self.assertEqual(self_contradictions(text), ["この治療の効果は低かった。"])
+
+    def test_flags_numeric_flip_within_answer(self) -> None:
+        from shoin.citation import self_contradictions
+
+        text = "成長率は15%だった。成長率は20%だった。"
+        self.assertEqual(self_contradictions(text), ["成長率は20%だった。"])
+
+    def test_different_subject_contrast_stays_silent(self) -> None:
+        """"A社の治療は効果がある。B社の治療は効果がない。" differs in TWO
+        spans (subject + predicate) — a legitimate contrast, not a flip."""
+        from shoin.citation import self_contradictions
+
+        text = "A社の治療は効果がある。B社の治療は効果がない。"
+        self.assertEqual(self_contradictions(text), [])
+
+    def test_list_prefix_stripped_before_comparing(self) -> None:
+        """Numbered/bulleted lines compare on content, not the marker."""
+        from shoin.citation import self_contradictions
+
+        text = "1. 治療の効果はある。\n2. 治療の効果はない。"
+        self.assertEqual(len(self_contradictions(text)), 1)
+
+    def test_report_records_self_contradiction(self) -> None:
+        from shoin.citation import make_report
+
+        report = make_report(
+            "治療の効果はある[S1]。治療の効果はない[S1]。",
+            ["調査A"],
+            source_bodies=["治療の効果があるかどうかは不明である。"],
+        )
+        self.assertEqual(report.get("self_contradiction"), ["治療の効果はない[S1]。"])
+
+    def test_fenced_code_reassignment_stays_silent(self) -> None:
+        """v0.2.209: `port = 1234` / `port = 5678` inside a fence is a code
+        reassignment, not a prose contradiction — fences are stripped before
+        comparing sentences."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("```\nport = 1234\nport = 5678\n```"), []
+        )
+        # Unterminated fence = code to end-of-file (Markdown rule).
+        self.assertEqual(
+            self_contradictions("```\nport = 1234\nport = 5678"), []
+        )
+        # …while the same shape in prose still fires.
+        self.assertEqual(
+            self_contradictions("売上は1234万円だった。売上は5678万円だった。"),
+            ["売上は5678万円だった。"],
+        )
+
+    def test_indented_code_reassignment_stays_silent(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too —
+        reassigned values inside it aren't prose contradictions, exactly
+        like the fenced form above."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("例：\n\n    port = 1234\n    port = 5678"), []
+        )
+
+    def test_cross_turn_flip_flagged_via_history(self) -> None:
+        """v0.2.215: a silent reversal of last turn's claim shows the same
+        single-diff flip; the CURRENT answer's sentence is the one flagged."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("治療の効果はない。", history="治療の効果はある。"),
+            ["治療の効果はない。"],
+        )
+        self.assertEqual(
+            self_contradictions("効果は低いことが分かった。", history="効果は高いことが分かった。"),
+            ["効果は低いことが分かった。"],
+        )
+        self.assertEqual(
+            self_contradictions("成長率は20%である。", history="成長率は15%である。"),
+            ["成長率は20%である。"],
+        )
+
+    def test_cross_turn_controls_stay_silent(self) -> None:
+        """Repeating last turn's claim is not a contradiction (degenerate_spans
+        owns repetition), a different-subject contrast stays silent, and
+        history-less calls behave exactly as before."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("治療の効果はある。", history="治療の効果はある。"), []
+        )
+        self.assertEqual(
+            self_contradictions("B社は効果がない。", history="A社は効果がある。"), []
+        )
+        self.assertEqual(self_contradictions("治療の効果はない。"), [])
+
+
+class TestDegenerateSpans(unittest.TestCase):
+    """degenerate_spans() (v0.2.188): verbatim repetition signalling an LLM
+    degeneration loop — the failure shape small local models are prone to and
+    every other check is blind to (it is answer-internal, not a citation
+    problem)."""
+
+    def test_repeated_sentence_three_times_flagged(self) -> None:
+        from shoin.citation import degenerate_spans
+
+        text = "結論は常に同じ結論である。" * 3 + "補足。"
+        self.assertTrue(degenerate_spans(text))
+        self.assertTrue(
+            any("結論は常に同じ結論" in s for s in degenerate_spans(text))
+        )
+
+    def test_consecutive_span_loop_flagged(self) -> None:
+        """A ≥6-char unit repeated ≥3 times consecutively — the stuck-tail
+        loop, even inside one run-on sentence."""
+        from shoin.citation import degenerate_spans
+
+        self.assertTrue(degenerate_spans("その結果は重要である" * 3))
+
+    def test_parallel_structure_stays_silent(self) -> None:
+        """Similar-but-different sentences are honest prose, not a loop."""
+        from shoin.citation import degenerate_spans
+
+        text = "猫は液体である。犬は固体である。鳥は空を飛ぶものである。"
+        self.assertEqual(degenerate_spans(text), [])
+
+    def test_short_filler_repeats_stay_silent(self) -> None:
+        """Sub-threshold units (はい/です etc.) recur legitimately."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(degenerate_spans("はい。はい。はい。"), [])
+
+    def test_two_repeats_stay_silent(self) -> None:
+        """Twice is emphasis or structure — only ≥3 asserts a loop."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(degenerate_spans("結論は常に同じ結論である。" * 2), [])
+
+    def test_whitespace_variants_still_match(self) -> None:
+        """Spacing differences do not disguise the same repeated sentence."""
+        from shoin.citation import degenerate_spans
+
+        text = "結論は 常に同じ 結論である。 結論は常に同じ結論である。結論は常に同じ結論である。"
+        self.assertTrue(degenerate_spans(text))
+
+    def test_report_carries_degenerate_field(self) -> None:
+        """make_report() attaches degenerate whenever the check fires —
+        answer-internal, no sources needed."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "これは繰り返しの文です。これは繰り返しの文です。これは繰り返しの文です。",
+            ["調査"],
+            source_bodies=["全く別の内容。"],
+        )
+        self.assertTrue(report.get("degenerate"))
+        clean = make_report("正常な回答です。[S1]", ["調査"], source_bodies=["正常な内容。"])
+        self.assertIsNone(clean.get("degenerate"))
+
+    def test_fenced_code_repeats_stay_silent(self) -> None:
+        """v0.2.209: identical statements inside a fence are code, not a
+        degeneration loop — ```- and ~~~-fences are stripped before scanning."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(
+            degenerate_spans("```\nresult=compute(x)\nresult=compute(x)\nresult=compute(x)\n```"),
+            [],
+        )
+        self.assertEqual(
+            degenerate_spans("~~~\nresult=compute(x)\nresult=compute(x)\nresult=compute(x)\n~~~"),
+            [],
+        )
+        # …while the same repetition in prose still fires.
+        self.assertTrue(degenerate_spans("result=compute(x)" * 3))
+
+    def test_indented_code_repeats_stay_silent(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too — same
+        code-is-not-prose rule as the fenced form above."""
+        from shoin.citation import degenerate_spans
+
+        self.assertEqual(
+            degenerate_spans("例：\n\n    result=compute(x)\n    result=compute(x)\n    result=compute(x)"),
+            [],
+        )
+
+    def test_cross_turn_loop_flagged_via_history(self) -> None:
+        """v0.2.210: a sentence repeated across conversation turns reaches the
+        ≥3 threshold through `history` — the parrot loop a per-message check
+        structurally cannot see (one occurrence per message)."""
+        from shoin.citation import degenerate_spans
+
+        para = "治療の効果は確立されている。多くの研究が支持している。"
+        # Said twice before, said again now → loop detected.
+        self.assertTrue(degenerate_spans(para, history=para + "\n" + para))
+        # Only 2 total occurrences → below the threshold, stays silent.
+        self.assertEqual(degenerate_spans(para, history=para), [])
+
+    def test_history_only_repeats_stay_silent(self) -> None:
+        """Sentences repeated only in `history` (never in this answer) are not
+        the answer's degeneration — only its own repeated sentences flag."""
+        from shoin.citation import degenerate_spans
+
+        para = "治療の効果は確立されている。多くの研究が支持している。"
+        self.assertEqual(
+            degenerate_spans("全く別の回答です。", history=(para + " ") * 3), []
+        )
 
 
 class TestUncitedSentences(unittest.TestCase):
@@ -3737,6 +5686,143 @@ class TestUncitedSentences(unittest.TestCase):
 
         text = "What is the capital of France? Paris has existed for centuries."
         self.assertEqual(uncited_sentences(text), ["Paris has existed for centuries."])
+
+    def test_ignores_framing_sentences(self) -> None:
+        """v0.2.203: structural sentences ("以下に要点を示します") describe the
+        answer's own shape, not the sources — flagging them false-positives
+        every well-organized answer."""
+        from shoin.citation import uncited_sentences
+
+        text = "以下に要点を示します。効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+        text = "要点は以下の通りです。効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_english_framing_sentences(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "the following summarizes the sources. efficacy is high [S1]."
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_framing_prefix_does_not_hide_claim(self) -> None:
+        """A framing opening followed by a real claim in the same sentence is
+        still an unsupported claim — the exemption covers pure framing only."""
+        from shoin.citation import uncited_sentences
+
+        text = "以下の通り：効果は高い。"
+        self.assertEqual(uncited_sentences(text), ["以下の通り：効果は高い。"])
+
+        text = "上記の治療は効果がある。"
+        self.assertEqual(uncited_sentences(text), ["上記の治療は効果がある。"])
+
+    def test_cited_colon_lead_in_scopes_list_items(self) -> None:
+        """"以下の通り[S1]：" cites S1 over the enumeration it introduces —
+        flagging each item is a false positive on the most common list style."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り[S1]：\n・効果は高い\n・副作用は少ない"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_cited_toori_lead_in_scopes_list_items(self) -> None:
+        """A 。-terminated "…の通り[S1]。" lead-in scopes its block too."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り[S1]。\n・効果は高い\n・副作用は少ない"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_period_terminated_claim_lead_in_does_not_scope(self) -> None:
+        """"効果は高い[S1]。" is a claim, not an enumeration intro — the list
+        items after it assert new content and still need their own citations,
+        matching the strict per-sentence rule prose already applies."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は高い[S1]。\n・副作用は少ない\n・低コストである"
+        self.assertEqual(
+            uncited_sentences(text), ["・副作用は少ない", "・低コストである"]
+        )
+
+    def test_uncited_lead_in_does_not_scope(self) -> None:
+        """Scope requires the lead-in to carry a citation — an uncited one
+        leaves every item exposed."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は以下の通り：\n・効果は高い"
+        self.assertIn("・効果は高い", uncited_sentences(text))
+
+    def test_scope_ends_at_first_non_item_line(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "以下の通り[S1]：\n・効果は高い\n別の話題である。\n・低コスト"
+        self.assertEqual(uncited_sentences(text), ["別の話題である。", "・低コスト"])
+
+    def test_comparison_toori_is_not_an_intro(self) -> None:
+        """"思った通りだった[S1]。" is a comparison, not an enumeration."""
+        from shoin.citation import uncited_sentences
+
+        text = "結果は思った通りだった[S1]。\n・効果は高い"
+        self.assertEqual(uncited_sentences(text), ["・効果は高い"])
+
+    def test_ignores_markdown_structural_lines(self) -> None:
+        """Headings, table rows (incl. |---| separators), rules and quotes are
+        markdown structure, not sentences asserting source content — the check
+        flags sentences, and none of these are one."""
+        from shoin.citation import uncited_sentences
+
+        text = (
+            "## 効果について\n効果は高い[S1]。\n---\n"
+            "| 項目 | 効果 |\n|---|---|\n| A | 高い |\n> 効果は高い"
+        )
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_fenced_code_and_its_contents(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "```python\nx = compute_answer()\n```\n効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_unclosed_fence_runs_to_eof(self) -> None:
+        """An unterminated fence means code to end-of-file — nothing after it
+        is prose, so even a claim-shaped line inside stays silent."""
+        from shoin.citation import uncited_sentences
+
+        text = "```python\nx = compute()\n効果は高い[S1]。"
+        self.assertEqual(uncited_sentences(text), [])
+
+    def test_ignores_indented_code_and_its_contents(self) -> None:
+        """v0.2.217: the 4-space indented-code form is covered too —
+        CommonMark's blank-line rule decides code vs lazy continuation."""
+        from shoin.citation import uncited_sentences
+
+        # Indent after a blank line = code block → silent.
+        self.assertEqual(
+            uncited_sentences("効果は高い[S1]。\n\n    port = 1234"), []
+        )
+        # Indent after a non-blank line = lazy paragraph continuation →
+        # still prose, still checked.
+        self.assertEqual(
+            uncited_sentences("効果は高い。\n    追加の散文文である。"),
+            ["効果は高い。", "追加の散文文である。"],
+        )
+        # A blank line inside the block keeps it open until non-indented text.
+        self.assertEqual(
+            uncited_sentences("例：\n\n    a = 1\n\n    b = 2\nこの後は散文である。"),
+            ["この後は散文である。"],
+        )
+
+    def test_claim_after_structure_still_flags(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        text = "## 概要\n効果は高い。"
+        self.assertEqual(uncited_sentences(text), ["効果は高い。"])
+
+    def test_structure_does_not_consume_trailing_citation(self) -> None:
+        """A structural line is invisible to the claim check — a trailing [S1]
+        still resolves the sentence before it."""
+        from shoin.citation import uncited_sentences
+
+        text = "効果は高い。\n## 次節\n[S1]"
+        self.assertEqual(uncited_sentences(text), [])
 
     def test_ignores_formal_japanese_question_ending_in_ka_period(self) -> None:
         """Formal written Japanese ends a question in か。 with no "?" at all —
@@ -3834,6 +5920,55 @@ class TestUncitedSentences(unittest.TestCase):
         )
         self.assertNotIn("uncited", report)
         self.assertEqual(report["confirmed"], [1, 2])
+
+    def test_make_report_splits_grounded_uncited(self) -> None:
+        """v0.2.212: `uncited_supported` splits citation-omission from
+        hallucination — an uncited claim that lexically matches a source is a
+        missing-[S#] fix, not an unsupported assertion."""
+        from shoin.citation import make_report
+
+        bodies = ["治療の効果は高いことが示された。安全性も確認済み。"]
+        text = (
+            "治療の効果は高いことが示された。\n"   # grounded → supported
+            "全く関係のない架空の主張が加えられた。"  # ungrounded → dangerous
+        )
+        report = make_report(text, ["調査A"], source_bodies=bodies)
+        self.assertEqual(
+            report.get("uncited_supported"),
+            ["治療の効果は高いことが示された。"],
+        )
+        # Both stay in `uncited` — the split annotates, it does not remove.
+        self.assertEqual(len(report["uncited"]), 2)
+
+    def test_make_report_no_supported_field_without_grounded_uncited(self) -> None:
+        """With no lexically-matching uncited sentence the field is absent."""
+        from shoin.citation import make_report
+
+        report = make_report(
+            "全く無関係の主張がここにある。",
+            ["調査A"],
+            source_bodies=["治療の効果は高いことが示された。"],
+        )
+        self.assertNotIn("uncited_supported", report)
+        self.assertNotIn("uncited_supported_source", report)
+
+    def test_make_report_names_supported_source(self) -> None:
+        """v0.2.216: `uncited_supported_source` maps each grounded uncited
+        sentence to the S# it most likely omitted — the fix is 'add [S#]',
+        not 're-read every source'."""
+        from shoin.citation import make_report
+
+        bodies = [
+            "安全性の評価は二重盲検試験で行われた。",
+            "治療の効果は高いことが示された。有効率は顕著だった。",
+        ]
+        report = make_report(
+            "治療の効果は高いことが示された。", ["調査A", "調査B"], source_bodies=bodies
+        )
+        self.assertEqual(
+            report.get("uncited_supported_source"),
+            {"治療の効果は高いことが示された。": "S2"},
+        )
 
     def test_make_report_populates_uncited_when_sources_present(self) -> None:
         from shoin.citation import make_report
@@ -3966,6 +6101,179 @@ class TestLLMClient(unittest.TestCase):
         with self.assertRaises(LLMError) as cm:
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_chat_sends_max_tokens_bound(self) -> None:
+        """chat() must bound generation with max_tokens (v0.2.219): without it
+        endpoints default to n_predict=-1 and a degeneration loop generates
+        until context exhaustion — minutes of garbage on local hardware."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, MAX_TOKENS
+
+        sent: list[bytes] = []
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode()
+
+        def _fake_urlopen(req, **kw):
+            sent.append(req.data)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(_json.loads(sent[0])["max_tokens"], MAX_TOKENS)
+
+    def test_chat_stream_sends_max_tokens_bound(self) -> None:
+        """chat_stream() must carry the same bound — the SSE /ask path is the
+        one a parrot loop actually hits in the UI."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, MAX_TOKENS
+
+        sent: list[bytes] = []
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"}}]}',
+            b"data: [DONE]",
+        ])
+
+        def _fake_urlopen(req, **kw):
+            sent.append(req.data)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        self.assertEqual(_json.loads(sent[0])["max_tokens"], MAX_TOKENS)
+
+    def test_chat_records_finish_reason(self) -> None:
+        """chat() must capture choices[0].finish_reason on last_finish_reason
+        (v0.2.245) so callers can tell a max_tokens-clipped answer ("length")
+        from a complete one ("stop") — and a missing field stays None."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        def _chat_with(finish: str | None) -> "LLMClient":
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            choice: dict[str, object] = {"message": {"content": "ok"}}
+            if finish is not None:
+                choice["finish_reason"] = finish
+            mock_resp.read.return_value = _json.dumps({"choices": [choice]}).encode()
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                client.chat([{"role": "user", "content": "hi"}])
+            return client
+
+        self.assertEqual(_chat_with("length").last_finish_reason, "length")
+        self.assertEqual(_chat_with("stop").last_finish_reason, "stop")
+        self.assertIsNone(_chat_with(None).last_finish_reason)
+
+    def test_chat_stream_records_finish_reason(self) -> None:
+        """chat_stream() must capture finish_reason from the final SSE chunk —
+        the /ask SSE path generates through this method (v0.2.245)."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}',
+            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            b"data: [DONE]",
+        ])
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertEqual(
+                list(client.chat_stream([{"role": "user", "content": "hi"}])), ["x"]
+            )
+        self.assertEqual(client.last_finish_reason, "length")
+
+    def test_chat_joins_content_parts(self) -> None:
+        """OpenAI's schema allows message.content as an ARRAY of parts
+        ([{"type":"text","text":"..."}]) — some compatible servers/proxies pass
+        that form through verbatim. str() would persist Python-repr garbage as
+        the answer; _message_text must join the text parts instead (v0.2.259)."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "refusal", "refusal": "n/a"},
+                {"type": "text", "text": " world"},
+            ]}}]}
+        ).encode()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out = LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(out, "Hello world")
+
+    def test_chat_rejects_non_text_content(self) -> None:
+        """A content field that is neither str nor a parts list (e.g. a dict
+        from a non-conforming endpoint) must raise LLMError — never str() it
+        into repr text that citation badges then decorate as a real answer."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient, LLMError
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": {"text": "x"}}}]}
+        ).encode()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_chat_stream_joins_content_parts_and_skips_malformed(self) -> None:
+        """Stream deltas carry the same parts-list shape; malformed non-text
+        deltas are dropped rather than str()-coerced into the answer."""
+        from unittest.mock import MagicMock, patch
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
+            b'data: {"choices":[{"delta":{"content":{"text":"junk"}}}]}',
+            b'data: {"choices":[{"delta":{"content":"!"}}]}',
+            b"data: [DONE]",
+        ])
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out = list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        self.assertEqual(out, ["Hello", "!"])
 
     def test_available_returns_false_for_invalid_url_scheme(self) -> None:
         """available() must return False (not raise ValueError) for unknown URL schemes.
@@ -4753,6 +7061,64 @@ class TestPipeline(unittest.TestCase):
         with make_store():
             pass  # store closed; already verified above
 
+    def test_refresh_source_unchanged_content_is_noop(self) -> None:
+        """v0.2.243: refreshing a URL whose content is byte-identical (same
+        sha256) previously deleted every chunk and re-inserted it with fresh
+        rowids — discarding all embeddings (LLM calls spent for zero content
+        change) and churning the rowid-reuse surface v0.2.230 guards stored
+        source_chunk_ids against. An unchanged refresh is now a no-op that
+        keeps chunk ids and embeddings intact."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        class EmbedLLM:
+            """Counts embed calls: an unchanged refresh must spend zero."""
+            embedding_model = "noop-embed-model"
+            calls = 0
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text: str) -> list[float]:
+                EmbedLLM.calls += 1
+                return [0.5, 0.5]
+
+        original = Extracted(
+            kind="url", title="Page", origin="http://same.test",
+            sha256="sha-same", text="word " * 200,
+        )
+        other = Extracted(
+            kind="url", title="Other", origin="http://other.test",
+            sha256="sha-other", text="filler " * 200,
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("noop-refresh-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://same.test")
+            source_id = res0.source.id
+            # A second source occupying higher rowids: without it, the first
+            # source's delete+reinsert lands back on the same 1..N rowids and
+            # the identity assertion below cannot discriminate churn from a
+            # true no-op.
+            with patch("shoin.pipeline.extract_url", return_value=other):
+                index_source(s, nb_id, "http://other.test")
+            before = [c.id for c in s.chunks_for_source(source_id)]
+            self.assertTrue(before)
+            EmbedLLM.calls = 0
+            same = Extracted(
+                kind="url", title="Page", origin="http://same.test",
+                sha256="sha-same", text="word " * 200,
+            )
+            with patch("shoin.pipeline.extract_url", return_value=same):
+                res1 = refresh_source(s, source_id, EmbedLLM())
+            after = [c.id for c in s.chunks_for_source(source_id)]
+        self.assertEqual(before, after, "chunk ids must survive an unchanged refresh")
+        self.assertEqual(EmbedLLM.calls, 0, "unchanged content must not re-embed")
+        self.assertEqual(res1.n_chunks, len(before))
+        self.assertEqual(res1.n_embedded, 0)
+
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
         """A user's custom rename (PATCH /api/sources/{id}) must survive a
         subsequent refresh, even when the re-fetched page has a different
@@ -5308,6 +7674,35 @@ class TestExport(unittest.TestCase):
         self.assertIn("S1", line)
         self.assertIn("1", line)  # uncited count
 
+    def test_status_line_flags_truncated(self) -> None:
+        """v0.2.245: report.truncated (finish_reason "length") must appear in the
+        exported status line — an archived answer must carry the same 'clipped
+        at the token limit' caveat the UI badge shows."""
+        from shoin.export import _status_line
+
+        self.assertIn("打切", _status_line({"truncated": True}))
+        self.assertNotIn("打切", _status_line({}))
+
+    def test_status_line_carries_suggested_source_hints(self) -> None:
+        """v0.2.223: the CLI/UI append '→S<right>' to misattributed numbers and
+        '→S#' to grounded-uncited warnings; the export silently dropped both,
+        leaving an archived 'S3 is wrong' with no hint that S1 was right."""
+        from shoin.export import _status_line
+
+        report: dict[str, object] = {
+            "misattributed": [3],
+            "misattributed_suggested": {"S3": "S1"},
+            "uncited": ["猫は液体である。", "猫は固体である。"],
+            "uncited_supported": ["猫は液体である。", "猫は固体である。"],
+            "uncited_supported_source": {
+                "猫は液体である。": "S2",
+                "猫は固体である。": "S2",
+            },
+        }
+        line = _status_line(report)
+        self.assertIn("S3\u2192S1", line)
+        self.assertIn("(2)\u2192S2", line)  # deduped target hint
+
     def test_status_line_empty_when_report_has_nothing_to_report(self) -> None:
         from shoin.export import _status_line
 
@@ -5384,6 +7779,91 @@ class TestExport(unittest.TestCase):
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc", md)
         self.assertNotIn("§", md)
+
+    def test_export_markdown_legend_shows_source_detail(self) -> None:
+        """v0.2.229: the seal viewer's 'found: full-text #2' provenance belongs in
+        the export too — a source surfaced only semantically is exactly the class
+        unsupported claims come from, so the archived legend carries it."""
+        import json
+
+        from shoin.citation import make_report
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("export-detail-test")
+            a = s.add_source(nb.id, "txt", "doc-a", "mem://a", "sha-a")
+            b = s.add_source(nb.id, "txt", "doc-b", "mem://b", "sha-b")
+            s.add_chunks(a.id, ["書院はローカルツールである。"])
+            s.add_chunks(b.id, ["検証は引用を確かめる。"])
+            report = make_report(
+                "書院はローカルツールである[S1]。検証は引用を確かめる[S2]。",
+                ["doc-a", "doc-b"], [a.id, b.id],
+                ["書院はローカルツールである。", "検証は引用を確かめる。"],
+                source_detail=[
+                    {"rrf_bm25_rank": 2.0, "rrf_vec_rank": 5.0},
+                    {"rrf_vec_rank": 3.0},
+                ],
+            )
+            s.add_message(nb.id, "user", "書院とは", "{}")
+            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            md = export_markdown(s, nb.id)
+        self.assertIn("S1=doc-a [検出: 全文 #2 + 意味 #5]", md)
+        self.assertIn("S2=doc-b [検出: 意味 #3]", md)
+
+    def test_print_report_shows_source_detail(self) -> None:
+        """v0.2.229: CLI parity — the [S#] line carries the same provenance."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1], "invalid": [], "n_sources": 1,
+                "source_map": {"S1": "doc0"},
+                "source_detail": {"S1": {"rrf_vec_rank": 4.0, "lex": 0.35}},
+                "confirmed": [], "misattributed": [],
+            })
+        out = buf.getvalue()
+        self.assertIn("[検出: 意味 #4 + 語彙 0.35]", out)
+        # Old reports without source_detail render exactly as before.
+        buf2 = _io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            _cli._print_report({
+                "cited": [1], "invalid": [], "n_sources": 1,
+                "source_map": {"S1": "doc0"}, "confirmed": [], "misattributed": [],
+            })
+        self.assertNotIn("検出", buf2.getvalue())
+
+    def test_print_report_flag_markers_and_tail_sections(self) -> None:
+        """v0.2.275: cover _print_report's flag markers (numeric/unit/negation),
+        the uncited block with supported-source naming, self_contradiction and
+        truncated — the print branches no earlier test exercised."""
+        import contextlib
+        import io as _io
+
+        from shoin import cli as _cli
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _cli._print_report({
+                "cited": [1, 2, 3, 4], "invalid": [], "n_sources": 4,
+                "coverage": 1.0,
+                "source_map": {"S1": "a", "S2": "b", "S3": "c", "S4": "d"},
+                "confirmed": [1], "misattributed": [],
+                "numeric_mismatch": [2], "unit_mismatch": [3],
+                "negation_mismatch": [4],
+                "uncited": ["無根拠の文", "根拠あり文"],
+                "uncited_supported": ["根拠あり文"],
+                "uncited_supported_source": {"根拠あり文": "S2"},
+                "self_contradiction": ["矛盾した文"],
+                "truncated": True,
+            })
+        out = buf.getvalue()
+        self.assertIn("→", out)             # supported names the likely source
+        self.assertIn("無根拠の文", out)
+        self.assertIn("矛盾した文", out)
 
     def test_export_markdown_chat_message_shows_uncited_count(self) -> None:
         import json
@@ -5808,6 +8288,19 @@ class TestConfigXDG(unittest.TestCase):
         with patch.dict(os.environ, {"SHOIN_PORT": "notanumber"}):
             result = port()
         self.assertEqual(result, DEFAULT_PORT)
+
+    def test_port_out_of_range_env_falls_back_to_default(self) -> None:
+        """Out-of-range SHOIN_PORT must fall back to DEFAULT_PORT — otherwise the
+        value reaches HTTPServer and raises OverflowError (an ArithmeticError,
+        not the OSError cli.main() catches) = raw traceback at startup."""
+        import os
+        from shoin.config import DEFAULT_PORT, port
+
+        for bad in ("-1", "65536", "99999"):
+            with patch.dict(os.environ, {"SHOIN_PORT": bad}):
+                self.assertEqual(port(), DEFAULT_PORT, bad)
+        with patch.dict(os.environ, {"SHOIN_PORT": "0"}):
+            self.assertEqual(port(), 0)  # 0 = ephemeral bind; serve() prints actual
 
     def test_port_empty_env_falls_back_to_default(self) -> None:
         """Empty SHOIN_PORT must fall back to DEFAULT_PORT."""
@@ -6270,6 +8763,81 @@ class TestCLI(unittest.TestCase):
         with patch("shoin.server.serve", side_effect=OSError("Address already in use")):
             rc = main(["serve"])
         self.assertEqual(rc, 1)
+
+    def test_ask_rejects_whitespace_question_like_the_api(self) -> None:
+        """v0.2.286: _cmd_ask must strip + refuse an empty question, matching
+        the API's _require("question") — otherwise a whitespace-only question is
+        persisted as a real user turn and answered via the degraded path."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = main(["--db", db_file, "ask", str(nb.id), "   "])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+            with Store(db_file) as s:
+                msgs = s.conn.execute(
+                    "SELECT COUNT(*) AS n FROM messages WHERE notebook_id = ?",
+                    (nb.id,),
+                ).fetchone()
+            self.assertEqual(msgs["n"], 0, "rejected question must not be persisted")
+        finally:
+            os.unlink(db_file)
+
+    def test_ask_and_eval_reject_non_positive_k(self) -> None:
+        """-k is a free int: k=0 silently yields an empty hit list (degraded
+        answer / zero-score eval) and k<0 slices the merged pool arbitrarily
+        (merged[:-n] drops the tail). argparse must refuse k<1 at parse time."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        for argv in (
+            ["ask", "1", "q", "-k", "0"],
+            ["ask", "1", "q", "-k", "-3"],
+            ["eval", "1", "cases.json", "-k", "0"],
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2, argv)
+            self.assertIn("-k", err.getvalue())
+
+    def test_pos_int_accepts_positive_values(self) -> None:
+        """The -k validator's accept path: a valid positive integer must pass
+        through unchanged (the rejection path is pinned above)."""
+        from shoin.cli import _pos_int
+
+        self.assertEqual(_pos_int("3"), 3)
+
+    def test_serve_rejects_out_of_range_port(self) -> None:
+        """--port reached serve() unchecked: port -1/99999 raised OverflowError
+        (an ArithmeticError, NOT the OSError the serve try/except catches) —
+        a raw traceback instead of argparse's clean usage error. Port 0 stays
+        legal: serve() prints back the ephemeral port the kernel assigned."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        for argv in (["serve", "--port", "-1"], ["serve", "--port", "99999"]):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2, argv)
+            self.assertIn("--port", err.getvalue())
 
     def test_health_command_reports_config_without_store(self) -> None:
         """`shoin health` (REQ-103 CLI parity with GET /api/health, v0.2.126) must
@@ -7553,9 +10121,10 @@ class TestWidthVariants(unittest.TestCase):
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
         # Control: a term whose spellings all coincide yields only itself, so
-        # pure-kanji FTS expressions stay byte-identical to before.
-        self.assertEqual(term_variants("研究論文"), ["研究論文"])
-        self.assertEqual(fts_query("研究論文"), '"研究論" OR "究論文"')
+        # pure-kanji FTS expressions stay byte-identical to before.  "言語理解"
+        # deliberately avoids kyujitai-mappable chars (v0.2.227 emits those).
+        self.assertEqual(term_variants("言語理解"), ["言語理解"])
+        self.assertEqual(fts_query("言語理解"), '"言語理" OR "語理解"')
 
     def test_cross_width_retrieval_both_directions(self) -> None:
         st, nb_id, ids = self._seeded_store()
@@ -7572,6 +10141,75 @@ class TestWidthVariants(unittest.TestCase):
                 self.assertEqual(got, want, query)
         finally:
             st.close()
+
+    def test_term_variants_numeric_spellings(self) -> None:
+        """v0.2.213: a digit term should also retrieve its shorthand spellings."""
+        v = term_variants("32000")
+        for want in ("32,000", "3.2万", "32千", "三万二千", "3万2000"):
+            self.assertIn(want, v)
+        # Non-digit and non-numeric terms emit no numeric spellings.
+        self.assertEqual(term_variants("python"), ["python", "ｐｙｔｈｏｎ"])
+        # "言語" has no variant of any kind (v0.2.227: kyujitai would add one).
+        self.assertEqual(term_variants("言語"), ["言語"])
+
+    def test_numeric_retrieval_both_directions(self) -> None:
+        """Digit query finds shorthand sources; shorthand query finds digit sources."""
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        docs = {
+            "shorthand": "売上は3.2万円であった。",      # shorthand body
+            "digits": "売上は32000円であった。",         # digit body
+            "kanji": "売上は三万二千円であった。",       # kanji numeral body
+            "wari": "達成率は50%を記録した。",          # percent body
+            "other": "猫が窓辺で眠っている。",
+        }
+        ids: dict[str, int] = {}
+        for name, text in docs.items():
+            s = st.add_source(nb.id, "md", name, f"{name}.md", name)
+            st.add_chunks(s.id, [text], contexts=[name])
+            ids[name] = s.id
+        try:
+            for query, want in (
+                ("32000", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("3.2万", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("三万二千", {ids["shorthand"], ids["digits"], ids["kanji"]}),
+                ("五割", {ids["wari"]}),   # 歩合 -> 50 -> digit body
+            ):
+                got = {h.source_id for h in bm25_search(st, nb.id, query, 9)}
+                self.assertEqual(got, want, query)
+        finally:
+            st.close()
+
+    def test_era_retrieval_both_directions(self) -> None:
+        """v0.2.225: '令和6年' and '2024年' assert the same year.  The citation
+        numeric check expands era→gregorian via _numbers_expanded, and the
+        query bridge picks it up for free; the reverse direction emits
+        era spellings for year terms in _numeric_variants."""
+        st = Store(":memory:")
+        nb = st.create_notebook("N")
+        era = st.add_source(nb.id, "md", "era", "era.md", "sha-e")
+        st.add_chunks(era.id, ["この制度は令和6年に施行された。"], contexts=["era"])
+        gre = st.add_source(nb.id, "md", "gre", "gre.md", "sha-g")
+        st.add_chunks(gre.id, ["この制度は2024年に施行された。"], contexts=["gre"])
+        decoy = st.add_source(nb.id, "md", "decoy", "decoy.md", "sha-d")
+        st.add_chunks(decoy.id, ["猫が窓辺で眠っている。"], contexts=["decoy"])
+        try:
+            # "2024年" query must find the 令和6年 source (and vice-versa).
+            got = {h.source_id for h in bm25_search(st, nb.id, "2024年", 9)}
+            self.assertEqual(got, {era.id, gre.id})
+            got = {h.source_id for h in bm25_search(st, nb.id, "令和6年", 9)}
+            self.assertEqual(got, {era.id, gre.id})
+        finally:
+            st.close()
+
+    def test_era_expansion_suppresses_numeric_mismatch(self) -> None:
+        """The same shared table feeds the citation check: a claim saying
+        令和6年 against a source writing 2024年 asserts the same year."""
+        from shoin.citation import _numbers_expanded
+        self.assertIn("2024", _numbers_expanded("令和6年に施行"))
+        self.assertIn("1989", _numbers_expanded("平成元年に公布"))
+        self.assertIn("1989", _numbers_expanded("昭和六十四年に終了"))
+        self.assertNotIn("2118", _numbers_expanded("令和100年"))  # out of era
 
     def test_nfkc_shortened_variant_still_reaches_like_path(self) -> None:
         """ｶﾞｽ is 3 chars but normalises to ガス (2), which FTS5 cannot trigram.
@@ -7792,6 +10430,1183 @@ class TestRenameReembed(unittest.TestCase):
             self.assertEqual(st.get_source(a_id).title, "免疫レポート")
         finally:
             st.close()
+
+
+class TestQueryVectorCache(unittest.TestCase):
+    """_query_vector must not re-embed a repeated (model, question) pair.
+
+    Every ask() embeds the retrieval query; repeat questions, eval reruns and
+    multi-query rewrites that coincide with an earlier phrasing all paid a full
+    LLM round-trip for a byte-identical vector. The cache is keyed on the
+    model, bounded by QUERY_VEC_CACHE_SIZE, never caches failures, and hands
+    callers their own list so mutations cannot corrupt shared entries."""
+
+    def setUp(self) -> None:
+        import shoin.qa as qa_mod
+
+        qa_mod._QUERY_VEC_CACHE.clear()
+
+    class _CountingLLM:
+        embedding_model = "test-embed"
+
+        def __init__(self, fail: bool = False) -> None:
+            self.calls = 0
+            self.fail = fail
+
+        def chat(self, messages, temperature: float = 0.2) -> str:
+            return ""
+
+        def embed_one(self, text: str) -> list[float]:
+            self.calls += 1
+            if self.fail:
+                raise LLMError("SYSTEM_LLM_HTTP_ERROR", "down")
+            return [float(len(text)), 1.0]
+
+    def test_repeated_question_embeds_once(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        v1 = _query_vector(llm, "同じ質問")
+        v2 = _query_vector(llm, "同じ質問")
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(v1, v2)
+        # The cached entry is shared state — mutating a returned vector must
+        # not corrupt it.
+        self.assertIsNotNone(v1)
+        assert v1 is not None
+        v1[0] = -999.0
+        v3 = _query_vector(llm, "同じ質問")
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(v3, [float(len("同じ質問")), 1.0])
+
+    def test_distinct_questions_and_models_are_separate_keys(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        _query_vector(llm, "q1")
+        _query_vector(llm, "q2")
+        self.assertEqual(llm.calls, 2)
+        other = self._CountingLLM()
+        other.embedding_model = "other-model"
+        _query_vector(other, "q1")
+        self.assertEqual(other.calls, 1, "model is part of the cache key")
+
+    def test_failures_are_not_cached(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM(fail=True)
+        self.assertIsNone(_query_vector(llm, "flaky"))
+        self.assertIsNone(_query_vector(llm, "flaky"))
+        self.assertEqual(llm.calls, 2, "a transient failure must not poison the cache")
+        llm.fail = False
+        self.assertIsNotNone(_query_vector(llm, "flaky"))
+
+    def test_cache_is_bounded_and_evicts_lru(self) -> None:
+        from unittest.mock import patch
+
+        import shoin.qa as qa_mod
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        with patch.object(qa_mod, "QUERY_VEC_CACHE_SIZE", 2):
+            _query_vector(llm, "a")
+            _query_vector(llm, "b")
+            _query_vector(llm, "a")  # refresh a; b is now oldest
+            _query_vector(llm, "c")  # evicts b
+            self.assertEqual(len(qa_mod._QUERY_VEC_CACHE), 2)
+            _query_vector(llm, "a")
+            self.assertEqual(llm.calls, 3, "a survived eviction")
+            _query_vector(llm, "b")
+            self.assertEqual(llm.calls, 4, "b was evicted and re-embedded")
+
+    def test_no_embedding_model_bypasses_cache(self) -> None:
+        from shoin.qa import _query_vector
+
+        llm = self._CountingLLM()
+        llm.embedding_model = ""
+        self.assertIsNone(_query_vector(llm, "q"))
+        self.assertEqual(llm.calls, 0)
+
+
+class TestEvalDiff(unittest.TestCase):
+    """diff_reports aggregate deltas must compare the SHARED questions only.
+
+    The eval tool exists to answer "did this change help retrieval". Comparing
+    the raw report means when the case file was edited between runs folds
+    case-set edits into the score — dropping a hard case reads as an
+    improvement that never happened (or vice versa). The per-case deltas and
+    new/dropped lists were already correct; only the aggregate lied."""
+
+    def test_case_set_edits_do_not_masquerade_as_score_changes(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[
+                CaseResult("q1", [1], [1], 1.0, 1.0),  # easy — dropped below
+                CaseResult("q2", [2], [3], 0.0, 0.0),
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        after = EvalReport(
+            cases=[
+                CaseResult("q2", [2], [3], 0.0, 0.0),  # unchanged
+                CaseResult("q3", [3], [3], 1.0, 1.0),  # new — not in baseline
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        diff = diff_reports(before, after)
+        # q2 is identical in both runs — the honest delta is 0. The raw-mean
+        # comparison (0.5 - 0.5) coincidentally agrees here; see the next test
+        # for a case-set edit that would have fabricated a delta.
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(diff.new_questions, ["q3"])
+        self.assertEqual(diff.dropped_questions, ["q1"])
+        self.assertEqual(diff.case_deltas, [])
+        # The displayed comparison means are over the matched population too
+        # — a "0.500 → 0.500 (+0.000)" row must mean what it labels.
+        self.assertEqual(diff.recall_before, 0.0)
+        self.assertEqual(diff.recall_after, 0.0)
+
+    def test_dropped_hard_case_cannot_fabricate_regression_or_gain(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[
+                CaseResult("q1", [1], [1], 1.0, 1.0),  # perfect case, dropped
+                CaseResult("q2", [2], [3], 0.0, 0.0),  # hard case, kept+improved
+            ],
+            recall=0.5,
+            mrr=0.5,
+        )
+        after = EvalReport(
+            cases=[CaseResult("q2", [2], [2], 1.0, 1.0)],  # q2 improved to perfect
+            recall=1.0,
+            mrr=1.0,
+        )
+        diff = diff_reports(before, after)
+        # Raw means would report 1.0 - 0.5 = +0.5, but q2 went 0 → 1.0, so the
+        # true shared-question delta is +1.0.
+        self.assertAlmostEqual(diff.d_recall, 1.0)
+        self.assertAlmostEqual(diff.d_mrr, 1.0)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(len(diff.case_deltas), 1)
+        self.assertEqual(diff.case_deltas[0].question, "q2")
+
+    def test_no_shared_questions_reports_zero_delta(self) -> None:
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(cases=[CaseResult("a", [1], [1], 1.0, 1.0)], recall=1.0, mrr=1.0)
+        after = EvalReport(cases=[CaseResult("b", [2], [9], 0.0, 0.0)], recall=0.0, mrr=0.0)
+        diff = diff_reports(before, after)
+        # Nothing comparable exists — 0 is the only honest delta (the -1.0 the
+        # raw means would claim is a case-set artifact, not a regression).
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 0)
+        self.assertEqual(diff.dropped_questions, ["a"])
+
+    def test_duplicate_questions_pair_occurrence_by_occurrence(self) -> None:
+        """A question appearing twice must not fabricate a delta: identical
+        runs with a duplicated case must report zero movement, not the phantom
+        change a last-occurrence-wins map would produce."""
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        cases = [
+            CaseResult("q", [1], [1], 1.0, 1.0),
+            CaseResult("q", [1], [9], 0.0, 0.0),  # same text, different result
+        ]
+        before = EvalReport(cases=list(cases), recall=0.5, mrr=0.5)
+        after = EvalReport(cases=list(cases), recall=0.5, mrr=0.5)
+        diff = diff_reports(before, after)
+        self.assertEqual(diff.d_recall, 0.0)
+        self.assertEqual(diff.d_mrr, 0.0)
+        self.assertEqual(diff.matched_questions, 2)  # both occurrences paired
+        self.assertEqual(diff.recall_before, 0.5)
+        self.assertEqual(diff.recall_after, 0.5)
+        self.assertEqual(diff.case_deltas, [])
+
+    def test_unpaired_duplicate_occurrence_is_not_new_or_dropped(self) -> None:
+        """before has q twice, after once: the unpaired before occurrence is
+        neither a new nor a dropped question — it is simply unmatched."""
+        from shoin.evaluate import CaseResult, EvalReport, diff_reports
+
+        before = EvalReport(
+            cases=[CaseResult("q", [1], [1], 1.0, 1.0), CaseResult("q", [1], [1], 1.0, 1.0)],
+            recall=1.0,
+            mrr=1.0,
+        )
+        after = EvalReport(cases=[CaseResult("q", [1], [1], 1.0, 1.0)], recall=1.0, mrr=1.0)
+        diff = diff_reports(before, after)
+        self.assertEqual(diff.matched_questions, 1)
+        self.assertEqual(diff.new_questions, [])
+        self.assertEqual(diff.dropped_questions, [])
+        self.assertEqual(diff.d_recall, 0.0)
+
+
+class TestSearchCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered guard/merge tails in search.py (v0.2.272)."""
+
+    def test_numeric_variants_man_remainder(self) -> None:
+        """12345 must emit the '1万2345' magnitude spelling (v0.2.213 bridge):
+        a digit query cannot substring-match '1万2345' without the variant."""
+        from shoin.search import _numeric_variants
+
+        got = _numeric_variants("12345")
+        self.assertIn("1万2345", got)
+        self.assertIn("一万二千三百四十五", got)
+
+    def test_bm25_neg_only_query_returns_fts_filtered(self) -> None:
+        """A query whose positive terms are all single ASCII chars ('a -cd')
+        produces no needles at all — the early return must still apply the
+        neg filter and must not crash."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["a cd を含む文。", "a のみの文。"])
+            hits = bm25_search(s, nb.id, "a -cd", 9)
+            self.assertEqual(hits, [])
+
+    def test_cosine_prepared_dim_mismatch_returns_zero(self) -> None:
+        """A vector from a different embedding model scores 0.0, not a crash
+        or a meaningless partial dot product (v0.2.261)."""
+        from shoin.search import _cosine_prepared
+
+        self.assertEqual(_cosine_prepared([1.0, 0.0], 1.0, [1.0, 0.0, 0.0]), 0.0)
+
+    def test_minmax_empty_returns_empty(self) -> None:
+        from shoin.search import _minmax
+
+        self.assertEqual(_minmax([]), [])
+
+    def test_proximity_window_shrinks_past_repeated_term(self) -> None:
+        """'a x a b': the window must drop the first 'a' so the measured span
+        is 3 (the tight cover), not 6 — the left-pointer shrink path."""
+        from shoin.search import PROX_SPAN, _proximity_from_norm
+
+        got = _proximity_from_norm(["a", "b"], "a x a b")
+        self.assertAlmostEqual(got, (2 / 2) * (PROX_SPAN / (3 + PROX_SPAN)))
+
+    def test_rrf_fuse_lists_merges_bm25_onto_vec_hit(self) -> None:
+        """Same chunk reached by a vector list first and a BM25 list second:
+        the canonical Hit must keep the bm25 signal, not lose it."""
+        from shoin.search import rrf_fuse_lists
+
+        fused = rrf_fuse_lists([
+            [Hit(7, 1, "t", 0.0, vec=0.9)],
+            [Hit(7, 1, "t", 0.0, bm25=0.8)],
+        ])
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].vec, 0.9)
+        self.assertEqual(fused[0].bm25, 0.8)
+
+    def test_retrieve_multi_empty_queries(self) -> None:
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            self.assertEqual(retrieve_multi(s, nb.id, []), [])
+
+
+class TestCitationCoverageTail(unittest.TestCase):
+    """Pin the remaining uncovered tails in citation.py (v0.2.273)."""
+
+    def test_conv_values_chained_same_family(self) -> None:
+        """'1km500m' must accumulate to 1500 m — consecutive same-family
+        units within 2 chars sum, so a claim of '1500m' isn't flagged."""
+        from shoin.citation import _conv_values
+
+        self.assertIn((1, 1500.0), _conv_values("1km500m"))
+
+    def test_unparsable_kanji_parts_stay_silent(self) -> None:
+        """'二三' is a counting sequence ('a few'), not a numeral — every
+        parser that meets it must return inconclusive silence, per the
+        module's never-accuse-on-inconclusive design."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("二三万"), set())     # suffix continue
+        self.assertEqual(_numbers_expanded("一億二三万"), set())  # chain break
+        self.assertEqual(_numbers_expanded("令和一二年"), set())  # era continue
+        self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
+
+    def test_citation_only_first_sentence_skips_claim(self) -> None:
+        """'[S1]' alone carries a citation number but no text and no prior
+        claim — every checker must skip it rather than fabricate a claim."""
+        from shoin.citation import (
+            negation_mismatches,
+            numeric_mismatches,
+            quote_mismatches,
+            unit_mismatches,
+        )
+
+        src = {1: "数値は10である。"}
+        self.assertEqual(numeric_mismatches("[S1]", src), [])
+        self.assertEqual(unit_mismatches("[S1]", src), [])
+        self.assertEqual(quote_mismatches("[S1]", src), [])
+        self.assertEqual(negation_mismatches("[S1]", src), [])
+
+    def test_conv_values_breaks_on_family_change(self) -> None:
+        """'1km500g' — a different family ends the chain: only the leading
+        '1km' accumulates; the 500 g is a separate value, never summed."""
+        from shoin.citation import _conv_values
+
+        vals = _conv_values("1km500g")
+        self.assertIn((1, 1000.0), vals)
+        self.assertNotIn((1, 1500.0), vals)
+
+    def test_quote_mismatch_suggested_names_right_source(self) -> None:
+        """When a doctored quote is flagged, `suggested` must name the source
+        it actually matches — the fix is 'say [S2]', not 're-read'."""
+        from shoin.citation import quote_mismatches
+
+        sources = {
+            1: "全く関係のない記述だけが書かれている。",
+            2: "ハイブリッド検索は両手法の長所を組み合わせる手法である。",
+        }
+        text = "出典は「ハイブリッド検索は両手法の短所を組み合わせる手法である」と述べている[S1]。"
+        suggested: dict[int, int] = {}
+        self.assertEqual(quote_mismatches(text, sources, suggested=suggested), [1])
+        self.assertEqual(suggested, {1: 2})
+
+    def test_make_report_source_detail_length_mismatch(self) -> None:
+        """A source_detail list whose length ≠ source count is a caller bug —
+        raise loudly instead of silently mis-keying the S-numbers."""
+        from shoin.citation import make_report
+
+        with self.assertRaises(ValueError):
+            make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
+
+
+class TestResidualGuards(unittest.TestCase):
+    """Pin the last reachable guard tails left by the v0.2.270-275 sweep (v0.2.277)."""
+
+    def test_chunk_overlap_non_int_env_falls_back(self) -> None:
+        """SHOIN_CHUNK_OVERLAP='abc' must fall back to the default, not crash
+        at import-adjacent config time."""
+        import os
+
+        from shoin.config import CHUNK_OVERLAP, chunk_overlap
+
+        with patch.dict(os.environ, {"SHOIN_CHUNK_OVERLAP": "abc"}):
+            self.assertEqual(chunk_overlap(), CHUNK_OVERLAP)
+
+    def test_parse_cases_non_object_case_raises(self) -> None:
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases([42])
+
+    def test_report_from_dict_bad_case_and_missing_scores(self) -> None:
+        """Baseline rebuild refuses malformed cases AND missing recall/mrr —
+        a silently-dropped field would fabricate a score delta."""
+        from shoin.evaluate import report_from_dict
+
+        with self.assertRaises(ValueError):
+            report_from_dict({"cases": ["x"], "recall": 0.0, "mrr": 0.0})
+        with self.assertRaises(ValueError):
+            report_from_dict({"cases": []})
+
+    def test_status_line_lists_each_mismatch(self) -> None:
+        from shoin.export import _status_line
+
+        line = _status_line(
+            {
+                "numeric_mismatch": [1],
+                "unit_mismatch": [2],
+                "negation_mismatch": [3],
+                "degenerate": [4],
+                "self_contradiction": [5],
+            }
+        )
+        for tok in ("S1", "S2", "S3"):
+            self.assertIn(tok, line)
+        # degenerate/self_contradiction print counts, not S-numbers.
+        self.assertEqual(line.count("(1)"), 2)
+
+    def test_section_from_context_without_prefix(self) -> None:
+        from shoin.qa import _section_from_context
+
+        self.assertEqual(_section_from_context("no breadcrumb", "タイトル"), "")
+
+    def test_history_messages_zero_each_budget_breaks(self) -> None:
+        """A zero per-message budget must break the pack loop cleanly rather
+        than emitting empty turns."""
+        import shoin.qa as qa
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            s.add_message(nb.id, "user", "質問の本文です")
+            with patch.object(qa, "HISTORY_TOKENS_EACH", 0):
+                self.assertEqual(qa.history_messages(s, nb.id), [])
+
+    def test_rewrite_queries_skips_short_and_dup_lines(self) -> None:
+        """Rewrite parsing drops sub-2-char fragments and repeats of itself —
+        the same list conventions studio.suggest_questions established."""
+        from shoin.qa import rewrite_queries
+
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return "1. x\n2. 別の言い換えです\n別の言い換えです"
+
+        self.assertEqual(rewrite_queries(_Stub(), "元の質問"), ["別の言い換えです"])  # type: ignore[arg-type]
+
+    def test_degraded_text_caps_at_three_sources(self) -> None:
+        """The degraded fallback enumerates at most 3 sources — a fourth must
+        be dropped rather than overflowing the no-LLM notice."""
+        from shoin.qa import _degraded_text
+        from shoin.search import Hit
+
+        hits = [Hit(i, i, f"テキスト{i}", 1.0) for i in range(1, 5)]
+        text = _degraded_text(hits)
+        self.assertIn("[S3]", text)
+        self.assertNotIn("[S4]", text)
+
+    def test_retrieve_multi_neg_filters_vector_lane(self) -> None:
+        """-term exclusions apply to the vector lane too (v0.2.73 placement):
+        a chunk mentioning the excluded term must not ride in on vectors."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "sha")
+            s.add_chunks(src.id, ["猫についての文。", "犬についての文。"])
+            for c in s.chunks_for_notebook(nb.id):
+                s.set_embedding(c.id, [1.0, 0.0])
+            hits = retrieve_multi(s, nb.id, ["猫 -犬"], [[1.0, 0.0]])
+            self.assertTrue(hits)
+            self.assertTrue(all("犬" not in h.text for h in hits))
+
+    def test_embed_chunks_backend_without_embed_api_returns_zero(self) -> None:
+        """A backend with embedding_model set but neither embed() nor
+        embed_one() embeds nothing — return 0, don't crash."""
+        from shoin.pipeline import _embed_chunks
+
+        class _NoEmbedAPI:
+            embedding_model = "m"
+
+        with make_store() as s:
+            self.assertEqual(_embed_chunks(s, _NoEmbedAPI(), [1], ["t"]), 0)  # type: ignore[arg-type]
+
+    def test_numeric_variants_era_year_one(self) -> None:
+        """2019 = 令和元年 must emit the 元 spelling too — a corpus that writes
+        '元年' would otherwise miss a digit query (search.py y==1 tail)."""
+        from shoin.search import _numeric_variants
+
+        self.assertIn("令和元", _numeric_variants("2019"))
+
+    def test_tail_long_run_periodic_credit_hits_limit(self) -> None:
+        """A word run past _LONG_RUN_THRESHOLD is credited every 4 chars —
+        the mid-run `acc >= tokens` return must fire, cutting inside the run."""
+        from shoin.chunk import _tail
+
+        text = "a" * 60
+        res = _tail(text, 1)
+        self.assertTrue(text.endswith(res))
+        self.assertEqual(len(res), 41)  # threshold 40 + first periodic credit
+
+    def test_refresh_source_sha_collision_with_other_source_aborts(self) -> None:
+        """Re-fetched content hashing to a DIFFERENT existing source must abort
+        before chunk replacement — committing would leave source/sha paired
+        wrongly (the guard exists precisely to prevent that split state)."""
+        import types
+
+        import shoin.pipeline as pl
+        from shoin.store import StoreError
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src_a = s.add_source(nb.id, "url", "a", "https://x/a", "sha-a")
+            s.add_source(nb.id, "url", "b", "https://x/b", "sha-b")
+            fake = types.SimpleNamespace(sha256="sha-b", title="b", text="x")
+            with patch.object(pl, "extract_url", return_value=fake):
+                with self.assertRaises(StoreError):
+                    pl.refresh_source(s, src_a.id)
+
+    def test_python_i18n_tables_have_ja_en_parity(self) -> None:
+        """Every server-side string table must define both locales — the UI
+        parity test (test_ui_contract) covers index.html only; a ja-only key
+        here would show Japanese text (or the bare key) to en users."""
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        tables = (
+            (shoin.cli, "_STRINGS"),      # lang-first: {"ja": {...}, "en": {...}}
+            (shoin.qa, "_STRINGS"),       # key-first: {"k": {"ja","en"}}
+            (shoin.studio, "_STRINGS"),
+            (shoin.studio, "_INSTRUCTIONS"),
+            (shoin.export, "_STRINGS"),
+            (shoin.server, "_STRINGS"),
+        )
+        for mod, name in tables:
+            table = getattr(mod, name)
+            label = f"{mod.__name__}.{name}"
+            if set(table) == {"ja", "en"}:
+                self.assertEqual(set(table["ja"]), set(table["en"]), label)
+            else:
+                for key, entry in table.items():
+                    self.assertEqual(
+                        set(entry), {"ja", "en"}, f"{label}.{key}"
+                    )
+
+    def test_python_i18n_placeholders_have_ja_en_parity(self) -> None:
+        """cli._t() formats its template with the caller's kwargs — a {name}
+        placeholder present in one locale but missing in the other raises
+        KeyError at format time only for users of that locale. The key-parity
+        test above doesn't see this; pin the placeholder-name set too."""
+        from string import Formatter
+
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        def fields(template: str) -> set[str]:
+            return {
+                field_name.split(".")[0].split("[")[0]
+                for _, field_name, _, _ in Formatter().parse(template)
+                if field_name
+            }
+
+        tables = (
+            (shoin.cli, "_STRINGS"),
+            (shoin.qa, "_STRINGS"),
+            (shoin.studio, "_STRINGS"),
+            (shoin.studio, "_INSTRUCTIONS"),
+            (shoin.export, "_STRINGS"),
+            (shoin.server, "_STRINGS"),
+        )
+        for mod, name in tables:
+            table = getattr(mod, name)
+            label = f"{mod.__name__}.{name}"
+            if set(table) == {"ja", "en"}:  # lang-first: {"ja": {k: tmpl}, ...}
+                for key in table["ja"]:
+                    self.assertEqual(
+                        fields(table["ja"][key]),
+                        fields(table["en"][key]),
+                        f"{label}.{key}",
+                    )
+            else:  # key-first: {k: {"ja": tmpl, "en": tmpl}}
+                for key, entry in table.items():
+                    self.assertEqual(
+                        fields(entry["ja"]),
+                        fields(entry["en"]),
+                        f"{label}.{key}",
+                    )
+
+    def test_python_i18n_call_sites_supply_every_placeholder(self) -> None:
+        """`_t(...)` callers must supply exactly the placeholder names their
+        template defines — nothing missing, nothing extra.
+
+        A missing kwarg raises KeyError only when that print path executes
+        (deep in an error tail — exactly where tests rarely reach); an extra
+        kwarg is dead drift. Covers both call shapes — `_t("k", kw=...)`
+        (cli.py) and `_t("k").format(kw=...)` (qa.py/studio.py) — and resolves
+        non-literal keys (`key if cond else key2`, `"prefix_" + var`
+        concat prefixes expand to every matching table key) and
+        `from .qa import _t as _qa_t` aliases (resolved against the
+        *source* module's table).
+        """
+        import ast
+        from string import Formatter
+
+        import shoin.cli
+        import shoin.export
+        import shoin.qa
+        import shoin.server
+        import shoin.studio
+
+        def fields(template: str) -> set[str]:
+            return {
+                field_name
+                for _, field_name, _, _ in Formatter().parse(template)
+                if field_name
+            }
+
+        def table_pairs(mod: object) -> dict[str, str]:
+            table = mod._STRINGS  # type: ignore[attr-defined]
+            if set(table) == {"ja", "en"}:
+                return {
+                    k: table["ja"][k] + table["en"][k]
+                    for k in table["ja"]
+                }
+            return {k: e["ja"] + e["en"] for k, e in table.items()}
+
+        mods = (shoin.cli, shoin.qa, shoin.studio, shoin.export, shoin.server)
+        pairs_by_mod = {m.__name__.split(".")[-1]: table_pairs(m) for m in mods}
+        for mname, pairs in pairs_by_mod.items():
+            self.assertTrue(
+                all(
+                    n.isidentifier() and not n.isdigit()
+                    for tmpl in pairs.values()
+                    for n in fields(tmpl)
+                ),
+                f"shoin.{mname}: unnamed/positional placeholders make the kwarg "
+                "contract unenforceable — use named fields",
+            )
+
+        for mod in mods:
+            tree = ast.parse(
+                Path(mod.__file__).read_text(encoding="utf-8")  # type: ignore[arg-type]
+            )
+            # Aliases: `from .qa import _t as _qa_t` resolves against qa._STRINGS,
+            # not the file's own table.
+            aliases: dict[str, str] = {}
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom):
+                    for a in n.names:
+                        if a.name == "_t" and a.asname:
+                            aliases[a.asname] = (n.module or "").split(".")[-1]
+            formatted: set[int] = {
+                id(n.func.value)
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "format"
+                and isinstance(n.func.value, ast.Call)
+            }
+            for node in ast.walk(tree):
+                supplied: set[str] = set()
+                inner = node
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "format"
+                    and isinstance(node.func.value, ast.Call)
+                ):
+                    inner = node.func.value
+                    supplied |= {k.arg for k in node.keywords if k.arg}
+                elif id(node) in formatted:
+                    continue  # checked via the enclosing .format call
+                if not (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and (inner.func.id == "_t" or inner.func.id in aliases)
+                ):
+                    continue
+                src = aliases.get(inner.func.id, mod.__name__.split(".")[-1])
+                pairs = pairs_by_mod.get(src, {})
+                placeholders = {k: fields(v) for k, v in pairs.items()}
+                supplied |= {k.arg for k in inner.keywords if k.arg}
+                arg = inner.args[0] if inner.args else None
+                keys: set[str] = set()
+                if isinstance(arg, ast.Constant):
+                    keys = {arg.value}
+                elif isinstance(arg, ast.IfExp):
+                    keys = {
+                        b.value
+                        for b in (arg.body, arg.orelse)
+                        if isinstance(b, ast.Constant)
+                    }
+                elif isinstance(arg, ast.BinOp) and isinstance(arg.left, ast.Constant):
+                    prefix = arg.left.value
+                    keys = {k for k in pairs if str(k).startswith(prefix)}
+                    self.assertTrue(
+                        keys,
+                        f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                        "prefix matches no table key (typo'd or dead prefix)",
+                    )
+                # A key absent from the table falls back to rendering the raw
+                # key at runtime — `_t` never raises for it, so a typo'd name
+                # (or a renamed key whose callers weren't updated) is a silent
+                # missing-string. The kwarg check below can't see it: an
+                # absent key resolves to needed=∅ and passes with no kwargs.
+                self.assertEqual(
+                    keys - set(pairs), set(),
+                    f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                    f"key(s) not in shoin.{src}._STRINGS: "
+                    f"{sorted(keys - set(pairs))}",
+                )
+                needed = set().union(*(placeholders.get(k, set()) for k in keys))
+                self.assertEqual(
+                    supplied,
+                    needed,
+                    f"{mod.__name__}:{node.lineno} _t({ast.unparse(arg)}) — "
+                    f"missing={sorted(needed - supplied)} "
+                    f"extra={sorted(supplied - needed)}",
+                )
+
+    def test_no_assert_statements_in_package(self) -> None:
+        """`python -O` strips assert — a library must never depend on one for
+        control flow or a debug-only check becomes silent behavior change
+        (store.py's lock-retry tail was the only site; replaced with an
+        explicit raise)."""
+        import ast
+
+        pkg = Path(__file__).resolve().parent.parent / "shoin"
+        for f in sorted(pkg.glob("*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            sites = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assert)]
+            self.assertEqual(sites, [], f"{f.name}: assert at {sites}")
+
+    def test_spec_requirements_are_traced_to_code(self) -> None:
+        """v0.2.287: every REQ-* row in docs/spec.md must be referenced by the
+        implementation or a test — a spec requirement nothing cites is either
+        unimplemented or silently drifting (REQ-001/007/105/106 were the four
+        unreferenced; now tagged at their entry points)."""
+        import re
+
+        root = Path(__file__).resolve().parent.parent
+        spec = (root / "docs" / "spec.md").read_text(encoding="utf-8")
+        reqs = sorted(set(re.findall(r"REQ-\d+", spec)))
+        self.assertGreater(len(reqs), 0, "spec.md lost its REQ-* requirements table")
+        corpus = "\n".join(
+            f.read_text(encoding="utf-8")
+            for f in list(root.glob("shoin/*.py")) + list(root.glob("tests/*.py"))
+        ) + (root / "shoin" / "static" / "index.html").read_text(encoding="utf-8")
+        untraced = [r for r in reqs if r not in corpus]
+        self.assertEqual(untraced, [], f"REQ ids with no code/test trace: {untraced}")
+
+    def test_export_mime_and_ext_cover_all_formats(self) -> None:
+        """v0.2.288+: _h_export indexes _EXPORT_MIME/_EXPORT_EXT by fmt — adding
+        a format to export.FORMATS without its table entries turns export into
+        a 500 KeyError. The tables and FORMATS must stay in lockstep."""
+        from shoin.export import FORMATS
+        from shoin.server import _EXPORT_EXT, _EXPORT_MIME
+
+        self.assertEqual(set(FORMATS), set(_EXPORT_MIME), "mime table drift")
+        self.assertEqual(set(FORMATS), set(_EXPORT_EXT), "extension table drift")
+
+    def test_every_static_asset_is_declared_package_data(self) -> None:
+        """v0.2.293+: the wheel ships static/ only via pyproject's
+        [tool.setuptools.package-data] globs — a new asset unmatched by them
+        is silently absent from installed builds (shoin serve then 404s the
+        UI). Pin per-file glob coverage so adding e.g. a .css under static/
+        without extending the glob fails the suite."""
+        import fnmatch
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        globs: list[str] = data["tool"]["setuptools"]["package-data"]["shoin"]
+        static_dir = root / "shoin" / "static"
+        for f in sorted(static_dir.iterdir()):
+            self.assertTrue(
+                any(fnmatch.fnmatchcase(f"static/{f.name}", g) for g in globs),
+                f"{f.name} not covered by package-data globs {globs}",
+            )
+
+    def test_every_shoin_env_var_is_documented_in_readme(self) -> None:
+        """v0.2.294+: every SHOIN_* key read by code must appear in README.md —
+        an undocumented env var is a feature users cannot discover, and a
+        renamed var left in the docs points at a setting that does nothing."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        keys: set[str] = set()
+        for f in root.glob("shoin/*.py"):
+            keys.update(re.findall(r"SHOIN_[A-Z_]+", f.read_text(encoding="utf-8")))
+        keys = {k.rstrip("_") for k in keys if len(k) > len("SHOIN_")}
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        missing = [k for k in keys if k not in readme]
+        self.assertEqual(missing, [], f"env vars absent from README: {missing}")
+
+    def test_history_md_records_current_version(self) -> None:
+        """v0.2.295: the version-bump ritual silently stopped landing entries —
+        the append step anchored on a `# Changelog` heading HISTORY.md does not
+        have, so 38 versions (v0.2.257-294) no-oped while the header advanced.
+        Pin the contract: this file must contain a `### v{VERSION}` entry."""
+        from pathlib import Path
+
+        from shoin.config import VERSION
+
+        root = Path(__file__).resolve().parent.parent
+        history = (root / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"### v{VERSION}",
+            history,
+            "HISTORY.md has no entry for the current version — the bump ritual dropped it",
+        )
+
+    @unittest.skipIf(os.name != "posix", "POSIX file modes")
+    def test_db_file_and_data_dir_permissions_are_private(self) -> None:
+        """v0.2.296: the DB holds private documents and chat history but was
+        created umask-readable (644) inside a 755 data dir — world-readable on
+        any shared system. Pin: DB file 0600, app's own data dir 0700, and
+        pre-existing -wal/-shm sidecars tightened; a foreign --db directory
+        must NOT be chmod'ed (only its file)."""
+        import os
+        import stat
+
+        from shoin.store import Store
+
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            db = data / "shoin.sqlite3"
+            data.mkdir(mode=0o755)
+            os.chmod(data, 0o755)
+            # Simulate a legacy install: a world-readable DB file.
+            db.write_bytes(b"")
+            os.chmod(db, 0o644)
+            foreign = Path(tmp) / "foreign"
+            foreign.mkdir(mode=0o755)
+            os.chmod(foreign, 0o755)
+            fdb = foreign / "other.db"
+            with patch.dict(os.environ, {"SHOIN_DATA_DIR": str(data)}):
+                # Assert inside the with-block: SQLite checkpoints and removes
+                # the -wal sidecar on close, so it only exists while open.
+                with Store(db):
+                    self.assertEqual(mode(data), 0o700)
+                    self.assertEqual(mode(db), 0o600)
+                    self.assertEqual(mode(data / "shoin.sqlite3-wal"), 0o600)
+                with Store(fdb):
+                    self.assertEqual(mode(fdb), 0o600)
+                    self.assertEqual(mode(foreign), 0o755)
+
+    def test_ci_yml_and_verify_sh_run_the_same_gates(self) -> None:
+        """v0.2.298: the repo defines the verification gate twice — ci/ci.yml
+        for GitHub Actions and scripts/verify.sh for local runs and the
+        pre-push hook — and nothing stops them drifting apart (the same
+        silent-drift class as the HISTORY.md anchor, v0.2.295: either file can
+        lose a gate with zero error anywhere). Pin every gate signature against
+        BOTH files; the ci.yml SBOM step is a build artifact, not a gate.
+        Also pin the pre-push hook delegating to verify.sh — a hook running
+        anything less is a hole in the only enforced gate."""
+        root = Path(__file__).resolve().parent.parent
+        ci = (root / "ci" / "ci.yml").read_text(encoding="utf-8")
+        verify = (root / "scripts" / "verify.sh").read_text(encoding="utf-8")
+        gates = [
+            "ruff check",
+            "mypy --strict shoin/",
+            "coverage run -m unittest discover",
+            "--fail-under=90",
+            "detect",  # spelled detect-secrets in ci.yml, detect_secrets module in verify.sh
+        ]
+        for sig in gates:
+            self.assertIn(sig, ci, f"ci.yml lost gate signature {sig!r}")
+            self.assertIn(sig, verify, f"verify.sh lost gate signature {sig!r}")
+        hook = (root / ".githooks" / "pre-push").read_text(encoding="utf-8")
+        self.assertIn("exec", hook)
+        self.assertIn("scripts/verify.sh", hook)
+
+    def test_every_python_file_is_discovered_or_scoped(self) -> None:
+        """v0.2.299: two manifest-level silent-exclusion surfaces.
+
+        1. A tests/*.py file whose name does not match the `-p 'test_*.py'`
+           pattern both gate files use is never run — a whole file of tests
+           could rot unnoticed (a misnamed `foo_test.py` looks identical to
+           every real test file when read top-to-bottom).
+        2. A new top-level directory containing .py modules would escape
+           `mypy --strict shoin/` AND `coverage --include='shoin/*'` (ruff's
+           `ruff check .` already covers the whole tree). Both gates would
+           stay green while the new package shipped un-typechecked and
+           uncounted against the 90% floor.
+        """
+        root = Path(__file__).resolve().parent.parent
+        for f in (root / "tests").glob("*.py"):
+            self.assertTrue(
+                f.name.startswith("test_") or f.name == "__init__.py",
+                f"tests/{f.name} is never discovered by `unittest -p 'test_*.py'`",
+            )
+        # Top-level dirs holding .py files directly (non-recursive): build
+        # artifacts nest deeper (build/lib/...) and never appear here.
+        gate_scoped = {"shoin", "tests"}
+        for d in root.iterdir():
+            if not d.is_dir() or d.name.startswith(".") or d.name == "__pycache__":
+                continue
+            if any(d.glob("*.py")):
+                self.assertIn(
+                    d.name,
+                    gate_scoped,
+                    f"{d.name}/ holds .py files outside the mypy/coverage gate scope",
+                )
+
+    def test_gitignore_covers_sqlite_sidecars_and_env_variants(self) -> None:
+        """v0.2.300: .gitignore listed `*.sqlite3` but not the WAL sidecars
+        (`shoin.sqlite3-wal`/`-shm`/`-journal`) or `.env.*` variants. A
+        `git add -A` in a checkout where Shoin ran with `--db ./x.sqlite3`
+        would commit the private DB's live sidecars — the same privacy
+        surface the file-permission fix (v0.2.296) hardened on disk.
+        Apply the ignore list via fnmatch, matching gitignore glob
+        semantics for the unanchored `*` patterns this file uses."""
+        root = Path(__file__).resolve().parent.parent
+        pats = [
+            line.strip()
+            for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+        def ignored(name: str) -> bool:
+            # A trailing-slash pattern is directory-only in gitignore
+            # semantics; approximate it by matching any path component.
+            if any(fnmatch.fnmatch(name, p) for p in pats):
+                return True
+            return any(
+                p.endswith("/")
+                and any(fnmatch.fnmatch(part, p[:-1]) for part in name.split("/"))
+                for p in pats
+            )
+
+        for name in (
+            "shoin.sqlite3",
+            "shoin.sqlite3-wal",
+            "shoin.sqlite3-shm",
+            "shoin.sqlite3-journal",
+            ".env",
+            ".env.local",
+            # v0.2.303: ci.yml regenerates sbom.json per build as an
+            # artifact; the tracked copy was a frozen v0.1.0 snapshot.
+            "sbom.json",
+            # v0.2.309: build/test/tool artifacts — a dropped pattern would
+            # silently make `git add -A` commit coverage output, wheels,
+            # caches, or the whole venv.
+            ".coverage",
+            "htmlcov/index.html",
+            "dist/shoin-0.0.0.tar.gz",
+            "build/lib/x.py",
+            "shoin.egg-info/PKG-INFO",
+            "__pycache__/x.pyc",
+            ".venv/bin/python",
+            ".mypy_cache/x",
+            ".ruff_cache/x",
+        ):
+            self.assertTrue(ignored(name), f"{name} is committable")
+
+    def test_contributing_md_matches_the_actual_gate(self) -> None:
+        """v0.2.301: CONTRIBUTING.md told contributors to run
+        `pytest tests/` (the project runs `unittest discover` through
+        scripts/verify.sh) and omitted detect-secrets from the setup deps —
+        a contributor following the guide would skip one of the four gates
+        and hit verify failures only at push time. v0.2.302: the same
+        stale-runner claim lived in docs/agents/{opus,sonnet}.md, whose
+        bump ritual was also labeled 三点 while listing 5 files. Pin: the
+        docs name scripts/verify.sh and detect-secrets, never mention
+        pytest, and the agent docs enumerate all five bump targets."""
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        self.assertIn("scripts/verify.sh", text)
+        self.assertIn("detect-secrets", text)
+        self.assertNotIn("pytest", text.lower())
+        bump_files = (
+            "config.py",
+            "pyproject.toml",
+            "test_version",
+            "HISTORY.md",
+            "CLAUDE.md",
+        )
+        for doc in ("docs/agents/opus.md", "docs/agents/sonnet.md"):
+            agent = (root / doc).read_text(encoding="utf-8")
+            self.assertNotIn("pytest", agent.lower(), f"{doc} still names pytest")
+            for f in bump_files:
+                self.assertIn(f, agent, f"{doc} bump ritual no longer names {f}")
+
+    def test_readme_json_examples_parse_with_the_real_schemas(self) -> None:
+        """v0.2.304: README's two ```json examples are user-facing schema
+        documentation — if parse_cases() tightened or a config.json key was
+        renamed, the examples would silently teach a broken format (the same
+        doc↔code drift class as CONTRIBUTING.md's pytest instructions).
+        Extract each example block and feed it through the real machinery:
+        cases.json must parse via evaluate.parse_cases(), and every key in
+        the config.json example must be a SHOIN_* name config.py actually
+        reads via _get()."""
+        from shoin.evaluate import parse_cases
+
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        cfg_src = (root / "shoin" / "config.py").read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\n(.*?)\n```", readme, re.S)
+        cases_json = next(b for b in blocks if '"sources"' in b)
+        config_json = next(b for b in blocks if '"SHOIN_LLM_MODEL"' in b)
+        cases = parse_cases(json.loads(cases_json))
+        self.assertEqual(len(cases), 2, "README example must stay parseable")
+        known = set(re.findall(r'_get\("([A-Z_]+)"', cfg_src))
+        for key in json.loads(config_json):
+            self.assertIn(key, known, f"README config.json example names unknown key {key}")
+
+    def test_claude_md_names_the_real_constant_values(self) -> None:
+        """v0.2.305: CLAUDE.md documented the history budget as "6 messages,
+        160 each" (implying 960) while the code's real share is
+        HISTORY_TOKENS_TOTAL=400 — a misdescription the qa.py comment had to
+        flag by hand, and the source-text share was still described as
+        "split equally" four versions after v0.2.200 made it
+        rank-proportional. Every named constant in CLAUDE.md must match the
+        code's value, or the design doc teaches a wrong mental model."""
+        from shoin.citation import CONFIRM_MIN, MISMATCH_GAP
+        from shoin.config import TOP_K
+        from shoin.qa import (
+            CONTEXT_TOKENS,
+            HISTORY_MESSAGES,
+            HISTORY_TOKENS_EACH,
+            HISTORY_TOKENS_TOTAL,
+            MIN_PER_SOURCE_TOKENS,
+            SOURCE_TEXT_TOKENS,
+        )
+
+        root = Path(__file__).resolve().parent.parent
+        compact = (root / "CLAUDE.md").read_text(encoding="utf-8").replace(" ", "")
+        constants = {
+            "CONTEXT_TOKENS": CONTEXT_TOKENS,
+            "SOURCE_TEXT_TOKENS": SOURCE_TEXT_TOKENS,
+            "HISTORY_MESSAGES": HISTORY_MESSAGES,
+            "HISTORY_TOKENS_EACH": HISTORY_TOKENS_EACH,
+            "HISTORY_TOKENS_TOTAL": HISTORY_TOKENS_TOTAL,
+            "MIN_PER_SOURCE_TOKENS": MIN_PER_SOURCE_TOKENS,
+            "TOP_K": TOP_K,
+            "CONFIRM_MIN": CONFIRM_MIN,
+            "MISMATCH_GAP": MISMATCH_GAP,
+        }
+        for name, value in constants.items():
+            rendered = f"{value:g}" if isinstance(value, float) else str(value)
+            self.assertIn(
+                f"{name}={rendered}",
+                compact,
+                f"CLAUDE.md must document {name}={rendered}",
+            )
+
+    def test_requirements_dev_pins_the_gate_tools(self) -> None:
+        """v0.2.306: the gate tools were installed via unpinned
+        `pip install ruff mypy coverage detect-secrets` — a new upstream
+        release can change what "green" means overnight (the v0.2.153-era
+        ruff-rule drift) or pull a yanked release. requirements-dev.txt is
+        the single pinned source of truth (dependabot's pip ecosystem
+        watches "/"), and every install instruction must route through it
+        so no surface drifts back to floating versions."""
+        root = Path(__file__).resolve().parent.parent
+        reqs = (root / "requirements-dev.txt").read_text(encoding="utf-8")
+        pins: dict[str, str] = {}
+        for raw in reqs.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            self.assertIn("==", line, f"unpinned dev tool line: {line!r}")
+            name, _, ver = line.partition("==")
+            self.assertRegex(
+                ver,
+                r"^[0-9]+\.[0-9]+\.[0-9]+$",
+                f"{name} must be an exact ==X.Y.Z pin, got {ver!r}",
+            )
+            pins[name] = ver
+        for tool in ("ruff", "mypy", "coverage", "detect-secrets", "cyclonedx-bom"):
+            self.assertIn(tool, pins, f"requirements-dev.txt must pin {tool}")
+        for doc in ("ci/ci.yml", "CONTRIBUTING.md", "README.md", "scripts/verify.sh"):
+            self.assertIn(
+                "requirements-dev.txt",
+                (root / doc).read_text(encoding="utf-8"),
+                f"{doc} no longer installs the pinned tool list",
+            )
+
+    def test_notebook_listings_tie_break_on_id(self) -> None:
+        """v0.2.308: list_notebooks()/list_notebooks_with_counts() ordered by
+        `updated_at DESC` with no tiebreaker — on a coarse-grained clock
+        (Windows ~15ms ticks) two notebooks can share one timestamp and the
+        list order becomes arbitrary. ORDER BY is now (updated_at, id) so
+        equal timestamps resolve newest-id-first deterministically."""
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "x.sqlite3"))
+            with patch("shoin.store._now", return_value="2026-01-01T00:00:00+00:00"):
+                a = store.create_notebook("a")
+                b = store.create_notebook("b")
+                c = store.create_notebook("c")
+            self.assertEqual(
+                [n.id for n in store.list_notebooks()],
+                [c.id, b.id, a.id],
+                "identical updated_at must fall back to id DESC",
+            )
+            self.assertEqual(
+                [n["id"] for n in store.list_notebooks_with_counts()],
+                [c.id, b.id, a.id],
+                "list_notebooks_with_counts must tie-break the same way",
+            )
+            store.close()
+
+    def test_wheel_package_scope_is_shoin_only(self) -> None:
+        """v0.2.310: pyproject's packages.find include must stay exactly
+        ["shoin*"] — a widened glob ("*") would silently bundle tests/,
+        docs/, and every future top-level dir into the distributed wheel,
+        and a dropped project.scripts entry would remove the `shoin`
+        command. The built wheel was verified to contain only shoin/**
+        plus dist-info."""
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["tool"]["setuptools"]["packages"]["find"]["include"],
+            ["shoin*"],
+            "packages.find scope widened — non-package files would ship in the wheel",
+        )
+        self.assertEqual(
+            cfg["project"]["scripts"]["shoin"],
+            "shoin.cli:main",
+            "the `shoin` console entry point must keep targeting cli.main",
+        )
+        self.assertEqual(
+            cfg["build-system"]["build-backend"],
+            "setuptools.build_meta",
+        )
+
+    def test_declared_dependencies_cover_all_nonstdlib_imports(self) -> None:
+        """v0.2.338: every non-stdlib import in shoin/ must be a declared
+        dependency, and every declared dependency must be imported — a missing
+        declaration breaks `pip install` users at runtime (the lazy pypdf
+        import sits inside a function, so a top-of-file scan misses it), and a
+        stale declaration drags a package nobody uses. Walked via ast, so
+        conditional/lazy imports count."""
+        import ast
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        imported: set[str] = set()
+        for py in (root / "shoin").rglob("*.py"):
+            for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    imported.update(a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    imported.add(node.module.split(".")[0])
+        third_party = imported - sys.stdlib_module_names - {"shoin"}
+
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = {
+            re.split(r"[<>=!~\[;\s]", dep, 1)[0].strip().lower()
+            for dep in cfg["project"]["dependencies"]
+        }
+        self.assertEqual(
+            third_party,
+            declared,
+            f"pyproject dependencies drifted from imports: "
+            f"undeclared={sorted(third_party - declared)} "
+            f"unused={sorted(declared - third_party)}",
+        )
+
+    def test_docs_reference_only_real_env_vars(self) -> None:
+        """A `SHOIN_*` name in the docs that no code path reads is a silent
+        no-op for the user who sets it — rename the code and every doc that
+        cites the old name becomes a trap. Pin doc-referenced env names to
+        the set the package and scripts actually read."""
+        root = Path(__file__).resolve().parent.parent
+        real: set[str] = set()
+        for py in (root / "shoin").glob("*.py"):
+            real |= set(
+                re.findall(r'(?:_get|getenv|environ\.get)\(\s*"(SHOIN_[A-Z_]+)"', py.read_text())
+            )
+        for sh in (root / "scripts").glob("*.sh"):
+            real |= set(re.findall(r"SHOIN_[A-Z_]+", sh.read_text()))
+        self.assertTrue(real, "expected SHOIN_* env reads in code/scripts")
+
+        for md in root.rglob("*.md"):
+            if ".git" in md.parts:
+                continue
+            referenced = set(re.findall(r"\b(SHOIN_[A-Z_]+)\b", md.read_text()))
+            unknown = referenced - real
+            self.assertEqual(
+                unknown, set(),
+                f"{md.relative_to(root)} references env vars nothing reads: "
+                f"{sorted(unknown)} — users would set a no-op knob",
+            )
+
 
 
 if __name__ == "__main__":

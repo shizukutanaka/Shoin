@@ -13,6 +13,7 @@ import re
 import socket
 import ssl
 import urllib.parse
+import zlib
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO
@@ -32,9 +33,19 @@ _EXT_KIND = {
 _BLOCK_TAGS = frozenset(
     "p div br li ul ol h1 h2 h3 h4 h5 h6"
     " tr td th table caption thead tbody tfoot"
-    " section article header footer nav aside main"
+    " section article header aside main"
     " blockquote pre dd dt dl figure figcaption".split()
 )
+
+# Boilerplate chrome whose text is navigation chrome, not document content:
+# menus, cookie/related-link lists, and page footers get chunked, embedded,
+# and cited as if they were part of the source — the classic noise trafilatura
+# / readability-style extraction removes before retrieval. Skipping is done at
+# the parser level via _skip_depth, and _SKIP_TAG_BALANCE below neutralizes an
+# unclosed opener so a malformed <nav> can't swallow the rest of the page.
+# <header>/<aside> deliberately stay: articles use them for lead paragraphs
+# and substantive sidebars, not just boilerplate.
+_BOILERPLATE_TAGS = frozenset("nav footer form".split())
 
 
 class IngestError(Exception):
@@ -52,6 +63,10 @@ class Extracted:
     text: str
     origin: str
     sha256: str
+    # Pages whose text extraction raised (PDF only). Surfaced so the ingest
+    # caller can warn: the graceful per-page fallback means a corrupt page's
+    # content silently vanishes from the index without this signal.
+    pages_failed: int = 0
 
 
 def _digest(data: bytes) -> str:
@@ -94,7 +109,7 @@ def _decode(data: bytes, charset: str | None = None) -> str:
 
 
 class _HTMLText(HTMLParser):
-    """Minimal stdlib HTML -> text extractor (skips script/style, keeps blocks)."""
+    """Minimal stdlib HTML -> text extractor (skips script/style and boilerplate, keeps blocks)."""
 
     # Remove "title" from Python's RCDATA_CONTENT_ELEMENTS so the tokenizer does
     # not enter raw-text mode on <title> — otherwise </noscript> (or any other tag)
@@ -113,7 +128,7 @@ class _HTMLText(HTMLParser):
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("script", "style", "noscript", "template"):
+        if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
             self._skip_depth += 1
         elif tag == "title" and not self._skip_depth:
             self._in_title = True
@@ -125,7 +140,7 @@ class _HTMLText(HTMLParser):
             self._in_title = False  # structural tag implies <title> was never properly closed
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style", "noscript", "template"):
+        if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag == "title":
             self._in_title = False
@@ -162,6 +177,13 @@ _SKIP_TAG_BALANCE = (
     # when it happens inside <body> instead.
     (re.compile(r"<noscript\b", re.I), re.compile(r"</noscript\s*>", re.I), "noscript"),
     (re.compile(r"<template\b", re.I), re.compile(r"</template\s*>", re.I), "template"),
+    # nav/footer/form are now skip-depth elements too (v0.2.256): an unclosed
+    # one would swallow the entire rest of the document, which is strictly
+    # worse than keeping its boilerplate text — the closer injection below
+    # degrades to the old keep-the-text behavior for malformed markup.
+    (re.compile(r"<nav\b", re.I), re.compile(r"</nav\s*>", re.I), "nav"),
+    (re.compile(r"<footer\b", re.I), re.compile(r"</footer\s*>", re.I), "footer"),
+    (re.compile(r"<form\b", re.I), re.compile(r"</form\s*>", re.I), "form"),
 )
 
 
@@ -200,7 +222,13 @@ def html_to_text(html: str) -> tuple[str, str]:
     return "".join(parser.title_parts).strip(), text
 
 
-def pdf_to_text(data: bytes) -> str:
+def pdf_to_text(data: bytes) -> tuple[str, int]:
+    """Extract text per page, tolerating per-page failures.
+
+    Returns (text, n_failed_pages): pages whose extract_text() raised are
+    dropped — a malformed content stream on one page must not discard the
+    rest — but the caller learns HOW MANY were lost so it can warn instead
+    of silently indexing a partial document."""
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -219,12 +247,14 @@ def pdf_to_text(data: bytes) -> str:
     # fallback text... History_messages() survives malformed chats"), already
     # applied the same way to per-batch embedding failures in pipeline.py.
     pages: list[str] = []
+    n_failed = 0
     for page in reader.pages:
         try:
             pages.append(page.extract_text() or "")
         except Exception:
+            n_failed += 1
             continue
-    return "\n\n".join(p.strip() for p in pages if p.strip())
+    return "\n\n".join(p.strip() for p in pages if p.strip()), n_failed
 
 
 # --- SSRF guard -----------------------------------------------------------
@@ -318,6 +348,58 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
+def _inflate(body: bytes, wbits: int, *, multi_member: bool = False) -> bytes:
+    """Inflate with the output bounded DURING decompression: a small encoded body
+    can expand ~1000x per layer, so checking the size afterwards is too late."""
+    out = b""
+    data = body
+    while True:
+        d = zlib.decompressobj(wbits)
+        out += d.decompress(data, MAX_UPLOAD_BYTES + 1 - len(out))
+        _check_size(out)
+        if not d.eof:
+            raise zlib.error("incomplete or truncated stream")
+        data = d.unused_data.lstrip(b"\x00")
+        if not (multi_member and data):
+            return out
+
+
+def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
+    """Decode a Content-Encoding response body; refuse what we cannot decode.
+
+    fetch_url never sends Accept-Encoding, so a spec-compliant server replies
+    unencoded — but some hosts and CDNs gzip unconditionally, and http.client
+    does not decode it transparently. Raw gzip bytes would then reach
+    _decode()'s cp932 fallback (which accepts any byte sequence) and index
+    mojibake into the notebook with zero signal. Encodings are applied in
+    reverse order (the header lists them in application order); anything we
+    cannot decode (br, zstd, …) fails cleanly rather than poisoning the index.
+    """
+    encodings = [e.strip().lower() for e in (header or "").split(",") if e.strip()]
+    for enc in reversed(encodings):
+        if enc == "identity":
+            continue
+        if enc in ("gzip", "x-gzip"):
+            try:
+                body = _inflate(body, 16 + zlib.MAX_WBITS, multi_member=True)
+            except zlib.error as exc:
+                raise IngestError("INGEST_FETCH_FAILED", f"corrupt gzip body: {exc}") from exc
+        elif enc == "deflate":
+            try:
+                body = _inflate(body, zlib.MAX_WBITS)
+            except zlib.error:
+                try:
+                    body = _inflate(body, -zlib.MAX_WBITS)
+                except zlib.error as exc:
+                    raise IngestError("INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}") from exc
+        else:
+            raise IngestError("INGEST_UNSUPPORTED_FORMAT", f"unsupported Content-Encoding: {enc}")
+    if encodings:
+        # The wire cap bounded the encoded form; bound the inflated form too.
+        _check_size(body)
+    return body
+
+
 def fetch_url(url: str) -> tuple[bytes, str, str]:
     """Fetch a public URL. Returns (body, content_type, final_url).
 
@@ -360,6 +442,7 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
             if not body:
                 raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
             _check_size(body)
+            body = _decode_content_encoding(resp.getheader("Content-Encoding"), body)
             ctype = resp.getheader("Content-Type") or ""
             return body, ctype, current
         except (OSError, http.client.HTTPException) as exc:
@@ -384,8 +467,9 @@ def extract_file(path: Path | str) -> Extracted:
         raise IngestError("INGEST_FETCH_FAILED", f"cannot read file: {exc}") from exc
     _check_size(data)
     title = p.name
+    pages_failed = 0
     if kind == "pdf":
-        text = pdf_to_text(data)
+        text, pages_failed = pdf_to_text(data)
     elif kind == "html":
         html_title, text = html_to_text(_decode(data))
         title = html_title or title
@@ -396,7 +480,7 @@ def extract_file(path: Path | str) -> Extracted:
     text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text in {p.name}")
-    return Extracted(kind, title, text, str(p), _digest(data))
+    return Extracted(kind, title, text, str(p), _digest(data), pages_failed)
 
 
 def _charset_from_ctype(ctype: str) -> str | None:
@@ -413,8 +497,10 @@ def extract_url(url: str) -> Extracted:
     body, ctype, final_url = fetch_url(url)
     low = ctype.lower()
     charset = _charset_from_ctype(ctype)
+    pages_failed = 0
     if "pdf" in low or body.lstrip()[:4] == b"%PDF":
-        text, title = pdf_to_text(body), final_url
+        text, pages_failed = pdf_to_text(body)
+        title = final_url
     elif "html" in low or body.lstrip()[:1] == b"<":
         title, text = html_to_text(_decode(body, charset))
         title = title or final_url
@@ -426,4 +512,4 @@ def extract_url(url: str) -> Extracted:
     text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
-    return Extracted("url", title, text, final_url, _digest(body))
+    return Extracted("url", title, text, final_url, _digest(body), pages_failed)

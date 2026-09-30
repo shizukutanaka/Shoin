@@ -11,14 +11,14 @@
 
 ## 1. 必読の儀式（省略禁止）
 
-1. **バージョンbump三点セット** — 1つの変更セットにつき:
+1. **バージョンbump五点セット** — 1つの変更セットにつき5ファイルを更新:
    - `shoin/config.py` の `VERSION`
    - `pyproject.toml` の `version`
    - `tests/test_core.py` の `test_version` のアサーション
-   さらに `docs/HISTORY.md` の Version History 節の**先頭**にエントリを追記し
-   （v0.2.172 以降、詳細な bug-by-bug エントリはここに書く — CLAUDE.md 本体には書かない）、
-   見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端と、`CLAUDE.md` 側の
-   一行ポインタ（"Current version: **v0.2.NNN**"）を両方更新する。
+   - `docs/HISTORY.md` — 見出し行 `## Version History: v0.1.37 → v0.2.NNN` の終端更新と、
+     その直下への `### v0.2.NNN` エントリ追記（v0.2.172 以降、詳細な bug-by-bug
+     エントリはここに書く — CLAUDE.md 本体には書かない）
+   - `CLAUDE.md` の一行ポインタ（"Current version: **v0.2.NNN**"）
    エントリの書式は直近のエントリ群に倣う（何を・なぜ・再現・修正・テスト・
    検証コマンド結果まで1エントリで完結させる）。
 2. **fail-then-pass 検証** — バグ修正には必ず回帰テストを書き、
@@ -27,13 +27,15 @@
 3. **UI 変更は実ブラウザで検証** — `shoin/static/index.html` を変えたら
    Playwright（chromium は `/opt/pw-browsers/chromium`）+ 実サーバーで
    操作シーケンスを再現し、修正前に壊れ・修正後に直ることを両方確認する。
-   pytest にブラウザテストは**残さない**（このプロジェクトの検証規約。
+   テストスイートにブラウザテストは**残さない**（このプロジェクトの検証規約。
    v0.2.88/109/122/128 の前例に従い、検証内容は Version History に記録する）。
 4. **静的検査** — 変更したソースファイルで `python -m ruff check` と
-   `python -m mypy shoin/` をクリーンに保つ（既存の pypdf スタブ注記のみ許容）。
+   `python -m mypy --strict shoin/` をクリーンに保つ（既存の pypdf スタブ注記のみ許容）。
    **`ruff format` は絶対に実行しない** — このコードベースは手整形スタイルで、
    自動整形は16ファイルを書き換えてしまう（v0.2.133 の記録参照）。
-5. **完了条件** — `python -m unittest discover -s tests` 全緑。
+5. **完了条件** — `./scripts/verify.sh` 全ゲート全緑（lint / mypy --strict /
+   unittest+coverage≥90% / detect-secrets。`python3` が 3.11+ でない環境では
+   `PYTHON=.venv/bin/python ./scripts/verify.sh`）。unittest 単独では残り4ゲートを通らない。
    件数が増えたら Version History エントリに新しい総数を記す。
 6. **push** — 指定作業ブランチに push し、`git push origin HEAD:main` で
    公開 `main` を追従させる（両ブランチとも同一コミットを指すのが正常状態）。

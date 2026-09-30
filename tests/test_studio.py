@@ -107,6 +107,14 @@ class StudioTest(unittest.TestCase):
         result = generate(self.store, llm, self.nb, "faq")
         self.assertEqual(result.report["invalid"], [9])
 
+    def test_generate_flags_length_truncation(self) -> None:
+        """finish_reason='length' must mark the Studio report truncated, same
+        as chat answers (v0.2.245) — a mid-list cut must not read complete."""
+        llm = FakeLLM()
+        llm.last_finish_reason = "length"
+        result = generate(self.store, llm, self.nb, "briefing")
+        self.assertTrue(result.report.get("truncated"))
+
     def test_generate_rejects_unknown_kind(self) -> None:
         with self.assertRaises(StoreError) as ctx:
             generate(self.store, FakeLLM(), self.nb, "poem")
@@ -131,6 +139,21 @@ class StudioTest(unittest.TestCase):
         )
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["目的は何か?", "仕組みはどう動きますか?", "制約は何か"])
+
+    def test_suggest_questions_drops_unanswerable_and_duplicate(self) -> None:
+        """v0.2.259+: a suggested question must be askable — /ask rejects
+        questions over MAX_QUESTION_LEN, so a runaway LLM line that long would
+        be a chip the app itself cannot answer. Duplicate lines must not
+        render as identical chips."""
+        from shoin.config import MAX_QUESTION_LEN
+
+        llm = FakeLLM(
+            reply="良い質問か？\n良い質問か？\n"
+            + "長い質問" * MAX_QUESTION_LEN + "？\n"
+            + "別の質問か？"
+        )
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["良い質問か?", "別の質問か?"])
 
     def test_suggest_questions_accepts_ka_with_trailing_period(self) -> None:
         """LLMs often append 。 even with 'no decoration' instructions — must not drop."""
@@ -744,6 +767,24 @@ class CliTest(unittest.TestCase):
             rc, out, _ = self._run(["--db", db, "notebook", "list"], llm)
             self.assertIn("sources=1", out)
 
+    def test_ask_prints_degenerate_only_report(self) -> None:
+        """v0.2.262: an answer of the same question repeated is a degenerate-
+        only report — uncited filters questions, so cited/invalid/uncited are
+        all empty and the old "---" guard silently dropped the loop warning
+        that the Web badge shows."""
+        llm = FakeLLM(reply="それは本当に有効であると言えますか？それは本当に有効であると言えますか？それは本当に有効であると言えますか？")
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            doc = Path(td) / "memo.txt"
+            doc.write_text("会議メモ。決定事項あり。" * 20, encoding="utf-8")
+            self._run(["--db", db, "notebook", "new", "案件A"], llm)
+            self._run(["--db", db, "add", "1", str(doc)], llm)
+
+            rc, out, _ = self._run(["--db", db, "ask", "1", "決定事項は？"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("---", out)
+            self.assertIn("繰り返し生成", out)
+
             # rename notebook
             rc, out, _ = self._run(["--db", db, "notebook", "rename", "1", "案件A改"], llm)
             self.assertEqual(rc, 0)
@@ -1097,6 +1138,288 @@ class EvalTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("recall", out)
         self.assertIn("MRR", out)
+
+    def test_eval_report_roundtrip_and_diff(self) -> None:
+        """--save must serialize a run faithfully; --diff must pair cases by
+        question (not position) and report only the cases that moved."""
+        from shoin.evaluate import (
+            CaseResult,
+            EvalReport,
+            diff_reports,
+            report_from_dict,
+            report_to_dict,
+        )
+
+        s, nb = self._seeded()
+        with s:
+            from shoin.evaluate import EvalCase, evaluate
+
+            rep = evaluate(s, FakeLLM(), nb, [EvalCase("和紙はどう作られるか", [1])])
+        blob = report_to_dict(rep, 8)
+        self.assertEqual(blob["k"], 8)
+        back, back_k = report_from_dict(blob)
+        self.assertEqual(back_k, 8)
+        self.assertAlmostEqual(back.recall, rep.recall)
+        self.assertAlmostEqual(back.mrr, rep.mrr)
+        self.assertEqual([c.question for c in back.cases], [c.question for c in rep.cases])
+
+        before = EvalReport(
+            [
+                CaseResult("hit", [1], [1, 2], 1.0, 1.0),
+                CaseResult("miss", [1], [2], 0.0, 0.0),
+                CaseResult("same", [1], [1], 1.0, 0.5),
+                CaseResult("gone", [1], [1], 1.0, 1.0),
+            ],
+            recall=0.75,
+            mrr=0.625,
+        )
+        after = EvalReport(
+            [
+                # Same cases, reordered — question matching must still pair them.
+                CaseResult("same", [1], [1], 1.0, 0.5),
+                CaseResult("miss", [1], [1, 2], 1.0, 1.0),
+                CaseResult("hit", [1], [1, 2], 1.0, 0.5),
+                CaseResult("fresh", [1], [1], 1.0, 1.0),
+            ],
+            recall=1.0,
+            mrr=0.75,
+        )
+        d = diff_reports(before, after)
+        # v0.2.252: aggregate deltas compare the SHARED cases ({hit, miss, same})
+        # only — the raw means (1.0 - 0.75) would fold the dropped perfect
+        # "gone" and the new perfect "fresh" into the score change.
+        self.assertAlmostEqual(d.d_recall, 1.0 - (2.0 / 3))  # shared: 2/3 → 3/3
+        self.assertAlmostEqual(d.d_mrr, (2.0 / 3) - 0.5)     # shared: 1.5/3 → 2/3
+        self.assertEqual(d.matched_questions, 3)
+        # CLI comparison rows print these matched-population means, not the
+        # report means — otherwise the row would contradict its own delta.
+        self.assertAlmostEqual(d.recall_before, 2.0 / 3)
+        self.assertAlmostEqual(d.recall_after, 1.0)
+        self.assertAlmostEqual(d.mrr_before, 0.5)
+        self.assertAlmostEqual(d.mrr_after, 2.0 / 3)
+        moved = {cd.question for cd in d.case_deltas}
+        self.assertEqual(moved, {"hit", "miss"})  # "same" unchanged → absent
+        self.assertEqual(d.new_questions, ["fresh"])
+        self.assertEqual(d.dropped_questions, ["gone"])
+
+        for bad in (None, "x", {"no": "cases"}, {"cases": [{"q": "x"}]}):
+            with self.assertRaises(ValueError):
+                report_from_dict(bad)
+
+    def test_eval_cli_save_and_diff(self) -> None:
+        """End-to-end: --save writes a baseline, --diff prints the delta."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1]}]), encoding="utf-8"
+        )
+        base = Path(d) / "baseline.json"
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--save", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        self.assertTrue(base.exists())
+        self.assertEqual(_json.loads(base.read_text())["k"], 8)
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
+
+    def test_eval_cli_failing_case_and_diff_tail(self) -> None:
+        """v0.2.275: a case whose expected source is absent must print the
+        expected-vs-got detail line, and --diff against a k-mismatched,
+        question-shifted baseline must print the warn + deltas + matched/new/
+        dropped tail."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([
+                {"q": "和紙はどう作られるか", "sources": [1]},
+                {"q": "存在しない事実について", "sources": [999]},
+            ]),
+            encoding="utf-8",
+        )
+        base = Path(d) / "baseline.json"
+        base.write_text(
+            _json.dumps({
+                "k": 4,  # differs from the default 8 → k-mismatch warning
+                "recall": 0.5, "mrr": 0.5,
+                "cases": [
+                    {"q": "和紙はどう作られるか", "expected": [1],
+                     "retrieved": [], "recall": 0.0, "rr": 0.0},
+                    {"q": "消えた質問", "expected": [1],
+                     "retrieved": [1], "recall": 1.0, "rr": 1.0},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(
+                ["--db", db, "eval", str(nb), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("存在しない事実について", out)  # NG case + detail
+        self.assertTrue("Baseline comparison" in out or "ベースライン比較" in out)
+
+    def test_eval_error_paths(self) -> None:
+        """_cmd_eval's uncovered error branches must exit rc 1 with a clean
+        [CODE] stderr line — unreadable cases file, non-JSON cases, valid JSON
+        of the wrong shape, and the same trio for a --diff baseline."""
+        import io as _io
+        import json as _json
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        db = str(Path(d) / "t.db")
+        cases = Path(d) / "cases.json"
+
+        def run(argv):
+            out, err = _io.StringIO(), _io.StringIO()
+            with _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+                rc = main(argv, llm=FakeLLM())
+            return rc, err.getvalue()
+
+        # Cases file: unreadable -> SYSTEM_IO_ERROR (never a bare traceback).
+        rc, err = run(["--db", db, "eval", "1", str(Path(d) / "nope.json")])
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_IO_ERROR", err)
+        self.assertNotIn("Traceback", err)
+
+        # Cases file: non-JSON -> VALIDATION_FIELD_FORMAT_INVALID.
+        cases.write_text("{not json", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", "1", str(cases)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        # Cases file: valid JSON, wrong shape -> VALIDATION_FIELD_FORMAT_INVALID.
+        cases.write_text("{}", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", "1", str(cases)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        # Baseline file errors fire AFTER a successful eval — needs a seeded db.
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1]}]),
+            encoding="utf-8",
+        )
+        rc, err = run(
+            ["--db", db, "eval", str(nb), str(cases), "--diff", str(Path(d) / "none.json")]
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_IO_ERROR", err)
+
+        bad = Path(d) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", str(nb), str(cases), "--diff", str(bad)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+        bad.write_text("{}", encoding="utf-8")
+        rc, err = run(["--db", db, "eval", str(nb), str(cases), "--diff", str(bad)])
+        self.assertEqual(rc, 1)
+        self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+    def test_serve_success_returns_zero(self) -> None:
+        """`serve` returning normally exits rc 0 — the path opposite the
+        port-in-use branch (v0.2.275)."""
+        from shoin.cli import main
+
+        with patch("shoin.server.serve") as mock_serve:
+            rc = main(["serve", "--port", "0"])
+        self.assertEqual(rc, 0)
+        mock_serve.assert_called_once()
+
+    def test_pages_failed_printed_on_add_and_refresh(self) -> None:
+        """v0.2.275: a partial PDF index must print the pages_failed warning on
+        stderr for BOTH `add` and `source refresh` — never a silent ✓."""
+        import io as _io
+        import contextlib as _cl
+
+        from shoin.cli import main
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        s, nb_id = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        fake = IndexResult(
+            Source(id=1, notebook_id=nb_id, kind="pdf", title="broken.pdf",
+                   origin="broken.pdf", sha256="x", added_at="now"),
+            n_chunks=3, n_embedded=0, pages_failed=2,
+        )
+        out, err = _io.StringIO(), _io.StringIO()
+        with patch("shoin.cli.index_source", return_value=fake), \
+                _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+            rc = main(["--db", db, "add", str(nb_id), "broken.pdf"], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("2", err.getvalue())
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with patch("shoin.cli.refresh_source", return_value=fake), \
+                _cl.redirect_stdout(out), _cl.redirect_stderr(err):
+            rc = main(["--db", db, "source", "refresh", "1"], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("2", err.getvalue())
+
+    def test_serve_port_in_use_and_keyboard_interrupt(self) -> None:
+        """main()'s serve special-case must map OSError to SYSTEM_PORT_IN_USE
+        rc 1, and the top-level KeyboardInterrupt handler must exit 130 —
+        neither may leak a traceback."""
+        import io as _io
+        import contextlib as _cl
+
+        from shoin.cli import main
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with _cl.redirect_stdout(out), _cl.redirect_stderr(err), \
+             patch("shoin.server.serve", side_effect=OSError("address in use")):
+            rc = main(["serve", "--port", "1"], llm=FakeLLM())
+        self.assertEqual(rc, 1)
+        self.assertIn("SYSTEM_PORT_IN_USE", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with _cl.redirect_stdout(out), _cl.redirect_stderr(err), \
+             patch("shoin.cli._cmd_messages", side_effect=KeyboardInterrupt):
+            rc = main(
+                ["--db", str(Path(tempfile.mkdtemp()) / "t.db"), "messages", "list", "1"],
+                llm=FakeLLM(),
+            )
+        self.assertEqual(rc, 130)
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 if __name__ == "__main__":

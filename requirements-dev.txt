@@ -1,0 +1,11 @@
+# Dev-tool pins — the single source of truth for verify.sh's gates and ci.yml.
+# Floating `pip install ruff mypy ...` lets a new upstream release change what
+# "green" means overnight (the v0.2.153-era ruff-rule drift, where a newer ruff
+# reported 188 findings against the same code) or pull a yanked release.
+# dependabot (pip ecosystem, weekly, configured in .github/dependabot.yml)
+# proposes bumps whose PRs re-run these same gates.
+ruff==0.16.8
+mypy==2.3.1
+coverage==7.16.1
+detect-secrets==1.5.0
+cyclonedx-bom==7.4.0

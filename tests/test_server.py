@@ -216,6 +216,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")  # type: ignore[index]
 
+        # v0.2.255: response echoes the stored (stripped) name, not the raw
+        # request value — same response-vs-stored class as _h_src_patch.
+        status, renamed = self._json("PATCH", f"/api/notebooks/{nb_id}", {"name": "  和紙研究  "})
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed["name"], "和紙研究")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "和紙研究")
+
         # clear chat
         _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
         self.assertGreater(len(detail["messages"]), 0)
@@ -270,6 +278,66 @@ class ServerTest(unittest.TestCase):
             up["source"]["title"], stored_title,
             "upload response title must match what was actually persisted",
         )
+
+    def test_upload_response_reports_pages_failed(self) -> None:
+        """v0.2.256: a PDF whose pages partially fail extraction must surface
+        pages_failed in the upload response — otherwise a partial index is
+        presented as a complete one."""
+        import shoin.server as srv
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "PDF欠損テスト"})
+        nb_id = nb["id"]
+        fake = IndexResult(
+            Source(id=1, notebook_id=nb_id, kind="pdf", title="broken.pdf",
+                   origin="broken.pdf", sha256="x", added_at="now"),
+            n_chunks=3, n_embedded=0, pages_failed=2,
+        )
+        body = "なんとか本文".encode("utf-8")
+        with patch.object(srv, "index_source", return_value=fake):
+            status, _, raw = self._req(
+                "POST",
+                f"/api/notebooks/{nb_id}/upload",
+                body,
+                {"X-Filename": "broken.pdf"},
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(raw)["pages_failed"], 2)
+
+    def test_upload_filename_latin1_only_survives(self) -> None:
+        """An X-Filename whose latin-1 bytes don't form UTF-8 ('é.txt') must
+        skip the recovery decode and still upload under its decoded name —
+        the encodeURIComponent convention is unenforced, so the fallback must
+        degrade gracefully, not crash (v0.2.277)."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "latin"})
+        body = "内容テキストです。".encode()
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb['id']}/upload",
+            body,
+            {"X-Filename": "é.txt"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(raw)["source"]["title"], "é.txt")
+
+    def test_refresh_response_reports_pages_failed(self) -> None:
+        """v0.2.258: refresh of a URL-ingested PDF re-extracts the document and
+        can lose pages on the second pass — the response must carry the count
+        just like add/upload do, or the loss regresses to silent."""
+        import shoin.server as srv
+        from shoin.pipeline import IndexResult
+        from shoin.store import Source
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "refresh PDF"})
+        nb_id = nb["id"]
+        src = Source(id=1, notebook_id=nb_id, kind="pdf", title="paper.pdf",
+                     origin="https://x/paper.pdf", sha256="y", added_at="now")
+        fake = IndexResult(src, n_chunks=2, n_embedded=0, pages_failed=3)
+        with patch.object(srv, "refresh_source", return_value=fake):
+            status, body = self._json("POST", "/api/sources/1/refresh")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["pages_failed"], 3)
 
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
@@ -656,6 +724,72 @@ class ServerTest(unittest.TestCase):
         """A syntactically broken JSON body must return 400 VALIDATION_FIELD_FORMAT_INVALID."""
         status, _, raw = self._req(
             "POST", "/api/notebooks", b"{broken:", {"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_protocol_error_responses_carry_baseline_headers(self) -> None:
+        """v0.2.316: the base send_error() path (unimplemented method, bad
+        request line) used to emit a bare HTML page bypassing _headers() — no
+        nosniff/no-store/Referrer-Policy and wrong content type. All errors
+        must go through the JSON envelope."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("OPTIONS", "/")  # not implemented -> 501 via send_error
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 501)
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+            self.assertEqual(headers.get("x-content-type-options"), "nosniff")
+            self.assertEqual(headers.get("cache-control"), "no-store")
+            self.assertEqual(headers.get("referrer-policy"), "no-referrer")
+            self.assertNotIn("Python", headers.get("server", ""))
+            payload = json.loads(body)
+            self.assertIn("error", payload)
+            self.assertEqual(payload["error"]["code"], "HTTP_501")
+        finally:
+            conn.close()
+
+    def test_idle_connection_times_out_quietly(self) -> None:
+        """v0.2.315: an accepted socket that never completes its request would
+        hold its handler thread forever — REQUEST_SOCKET_SEC bounds any single
+        blocking socket op, and the timeout close must not spam a traceback
+        (idle keep-alives are expected traffic)."""
+        import io
+        import socket
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "REQUEST_SOCKET_SEC", 0.2):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            try:
+                s.sendall(b"GET / HTTP/1.1\r\n")  # deliberately incomplete
+                captured = io.StringIO()
+                with patch("sys.stderr", captured):
+                    deadline = time.time() + 10
+                    while True:
+                        got = s.recv(4096)
+                        if got == b"":
+                            break  # server closed the connection
+                        if time.time() > deadline:
+                            self.fail("idle connection never timed out")
+            finally:
+                s.close()
+        self.assertNotIn(
+            "Traceback",
+            captured.getvalue(),
+            "a socket timeout must close quietly, not log a traceback",
+        )
+
+    def test_json_body_deep_nesting_returns_400(self) -> None:
+        """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
+        and raises RecursionError — a malformed input that must still map to
+        400 VALIDATION_FIELD_FORMAT_INVALID, not 500 SYSTEM_INTERNAL_ERROR."""
+        depth = 20000
+        status, _, raw = self._req(
+            "POST",
+            "/api/notebooks",
+            ("[" * depth + "]" * depth).encode(),
+            {"Content-Type": "application/json"},
         )
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(raw)["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
@@ -1066,6 +1200,177 @@ class MidStreamLLMErrorTest(unittest.TestCase):
         self.assertTrue(persisted_report.get("degraded"), "report.degraded must be True in DB")
 
 
+class TruncatedStreamTest(unittest.TestCase):
+    """v0.2.245: a stream ending at finish_reason "length" must surface as
+    report.truncated in the done frame — otherwise a MAX_TOKENS-clipped answer
+    is presented as complete on every client surface."""
+
+    class _TruncLLM(FakeLLM):
+        def chat_stream(self, messages, temperature=0.2):
+            yield from self.reply_parts
+            self.last_finish_reason = "length"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = cls._TruncLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "tr.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_done_frame_flags_truncated(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "trunc-test"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("これは打切テストの内容です。内容について説明します。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "trunc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        req2 = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/ask"),
+            data=json.dumps({"question": "内容について教えてください"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req2) as resp:
+            raw = resp.read().decode()
+        events = parse_sse(raw)
+        done = [d for e, d in events if e == "done"]
+        self.assertTrue(done, "done frame missing")
+        self.assertTrue(done[0]["report"].get("truncated"))
+        # And the persisted assistant message carries the same flag on reload.
+        _, msgs = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertTrue(msgs["messages"][-1]["report"].get("truncated"))
+
+    def test_finish_reason_is_captured_under_generation_lock(self) -> None:
+        """v0.2.284: last_finish_reason lives on the *shared* llm client and is
+        reset at the start of every call — reading it after generation_lock is
+        released races with the next queued request's reset and silently drops
+        (or misattributes) the truncated flag."""
+        handler_cls = self.server.RequestHandlerClass
+        llm = self.llm
+        inner = handler_cls.generation_lock
+
+        class _UnlockThenReset:
+            def __enter__(self):  # noqa: D102
+                return inner.__enter__()
+
+            def __exit__(self, *exc: object) -> object:
+                result = inner.__exit__(*exc)
+                # What the next queued request's chat()/chat_stream() does the
+                # moment it acquires the lock (llm.py resets on entry).
+                llm.last_finish_reason = None
+                return result
+
+        handler_cls.generation_lock = _UnlockThenReset()
+        try:
+            _, nb = self._json("POST", "/api/notebooks", {"name": "race"})
+            nb_id = nb["id"]
+            req = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/upload"),
+                data=("打切レーステストの内容。" * 30).encode(),
+                method="POST",
+                headers={"X-Filename": "race.txt"},
+            )
+            with urllib.request.urlopen(req):
+                pass
+            req2 = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/ask"),
+                data=json.dumps({"question": "内容は"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req2) as resp:
+                raw = resp.read().decode()
+        finally:
+            handler_cls.generation_lock = inner
+        done = [d for e, d in parse_sse(raw) if e == "done"]
+        self.assertTrue(done, "done frame missing")
+        self.assertTrue(
+            done[0]["report"].get("truncated"),
+            "a queued request's flag reset must not erase this request's truncated flag",
+        )
+
+
+class CacheControlTest(unittest.TestCase):
+    """v0.2.285: every response must carry Cache-Control: no-store — a cached
+    index.html outliving the server build silently runs stale JS against a
+    new API. Previously only the SSE route sent it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "cc.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _req(self, method: str, path: str) -> tuple[int, dict[str, str], bytes]:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", method=method
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+
+    def test_baseline_security_headers_on_html_api_and_error(self) -> None:
+        """v0.2.311+: the no-store guarantee extends to the other baseline
+        headers _headers() emits — X-Content-Type-Options: nosniff (stops a
+        JSON error body being sniffed as HTML) and Referrer-Policy:
+        no-referrer — on every response class, not just the HTML page."""
+        for path in ("/", "/api/notebooks", "/api/nope"):
+            status, headers, _ = self._req("GET", path)
+            for name, want in (
+                ("Cache-Control", "no-store"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+            ):
+                self.assertEqual(
+                    want,
+                    headers.get(name),
+                    f"{path} missing {name}: {want} (status {status})",
+                )
+            self.assertNotIn(
+                "Python",
+                headers.get("Server", ""),
+                f"{path} Server header leaks the Python runtime version",
+            )
+
+
 class PostStreamStoreErrorTest(unittest.TestCase):
     """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
 
@@ -1199,6 +1504,233 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         # Server must still be alive and responsive after an OperationalError in persist.
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
+
+    def test_headers_disconnect_then_persist_failure_stays_quiet(self) -> None:
+        """If the client is already gone when SSE headers are written (the
+        ConnectionError path) AND the orphan-turn repair write then fails too,
+        the request must still end quietly — no traceback, server responsive."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "hdr-disc"})
+        nb_id = nb["id"]
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_headers", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            req = urllib.request.Request(
+                self._url(f"/api/notebooks/{nb_id}/ask"),
+                data=json.dumps({"question": "原料は？"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(
+                (urllib.error.URLError, ConnectionError, http.client.HTTPException)
+            ):
+                urllib.request.urlopen(req, timeout=10)
+
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_meta_disconnect_then_persist_failure_stays_quiet(self) -> None:
+        """Client gone at the meta frame + orphan-turn repair write failing —
+        the swallowed pair must leave the stream clean and the server alive."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "meta-disc"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_context_failure_on_dead_socket_swallows_both_writes(self) -> None:
+        """build_context raising after SSE headers commits the status line, so
+        the error frame is best-effort: when that frame hits a dead socket AND
+        the repair persist also fails, both must be swallowed quietly."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-dead"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod, "build_context", side_effect=RuntimeError("ctx boom")),
+            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_delta_write_on_dead_socket_marks_client_gone(self) -> None:
+        """A delta write dying mid-stream must take the outer ConnectionError
+        branch — client_gone short-circuits the done frame and the broken-pipe
+        persist failure is still swallowed quietly. This tail was previously
+        covered only incidentally by whichever fault landed first."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store, StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delta-disc"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original = Store.add_message
+
+        def failing(self_s, nb_id_arg, role, body, meta):
+            if role == "assistant":
+                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
+            return original(self_s, nb_id_arg, role, body, meta)
+
+        def delta_boom(event, payload):
+            # meta must succeed — a dead socket at meta returns early and never
+            # reaches the stream loop; only the delta write should fail.
+            if event == "delta":
+                raise ConnectionError("gone")
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=delta_boom),
+            patch.object(Store, "add_message", failing),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        health_status, _ = self._json("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+
+    def test_send_error_survives_a_dead_connection(self) -> None:
+        """send_error on a socket that died mid-response must swallow the write
+        failure — protocol-level errors are already terminal; raising again
+        would just produce noise in handle_error."""
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        h = srv_mod._Handler.__new__(srv_mod._Handler)
+        with patch.object(h, "_error", side_effect=BrokenPipeError()):
+            h.send_error(501)
+        self.assertTrue(h.close_connection)
+
+    def test_handle_error_still_reports_non_timeout_failures(self) -> None:
+        """Only TimeoutError is quieted by _HTTPServer.handle_error — a real
+        request-thread failure must keep the default traceback print so a
+        handler bug can never vanish silently."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                srv_mod._HTTPServer.handle_error(self.server, None, ("127.0.0.1", 0))
+        self.assertIn("RuntimeError", err.getvalue())
+
+    def test_handle_error_quiets_timeout_failures(self) -> None:
+        """Symmetric contract: a TimeoutError escaping a request thread (e.g. a
+        stalled write in finish(), outside handle_one_request's own catch) must
+        be swallowed — idle keep-alive timeouts are routine, not failures."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+
+        try:
+            raise TimeoutError("idle socket")
+        except TimeoutError:
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                srv_mod._HTTPServer.handle_error(self.server, None, ("127.0.0.1", 0))
+        self.assertEqual(err.getvalue(), "")
 
 
 class ClearChatCacheTest(unittest.TestCase):
@@ -1383,6 +1915,139 @@ class SourceRenameCacheTest(unittest.TestCase):
             patch_result["title"], persisted_title,
             "PATCH response title must match what was actually persisted",
         )
+
+
+class ReindexCacheTest(unittest.TestCase):
+    """POST /api/notebooks/{id}/reindex must invalidate the questions cache.
+    Reindex rebuilds every chunk's embedding under an unchanged source-id
+    fingerprint, so suggestions generated against the old retrieval substrate
+    would be served forever — the same eviction gap _h_src_refresh (v0.2.36)
+    and source rename already cover with an explicit pop."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "rx.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_reindex_invalidates_questions_cache(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "再索引キャッシュ"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("埋め込み再構築の対象文書。" * 50).encode(),
+            method="POST",
+            headers={"X-Filename": "rx.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        before = self.llm.chat_count
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        after_warm = self.llm.chat_count
+        self.assertEqual(after_warm, before + 1)  # one LLM call to warm the cache
+
+        status, _ = self._json("POST", f"/api/notebooks/{nb_id}/reindex", {})
+        self.assertEqual(status, 200)
+
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.llm.chat_count, after_warm + 1,
+            "reindex must invalidate the questions cache (one new LLM call)",
+        )
+
+
+class NotebookMessagesCapTest(unittest.TestCase):
+    """GET /api/notebooks/{id} embeds at most NB_MESSAGES_LIMIT messages.
+
+    Chat history grows monotonically and openNotebook() re-fetches this payload
+    on every mutation (upload, source add/delete/refresh, studio generate,
+    clear-chat, SSE-drop recovery) — an unbounded messages array would make
+    each click heavier forever. The payload stays honest: `messages_omitted`
+    reports the real hidden count for the UI's disclosure line; the full record
+    remains in the DB and in export()."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.llm = FakeLLM()
+        cls.server = make_server(port=0, db=str(Path(cls.tmp.name) / "mc.db"), llm=cls.llm)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _json(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            self._url(path), data=body, method=method,
+            headers={"Content-Type": "application/json"} if body else {},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_notebook_payload_caps_messages_and_reports_omitted(self) -> None:
+        from shoin.store import Store
+
+        import shoin.server as srv
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_message(nb_id, "user" if i % 2 == 0 else "assistant", f"msg {i}", "{}")
+        with patch.object(srv, "NB_MESSAGES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["messages"]), 4)
+        self.assertEqual(j["messages_omitted"], 8)
+        # The newest turns are the embedded ones — the SSE-drop recovery refetch
+        # (v0.2.246) depends on the persisted last assistant message being in
+        # the payload.
+        self.assertEqual(j["messages"][0]["body"], "msg 8")
+        self.assertEqual(j["messages"][-1]["body"], "msg 11")
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["messages_omitted"], 0)
+        self.assertEqual(len(j2["messages"]), 12)
 
 
 class SafeReportTest(unittest.TestCase):
@@ -1807,6 +2472,70 @@ class SSEConnectionErrorTest(unittest.TestCase):
         # Server must have responded (400 for too-large body or close gracefully)
         self.assertTrue(len(response) >= 0)  # did not crash
 
+    def test_streamed_report_receives_history(self) -> None:
+        """v0.2.216: the streamed make_report() must get the same `history`
+        join qa.ask() passes — previously it was omitted, so the cross-turn
+        checks (degenerate_spans/self_contradictions) silently never fired
+        on the web path, the primary user surface."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "xturn"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("治療法の効果について多くの研究がある。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+        # Seed a prior assistant turn asserting the opposite.
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            store.add_message(nb_id, "user", "効果は？", "{}")
+            store.add_message(nb_id, "assistant", "治療の効果はある。", "{}")
+        self.llm.reply_parts = ["治療の効果はない。"]
+        try:
+            raw = self._ask_raw(nb_id, "効果はどうですか？")
+        finally:
+            self.llm.reply_parts = ["回答 ", "[S1]。"]
+        done = [d for ev, d in parse_sse(raw.decode()) if ev == "done"]
+        self.assertTrue(done)
+        self.assertEqual(
+            done[0]["report"].get("self_contradiction"), ["治療の効果はない。"]
+        )
+
+    def test_build_context_error_frame_and_no_dangling_turn(self) -> None:
+        """build_context raising after hits are found (e.g. WAL busy_timeout)
+        must emit an SSE error frame — headers already committed, so no HTTP
+        status can be sent — and persist an EMPTY assistant message so the
+        orphaned user turn can't corrupt history_messages pairing."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-err"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch("shoin.server.build_context", side_effect=RuntimeError("ctx boom")):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        events = parse_sse(raw.decode())
+        kinds = [e for e, _ in events]
+        self.assertIn("error", kinds)
+        self.assertNotIn("done", kinds)
+        err_payload = [d for e, d in events if e == "error"][0]
+        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        # The dangling-turn guard: an empty assistant turn was persisted.
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            msgs = store.list_messages(nb_id)
+        self.assertEqual(msgs[-1]["role"], "assistant")
+        self.assertEqual(msgs[-1]["body"], "")
+
 
 class HostnameOfTest(unittest.TestCase):
     def test_malformed_netloc_returns_empty_string(self) -> None:
@@ -1839,8 +2568,14 @@ class InputValidationSecurityTest(unittest.TestCase):
         cls.server.server_close()
         cls.tmp.cleanup()
 
+    # Generous liveness bound, not a latency SLA: only meant to catch a hung
+    # server. Under full-suite load a localhost request can legitimately take
+    # several seconds — a tight timeout here flakes with TimeoutError while
+    # the server and code under test are both healthy.
+    _CONN_TIMEOUT = 30
+
     def _raw_post(self, path: str, body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request("POST", path, body=body, headers=headers)
         resp = conn.getresponse()
         return resp.status, resp.read()
@@ -1859,7 +2594,7 @@ class InputValidationSecurityTest(unittest.TestCase):
 
     def test_negative_content_length_returns_400(self) -> None:
         """A negative Content-Length on a JSON endpoint must return 400, not read until EOF."""
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST",
             "/api/notebooks",
@@ -1878,7 +2613,7 @@ class InputValidationSecurityTest(unittest.TestCase):
 
         # Create a notebook first so the rejection happens in _h_ask_sse, not at 404
         nb_body = _json.dumps({"name": "q-len-test"}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=nb_body,
             headers={"Content-Type": "application/json"},
@@ -1907,7 +2642,7 @@ class InputValidationSecurityTest(unittest.TestCase):
         import json as _json
 
         body = _json.dumps({"name": 42}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=body,
             headers={"Content-Type": "application/json"},
@@ -1934,7 +2669,7 @@ class InputValidationSecurityTest(unittest.TestCase):
             {"Content-Type": "application/json", "X-HTTP-Method-Override": "PATCH"},
         )
         # Can't use _raw_post for PATCH directly — do it manually
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "PATCH", "/api/sources/99999",
             body=patch_body,
@@ -1958,7 +2693,7 @@ class InputValidationSecurityTest(unittest.TestCase):
         import json as _json
 
         nb_body = _json.dumps({"name": "note-body-type-test"}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
         conn.request(
             "POST", "/api/notebooks", body=nb_body,
             headers={"Content-Type": "application/json"},

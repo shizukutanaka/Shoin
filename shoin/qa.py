@@ -11,13 +11,21 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, estimate_tokens, is_cjk
 from .citation import CitationReport, make_report
-from .config import MAX_QUESTION_LEN, TOP_K, multi_query_enabled, ui_lang
+from .config import (
+    MAX_QUESTION_LEN,
+    QUERY_VEC_CACHE_SIZE,
+    TOP_K,
+    multi_query_enabled,
+    ui_lang,
+)
 from .llm import LLMError, Message
 from .search import Hit, retrieve, retrieve_multi
 from .store import Store, StoreError
@@ -164,6 +172,11 @@ class GroundedContext:
     # grounded in — the last mile of "verifiable citation": the reader can see the
     # cited text in its original position, not just as a detached excerpt.
     source_chunk_ids: list[list[int]] = field(default_factory=list)
+    # Retrieval-provenance detail of each source's TOP hit (S1..Sn order):
+    # rrf_bm25_rank / rrf_vec_rank say WHICH channel surfaced the source and
+    # `lex` records term presence — the "why it was retrieved" half of
+    # explainable citation, complementing source_excerpts' "what it said".
+    source_detail: list[dict[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -203,6 +216,26 @@ def _truncate_tokens(text: str, limit: int) -> str:
     return text
 
 
+_MIN_BOUNDARY_OVERLAP = 20  # chars — below this a shared boundary is coincidental
+
+
+def _boundary_overlap(a: str, b: str) -> int:
+    """Longest prefix of `b` that is also a suffix of `a` (>= _MIN_BOUNDARY_OVERLAP).
+
+    Adjacent chunks share a ~CHUNK_OVERLAP-token boundary — split_text() seeds
+    each new chunk with `_tail(previous)` — so the head of the later chunk
+    repeats the tail of the earlier one. This is the exact dedup point for
+    merging them back into continuous prompt text. 0 = no shared boundary.
+    Scans downward from the longest candidate: "a ends with b[:k]" is NOT
+    monotone in k (a can end with b[:30] yet not with b[:28]), so a binary
+    search would miss the true boundary.
+    """
+    for k in range(min(len(a), len(b)), _MIN_BOUNDARY_OVERLAP - 1, -1):
+        if a.endswith(b[:k]):
+            return k
+    return 0
+
+
 def _section_from_context(context: str, title: str) -> str:
     """Strip the source-title prefix from a chunk's stored context breadcrumb.
 
@@ -223,10 +256,23 @@ def _section_from_context(context: str, title: str) -> str:
     return ""
 
 
+def _sec_label(section: str) -> str:
+    """`§ section\n` prefix for one excerpt segment (v0.2.222).
+
+    v0.2.221 put the label in the source header — but a single source can
+    contribute hits from SEVERAL sections (top-k picks non-adjacent chunks),
+    and one header label is then misinformation for every other segment.
+    Labels live per segment instead: each excerpt block names the section its
+    own leading chunk came from. Unbilled (~10 chars/segment): attaching it
+    outside the token accounting keeps the label honest even on a truncated
+    segment — a cut body still gets to say where it came from."""
+    return f"§ {section}\n" if section else ""
+
+
 def build_context(
     store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
 ) -> GroundedContext:
-    """Group hits by source (relevance order) under a fair per-source budget.
+    """Group hits by source (relevance order) under a rank-proportional budget.
 
     budget_tokens defaults to SOURCE_TEXT_TOKENS (~1000, CLAUDE.md's documented
     "source text" sub-share of the 2400-token total), not CONTEXT_TOKENS itself —
@@ -254,14 +300,27 @@ def build_context(
     # order is source-id-first-seen, so this drops the lowest-priority tail.
     order = order[: max(budget_tokens // MIN_PER_SOURCE_TOKENS, 1)]
 
+    # Rank-proportional per-source budgets (v0.2.200): every source keeps the
+    # MIN_PER_SOURCE_TOKENS floor (so no source ever gets a meaningless sliver),
+    # and the remaining surplus is distributed by harmonic rank weight 1/i —
+    # retrieval already ranked `order`, so the #1 source deserves the largest
+    # share of the surplus rather than the same slice as the #8 source
+    # (lost-in-the-middle literature: front position matters most for small
+    # context budgets). Sum of shares = min(budget_tokens, n*floor + surplus)
+    # == budget_tokens exactly when order fits; the floor guarantees
+    # surplus >= 0 because order was capped to what the floor can support.
+    n_src = len(order)
+    surplus = max(budget_tokens - n_src * MIN_PER_SOURCE_TOKENS, 0)
+    harmonic = sum(1 / i for i in range(1, n_src + 1))
     titles: list[str] = []
     bodies: list[str] = []
     contexts: list[str] = []
+    details: list[dict[str, float]] = []
     chunk_id_lists: list[list[int]] = []
     parts: list[str] = []
     snums: dict[int, int] = {}
-    per_source = max(budget_tokens // max(len(order), 1), MIN_PER_SOURCE_TOKENS)
     for idx, source_id in enumerate(order, start=1):
+        per_source = MIN_PER_SOURCE_TOKENS + int(surplus * ((1 / idx) / harmonic))
         try:
             title = store.get_source(source_id).title
         except StoreError:
@@ -269,8 +328,36 @@ def build_context(
         titles.append(title)
         # Section breadcrumb from this source's TOP (most-relevant) hit — grouped[]
         # preserves the relevance order hits arrived in, so [0] is the best match.
-        contexts.append(_section_from_context(grouped[source_id][0].context, title))
+        section = _section_from_context(grouped[source_id][0].context, title)
+        contexts.append(section)
+        details.append(dict(grouped[source_id][0].detail))
         snums[source_id] = idx
+        # Merge consecutive-seq hits into one continuous segment (v0.2.207),
+        # assembled in DOCUMENT order (v0.2.208): adjacent chunks share a
+        # ~CHUNK_OVERLAP-token boundary, so presenting them with the "\n…\n"
+        # gap marker claims a discontinuity that does not exist AND bills the
+        # shared overlap region to the token budget twice. Merging deduplicates
+        # the shared boundary so the prompt reads as the document reads and the
+        # saved tokens serve further hits. Sorting by seq (unknown -1 sorts
+        # last, stably) also merges pairs that arrived reversed (rank k+1 above
+        # rank k) — the excerpt for a source is document-ordered text, while
+        # grouped[] itself keeps relevance order for contexts[0] and snums.
+        # Ordering the budget consumption by document position rather than hit
+        # rank is deliberate: a coherent excerpt beats a more-relevant fragment.
+        seg_parts: list[list[tuple[int, str]]] = []  # (chunk_id, contributed text)
+        seg_secs: list[str] = []  # section of each segment's leading chunk
+        prev_seq = -2  # sentinel distinct from any real seq and the -1 unknown
+        for h in sorted(grouped[source_id], key=lambda h: (h.seq < 0, h.seq)):
+            piece = h.text
+            if seg_parts and h.seq >= 0 and h.seq == prev_seq + 1:
+                prev_text = "".join(p for _, p in seg_parts[-1])
+                ov = _boundary_overlap(prev_text, h.text)
+                piece = h.text[ov:] if ov else "\n" + h.text
+                seg_parts[-1].append((h.chunk_id, piece))
+            else:
+                seg_parts.append([(h.chunk_id, h.text)])
+                seg_secs.append(_section_from_context(h.context, title))
+            prev_seq = h.seq
         used = 0
         texts: list[str] = []
         # Chunk ids actually placed in the prompt for this source (not merely
@@ -279,31 +366,45 @@ def build_context(
         # (visual source attribution, cf. VISA arXiv:2412.14457). Collected in
         # lock-step with `texts` so a chunk dropped by the budget is never marked.
         chunk_ids: list[int] = []
-        for h in grouped[source_id]:
-            cost = estimate_tokens(h.text)
+        for i, seg in enumerate(seg_parts):
+            seg_text = "".join(p for _, p in seg)
+            cost = estimate_tokens(seg_text)
             # Zero-token text (Arabic, Cyrillic, Hebrew, pure punctuation — scripts
             # outside _CJK_RANGES and _WORD_RE) escapes the token budget: cost=0 means
             # cost > remaining is always False and ALL chunks are appended uncapped.
             # Use 5 chars/token (≈ASCII word density) as a conservative char-based cost
             # so the budget guard fires for scripts that estimate_tokens() can't count.
-            effective_cost = cost if cost > 0 else len(h.text) // 5
+            effective_cost = cost if cost > 0 else len(seg_text) // 5
             remaining = per_source - used
             if effective_cost > remaining:
-                # Chunk won't fit in full: truncate to remaining budget if any.
+                # Segment won't fit in full: truncate to remaining budget if any.
                 # Previously, the truncation guard fired only for the first chunk
                 # (when used==0); later oversize chunks were silently dropped.
                 if remaining > 0:
                     if cost > 0:
-                        texts.append(_truncate_tokens(h.text, remaining))
+                        truncated = _truncate_tokens(seg_text, remaining)
                     else:
                         # Zero-token text: _truncate_tokens may also return the full
                         # text (same 0-count problem). Use char window as fallback.
-                        texts.append(h.text[: remaining * 5])
-                    # A truncated chunk IS in the prompt, so it counts as cited.
-                    chunk_ids.append(h.chunk_id)
+                        truncated = seg_text[: remaining * 5]
+                    # A truncated segment IS in the prompt, so its surviving
+                    # chunks count as cited — but only those whose text survived
+                    # the truncation point (a merged tail chunk may be cut).
+                    # The "…" marker tells the model the excerpt was CUT, not
+                    # complete — without it a mid-sentence fragment looks like a
+                    # whole passage and can be quoted as such (v0.2.211).
+                    if truncated:
+                        texts.append(_sec_label(seg_secs[i]) + truncated + "…")
+                    off = 0
+                    for cid, piece in seg:
+                        if off < len(truncated):
+                            chunk_ids.append(cid)
+                        off += len(piece)
+                        if off >= len(truncated):
+                            break
                 break
-            texts.append(h.text)
-            chunk_ids.append(h.chunk_id)
+            texts.append(_sec_label(seg_secs[i]) + seg_text)
+            chunk_ids.extend(cid for cid, _ in seg)
             used += effective_cost
         body = "\n…\n".join(texts)
         bodies.append(body)
@@ -312,7 +413,7 @@ def build_context(
     ordered_ids = [sid for sid, _ in sorted(snums.items(), key=lambda x: x[1])]
     return GroundedContext(
         titles, "\n\n".join(parts), hits, snums, ordered_ids, bodies, contexts,
-        chunk_id_lists,
+        chunk_id_lists, details,
     )
 
 
@@ -416,7 +517,14 @@ def expand_query(question: str, history: list[Message]) -> str:
     if len(question) >= 30:
         return question
     prev = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
-    return f"{prev} {question}" if prev else question
+    if not prev:
+        return question
+    # The expanded string feeds the FTS5 OR-expression directly, so it must
+    # respect the same MAX_QUESTION_LEN bound the raw question was validated
+    # against — otherwise a max-length prior turn makes a short follow-up the
+    # pathological query the limit exists to prevent. Truncate the prepended
+    # context, never the current question itself (it is the actual intent).
+    return f"{prev[: MAX_QUESTION_LEN - len(question) - 1]} {question}"
 
 
 def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
@@ -432,13 +540,41 @@ def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     return not stored or stored == current
 
 
+# Embedding the question is the single most repeated LLM call in the app: every
+# ask() embeds the retrieval query, and repeat questions, eval reruns, and
+# multi-query rewrites that coincide with an earlier phrasing all re-hit the
+# endpoint for a byte-identical vector. Bound a small LRU keyed on
+# (embedding model, question) — vectors are immutable per model so entries
+# never go stale, and failures are not cached (a transient outage must not
+# stick). ThreadingHTTPServer serves asks concurrently, so the tiny
+# check-and-evict section is serialized.
+_QUERY_VEC_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+_QUERY_VEC_LOCK = threading.Lock()
+
+
 def _query_vector(llm: ChatBackend, question: str) -> list[float] | None:
-    if not (llm.embedding_model or "").strip():
+    model = (llm.embedding_model or "").strip()
+    if not model:
         return None
+    key = (model, question)
+    with _QUERY_VEC_LOCK:
+        cached = _QUERY_VEC_CACHE.get(key)
+        if cached is not None:
+            _QUERY_VEC_CACHE.move_to_end(key)
+            # Copy out: callers receive a fresh list so a mutating consumer can
+            # never corrupt the shared cached vector.
+            return list(cached)
     try:
-        return llm.embed_one(question)
+        vec = llm.embed_one(question)
     except LLMError:
         return None  # vector path optional: degrade to BM25-only retrieval
+    with _QUERY_VEC_LOCK:
+        # The cache owns its own list; callers get `vec` and may mutate it.
+        _QUERY_VEC_CACHE[key] = list(vec)
+        _QUERY_VEC_CACHE.move_to_end(key)
+        while len(_QUERY_VEC_CACHE) > QUERY_VEC_CACHE_SIZE:
+            _QUERY_VEC_CACHE.popitem(last=False)
+    return vec
 
 
 def rewrite_queries(
@@ -573,8 +709,21 @@ def ask(
                     context.source_bodies,
                     context.source_contexts,
                     context.source_chunk_ids,
+                    context.source_detail,
+                    # Prior assistant text lets degenerate_spans catch a
+                    # cross-turn parrot loop (same paragraph re-emitted every
+                    # turn) that a per-message check structurally cannot see.
+                    history="\n".join(
+                        m["content"] for m in history if m["role"] == "assistant"
+                    ),
                 ),
             )
+            # finish_reason "length" means the answer hit MAX_TOKENS mid-
+            # generation — the text is real but silently clipped. Flag it so
+            # every surface can warn instead of presenting it as complete.
+            # getattr-guarded: ChatBackend stubs do not carry the attribute.
+            if getattr(llm, "last_finish_reason", None) == "length":
+                answer.report["truncated"] = True
         except LLMError:
             text = _degraded_text(hits)
             report = make_report(
@@ -584,6 +733,7 @@ def ask(
                 context.source_bodies,
                 context.source_contexts,
                     context.source_chunk_ids,
+                    context.source_detail,
                 check_uncited=False,
             )
             report["degraded"] = True

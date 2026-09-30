@@ -24,6 +24,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from .chunk import _CJK_RANGES, is_cjk
+from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
 from .config import TOP_K
 from .store import Store
 
@@ -89,6 +90,10 @@ class Hit:
     # the section a citation came from in the UI. Defaults to "" so every existing
     # positional Hit(...) construction in tests stays valid.
     context: str = ""
+    # The chunk's sequence index within its source (v0.2.207). -1 = unknown
+    # (test-constructed hits); build_context() merges hits with consecutive
+    # known seqs instead of inserting a false "…" discontinuity.
+    seq: int = -1
 
 
 # --- query helpers --------------------------------------------------------
@@ -199,14 +204,195 @@ def _to_hiragana(s: str) -> str:
     return "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in s)
 
 
+def _kanji_skeleton(s: str) -> str:
+    """*s* with every hiragana character removed (v0.2.224).
+
+    Japanese conjugation and okurigana variance hide the shared kanji stem:
+    a query "走った" shares ZERO trigrams with a document saying "走る", and
+    "切り替える" vs "切替える" differ inside the word. Both collapse to the
+    same skeleton ("走", "切替"), which LIKE needles and FTS grams then match
+    — a dictionary-free stem bridge (Sudachi/Kuromoji solve this by inflecting
+    to dictionary form; we cannot afford a morphological dictionary, and the
+    skeleton covers the *vocabulary-level* mismatch without one).
+
+    Returns "" unless the skeleton still contains a kanji — a pure-kana
+    residue ("みーつ" → "ー") would emit a '%ー%' needle that LIKE-matches
+    every long-vowel word in the notebook.  Also "" when nothing was removed
+    (no hiragana in *s*); the term_variants dedup then drops it.
+    """
+    skel = "".join(c for c in s if not (0x3041 <= ord(c) <= 0x3096))
+    if not any(0x3400 <= ord(c) <= 0x9FFF for c in skel):
+        return ""
+    return skel
+
+
 def _to_halfwidth(s: str) -> str:
     """Fullwidth katakana → halfwidth, via the inverted-NFKC table."""
     return "".join(_FW_TO_HW.get(c, c) for c in s)
 
 
+# Tōyō-era simplified-form → traditional-form pairs (新字体 → 旧字体), the
+# common jōyō simplifications. A query or source written in pre-reform
+# orthography shares ZERO trigrams with the modern spelling — the same
+# all-or-nothing gap the kanji skeleton fixes for inflections (v0.2.224).
+# The bridge is query-side like every other variant (the index stays
+# byte-identical to the source): emit the fully-converted counterpart of
+# whichever script the term arrived in. Ambiguous simplifications (弁, 台,
+# 与…) pick the most common predecessor — an occasionally wrong old form is
+# harmless: the variant only adds an extra needle/gram and can never suppress
+# a document the term itself matched.
+_SHIN_TO_KYU: dict[str, str] = {
+    "圧": "壓", "悪": "惡", "為": "爲", "医": "醫", "壱": "壹", "隠": "隱",
+    "栄": "榮", "衛": "衞", "円": "圓", "縁": "緣", "応": "應", "欧": "歐",
+    "殴": "毆", "桜": "櫻", "温": "溫", "穏": "穩", "仮": "假", "価": "價",
+    "画": "畫", "会": "會", "懐": "懷", "壊": "壞", "概": "槪", "拡": "擴",
+    "殻": "殼", "覚": "覺", "学": "學", "楽": "樂", "缶": "罐", "関": "關",
+    "陥": "陷", "勧": "勸", "寛": "寛", "観": "觀", "気": "氣", "亀": "龜",
+    "偽": "僞", "戯": "戲", "犠": "犧", "旧": "舊", "拠": "據", "挙": "擧",
+    "虚": "虛", "峡": "峽", "狭": "狹", "郷": "鄕", "暁": "曉", "区": "區",
+    "駆": "驅", "継": "繼", "茎": "莖", "渓": "溪", "経": "經", "蛍": "螢",
+    "軽": "輕", "鶏": "鷄", "芸": "藝", "撃": "擊", "研": "硏", "県": "縣",
+    "倹": "儉", "剣": "劍", "険": "險", "献": "獻", "検": "驗", "顕": "顯",
+    "広": "廣", "効": "效", "鉱": "鑛", "号": "號", "国": "國", "穀": "榖",
+    "黒": "黑", "砕": "碎", "済": "濟", "剤": "劑", "斎": "齋", "雑": "雜",
+    "桟": "棧", "賛": "贊", "蚕": "蠶", "残": "殘", "辞": "辭", "歯": "齒",
+    "児": "兒", "湿": "濕", "実": "實", "写": "寫", "釈": "釋", "寿": "壽",
+    "収": "收", "従": "從", "渋": "澁", "獣": "獸", "縦": "縱", "粛": "肅",
+    "処": "處", "将": "將", "奨": "奬", "醤": "醬", "焼": "燒", "証": "證",
+    "条": "條", "乗": "乘", "剰": "剩", "浄": "淨", "畳": "疊", "縄": "繩",
+    "壌": "壤", "醸": "釀", "嬢": "孃", "触": "觸", "寝": "寢", "慎": "愼",
+    "真": "眞", "尽": "盡", "図": "圖", "粋": "粹", "酔": "醉", "穂": "穗",
+    "随": "隨", "髄": "髓", "枢": "樞", "数": "數", "声": "聲", "静": "靜",
+    "摂": "攝", "専": "專", "浅": "淺", "戦": "戰", "践": "踐", "銭": "錢",
+    "潜": "潛", "繊": "纖", "禅": "禪", "壮": "壯", "争": "爭", "荘": "莊",
+    "装": "裝", "捜": "搜", "挿": "插", "蔵": "藏", "臓": "臟", "増": "增",
+    "即": "卽", "属": "屬", "続": "續", "堕": "墮", "対": "對", "体": "體",
+    "帯": "帶", "滞": "滯", "台": "臺", "滝": "瀧", "択": "擇", "沢": "澤",
+    "単": "單", "胆": "膽", "団": "團", "弾": "彈", "断": "斷", "痴": "癡",
+    "虫": "蟲", "鋳": "鑄", "庁": "廳", "徴": "徵", "聴": "聽", "懲": "懲",
+    "勅": "敕", "転": "轉", "伝": "傳", "灯": "燈", "当": "當", "盗": "盜",
+    "稲": "稻", "徳": "德", "独": "獨", "読": "讀", "弐": "貳", "悩": "惱",
+    "脳": "腦", "覇": "霸", "拝": "拜", "廃": "廢", "売": "賣", "麦": "麥",
+    "発": "發", "髪": "髮", "抜": "拔", "蛮": "蠻", "秘": "祕", "浜": "濱",
+    "氷": "冰", "弁": "辯", "歩": "步", "宝": "寶", "豊": "豐", "没": "沒",
+    "万": "萬", "満": "滿", "黙": "默", "訳": "譯", "薬": "藥", "与": "與",
+    "誉": "譽", "揺": "搖", "様": "樣", "謡": "謠", "来": "來", "覧": "覽",
+    "竜": "龍", "涙": "淚", "塁": "壘", "暦": "曆", "歴": "歷", "恋": "戀",
+    "楼": "樓", "録": "錄", "練": "練", "齢": "齡", "労": "勞", "炉": "爐",
+    "禄": "祿", "乱": "亂", "湾": "灣",
+}
+
+_KYU_TO_SHIN = {v: k for k, v in _SHIN_TO_KYU.items()}
+
+
+def _kyujitai_variants(s: str) -> list[str]:
+    """Fully-traditional and fully-simplified spellings of *s*.
+
+    Both directions are emitted because the notebook may mix eras: a modern
+    query ("学校") must find a pre-war quotation ("學校") and vice versa.
+    Partial conversions are unnecessary — LIKE needles and trigram grams both
+    match the whole converted string as a substring/word."""
+    out: list[str] = []
+    for table in (_SHIN_TO_KYU, _KYU_TO_SHIN):
+        v = "".join(table.get(c, c) for c in s)
+        if v != s:
+            out.append(v)
+    return out
+
+
 def _to_fullwidth_ascii(s: str) -> str:
     """ASCII → fullwidth forms (Ａ-Ｚ ０-９ …), the U+FEE0 offset block."""
     return "".join(chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s)
+
+
+_KANJI_DIGIT_REV = {v: k for k, v in _KANJI_DIGIT.items()}
+
+
+def _kanji_group(n: int, omit_one: bool) -> str:
+    """Sub-10000 kanji numeral: place chars 千/百/十 with optional 一-omission."""
+    out: list[str] = []
+    for place, ch in ((1000, "千"), (100, "百"), (10, "十")):
+        d, n = divmod(n, place)
+        if d:
+            out.append(ch if d == 1 and omit_one else _KANJI_DIGIT_REV[d] + ch)
+    if n:
+        out.append(_KANJI_DIGIT_REV[n])
+    return "".join(out)
+
+
+def _int_to_kanji(v: int) -> str:
+    """Positional kanji numeral for 0 < v < 1e8 — the inverse of
+    citation._kanji_value (1000 → 千, 32000 → 三万二千, 12000000 → 千二百万).
+
+    一 is omitted inside the trailing sub-10000 group (1000 = 千, not 一千)
+    but kept on magnitude groups (一万, 一億 are the standard spellings)."""
+    parts: list[str] = []
+    for mag, suf in ((100_000_000, "億"), (10_000, "万")):
+        q, v = divmod(v, mag)
+        if q:
+            parts.append(_kanji_group(q, omit_one=False) + suf)
+    if v:
+        parts.append(_kanji_group(v, omit_one=True))
+    return "".join(parts)
+
+
+def _numeric_variants(term: str) -> list[str]:
+    """Magnitude/kanji spellings an all-digit term should also retrieve.
+
+    FTS5 and LIKE match literal characters, so "32000" cannot find a source
+    that wrote the value as "3.2万", "32,000", or "三万二千" — the same
+    vocabulary-mismatch class term_variants already bridges for kana/width,
+    for numeric shorthand this time.  Emitted spellings: comma grouping,
+    千/万/億/兆 shorthand (exact and 1-2 decimals), the X万Y split form, and
+    the positional kanji numeral (< 1e8 — 億 numerals are rare enough as
+    queries that emitting them stays out of scope).
+    """
+    if not (term.isascii() and term.isdigit()):
+        return []
+    v = int(term)
+    out: list[str] = []
+    grouped = f"{v:,}"
+    if grouped != term:
+        out.append(grouped)
+    for mag, suf in ((10**12, "兆"), (10**8, "億"), (10**4, "万"), (10**3, "千")):
+        q = v / mag
+        if q >= 1 and v % (mag // 100) == 0:
+            out.append(f"{q:g}{suf}")
+    if v and v < 100_000_000:
+        out.append(_int_to_kanji(v))
+    # Gregorian year → era-name spellings (v0.2.225): a query "2024" cannot
+    # match "令和6年" literally — the same vocabulary-mismatch class as the
+    # magnitude shorthand above.  Emit every era whose range covers the year
+    # (1989/2019 boundary years belong to two), both ASCII and fullwidth
+    # digits, plus the 元年 spelling.  No 年 suffix: '%令和6%' already
+    # substring-matches "令和6年", and the 3-char trigram "令和6" matches
+    # the FTS gram of it too.
+    for name, base, end in _ERAS:
+        if base <= v <= end:
+            y = v - base + 1
+            out.append(f"{name}{y}")
+            out.append(f"{name}{_to_fullwidth_ascii(str(y))}")
+            if y == 1:
+                out.append(f"{name}元")
+    if 10_000 <= v < 100_000_000 and v % 10_000:
+        out.append(f"{v // 10_000}万{v % 10_000}")
+    return [o for o in out if o]
+
+
+def _numeric_query_terms(query: str) -> list[str]:
+    """Digit values the query's shorthand numerals assert — the reverse
+    direction of _numeric_variants.
+
+    Resolved at raw-query level because suffix and punctuation characters
+    fragment "3.2万" into the meaningless term pieces "3", "2", "万" before
+    term_variants can see it.  citation._numbers_expanded already knows every
+    equivalence the citation checks use (3.2万→32000, 三万二千→32000,
+    1億2000万→120000000, 五割→50, three million→3000000), so the query bridge
+    reuses the same canonical values rather than a second table that could
+    drift.  Raw digit terms the query already carries come along too —
+    fts_query's `seen` dedups the grams they would emit twice.
+    """
+    return sorted(n for n in _numbers_expanded(query) if n.isascii() and n.isdigit())
 
 
 def term_variants(term: str) -> list[str]:
@@ -234,8 +420,11 @@ def term_variants(term: str) -> list[str]:
     norm = unicodedata.normalize("NFKC", term)
     katakana = _to_katakana(norm)
     candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    candidates.append(_kanji_skeleton(norm))
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))
+    candidates.extend(_numeric_variants(norm))
+    candidates.extend(_kyujitai_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
@@ -266,7 +455,7 @@ def fts_query(query: str) -> str:
     """
     groups: list[str] = []
     seen: set[str] = set()
-    for raw_term in query_terms(query):
+    for raw_term in query_terms(query) + _numeric_query_terms(query):
         # Trigram-vs-whole-term is a property of the TERM, not of each spelling:
         # a fullwidth ASCII variant is is_cjk()-true (fullwidth Latin lives in
         # _CJK_RANGES), so branching per variant would shred ｗｅａｔｈｅｒ into five
@@ -291,6 +480,20 @@ def fts_query(query: str) -> str:
     return " OR ".join(groups)
 
 
+# The standard Lucene/Elasticsearch English stop list — the minimal,
+# widely-deployed set; no bespoke additions (a bespoke list is an
+# unverifiable knob). _needle_score counts RAW occurrences, so a ubiquitous
+# term like "the" or "of" contributes unbounded noise to LIKE-path ranking
+# that the FTS path never sees: FTS5's bm25 deweights high-DF terms via IDF
+# automatically. Filtering them from the needles — not from the FTS query —
+# mirrors that deweighting on exactly the path where it was missing.
+_ASCII_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in",
+    "into", "is", "it", "no", "not", "of", "on", "or", "such", "that", "the",
+    "their", "then", "there", "these", "they", "to", "was", "will", "with",
+})
+
+
 def _fallback_needles(query: str) -> list[str]:
     """Substring needles for the LIKE-scan fallback (CJK bigrams + words ≥ 2 chars).
 
@@ -308,14 +511,20 @@ def _fallback_needles(query: str) -> list[str]:
     two-character kana query (こー vs コー) stayed script-brittle, since terms
     that short never reach FTS5's trigram tokeniser in the first place.
     """
+    terms = query_terms(query) + _numeric_query_terms(query)
+    # Filter stopwords only when a content term remains: a query made entirely
+    # of stopwords ("to be") keeps its needles — noisy recall beats zero recall.
+    keep_stopwords = not any(t.lower() not in _ASCII_STOPWORDS for t in terms)
     needles: list[str] = []
-    for raw_term in query_terms(query):
+    for raw_term in terms:
         # Drop a single-character ASCII term before expanding it: is_cjk('Ａ') is
         # true (fullwidth Latin lives in _CJK_RANGES), so its fullwidth variant
         # would otherwise fall into the CJK branch's keep-1-char path and
         # reintroduce precisely the flooding needle the raw term was excluded to
         # avoid.  Eligibility is a property of the term, not of each spelling.
         if not is_cjk(raw_term[0]) and len(raw_term) < 2:
+            continue
+        if not keep_stopwords and raw_term.lower() in _ASCII_STOPWORDS:
             continue
         for term in term_variants(raw_term):
             if is_cjk(term[0]):
@@ -340,7 +549,8 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     fts_hits: list[Hit] = []
     if expr:
         rows = store.conn.execute(
-            "SELECT c.id, c.source_id, c.text, c.context, bm25(chunks_fts) AS rank"
+            "SELECT c.id, c.source_id, c.text, c.context, c.seq,"
+            f" bm25(chunks_fts, {_CTX_BM25_WEIGHT}, 1.0) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
@@ -352,6 +562,7 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
                 Hit(
                     r["id"], r["source_id"], r["text"], 0.0,
                     bm25=-float(r["rank"]), context=str(r["context"] or ""),
+                    seq=int(r["seq"]),
                 )
             )
         # Return early only when fts_query covered every query term (no terms with
@@ -399,13 +610,32 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # Cap at 2000 rows: LIKE has no BM25 scoring so we fetch a generous pool,
     # score in Python, and take the top k.  Without the cap a common CJK bigram
     # on a large notebook can pull tens of thousands of rows into memory.
+    # The cap is applied AFTER ordering by the same formula _needle_score()
+    # computes — text occurrence count + _CTX_BM25_WEIGHT for context presence —
+    # so the pool holds the best 2000 candidates rather than the first 2000 in
+    # insertion order.  Without ORDER BY a common short needle on a >cap
+    # notebook silently drops the densest late-added chunks before Python ever
+    # sees them.  REPLACE-based counting matches str.count's non-overlapping
+    # semantics; LOWER() folds ASCII exactly like LIKE and str.lower() do.
+    score_terms = [
+        "((LENGTH(LOWER(c.text)) - LENGTH(REPLACE(LOWER(c.text), LOWER(?), ''))) / ?"
+        " + CASE WHEN c.context LIKE ? ESCAPE '|' THEN ? ELSE 0.0 END)"
+        for _ in needles
+    ]
+    score_expr = " + ".join(score_terms)
+    score_params = [
+        p
+        for n in needles
+        for p in (n, len(n), f"%{_esc_like(n)}%", _CTX_BM25_WEIGHT)
+    ]
     like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
-        f"SELECT c.id, c.source_id, c.text, c.context FROM chunks c"
+        f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
+        f" ORDER BY {score_expr} DESC"
         f" LIMIT ?",
-        [notebook_id, *like_params, like_cap],
+        [notebook_id, *like_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []
     for r in rows:
@@ -413,7 +643,8 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         score = _needle_score(text, str(r["context"] or ""), needles)
         if score > 0:
             like_hits.append(
-                Hit(r["id"], r["source_id"], text, 0.0, bm25=score, context=str(r["context"] or ""))
+                Hit(r["id"], r["source_id"], text, 0.0, bm25=score,
+                    context=str(r["context"] or ""), seq=int(r["seq"]))
             )
     like_hits.sort(key=lambda h: h.bm25, reverse=True)
     if fts_hits:
@@ -443,20 +674,44 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     return result
 
 
+# Field weight for the context breadcrumb column, applied identically in the
+# FTS path (bm25 column weights — column order is (context, text)) and the
+# LIKE path (_needle_score).  A query term appearing in a chunk's section
+# breadcrumb is a stronger topicality signal than a body occurrence — the
+# standard field-weighting result (BM25F titles get 2-4x); without it the
+# v0.2.123 contextual-retrieval investment pays off in recall only, never in
+# ranking.  2.0 is the conservative end of the literature range.
+# _needle_score must use the SAME weight: the LIKE path's whole point is to
+# rank identically to the FTS path for the terms it covers, and an equal-1.0
+# fallback would quietly un-rank exactly the heading-matched chunks this
+# weight exists to surface (the v0.2.77-79 duplicated-heuristic drift lesson).
+_CTX_BM25_WEIGHT = 2.0
+
+
 def _needle_score(text: str, context: str, needles: list[str]) -> float:
     """Count LIKE-fallback needle occurrences across a chunk's text and context.
 
-    Both fields count at weight 1.0, which is deliberately the same weighting the
-    FTS path gets: SQLite's bm25(chunks_fts) defaults every column to 1.0, and the
-    point of scoring context here is to remove the divergence between the two
-    branches, not to introduce a new tuning knob on one of them.  A section's
-    breadcrumb is identical across all of that section's chunks, so a context match
-    lifts the whole section uniformly and never reorders chunks within it.
+    The breadcrumb answers a binary question — "does this section's heading
+    name the term?" — so its contribution is per-term PRESENCE
+    (_CTX_BM25_WEIGHT when present, else 0), not a linear count.  That both
+    mirrors FTS5's bm25 saturation (repeated occurrences in the same column
+    yield diminishing returns) and keeps the intended ordering: a chunk whose
+    body discusses the term three times still outranks one whose breadcrumb
+    merely names it once.  The weight itself is deliberately identical to the
+    FTS path's bm25(chunks_fts, w, 1.0): the point of scoring context here is
+    to remove divergence between the two branches, not to introduce a new
+    knob on one of them.  A section's breadcrumb is identical across all of
+    that section's chunks, so a context match lifts the whole section
+    uniformly and never reorders chunks within it.
     """
     low_text = text.lower()
     low_ctx = context.lower()
     return float(
-        sum(low_text.count(n.lower()) + low_ctx.count(n.lower()) for n in needles)
+        sum(
+            low_text.count(n.lower())
+            + (_CTX_BM25_WEIGHT if n.lower() in low_ctx else 0.0)
+            for n in needles
+        )
     )
 
 
@@ -478,15 +733,121 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     Each hit's text and context are NFKC-folded once, not once per negated term:
     the fold is the expensive part (a full chunk body) and does not depend on
     which needle it is tested against.
+
+    ASCII negated terms match as whole WORDS, not substrings: exclusion is
+    irreversible, so its overreach is the asymmetric harm of positive-match
+    overreach (which broad recall absorbs downstream).  `-api` must drop an
+    "api design" chunk but keep a "capital" one; `-ai` must keep "train" and
+    "email".  CJK-containing terms keep substring semantics — CJK text has no
+    word boundaries and `-儒学` is meant to suppress every chunk containing
+    those characters.  The word-char set mirrors query_terms' [0-9A-Za-z_]
+    tokenization so the exclusion boundary is the same boundary that produced
+    the term.
     """
     folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
+    checks: list[tuple[str | None, re.Pattern[str] | None]] = []
+    for n in folded_negs:
+        if re.fullmatch(r"[0-9A-Za-z_]+", n):
+            checks.append(
+                (None, re.compile(rf"(?<![0-9A-Za-z_]){re.escape(n)}(?![0-9A-Za-z_])"))
+            )
+        else:
+            checks.append((n, None))
     out: list[Hit] = []
     for h in hits:
         folded_text = unicodedata.normalize("NFKC", h.text).lower()
         folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
-        if not any(n in folded_text or n in folded_ctx for n in folded_negs):
+        drop = False
+        for s, w in checks:
+            if w is not None:
+                drop = bool(w.search(folded_text)) or bool(w.search(folded_ctx))
+            elif s is not None and (s in folded_text or s in folded_ctx):
+                drop = True
+            if drop:
+                break
+        if not drop:
             out.append(h)
     return out
+
+
+# --- pseudo-relevance feedback (PRF) --------------------------------------
+#
+# BM25's residual weakness is vocabulary mismatch: a chunk that shares no
+# query term's spelling (even via term_variants) is invisible to the index.
+# Classical PRF (Lavrenko & Croft, SIGIR 2001 "Relevance-based language
+# models"; Abdul-Jaleel et al., TREC 2004; revisited for BM25 by Jedidi & Lin,
+# SIGIR 2026) treats the top-ranked documents as relevant and expands the
+# query with their shared distinctive terms.  Unlike multi-query RAG-Fusion
+# (SHOIN_MULTI_QUERY), this costs no LLM call and works offline.
+
+PRF_DOCS = 3  # feedback docs: bottom of the classic 3-10 range — least drift
+PRF_MIN_DOCS = 2  # a term in >=2 of the top docs is topical, not one doc's noise
+PRF_TERMS = 8  # bounded expansion: noise and OR-list size both stay small
+_PRF_NGRAMS = (2, 3)  # CJK grams: 2-char compounds + the FTS trigram itself
+
+
+def _prf_terms(hits: list[Hit], query: str) -> list[str]:
+    """Distinctive terms shared by the top feedback hits, minus query vocabulary.
+
+    A candidate must appear in at least PRF_MIN_DOCS of the PRF_DOCS feedback
+    hits — the cheapest available evidence it is topical rather than one
+    document's idiosyncrasy — and must not already be in the query (a term the
+    user already typed adds nothing).  CJK candidates are 2- and 3-char grams
+    (the codebase's existing LIKE/FTS granularity); ASCII candidates are whole
+    words >= 3 chars, matching fts_query's whole-term threshold.  Exclusion
+    uses each gram's full spelling-variant set, so a katakana gram in the docs
+    is not re-added against a hiragana query (and vice-versa).
+    """
+    docs = hits[:PRF_DOCS]
+    if len(docs) < PRF_MIN_DOCS:
+        return []
+    norm_q = unicodedata.normalize("NFKC", query).casefold()
+    query_vocab = {v.casefold() for t in query_terms(query) for v in term_variants(t)}
+    counts: dict[str, int] = {}
+    for h in docs:
+        seen_in_doc: set[str] = set()
+        for term in query_terms(f"{h.text} {h.context}"):
+            if is_cjk(term[0]):
+                for n in _PRF_NGRAMS:
+                    seen_in_doc.update(term[i : i + n] for i in range(len(term) - n + 1))
+            elif len(term) >= 3:
+                seen_in_doc.add(term.casefold())
+        for g in seen_in_doc:
+            counts[g] = counts.get(g, 0) + 1
+    cands = [
+        g
+        for g, c in counts.items()
+        if c >= PRF_MIN_DOCS
+        and all(v.casefold() not in query_vocab and v.casefold() not in norm_q for v in term_variants(g))
+    ]
+    # df desc, longer grams first (more specific), then text — deterministic.
+    cands.sort(key=lambda g: (-counts[g], -len(g), g))
+    return cands[:PRF_TERMS]
+
+
+def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
+    """bm25_search plus one pseudo-relevance-feedback pass (see _prf_terms).
+
+    The expanded second pass runs only when the first left the result list
+    under-filled (< k): a pool already at capacity has no recall head-room for
+    expansion to add, so the extra search would be pure cost.  The expanded
+    query appends PRF terms AFTER the original text, so `-term` negations keep
+    parsing identically and still filter both passes.  Expanded-only hits can
+    only ADD recall — every first-pass hit keeps its score, and the merged
+    list is re-sorted by bm25 so an expansion-surfaced chunk with genuinely
+    higher term density still earns its rank.
+    """
+    hits = bm25_search(store, notebook_id, query, k)
+    if len(hits) >= k:
+        return hits
+    terms = _prf_terms(hits, query)
+    if not terms:
+        return hits
+    extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k)
+    seen = {h.chunk_id for h in hits}
+    merged = hits + [h for h in extra if h.chunk_id not in seen]
+    merged.sort(key=lambda h: h.bm25, reverse=True)
+    return merged[:k]
 
 
 _MUL = operator.mul  # bound once: map(operator.mul, ...) beats a generator expression
@@ -526,6 +887,12 @@ def _cosine_with_norms(
     """
     if not query_norm or not vec_norm:
         return 0.0
+    # map() stops at the shorter vector: a query/stored dimension mismatch
+    # (e.g. SHOIN_EMBED_MODEL switched without reindexing, or a corrupt blob)
+    # would fabricate a score from the leading dims. Match cosine()'s
+    # len-mismatch -> 0.0 semantics so the hit simply carries no vector signal.
+    if len(query) != len(vec):
+        return 0.0
     result = sum(map(_MUL, query, vec)) / (query_norm * vec_norm)
     return result if math.isfinite(result) else 0.0
 
@@ -547,7 +914,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
     # defined as sorted(..., key=..., reverse=True)[:k], so ties still resolve in
     # row order and the returned list is identical to the previous sort-then-slice.
     cur = store.conn.execute(
-        "SELECT c.id, c.source_id, c.text, c.context, c.embedding, c.embedding_norm"
+        "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"
         " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
         (notebook_id,),
@@ -573,6 +940,7 @@ def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None,
                 0.0,
                 vec=_cosine_with_norms(query_vec, query_norm, vec, vec_norm),
                 context=str(r["context"] or ""),
+                seq=int(r["seq"]),
             )
 
     return heapq.nlargest(k, _scored(), key=lambda h: h.vec)
@@ -669,16 +1037,112 @@ def _norm_query_terms(query: str) -> list[str]:
     return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
 
 
-def _overlap_from_norm(norm_terms: list[str], text: str) -> float:
-    """lexical_overlap's core, given already-normalised terms (see rerank())."""
+def _overlap_from_norm(
+    norm_terms: list[str], text: str, idf: dict[str, float] | None = None
+) -> float:
+    """lexical_overlap's core, given already-normalised terms (see rerank()).
+
+    With ``idf`` the uniform mean becomes a weighted one: each term's
+    saturated tf is scaled by its pool-local IDF, normalised by the sum of
+    weights so the result stays in [0,1] — and, because equal weights reduce
+    the weighted mean to the plain mean, identical to the uniform score
+    whenever every query term is equally (un)informative across the pool.
+    """
     if not norm_terms:
         return 0.0
     low = unicodedata.normalize("NFKC", text).lower()
-    score = 0.0
+    if idf is None:
+        score = 0.0
+        for t in norm_terms:
+            tf = low.count(t)
+            score += tf / (tf + 1.0)  # saturate repeated occurrences
+        return score / len(norm_terms)
+    num = den = 0.0
     for t in norm_terms:
+        w = idf.get(t, 0.0)
         tf = low.count(t)
-        score += tf / (tf + 1.0)  # saturate repeated occurrences
-    return score / len(norm_terms)
+        num += w * (tf / (tf + 1.0))
+        den += w
+    return num / den if den else 0.0
+
+
+def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
+    """BM25-style IDF of each query term over the candidate pool itself.
+
+    A term present in every candidate got them all retrieved in the first
+    place — it carries no discriminative power for the rerank — while a term
+    appearing in only a few hits is decisive (Robertson & Zaragoza 2009's IDF
+    rationale, applied to the retrieved set the way PRF statistics are).
+    idf = ln(1 + (N - df + 0.5)/(df + 0.5)) stays positive and finite even
+    when a term is absent from every hit (df=0): its saturated tf is 0
+    everywhere then, so the large weight is multiplied by zero.
+    """
+    n = len(texts)
+    lows = [unicodedata.normalize("NFKC", t).lower() for t in texts]
+    out: dict[str, float] = {}
+    for t in dict.fromkeys(norm_terms):
+        df = sum(1 for s in lows if t in s)
+        out[t] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+    return out
+
+
+# --- term proximity (SDM-style unordered window) ----------------------------
+
+PROX_SPAN = 32  # chars: ~one compact CJK phrase — tight enough to mean co-occurrence
+PROX_WEIGHT = 0.35  # of rerank's lexical budget: effective ~0.10, SDM's canon
+
+
+def _occurrences(low: str, term: str) -> Iterator[int]:
+    """Start offsets of every (possibly overlapping) occurrence of term in low."""
+    start = 0
+    while True:
+        p = low.find(term, start)
+        if p < 0:
+            return
+        yield p
+        start = p + 1
+
+
+def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
+    """0..1 unordered-window term-dependency score (Metzler & Croft, SIGIR 2005).
+
+    BM25 and lexical_overlap both treat the query as a bag of words: a chunk
+    where every term co-occurs inside one phrase scores identically to one
+    where the same terms scatter a paragraph apart.  The term-dependency line
+    (Metzler & Croft 2005's unordered-window feature; Rasolofo & Savoy 2003)
+    is one of the strongest cheap precision signals in IR — and FTS5's trigram
+    index stores no positions, so the window is measured on the text itself.
+
+    Score = distinct-coverage x tightness of the smallest window containing the
+    most distinct query terms: (covered / len(terms)) x (PROX_SPAN /
+    (span + PROX_SPAN)).  Fewer than two distinct present terms returns 0.0 —
+    there is no pair to be near — which keeps every single-term scoring path
+    byte-identical to before this signal existed.
+    """
+    terms = list(dict.fromkeys(norm_terms))
+    if len(terms) < 2:
+        return 0.0
+    low = unicodedata.normalize("NFKC", text).lower()
+    pts = sorted((p, t) for t in terms for p in _occurrences(low, t))
+    if len({t for _, t in pts}) < 2:
+        return 0.0
+    # Sliding window over the sorted occurrence list: contract left while the
+    # leftmost term still occurs again inside the window, so each residual
+    # window is the tightest covering of its distinct set for that right edge.
+    counts: dict[str, int] = {}
+    best_cover, best_span = 0, len(low) + 1
+    left = 0
+    for right in range(len(pts)):
+        pos, term = pts[right]
+        counts[term] = counts.get(term, 0) + 1
+        while counts[pts[left][1]] > 1:
+            counts[pts[left][1]] -= 1
+            left += 1
+        span = pos + len(term) - pts[left][0]
+        cover = len(counts)
+        if cover > best_cover or (cover == best_cover and span < best_span):
+            best_cover, best_span = cover, span
+    return (best_cover / len(terms)) * (PROX_SPAN / (best_span + PROX_SPAN))
 
 
 def lexical_overlap(query: str, text: str) -> float:
@@ -714,12 +1178,35 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     The query is tokenised and NFKC-folded once here, not once per hit inside
     lexical_overlap: the term set is identical across the whole hit list, only the
     text being scored changes.
+
+    For multi-term queries two extra signals refine the lexical side.  An
+    unordered-window term-proximity bonus (_proximity_from_norm) is added
+    inside the same lexical weight — BM25 has no positional signal at all, so
+    without this a chunk where the terms sit a paragraph apart ranks
+    identically to one where they co-occur in a phrase.  And the overlap
+    itself is weighted by pool-local IDF (_pool_idf): a term present in every
+    candidate is what got them retrieved, so it carries no discriminative
+    power here, while a rare term is decisive.  detail["lex"] stays the pure
+    uniform overlap measure (existing consumers and the hoisted-terms
+    contract pin that), detail["lexw"] records the weighted signal, and prox
+    is additive: a bonus on top of the blend, never a replacement for it.
+    Equal-IDF pools make lexw == lex exactly, and single-term queries skip
+    the machinery entirely — every such scoring path is identical to before.
     """
     norm_terms = _norm_query_terms(query)
-    for h in hits:
-        lex = _overlap_from_norm(norm_terms, f"{h.text}\n{h.context}" if h.context else h.text)
+    multi = len(set(norm_terms)) >= 2
+    scored_texts = [f"{h.text}\n{h.context}" if h.context else h.text for h in hits]
+    idf = _pool_idf(norm_terms, scored_texts) if multi else None
+    for h, scored in zip(hits, scored_texts):
+        lex = _overlap_from_norm(norm_terms, scored)
         h.detail["lex"] = lex
-        h.score = (1 - weight) * h.score + weight * lex
+        lexw = _overlap_from_norm(norm_terms, scored, idf) if multi else lex
+        if multi:
+            h.detail["lexw"] = lexw
+        prox = _proximity_from_norm(norm_terms, scored) if multi else 0.0
+        if multi:
+            h.detail["prox"] = prox
+        h.score = (1 - weight) * h.score + weight * lexw + weight * PROX_WEIGHT * prox
     return sorted(hits, key=lambda h: h.score, reverse=True)
 
 
@@ -731,7 +1218,7 @@ def _sim(a: Hit, b: Hit) -> float:
 
 
 def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
-    """Maximal Marginal Relevance: relevance vs. redundancy trade-off."""
+    """REQ-106 — Maximal Marginal Relevance: relevance vs. redundancy trade-off."""
     pool = list(hits)
     selected: list[Hit] = []
     while pool and len(selected) < k:
@@ -743,6 +1230,37 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
                 best_idx, best_val = i, val
         selected.append(pool.pop(best_idx))
     return selected
+
+
+# Score-gap (elbow) cutoff for the MMR candidate pool (v0.2.189).  Vector
+# search ranks semantically-near chunks that may share ZERO query terms, and
+# RRF hands that flat tail to MMR — which then pads it into the prompt
+# context and the [S#] source list whenever the genuinely-relevant set is
+# smaller than k.  Score-distributional thresholding (the "elbow" /
+# largest-gap heuristic behind vector stores' score_threshold options)
+# detects the cliff where relevance ends — but only alongside a lexical
+# zero: _minmax stretches RRF scores over [0,1] for ANY pool, so a large
+# blended-score gap alone is routine even between two legitimate hits, and
+# must never cut a chunk that actually carries query terms (detail["lex"]).
+# Both conditions required = the same "stay silent when inconclusive"
+# asymmetry the citation checks use.
+ADAPTIVE_GAP = 0.25
+
+
+def _tail_cut(hits: list[Hit]) -> list[Hit]:
+    """Drop the pool tail at the first score cliff into term-free chunks.
+
+    Input must be rerank() output (score-sorted, detail["lex"] populated).
+    Fires only when an >= ADAPTIVE_GAP adjacent drop lands on a chunk with
+    zero lexical overlap — a hit that reached the pool without sharing any
+    query term.  Never reorders; a pool with no cliff or whose tail still
+    carries terms passes through untouched.
+    """
+    for i in range(len(hits) - 1):
+        nxt = hits[i + 1]
+        if hits[i].score - nxt.score >= ADAPTIVE_GAP and nxt.detail.get("lex", 0.0) == 0.0:
+            return hits[: i + 1]
+    return hits
 
 
 # --- debugging aid ---------------------------------------------------------
@@ -803,7 +1321,10 @@ def retrieve(
     pool = max(k * 3, 12)
     negs = neg_terms(query)
     clean = strip_neg_terms(query) if negs else query
-    bm25_hits = bm25_search(store, notebook_id, query, pool)
+    # bm25_prf_search, not bare bm25_search: the pseudo-relevance-feedback pass
+    # costs nothing when the first pass already fills the pool, and adds recall
+    # for vocabulary-mismatch queries when it does not.
+    bm25_hits = bm25_prf_search(store, notebook_id, query, pool)
     vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
     # bm25_search() already excludes negated-term hits internally; vector_search()
     # has no query text to do the same, so filter it here. This must happen BEFORE
@@ -824,7 +1345,13 @@ def retrieve(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    result = mmr(rerank(clean, fused), k)
+    # _tail_cut between rerank and MMR: the reranked, blended-score list is
+    # where the relevance cliff is measurable.  Cutting the pool before MMR
+    # (not the final k results) preserves MMR's own relevance/diversity
+    # trade-off on the surviving candidates — and lets the final list end
+    # below k when fewer than k chunks are actually relevant, instead of
+    # padding context with the tail.
+    result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
         _debug_print("retrieve", query, negs, len(bm25_hits), len(vec_hits), result)
     return result
@@ -860,7 +1387,9 @@ def retrieve_multi(
     total_vec = 0
     for i, (q, qv) in enumerate(zip(queries, vecs)):
         q_search = q if i == 0 else strip_neg_terms(q)
-        bm25_hits = bm25_search(store, notebook_id, q_search, pool)
+        # Same PRF-wrapped search as retrieve(): every phrasing expands on its
+        # own feedback evidence — original and rewrite queries alike.
+        bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool)
         if negs and i > 0:
             # bm25_search() already applied the primary query's own negs (i==0);
             # rewrite lists were searched without them and need the filter here.
@@ -879,7 +1408,9 @@ def retrieve_multi(
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed):
             h.score = n
-    result = mmr(rerank(clean, fused), k)
+    # Same pool cut as retrieve(): multi-query fusion produces a deeper pool,
+    # so the tail is longer and the clip more valuable.
+    result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
         _debug_print(f"retrieve_multi({len(queries)} queries)", primary, negs, total_bm25, total_vec, result)
     return result

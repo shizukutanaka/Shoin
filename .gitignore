@@ -9,4 +9,9 @@ dist/
 build/
 *.egg-info/
 .env
+.env.*
 *.sqlite3
+*.sqlite3-*
+# ci.yml regenerates sbom.json per build; the committed copy was a frozen
+# v0.1.0 snapshot (stale dependency versions are worse than none).
+sbom.json

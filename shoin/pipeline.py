@@ -55,6 +55,9 @@ class IndexResult:
     source: Source
     n_chunks: int
     n_embedded: int
+    # PDF pages whose extraction failed — surfaced so callers can warn that
+    # the index holds less than the document contains.
+    pages_failed: int = 0
 
 
 class _NoEmbed:
@@ -207,7 +210,9 @@ def index_source(
     chunk_ids = store.add_chunks(source.id, texts, full_contexts)
     embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
-    return IndexResult(source, len(chunk_ids), n_embedded)
+    return IndexResult(
+        source, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
+    )
 
 
 def rename_source(
@@ -276,6 +281,12 @@ def refresh_source(
     ).fetchone()
     if dup:
         raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content matches an existing source")
+    if extracted.sha256 == src.sha256:
+        # Byte-identical content: re-chunking would produce the same texts, so
+        # delete+reinsert only mints fresh rowids — discarding every embedding
+        # (paid for in LLM calls) and churning the rowid-reuse surface that
+        # v0.2.230's excerpt check guards stored source_chunk_ids against.
+        return IndexResult(src, len(store.text_chunks_for_source(source_id)), 0)
     pairs = split_text_with_context(
         extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
     )
@@ -329,7 +340,9 @@ def refresh_source(
     embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     updated_src = store.get_source(source_id)
-    return IndexResult(updated_src, len(chunk_ids), n_embedded)
+    return IndexResult(
+        updated_src, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
+    )
 
 
 def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[int, int]:

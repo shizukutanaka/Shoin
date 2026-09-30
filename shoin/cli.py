@@ -12,7 +12,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .citation import COVERAGE_LOW, CitationReport
+from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
@@ -37,6 +37,21 @@ from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
+
+def _pos_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return n
+
+
+def _port_num(value: str) -> int:
+    n = int(value)
+    if not 0 <= n <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 0-65535")
+    return n
+
+
 _STRINGS: dict[str, dict[str, str]] = {
     "ja": {
         "nb.created": "作成: [{id}] {name}",
@@ -48,7 +63,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ 検証失敗の引用(ソース範囲外): {bad}",
         "cite.confirmed": " ✓根拠確認済み",
         "cite.misattr": " ⚠番号取り違えの可能性",
+        "cite.numeric": " ⚠数値が出典に無し",
+        "cite.unit": " ⚠単位が出典と不一致",
+        "cite.negation": " ⚠出典と逆の主張の可能性",
         "cite.uncited": "⚠ 無出典の断定文({n}件、引用なし):",
+        "cite.uncited_supported": "出典内一致=引用欠落の疑い",
+        "cite.found": "検出: ",
+        "cite.found_fts": "全文",
+        "cite.found_vec": "意味",
+        "cite.found_lex": "語彙",
+        "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
+        "cite.truncated": "⚠ 出力が途中で打ち切られた可能性(トークン上限)",
+        "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
         "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
@@ -56,6 +82,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      期待={exp} 取得={got}",
+        "eval.saved": "ベースライン保存: {f}",
+        "eval.diff_header": "ベースライン比較 ({f})",
+        "eval.diff_recall": "  recall  : {old} → {new} ({d})",
+        "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
+        "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_matched": "  (差分は共通 {n} 件で計算)",
+        "eval.diff_new": "  新規ケース {n}件 (ベースライン無し)",
+        "eval.diff_dropped": "  削除ケース {n}件 (現実行に無し)",
+        "eval.diff_k_warn": "  注意: ベースラインは k={bk} で計測 (現実行 k={k}) — 同条件での比較ではありません",
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -65,6 +100,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "ソース削除完了",
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "src.pages_failed": "⚠ {n} ページのテキスト抽出に失敗（索引は不完全です）",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
         "health.yes": "はい",
@@ -89,7 +125,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.invalid": "⚠ Invalid citations (out of range): {bad}",
         "cite.confirmed": " ✓ grounding confirmed",
         "cite.misattr": " ⚠ possible wrong source",
+        "cite.numeric": " ⚠ number not in source",
+        "cite.unit": " ⚠ unit differs from source",
+        "cite.negation": " ⚠ possible contradiction with source",
         "cite.uncited": "⚠ Uncited assertions ({n}, no citation):",
+        "cite.uncited_supported": "matches a source — missing citation",
+        "cite.found": "found: ",
+        "cite.found_fts": "full-text",
+        "cite.found_vec": "semantic",
+        "cite.found_lex": "lexical",
+        "cite.degenerate": "⚠ Possible generation loop ({n}):",
+        "cite.contradict": "⚠ Contradictory statements ({n}):",
+        "cite.truncated": "⚠ Output may be truncated (token limit reached)",
         "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
@@ -97,6 +144,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      expected={exp} retrieved={got}",
+        "eval.saved": "Baseline saved: {f}",
+        "eval.diff_header": "Baseline comparison ({f})",
+        "eval.diff_recall": "  recall  : {old} → {new} ({d})",
+        "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
+        "eval.diff_case": "  Δ {q}: recall {ro}→{rn}, MRR {mo}→{mn}",
+        "eval.diff_matched": "  (deltas computed over {n} shared questions)",
+        "eval.diff_new": "  {n} new case(s) (no baseline entry)",
+        "eval.diff_dropped": "  {n} case(s) dropped (absent in this run)",
+        "eval.diff_k_warn": "  note: baseline was measured at k={bk} (current k={k}) — not a like-for-like comparison",
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -106,6 +162,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.deleted": "Source deleted",
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
+        "src.pages_failed": "⚠ {n} page(s) could not be extracted — the index is incomplete",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
         "health.yes": "yes",
@@ -137,6 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default=None, help="データベースパス(既定: SHOIN_DATA_DIR)")
     sub = p.add_subparsers(dest="command", required=True)
 
+    # REQ-105: the full subcommand surface — UI-free operation of every feature
     nb = sub.add_parser("notebook", help="ノートブック管理")
     nbsub = nb.add_subparsers(dest="action", required=True)
     nb_new = nbsub.add_parser("new", help="作成")
@@ -186,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
-    askp.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+    askp.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
 
     st = sub.add_parser("studio", help="Studio出力生成")
     st.add_argument("notebook_id", type=int)
@@ -198,14 +256,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
     ev.add_argument("notebook_id", type=int)
     ev.add_argument("cases", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]')
-    ev.add_argument("-k", type=int, default=TOP_K, help="検索深さ")
+    ev.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
+    ev.add_argument("--save", metavar="FILE", help="この実行をベースラインJSONとして保存")
+    ev.add_argument("--diff", metavar="FILE", help="保存済みベースラインとの差分を表示")
 
     ex = sub.add_parser("export", help="エクスポート")
     ex.add_argument("notebook_id", type=int)
     ex.add_argument("--format", choices=FORMATS, default="md")
 
     sv = sub.add_parser("serve", help="Web UI起動 (127.0.0.1のみ)")
-    sv.add_argument("--port", type=int, default=port(), help=f"ポート(既定: {port()})")
+    sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
 
     sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
     return p
@@ -217,28 +277,76 @@ def _print_report(report: CitationReport) -> None:
         print(_t("cite.invalid", bad=bad))
     confirmed: set[int] = set(report.get("confirmed") or [])
     misattr: set[int] = set(report.get("misattributed") or [])
+    numeric: set[int] = set(report.get("numeric_mismatch") or [])
+    unit: set[int] = set(report.get("unit_mismatch") or [])
+    negation: set[int] = set(report.get("negation_mismatch") or [])
     # Section breadcrumb per cited source (v0.2.131) — completes v0.2.130's
     # in-app seal viewer and the Markdown export on the CLI surface too, so a
     # headless `shoin ask` user sees WHICH section each citation is grounded in
     # (REQ-103 CLI/Web parity). Absent on old reports/no-heading sources.
     raw_ctx = report.get("source_contexts")
     section_map: dict[str, str] = raw_ctx if isinstance(raw_ctx, dict) else {}
+    # Retrieval provenance per cited source (v0.2.229) — the same "which channel
+    # surfaced it" signal the seal viewer shows, on the headless surface too
+    # (REQ-103 parity). Absent on old reports.
+    raw_det = report.get("source_detail")
+    detail_map: dict[str, dict[str, float]] = (
+        raw_det if isinstance(raw_det, dict) else {}
+    )
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
         section = section_map.get(f"S{c}", "")
         sec = f" (§ {section})" if section else ""
+        bits = [
+            f"{_t('cite.found_' + kind)} #{int(v)}"
+            if kind != "lex"
+            else f"{_t('cite.found_' + kind)} {v:.2f}"
+            for kind, v in found_bits(detail_map.get(f"S{c}"))
+        ]
+        prov = f" [{_t('cite.found')}{' + '.join(bits)}]" if bits else ""
         if c in confirmed:
             marker = _t("cite.confirmed")
         elif c in misattr:
-            marker = _t("cite.misattr")
+            # Wrong number — append the source the claim actually matches when
+            # the report names one (v0.2.220): the fix becomes a one-char edit.
+            sugg = (report.get("misattributed_suggested") or {}).get(f"S{c}")
+            marker = _t("cite.misattr") + (f"→{sugg}" if sugg else "")
+        elif c in numeric:
+            marker = _t("cite.numeric")
+        elif c in unit:
+            marker = _t("cite.unit")
+        elif c in negation:
+            marker = _t("cite.negation")
         else:
             marker = ""
-        print(f"  [S{c}] {title}{sec}{marker}")
+        print(f"  [S{c}] {title}{sec}{prov}{marker}")
     uncited = report.get("uncited") or []
     if uncited:
+        supported = set(report.get("uncited_supported") or [])
         print(_t("cite.uncited", n=str(len(uncited))))
+        sup_src = report.get("uncited_supported_source") or {}
         for sentence in uncited:
+            # Grounded uncited = citation omission; ungrounded = the dangerous kind.
+            mark = (
+                f" [{_t('cite.uncited_supported')}→{sup_src.get(sentence, '')}]"
+                if sentence in supported
+                else ""
+            )
+            print(f"  - {sentence}{mark}")
+    degenerate = report.get("degenerate") or []
+    if degenerate:
+        print(_t("cite.degenerate", n=str(len(degenerate))))
+        for snippet in degenerate:
+            print(f"  - {snippet}")
+    contradict = report.get("self_contradiction") or []
+    if contradict:
+        print(_t("cite.contradict", n=str(len(contradict))))
+        for sentence in contradict:
             print(f"  - {sentence}")
+    if report.get("truncated"):
+        # finish_reason "length": generation stopped at the token limit — the
+        # report flag the Web badge and export status line already carry.
+        print(_t("cite.truncated"))
     # Low coverage = the answer cited only a small share of the sources it was
     # given, i.e. it may be ignoring retrieved evidence. The Web UI has warned
     # about this since early on; the CLI silently dropped it despite REQ-103
@@ -247,6 +355,29 @@ def _print_report(report: CitationReport) -> None:
     n_sources = report.get("n_sources") or 0
     if isinstance(cov, (int, float)) and report["cited"] and n_sources and cov < COVERAGE_LOW:
         print(_t("cite.coverage_low", n=str(len(set(report["cited"]))), total=str(n_sources)))
+
+
+def _report_has_output(report: CitationReport) -> bool:
+    """True iff _print_report() would print anything for this report.
+
+    The ask/studio "---" guards must neither print a bare separator over an
+    empty report (v0.2.27/55) nor skip a report over keys the printer renders
+    but the guard forgot — invalid/uncited/truncated were added piecemeal
+    (v0.2.55, v0.2.245), and degenerate/self_contradiction were still missing:
+    an answer of repeated questions or disclaimers produces a degenerate-only
+    report (uncited filters questions/disclaimers), so its generation-loop
+    warning vanished on the CLI while the Web badge showed it. One predicate
+    shared by both call sites keeps the guard and the printer from drifting
+    a third time. `coverage` prints only when `cited` is non-empty, so it is
+    covered transitively."""
+    return bool(
+        report["invalid"]
+        or report["cited"]
+        or report.get("uncited")
+        or report.get("degenerate")
+        or report.get("self_contradiction")
+        or report.get("truncated")
+    )
 
 
 def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
@@ -313,6 +444,70 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
         if not ok:
             print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
+    if args.save:
+        from .evaluate import report_to_dict
+
+        Path(str(args.save)).write_text(
+            _json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        print(_t("eval.saved", f=str(args.save)))
+    if args.diff:
+        from .evaluate import diff_reports, report_from_dict
+
+        try:
+            base_raw = _json.loads(Path(str(args.diff)).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
+        except _json.JSONDecodeError as exc:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
+            ) from exc
+        try:
+            base, base_k = report_from_dict(base_raw)
+        except ValueError as exc:
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", str(exc)) from exc
+        diff = diff_reports(base, rep)
+        print(_t("eval.diff_header", f=str(args.diff)))
+        # The comparison rows print the means over the MATCHED questions — the
+        # same population the deltas were computed on. Printing the full-run
+        # means (base.recall / rep.recall) would show e.g. 0.500 → 1.000 next
+        # to (+0.000): two different populations labeled as one comparison.
+        print(
+            _t(
+                "eval.diff_recall",
+                old=f"{diff.recall_before:.3f}",
+                new=f"{diff.recall_after:.3f}",
+                d=f"{diff.d_recall:+.3f}",
+            )
+        )
+        print(
+            _t(
+                "eval.diff_mrr",
+                old=f"{diff.mrr_before:.3f}",
+                new=f"{diff.mrr_after:.3f}",
+                d=f"{diff.d_mrr:+.3f}",
+            )
+        )
+        if base_k is not None and base_k != int(args.k):
+            print(_t("eval.diff_k_warn", bk=str(base_k), k=str(args.k)))
+        for cd in diff.case_deltas:
+            print(
+                _t(
+                    "eval.diff_case",
+                    q=cd.question,
+                    ro=f"{cd.recall_before:.3f}",
+                    rn=f"{cd.recall_after:.3f}",
+                    mo=f"{cd.rr_before:.3f}",
+                    mn=f"{cd.rr_after:.3f}",
+                )
+            )
+        if diff.new_questions or diff.dropped_questions:
+            print(_t("eval.diff_matched", n=str(diff.matched_questions)))
+        if diff.new_questions:
+            print(_t("eval.diff_new", n=str(len(diff.new_questions))))
+        if diff.dropped_questions:
+            print(_t("eval.diff_dropped", n=str(len(diff.dropped_questions))))
     return 0
 
 
@@ -362,6 +557,13 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             print(
                 f"✓ {result.source.title}: {result.n_chunks} chunks ({result.n_embedded} embedded)"
             )
+            if result.pages_failed:
+                # Don't report a partial index as complete: the graceful
+                # per-page PDF fallback drops failed pages silently.
+                print(
+                    _t("src.pages_failed", n=str(result.pages_failed)),
+                    file=sys.stderr,
+                )
         except (IngestError, StoreError) as exc:
             print(f"✗ {target}: [{exc.code}] {exc}", file=sys.stderr)
             rc = 1
@@ -372,7 +574,12 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
-    question = str(args.question)
+    # Strip + reject empty, matching the API's _require("question") contract —
+    # otherwise a whitespace-only question is persisted as a real user turn and
+    # silently answered via the degraded path instead of refused like the API.
+    question = str(args.question).strip()
+    if not question:
+        raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "missing field: question")
     if len(question) > MAX_QUESTION_LEN:
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
@@ -386,9 +593,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     # excludes from `uncited` (citation.py's _DISCLAIMER_MARKERS). Printing a
     # bare "---" with nothing under it is the same defect v0.2.27/v0.2.55 fixed
     # elsewhere; guard on actual report content too, not just hits/degraded.
-    if answer.hits and not answer.degraded and (
-        answer.report["cited"] or answer.report["invalid"] or answer.report.get("uncited")
-    ):
+    if answer.hits and not answer.degraded and _report_has_output(answer.report):
         print("---")
         _print_report(answer.report)
     return 0
@@ -397,11 +602,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
     print(result.body)
-    # _print_report() also prints something for an invalid-only report (out-of-
-    # range [S#] citations, cli.py's own _print_report()) — the pre-existing
-    # guard here missed that case, silently dropping the warning from CLI
-    # output. Same fix shape as _cmd_ask()'s report-content guard.
-    if result.report["cited"] or result.report["invalid"] or result.report.get("uncited"):
+    if _report_has_output(result.report):
         print("---")
         _print_report(result.report)
     return 0
@@ -469,6 +670,8 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
                 embedded=str(result.n_embedded),
             )
         )
+        if result.pages_failed:
+            print(_t("src.pages_failed", n=str(result.pages_failed)), file=sys.stderr)
     return 0
 
 

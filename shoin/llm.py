@@ -17,6 +17,17 @@ from typing import Any
 from .config import embed_model, llm_model, llm_url
 
 CHAT_TIMEOUT_SEC = 180
+
+# Upper bound on generated tokens per request (v0.2.219).  Without it the
+# only stop is the endpoint's own default — llama.cpp's n_predict=-1 and
+# Ollama's num_predict=-1 both generate until context exhaustion, so the
+# degeneration loops the citation report *detects* also *consume* the whole
+# remaining context window (minutes of garbage on CPU-scale hardware).
+# max_tokens is a core OpenAI field accepted by llama.cpp, Ollama, vLLM and
+# llamafile alike.  4096 is deliberately generous — far above any legitimate
+# answer or Studio output for a ~2400-token context budget — so the cap
+# bounds runaway generation without shaping real output.
+MAX_TOKENS = 4096
 EMBED_TIMEOUT_SEC = 60
 HEALTH_TIMEOUT_SEC = 3
 
@@ -38,6 +49,28 @@ class LLMError(Exception):
 Message = dict[str, str]
 
 
+def _message_text(content: object) -> str:
+    """Normalize an OpenAI `content` field to plain text.
+
+    The schema allows a string OR an array of parts
+    ([{"type": "text", "text": "..."}]) — some compatible servers and
+    proxies pass the parts form through verbatim. str() on either shape
+    would present Python-repr garbage ("[{'type': 'text', ...}]") as the
+    answer text, badges and all.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+    raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "non-text content in LLM response")
+
+
 class LLMClient:
     """Minimal OpenAI-compatible API client bound to one base URL."""
 
@@ -50,6 +83,11 @@ class LLMClient:
         self.base_url = (base_url or llm_url()).rstrip("/")
         self.model = model or llm_model()
         self.embedding_model = embedding_model if embedding_model is not None else embed_model()
+        # finish_reason of the most recent chat/chat_stream call ("stop",
+        # "length", …), or None when the endpoint omitted it or no call ran.
+        # "length" means the answer stopped at MAX_TOKENS — callers surface it
+        # as report.truncated instead of presenting a clipped answer as whole.
+        self.last_finish_reason: str | None = None
 
     # --- transport ---
 
@@ -126,6 +164,7 @@ class LLMClient:
     # --- chat ---
 
     def chat(self, messages: list[Message], temperature: float = 0.2) -> str:
+        self.last_finish_reason = None
         data = self._post(
             "/chat/completions",
             {
@@ -133,16 +172,21 @@ class LLMClient:
                 "messages": messages,
                 "temperature": temperature,
                 "stream": False,
+                "max_tokens": MAX_TOKENS,
             },
             CHAT_TIMEOUT_SEC,
         )
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "missing choices in response") from exc
         if content is None:
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "null content in LLM response")
-        return str(content)
+        content = _message_text(content)
+        if isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str):
+            self.last_finish_reason = choice["finish_reason"]
+        return content
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
         """Yield content deltas from an SSE streaming chat completion."""
@@ -154,12 +198,14 @@ class LLMClient:
                     "messages": messages,
                     "temperature": temperature,
                     "stream": True,
+                    "max_tokens": MAX_TOKENS,
                 }
             ).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         total_bytes = 0
+        self.last_finish_reason = None
         try:
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
                 for raw in resp:
@@ -183,13 +229,23 @@ class LLMClient:
                                 "SYSTEM_LLM_BAD_RESPONSE",
                                 f"LLM stream error: {str(msg)[:200]}",
                             )
-                        delta = obj["choices"][0]["delta"].get("content")
+                        # choices[0].finish_reason arrives on the final delta
+                        # chunk (None on intermediate ones); keep the last one.
+                        choice = obj["choices"][0]
+                        delta = choice["delta"].get("content")
+                        if isinstance(delta, list):
+                            delta = _message_text(delta)
+                        if isinstance(choice.get("finish_reason"), str):
+                            self.last_finish_reason = choice["finish_reason"]
                     except LLMError:
                         raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
                         continue
-                    if delta:
-                        yield str(delta)
+                    # A malformed non-text delta is dropped rather than
+                    # str()-coerced — repr garbage mid-stream would land in the
+                    # persisted answer text (same shape as chat()'s fix above).
+                    if isinstance(delta, str) and delta:
+                        yield delta
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:

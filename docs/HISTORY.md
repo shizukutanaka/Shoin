@@ -29,7 +29,811 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.181
+## Version History: v0.1.37 → v0.2.349
+
+### v0.2.349 (2026-09-28)
+
+- Close the literal-key gap in the Python i18n pin (test_python_i18n_call_sites_supply_every_placeholder): a `_t("k")` call whose key isn't in the table resolved to needed=∅ and passed with no kwargs — yet `_t`'s runtime fallback renders the raw key string instead of raising, so a typo'd or renamed-away key is a silent missing-string (the JS side has pinned literal t() keys ⊆ I18N.ja since v0.2.329; the Python side lacked the mirror). Now every resolved literal key must exist in the source module's _STRINGS, and a BinOp prefix expanding to zero keys is flagged too. Fail-then-pass verified (_t("serve.stopped")→_t("serve.stopd") flagged with the missing key).
+
+### v0.2.348 (2026-09-28)
+
+- Pin data-i18n* attribute-kind coverage (test_every_i18n_attribute_kind_is_applied): markup attribute kinds (data-i18n, -ph, -title, -aria, …) must be a subset of the kinds applyI18n's querySelectorAll list handles — a new kind (e.g. data-i18n-value) with no selector stays unlocalized forever and, before this change, the key-scan regex's hardcoded alternation also skipped it. The key scan now matches data-i18n[a-z-]* generically. Fail-then-pass verified (data-i18n-ph→data-i18n-value flagged).
+
+### v0.2.347 (2026-09-28)
+
+- Extend the id-reference pin to markup references (test_every_id_reference_resolves_to_an_element): for=, aria-labelledby/controls/describedby/owns/activedescendant (space-separated id lists) and href="#id" now resolve against id= too — a stale one silently unwires the a11y tree (the v0.2.311 tabs wiring depends on all six being live). All current references resolve; fail-then-pass verified (tabChat→tabChatX in aria-labelledby flagged).
+
+### v0.2.346 (2026-09-28)
+
+- Pin literal id references to real elements (test_every_id_reference_resolves_to_an_element): every $("#id")/getElementById("id") in index.html must resolve to an id= attribute — a renamed element leaves lookups returning null and the next interaction dies on a TypeError with no build-time signal. All 37 current references resolve; fail-then-pass verified (askBtn→askBtnX flagged).
+
+### v0.2.345 (2026-09-28)
+
+- Extend the UI→server route pin to verbs (test_every_api_path_matches_a_registered_route): each index.html call site now asserts method+path ⊆ _ROUTES, not just path. A bare api() (GET) aimed at a POST-only route — or a POST aimed at a GET-only one — previously passed the pin and 405'd at click time. Method resolution mirrors the JS: jpost()=POST, api() defaults GET, {method:"X"} overrides (searched only up to the next api()/jpost() on the line so same-line calls don't cross-attribute). Current state clean; fail-then-pass verified (dropping {method:"POST"} on the refresh call is flagged).
+
+### v0.2.344 (2026-09-28)
+
+- Pin doc-referenced env vars to the set the code actually reads (test_docs_reference_only_real_env_vars): every `SHOIN_*` name in any *.md must appear in a `_get`/`getenv`/`environ.get` call in shoin/ or a scripts/*.sh reference — a doc-only name is a no-op knob users can set forever without effect. Consistent today (the only non-code names were `__SHOIN_LANG__`, an HTML meta placeholder, and `SHOIN_VERIFY_ALLOW_INCOMPLETE`, a verify.sh knob). Dead relative links also audited clean across all markdown. Fail-then-pass verified (renaming SHOIN_LANG in code flags the stale doc reference).
+
+### v0.2.343 (2026-09-28)
+
+- Fix CLAUDE.md subcommand list drift: it claimed the CLI is `notebook, add, ask, studio, questions, export, serve, reindex, note, source, health` — missing `messages` (list/clear, v0.2.73) and `eval` (v0.2.226 + `--save`/`--diff`). spec.md REQ-105 was already correct; only the developer-guide list lagged. Verified against the actual argparse subparsers (13 commands).
+
+### v0.2.342 (2026-09-28)
+
+- Extend the call-site kwarg pin to aliased `_t` imports: `from .qa import _t as _qa_t` call sites in server.py/studio.py were invisible to the v0.2.341 check (func.id != "_t"). The pin now collects ImportFrom aliases of `_t` and resolves each call against the *source* module's `_STRINGS` table. Fail-then-pass verified both directions: a `{x}` placeholder added to qa's `no_hit` template flags `missing=['x']` at the in-module call, and a stray kwarg on `_qa_t("no_hit")` in server.py flags `extra=['x']`. Clean today: `_qa_t` targets (no_hit, system_prompt) and studio's `_INSTRUCTIONS`/`_t_kind` carry no placeholders.
+
+### v0.2.341 (2026-09-28)
+
+- Pin the Python side of the call-site placeholder contract (test_python_i18n_call_sites_supply_every_placeholder): ast-walks all five modules for both call shapes — cli.py's `_t("k", kw=...)` and qa.py/studio.py's `_t("k").format(kw=...)` — and requires supplied kwarg names to equal the template's placeholder set exactly (missing → KeyError only when that print path executes, deep in error tails tests rarely reach; extra → dead drift). Resolves non-literal keys too: `key if cond else key2` unions both branches, `"prefix_" + var` expands to every matching table key. Also bans unnamed/positional template fields (`{}`, `{0}`) which would defeat the kwarg contract. Fail-then-pass verified (dropping total= from reindex.done fails the pin).
+
+### v0.2.340 (2026-09-28)
+
+- Pin the third leg of the i18n placeholder contract — call-site substitution completeness (test_i18n_call_sites_substitute_every_placeholder): for every line calling t("k") on a placeholder-bearing key, the line's .replace("{name}") set must cover the template's placeholder set (a miss leaks raw `{n}`/`{total}` into the UI) and must not replace names no key on the line defines (dead substitution = drift). Checks the union of ja+en placeholder sets, so it stays sound even if locales diverge under a separate failure. Fail-then-pass verified (dropping .replace("{total}") from reindex.ok fails the pin). With v0.2.336-337 this closes the whole placeholder contract: template names equal across locales AND every call site substitutes all of them.
+
+### v0.2.339 (2026-09-28)
+
+- Sync product-review.md ledger to v0.2.338 (header version + test count, new v0.2.332-338 summary block covering the eval-diff follow-up recovery, README eval docs, the i18n placeholder-parity closure on both sides, the dependency-declaration pin, and the PR/branch hygiene sweep). Also verified the packaging contract end-to-end this cycle: built the wheel, installed into a clean venv, ran `shoin` → notebook new / add / ask golden path — and confirmed `requires-python>=3.11` correctly refuses install on Python 3.9.
+
+### v0.2.338 (2026-09-28)
+
+- Pin packaging dependency contract both directions (test_declared_dependencies_cover_all_nonstdlib_imports): ast-walks every import in shoin/ — including the lazy in-function pypdf import a top-of-file scan misses — and requires the non-stdlib set to equal pyproject's declared dependencies exactly. An undeclared import breaks `pip install` users at runtime; an unused declaration drags a package nobody needs. Fail-then-pass verified (removing pypdf from dependencies fails the pin).
+
+### v0.2.337 (2026-09-28)
+
+- Pin `{name}` placeholder parity inside I18N.ja/I18N.en values (test_i18n_values_keep_placeholder_parity): UI placeholders are substituted manually per call site (t(k).replace("{n}", v)), so a placeholder present in one locale but absent from the other leaks the raw `{n}`/`{total}` into that locale's toast — the key-symmetry pin can't see it (both locales define the key; only the names inside the values diverge). Completes the placeholder-parity closure begun server-side at v0.2.336. Fail-then-pass verified (dropping {total} from en's reindex.ok fails the pin).
+
+### v0.2.336 (2026-09-28)
+
+- Pin format-placeholder parity between ja/en in all five server-side string tables (test_python_i18n_placeholders_have_ja_en_parity): cli._t() formats templates with caller kwargs, so a {name} present in one locale but not the other raises KeyError only for users of that locale — the key-parity pin couldn't see it. Fail-then-pass verified (diverging {bk}→{bkw} in en fails the pin). Also audited eval baseline I/O: report_from_dict refuses malformed/mistyped baseline JSON (VALIDATION_FIELD_FORMAT_INVALID), k-mismatch between runs prints eval.diff_k_warn, element-type laxity in expected/retrieved is unreachable (diff uses question text + stored scores only).
+
+### v0.2.335 (2026-09-28)
+
+- Document the `eval --save`/`--diff` baseline-compare workflow in README — it existed since v0.2.226 and gained duplicate-pairing/matched-population means at v0.2.334, but README recommended before/after config comparison without ever showing the flags. Now documents the shared-question aggregation semantics, occurrence pairing for duplicate questions, and new/dropped question listing.
+
+### v0.2.334 (2026-09-28)
+
+- Land the unmerged review follow-up from PR #122's branch (commit 8a14353, cherry-picked): eval diff now pairs duplicate questions occurrence-by-occurrence via a per-question deque instead of last-occurrence-wins (identical runs with a repeated case report delta 0 rather than a phantom change), and `EvalDiff` carries `recall_before/after` + `mrr_before/after` over the paired population so the CLI comparison rows describe the same population the deltas were computed on.
+
+### v0.2.333 (2026-09-28)
+
+- Pin `jpost()`'s request-side contract under node (test_jpost_serializes_json_request): every mutating call must reach fetch() as method=POST + Content-Type: application/json + JSON.stringify'd body — the response-side envelope was pinned at v0.2.325, this closes the boundary in both directions (create/rename/notes/studio/reindex all go through jpost). Fail-then-pass verified: dropping the Content-Type header and dropping JSON.stringify both fail the pin. Also refreshed rollup PR #160's head to the v0.2.332 tip and rewrote its title/body (173 commits, 511→1012 tests) so one merge lands the whole v0.2.182-332 series on main. Audit-confirmed clean: export.py escapes (BibTeX specials/RIS line-fold), all list queries' ORDER BY determinism, ui_lang allowlist, env-knob validation, CLI subcommand dispatch + exit-code taxonomy (required=True, 1/130), index_source/refresh_source guards, _tail_cut relevance floor.
+
+### v0.2.332 (2026-09-28)
+
+- Sync docs/product-review.md ledger to v0.2.331: header + test count (1003→1012), new v0.2.323-331 summary block (final source-row wiring pins completing the all-handler coverage, viewer abort/focus/lazy-toggle pins, COVERAGE_LOW + api() envelope constants, report.*⊆CitationReport and t()⊆I18N.ja+ja≡en producer↔consumer contracts, spec.md sync, agent-doc gate fix), and weakness-#5 row extended to v0.2.330 noting every event handler in index.html is now behavior-pinned under node. Audit-confirmed clean: refresh_source guards (non-URL/sha256-collision/byte-identical), updated_at touch coverage, questions_cache eviction, add_source dedup.
+
+### v0.2.331 (2026-09-28)
+
+- Fix agent-doc gate drift (opus.md/sonnet.md): the stated 完了条件 was `python -m unittest discover -s tests`, which silently skips the other four gates (ruff, mypy --strict — the docs cited `mypy shoin/` without `--strict`, coverage ≥90%, detect-secrets) that verify.sh actually enforces, and bare `python` doesn't resolve to the project venv on machines whose system python3 is <3.11. Both docs now point at `./scripts/verify.sh` (with the `PYTHON=` knob noted) as the completion gate; sonnet.md's redundant manual lint step and the HISTORY template line updated to match. Audit-confirmed: refresh_source rejects non-URL kinds (INGEST_REFRESH_NOT_URL), pre-checks sha256 collisions before chunk replacement, and no-ops byte-identical content; add_source dedup is UNIQUE(notebook_id, sha256) + pre-check + race-mapped IntegrityError (all pinned since v0.2.321 _RacyConn tests).
+
+### v0.2.330 (2026-09-28)
+
+- Pin the last three unpinned source-row wirings in renderNotebook: the × delete button (disable → DELETE /api/sources/{id} → reload; failure restores the button and toasts without reloading), the row click/Enter/Space → showSource wiring with its rename-in-progress guard (a click on a row mid-rename must not tear down the edit), and tt.ondblclick → startSourceRename. With these, every event handler in index.html is behavior-pinned under node. Audit-confirmed: updated_at ordering is consistent (every content mutation calls touch_notebook or rides a touching parent; embeddings/settings correctly skip it).
+
+### v0.2.329 (2026-09-28)
+
+- Pin the two i18n invariants the data-i18n attribute scan cannot see: every literal `t("k")` call site resolves in I18N.ja (the primary locale and `t()`'s last-resort fallback — a missing key renders the raw key text in a toast), and I18N.ja ≡ I18N.en key sets (the attr scan only checks markup-referenced keys, so locale-only keys drifted unnoticed). Audit-confirmed `_safe_report` already guards corrupt persisted citation_report JSON on both read paths.
+
+### v0.2.328 (2026-09-28)
+
+- Pin the last cross-layer drift path: every `report.X` key the UI reads from the SSE done frame / persisted reports must be a declared `CitationReport` field (subset check — producer-only keys like `n_sources`/`quote_mismatch` have no UI reader). Renaming or dropping a Python key previously degraded every check badge silently with all server tests still green. Also audit-confirmed questions_cache eviction covers both stale-write paths (source refresh and rename already `pop()`).
+
+### v0.2.327 (2026-09-28)
+
+- Sync docs/spec.md to v0.2.326: STRIDE DoS row gains the accepted-socket 120s timeout, deep-nesting JSON → 400, and protocol-level errors in the JSON envelope; the information-leak row gains the full-response security headers (nosniff/Referrer-Policy/no-store, CSP/X-Frame-Options on the UI) and the Server-header Python-version suppression; SSRF row notes per-hop revalidation + DNS re-pinning; version markers and the measured-coverage line refreshed. Verified the REQ table, report key list, CLI subcommand list, 4-question default, and 9-migration schema all still match code.
+
+### v0.2.326 (2026-09-28)
+
+- Pin the last two unpinned JS branches under node: the source-refresh button's producer side (externalPendingRename stash + handler detach + disabled-in-flight + POST /refresh + pages_failed toast + error restore) and showSource's excerpt-path lazy <details> toggle (dataset.loaded once-only fetch, error written into the body, sig.aborted stale-response guard).
+- Pin the mid-stream dead-socket tail deterministically: _sse("delta") raising ConnectionError inside the stream loop → client_gone short-circuits the done frame and the repair persist failure is swallowed (server.py 842-843 was only ever covered incidentally by whichever fault landed first).
+
+### v0.2.325 (2026-09-28)
+
+- Pin the last JS↔Python duplicated constant (index.html COVERAGE_LOW ≡ citation.COVERAGE_LOW — previously kept in sync by a comment only) and the api() error-envelope contract under node (200→response passthrough, JSON `{error:{code,message}}`→`[code] msg` throw, non-JSON error body→`[status] err.generic` fallback).
+
+### v0.2.324 (2026-09-28)
+
+- Pin the source viewer's modal contract under node: the _srcAbort/sig.aborted pair discards a stale source-N response when the user opens another source mid-flight, and the viewer focus trap wraps Tab/Shift+Tab inside the open dialog with Escape closing — the last two unpinned async UI behaviors.
+
+### v0.2.323 (2026-09-28)
+
+- Sync the product-review ledger to v0.2.322: new v0.2.307-322 summary block (guard-tail completion via _RacyConn, socket timeout + send_error envelope + Server-header hygiene, all interactive handlers pinned, KINDS/FORMATS cross-language parity), weakness row 5 extended to the completed handler-pin state, header test count 978→1003.
+
+### v0.2.322 (2026-09-28)
+
+- Pin the remaining cross-language enumerations: the UI's `const KINDS` array must equal studio.KINDS exactly (server-only kind renders no button; UI-only kind always 400s), and the export href set must equal export.FORMATS (a format added server-side gets no link; a stale link 400s on click).
+
+### v0.2.321 (2026-09-28)
+
+- Pin the last reachable guard tails: concurrent-delete rowcount/FK mappings in store.py (_RacyConn proxy), migrate() non-duplicate-error re-raise, unparseable-resolver-token SSRF rejection, _pos_int accept path, send_error dead-socket swallow, handle_error TimeoutError/non-timeout symmetry, and the three SSE disconnect+persist-failure tails. Remaining uncovered lines (3) are provably unreachable defensive guards.
+
+### v0.2.320 (2026-09-28)
+
+- Pin the language toggle under node: langBtn flips lang + persists to localStorage; applyI18n rewrites all four i18n attribute classes, the button label, and documentElement.lang
+
+### v0.2.319 (2026-09-28)
+
+- Pin the remaining write handlers under node: note create/delete, reindex, clear-chat, and the five studio kind buttons — including the no-sources guard and failure-path re-enable
+
+### v0.2.318 (2026-09-28)
+
+- Pin the three write entry points under node: create-notebook, add-URL, file-upload handlers — disable during POST, clear input on success, reload, always re-enable in finally (error path included)
+
+### v0.2.317 (2026-09-28)
+
+- Pin the SSE frame parser itself under node: bytes split mid-frame, malformed JSON and empty-data frames — the last unguarded dispatch path in the UI
+
+### v0.2.316 (2026-09-28)
+
+- Route protocol-level errors through the JSON envelope (send_error override) — unimplemented methods and malformed request lines previously emitted a bare HTML page with no nosniff/no-store/Referrer-Policy
+
+### v0.2.315 (2026-09-28)
+
+- Bound every blocking socket op on accepted connections (REQUEST_SOCKET_SEC=120) — an idle or partial-body client no longer pins a request thread forever; timeout closes are quiet (no traceback)
+
+### v0.2.314 (2026-09-28)
+
+- Deeply nested JSON bodies (RecursionError) now map to 400, not 500
+
+### v0.2.313 (2026-09-28)
+
+- Stop leaking the Python runtime version in the Server header (sys_version = ""); the security-headers pin now asserts it too
+
+### v0.2.312 (2026-09-27)
+
+- Pin nosniff and Referrer-Policy on every response class (extended the Cache-Control sweep)
+
+### v0.2.311 (2026-09-27)
+
+- Complete the WAI-ARIA tabs pattern: ArrowLeft/Right/Home/End keyboard navigation on the pane switcher, aria-controls on tabs, role=tabpanel + aria-labelledby on panes; pinned statically and under node
+
+### v0.2.310 (2026-09-27)
+
+- Pin the wheel packaging scope: packages.find include must stay exactly shoin*, plus the shoin console entry point and setuptools build-backend
+
+### v0.2.309 (2026-09-27)
+
+- Extended the .gitignore guard to the build/test/tool artifacts: the
+  pinned ignored-names list now also covers .coverage, htmlcov/, dist/,
+  build/, *.egg-info/, __pycache__/, .venv/, .mypy_cache/ and
+  .ruff_cache/, and the matcher handles directory-only (trailing-slash)
+  patterns by matching path components. A dropped pattern previously
+  meant `git add -A` could silently commit a venv or coverage output.
+
+
+### v0.2.308 (2026-09-27)
+
+- Fixed nondeterministic notebook ordering: list_notebooks() and
+  list_notebooks_with_counts() ordered by `updated_at DESC` with no
+  tiebreaker — on coarse-grained clocks (Windows ~15ms ticks) two
+  notebooks can share one timestamp and list order becomes arbitrary.
+  ORDER BY is now (updated_at DESC, id DESC). Tested via a pinned _now()
+  making all three timestamps identical.
+
+
+### v0.2.307 (2026-09-27)
+
+- Synced docs/product-review.md to v0.2.306: new summary block covering
+  the "parallel-structure silent drift" sweep (v0.2.297-306 — gate
+  parity, test discovery, .gitignore coverage, contributor/agent docs,
+  tracked artifacts, README examples, CLAUDE.md constants, gate-tool
+  pins), plus the installed-package end-to-end verification result.
+  Test count in the header updated 971→978.
+
+
+### v0.2.306 (2026-09-27)
+
+- Added requirements-dev.txt pinning the four gate tools plus
+  cyclonedx-bom (ruff==0.16.8, mypy==2.3.1, coverage==7.16.1,
+  detect-secrets==1.5.0, cyclonedx-bom==7.4.0). Every install surface —
+  ci.yml, CONTRIBUTING.md, README.md, verify.sh's SKIP hints — now routes
+  through it, so a new upstream release can no longer silently change
+  what "green" means (the v0.2.153-era ruff drift) or pull a yanked
+  release. dependabot's pip ecosystem watches the file for bumps.
+- Added test_requirements_dev_pins_the_gate_tools: every line must be an
+  exact ==X.Y.Z pin, all five tools present, and all four install
+  surfaces must reference the file.
+
+
+### v0.2.305 (2026-09-27)
+
+- Corrected CLAUDE.md's context-budget description: the history share is
+  HISTORY_TOKENS_TOTAL=400 (not "6 messages, 160 each" = 960, a
+  misdescription qa.py's comment had to flag by hand since v0.2.101) and
+  the source-text share is rank-proportional (v0.2.200), not "split
+  equally". Named every budget constant inline so the doc states values
+  directly.
+- Added test_claude_md_names_the_real_constant_values: every constant
+  CLAUDE.md names must appear in NAME=value form matching the code —
+  the doc↔code drift guard extended to the design document.
+
+
+### v0.2.304 (2026-09-27)
+
+- tests: pin README's user-facing JSON examples against the real schemas —
+  the cases.json block must parse via evaluate.parse_cases(), and every
+  key in the config.json example must be a SHOIN_* name config.py reads
+  via _get(). A schema change would otherwise leave the docs teaching a
+  broken format (same doc↔code drift class as v0.2.301/302).
+- audit: UI i18n key parity and the studio.KINDS↔I18N contract verified
+  already pinned (test_ui_contract.py); all README CLI examples match the
+  real argparse surface.
+
+### v0.2.303 (2026-09-27)
+
+- sbom.json: removed the frozen v0.1.0 snapshot from tracking (it claimed
+  pypdf 5.9.0 while pyproject resolves far newer) — ci.yml regenerates it
+  per build as an artifact, so the committed copy could only rot. Added to
+  .gitignore; pinned by the gitignore test.
+- audit: shoin/__init__.py public surface, .github/dependabot.yml, spec.md
+  STRIDE claims and faq.md all verified accurate against code.
+- audit-saturation note: every gate-definition, doc-claim,
+  manifest-scope, and privacy surface now has a permanent regression pin.
+
+### v0.2.302 (2026-09-27)
+
+- docs/agents/{opus,sonnet}.md: same stale-runner drift as CONTRIBUTING.md —
+  `pytest` referenced as the test runner in three places, and the bump
+  ritual labeled 三点 while listing five files. Reworded to the unittest
+  suite and the explicit 五点 list (config.py / pyproject.toml /
+  test_version / HISTORY.md header+entry / CLAUDE.md pointer).
+- tests: the doc-consistency pin now also covers both agent docs — no
+  `pytest`, and all five bump targets named.
+
+### v0.2.301 (2026-09-27)
+
+- CONTRIBUTING.md: replace the stale `pytest tests/` + partial dep list with
+  the canonical `./scripts/verify.sh` gate (README already documented it) —
+  a contributor following the guide ran no lint/type/secret-scan gate at all.
+- tests: pin CONTRIBUTING.md to name verify.sh and detect-secrets and never
+  mention pytest.
+
+### v0.2.300 (2026-09-27)
+
+- .gitignore: cover SQLite WAL/journal sidecars (`*.sqlite3-*`) and `.env.*`
+  variants — a `git add -A` in a checkout running `shoin --db ./x.sqlite3`
+  previously would have committed the private DB's live sidecars.
+- tests: pin the sidecar/env coverage by applying .gitignore via fnmatch
+  (same unanchored `*` semantics git uses for these patterns).
+- audit: every `except Exception`/`pass`/`contextlib.suppress` site in
+  shoin/ verified as a documented, intentional degradation path — no bare
+  excepts, no silent swallowing.
+
+### v0.2.299 (2026-09-27)
+
+- tests: pin the last two manifest-level silent-exclusion surfaces — every
+  tests/*.py file must match the `-p 'test_*.py'` pattern the gates use, and
+  every top-level dir holding .py files must be inside the mypy/coverage
+  scope (a misnamed test file or a new package dir would previously stay
+  green while never running).
+- llm.py/cli.py/store.py audit: all HTTP/SSE/embed error mapping, subcommand
+  surfaces, and remaining ORDER BY/row-scan helpers verified clean.
+
+### v0.2.298 (2026-09-27)
+
+- **Gate-parity audit**: `ci/ci.yml` and `scripts/verify.sh` both define the verification gate (ruff check, mypy --strict, coverage ≥90, detect-secrets) — verified in sync today, but nothing prevented silent drift (the same class as the v0.2.295 HISTORY.md anchor no-op). New `test_ci_yml_and_verify_sh_run_the_same_gates` pins every gate signature against BOTH files and pins `.githooks/pre-push` delegating to verify.sh — a hook running anything less would be a hole in the only enforced gate.
+- Audit-clean: network surface (loopback-only `make_server` guard already pinned, Host/Origin checks, CSP, no-store on all responses) and `pipeline.py` partial-failure paths (sha-collision guard, chunk cap, atomic replace, embed-model mismatch rules) all verified already defended.
+
+### v0.2.297 (2026-09-27)
+
+- **docs/product-review.md**: ledger sync to v0.2.296 (971 tests) — records the v0.2.291-296 sweep (CLI/env numeric range checks, package-data guard, HISTORY backfill, DB permissions). Corrects two stale rows: the "default branch synced" resolved-item is updated to reflect that main stalled at v0.2.181 with the v0.2.182+ chain living only in devin/* branches (rollup PR #160 pending), and the now-obsolete "rename default branch to main" backlog item is marked resolved (origin HEAD already points at main). Strength #10 (privacy) now covers the v0.2.296 filesystem-permissions fix.
+
+### v0.2.296 (2026-09-27)
+
+- **Store.__init__**: the SQLite DB was created with umask-derived permissions (644) inside a 755 data dir — private documents and chat history were world-readable to other users on a shared system. The DB is now pre-created `0600` (O_CREAT only sets the mode for new files) and, after migration, the DB plus any `-wal`/`-shm` sidecars are tightened to `0600` and the app's own `data_dir()` to `0700` — repairing existing installs. A `--db` path inside a foreign directory tightens only the file, never the directory.
+- New regression test pins the permission contract and the foreign-dir rule.
+
+### v0.2.295 (2026-09-27)
+**Guard + repair (history ledger self-heal)**: the per-version entries for v0.2.257-294 never landed in this file — the append step anchored on a `# Changelog` heading this file does not have, so it silently no-oped for 38 versions while the header kept advancing. Root cause recorded; the versions are backfilled below (v0.2.257-294 as a consolidated entry), the header is corrected, and a guard test now asserts `### v{VERSION}` exists in this file so the drift can never recur silently. Audit-clean surfaces this cycle: config.json value typing, upload filename sanitization, button in-flight guards, `add` per-target error isolation. Plus a new invariant pinned: every `SHOIN_*` env var read by code must be documented in README.md.
+
+### v0.2.257-294 (2026-09-27, consolidated backfill)
+**Ledger repair**: these 38 versions were committed (tests, code, and PRs #118-164 carry the full record) but their entries silently failed to land here — recorded as one consolidated list rather than rewritten as fake individual entries. Per-version detail lives in the commit messages and PR bodies.
+
+- v0.2.257: surface partial PDF extraction via `pages_failed` end-to-end
+- v0.2.258: carry `pages_failed` through the refresh path
+- v0.2.259: normalize LLM content fields instead of `str()`-coercing them
+- v0.2.260: drop unanswerable and duplicate suggested questions
+- v0.2.261: score 0.0 on embedding dimension mismatch
+- v0.2.262: close the report guard's missing keys
+- v0.2.263: sync the product-review ledger to v0.2.262
+- v0.2.264: reflect health-check failure in the lamp and banner
+- v0.2.265: pin `refreshQuestions` chips/guards/race under node
+- v0.2.266: pin `renderNotebook` in-progress rename preservation under node
+- v0.2.267: pin `startSourceRename` commit/cancel paths under node
+- v0.2.268: pin `loadNotebooks` list/delete/rename paths under node
+- v0.2.269: sync the product-review ledger to v0.2.268
+- v0.2.270: cover cli.py eval/serve/interrupt error paths
+- v0.2.271: cover the `build_context` SSE failure tail
+- v0.2.272: pin the search.py coverage tail
+- v0.2.273: pin the citation.py coverage tail
+- v0.2.274: close the last coverable citation.py tails
+- v0.2.275: cover the cli.py flag surface
+- v0.2.276: sync the product-review ledger to v0.2.275
+- v0.2.277: pin the remaining reachable guard tails
+- v0.2.278: sync spec.md with the implementation
+- v0.2.279: correct the README serve/subcommand claims
+- v0.2.280: pin server-side i18n parity
+- v0.2.281: ban `assert` in the package (-O-safe lock-retry tail)
+- v0.2.282: bound the spec search-latency claim with a measured envelope
+- v0.2.283: sync the product-review ledger to v0.2.282
+- v0.2.284: capture `last_finish_reason` under `generation_lock` (SSE race fix)
+- v0.2.285: send `Cache-Control: no-store` on every response
+- v0.2.286: reject whitespace-only questions in `cli ask` (API parity)
+- v0.2.287: trace every spec REQ-* id to code (guard test)
+- v0.2.288: run the detect-secrets gate in verify.sh too
+- v0.2.289: pin the no-HTML-sinks and export-table invariants
+- v0.2.290: track running token count in chunk merge loops (84x faster on newline-dense input)
+- v0.2.291: sync the product-review ledger to v0.2.290
+- v0.2.292: range-check numeric CLI flags at parse time (`-k >= 1`, `--port 0-65535`)
+- v0.2.293: range-check `SHOIN_PORT` env (falls back to default outside 0-65535)
+- v0.2.294: pin package-data glob coverage for `shoin/static`
+
+### v0.2.256 (2026-09-27)
+**Quality fix (HTML boilerplate exclusion)**: `html_to_text` indexed `<nav>`/`<footer>`/`<form>` chrome — menus, cookie notices, related-link lists — as document content, so navigation text was chunked, embedded, retrieved, and even cited. They are now skipped via `_skip_depth` (header/aside deliberately kept — articles use them for lead paragraphs and real sidebars). `nav`/`footer`/`form` join `_SKIP_TAG_BALANCE` so an unclosed opener degrades to keep-the-text instead of swallowing the rest of the page.
+
+### v0.2.255 (2026-09-27)
+**Bug fix (rename response echoes stored name)**: `PATCH /api/notebooks/{id}` returned the raw request `name` while `rename_notebook()` persisted `name.strip()` — the response reported a name the row never had. Same response-vs-stored class as v0.2.93's `_h_src_patch` title truncation; the handler now echoes the normalized value.
+
+### v0.2.254 (2026-09-27)
+**Bug fix (query expansion bound)**: `expand_query` prepended the previous user turn (up to MAX_QUESTION_LEN chars) to a short follow-up, so the expanded retrieval query could reach ~2× the validated limit — exactly the pathological FTS5 OR-expression length the limit exists to prevent, on the very path expansion targets. The prepended context is now truncated to `MAX_QUESTION_LEN - len(question) - 1`; the current question itself is never cut. Includes a Devin Review follow-up on the eval-diff: duplicate questions now pair occurrence-by-occurrence (no phantom delta on identical runs), and `EvalDiff` exposes matched-population means the CLI comparison rows print.
+
+### v0.2.253 (2026-09-27)
+**Docs (product-review ledger sync to v0.2.252)**: the review ledger was 21 versions stale (v0.2.231). Synced the header/test count (901), extended weakness #5 (browser-test gap) with the now-generalized node-run behavioral test coverage — reportBadges flag matrix, openSeal excerpt disambiguation, SSE-drop recovery, openNotebook ordering, renderChatHistory disclosure — and added a "v0.2.233-252 の要約" paragraph covering the interval's themes: badge-chain unification, LIKE-pool ordering, negation word boundaries, stopword needles, truncated/degraded surfacing, SSE liveness, sequence guards, Content-Encoding decode, payload bounding, the embed LRU, and the eval-diff honesty fix.
+
+### v0.2.252 (2026-09-27)
+**Fixed (eval, aggregate diff folded case-set edits into the score)**: `diff_reports` computed `d_recall`/`d_mrr` as `after.recall - before.recall` — the raw report means. When the case file was edited between runs (a question dropped, another added) the aggregate delta mixed the *case-set change* with the retrieval change: dropping a hard case fabricated an improvement, dropping an easy one fabricated a regression, and a fully rewritten case file reported a confident delta over zero shared questions — the measurement lying about exactly the question the tool exists to answer. Per-case deltas were already matched by question text; the aggregates now are too: both deltas are means over the shared questions (0.0 when none), and a new `matched_questions` field reports the comparison basis — printed by `--diff` as "(deltas computed over N shared questions)" whenever the two case sets differ. `new_questions`/`dropped_questions` still surface the unmatched cases. New tests: `TestEvalDiff` (3 tests — case-set edits don't masquerade as score changes, a dropped perfect case can't shrink a real improvement, zero shared questions reports 0 not the raw artifact). Verified fail-then-pass (old code reported -1.0 for a disjoint case set).
+
+### v0.2.251 (2026-09-27)
+**Fixed (qa, repeated question-embedding round-trips)**: `_query_vector` hit the embedding endpoint on every ask() — repeat questions, `shoin eval` reruns over the same query set, and multi-query rewrites that coincide with an earlier phrasing all paid a full LLM round-trip for a byte-identical vector. On the 4B-class local endpoints this project targets, an embedding call is small but not free, and the duplicate calls were pure waste. A bounded LRU (`QUERY_VEC_CACHE_SIZE` = 64 entries) now sits in `_query_vector`, keyed on `(embedding_model, question)` so a model switch naturally misses. Entries never go stale (vectors are immutable per model); LLMError failures are **not** cached so a transient outage cannot poison later asks; ThreadingHTTPServer concurrency is handled with a short lock around the check-and-evict section; and callers always receive their own list so mutating a returned vector cannot corrupt the shared entry. New tests: `TestQueryVectorCache` (5 tests — repeated question embeds once, mutation safety, distinct question/model keys, failures uncached, bounded LRU eviction, empty-model bypass). Verified fail-then-pass (old code had no cache and re-embedded every call).
+
+### v0.2.250 (2026-09-27)
+**Fixed (server, unbounded chat-history payload on every mutation)**: `_notebook_json` embedded `store.list_messages(nb_id)` — the *entire* chat history with every message body and parsed citation report — in `GET /api/notebooks/{id}`, a payload the UI re-fetches on **every** mutation (upload, source add/rename/refresh/delete, note add/delete, studio generate, clear-chat) and on the v0.2.246 stream-drop recovery refetch. History only grows, so each click got heavier forever: an old, busy notebook re-downloads and re-parses megabytes per action. `list_messages_recent` (the bounded variant `history_messages` already uses for the prompt path) now caps the embedded tail at `NB_MESSAGES_LIMIT` (500). The payload stays honest rather than silently partial: a new additive `messages_omitted` key carries the real hidden count (via `store.count_messages()`, an indexed COUNT issued only when the limit is actually exceeded), and `renderChatHistory` prepends a disclosure line — "— N earlier messages not shown —" — the same honesty convention as the budget-cut marker (v0.2.211) and the truncated badge (v0.2.245). The newest turns are the ones kept, so the recovery refetch still finds the persisted last assistant message; `export()` and the DB hold the full record regardless. New tests: `NotebookMessagesCapTest.test_notebook_payload_caps_messages_and_reports_omitted` (patched limit 4 → 4 newest + omitted=8 + honest 0 under the cap) and `test_render_chat_history_discloses_omitted_messages` (real renderChatHistory under node: disclosure prepended on a nonzero flag, absent when 0 or the key is missing). Verified fail-then-pass (old code had no `NB_MESSAGES_LIMIT`/`messages_omitted` and embedded all rows).
+
+### v0.2.249 (2026-09-27)
+**Fixed (UI, out-of-order openNotebook responses select the wrong notebook)**: `openNotebook(id)` awaits `/api/notebooks/{id}` then assigns `cur` — last-*write*-wins. Click notebook A then B and, if A's response lands after B's (slower fetch, different timing), the panes render **A** while the user believes B is open: sources, chat history, Studio cards and the ask target all belong to the wrong notebook. Every in-flight earlier call is now discarded via a `_nbSeq` sequence counter — the same shape `_sealSeq` uses for openSeal's excerpt probes (v0.2.239): the newest call wins, stale resolves return silently, and a stale failure does not toast (the user already moved on) while the freshest failure still does. New `test_open_notebook_drops_out_of_order_responses` executes the real function under node: out-of-order resolve keeps the newer selection, a lone call still opens, a stale error is swallowed, a fresh error toasts. Verified fail-then-pass (old code ends on notebook 1).
+
+### v0.2.248 (2026-09-27)
+**Fixed (ingest, Content-Encoding was never decoded)**: `fetch_url` never sends `Accept-Encoding`, so a spec-compliant server replies unencoded — but some hosts and CDNs gzip `text/*` responses unconditionally, and `http.client` does not decode `Content-Encoding` transparently. The raw compressed bytes then flowed into `_decode()`'s cp932 fallback — which accepts *any* byte sequence — and were indexed as mojibake with zero signal: a silent notebook-poisoning path indistinguishable from a successful ingest. The body is now decoded per the `Content-Encoding` response header before extraction: `gzip`/`x-gzip` and `deflate` (both the zlib-wrapped and raw-deflate forms) via the stdlib, listed in reverse application order for multi-hop encodings, with the size cap re-checked on the inflated form (a ≤10 MB gzip could inflate arbitrarily). Corrupt compressed bodies report `INGEST_FETCH_FAILED` (gzip truncation raises `EOFError`, not `OSError` — caught explicitly); encodings we cannot decode (`br`, `zstd`) now fail as `INGEST_UNSUPPORTED_FORMAT` instead of indexing garbage. New `test_fetch_url_decodes_content_encoding` covers gzip/identity/deflate-both-forms round-trips, the unknown-encoding refusal, and the corrupt-body error. Verified fail-then-pass (old code returned the raw `\x1f\x8b` byte stream).
+
+### v0.2.247 (2026-09-27)
+**Fixed (server, reindex left the questions cache stale forever)**: `POST /api/notebooks/{id}/reindex` rebuilds every chunk's embedding — e.g. after an embedding-model change — so `overview_hits()` can legitimately surface different chunks and the suggested questions should be regenerated. But the `questions_cache` fingerprint is the source-id tuple, which reindex never changes, so suggestions computed against the old retrieval substrate were served indefinitely. `_h_src_refresh` (v0.2.36) and the source-rename path already pop the cache for exactly this reason (content/context changed under an unchanged fingerprint); reindex was the missing third mutation. `_h_nb_reindex` now pops `questions_cache[nb_id]` after a successful reindex. New `ReindexCacheTest.test_reindex_invalidates_questions_cache`: a warm cache forces a fresh `suggest_questions` LLM call after reindex (chat_count +1). Verified fail-then-pass (cache hit served stale on the old code).
+
+### v0.2.246 (2026-09-27)
+**Fixed (UI, done-less stream end left a phantom partial answer)**: if the SSE stream closed without a `done` frame — a proxy or network cut between the server persisting the answer and the client reading it — the live bubble kept whatever partial text had arrived, rendered as plain text with no seals, no report badges, and no error signal. A reload would show the full verified answer the server always persists (`store.add_message` runs unconditionally after the stream loop), so the session view and the stored record silently diverged. The ask handler now tracks `gotDone`/`failed`; when the reader loop ends with neither, it re-fetches `GET /api/notebooks/{id}` and re-renders the persisted last assistant message through the same `renderWithSeals`/`reportBadges` chain a reload uses (restoring `degBadge` from the stored report too). A normal `done` still costs zero extra fetches; an `error` frame skips the refetch (nothing fuller exists); if the refetch itself fails or no assistant message was ever persisted, the partial text stays and a `chat.stream_dropped` toast says so. New `test_dropped_stream_restores_persisted_answer` executes the real recovery block under node: restore-with-report on done-less end, no refetch after done/error, toast on refetch failure, and partial preserved when nothing was persisted.
+
+### v0.2.245 (2026-09-27)
+**Added (all surfaces, silent truncation surfaced)**: the OpenAI-compatible endpoint reports an answer cut off at `MAX_TOKENS` via `finish_reason: "length"` — and Shoin discarded it on every path, so an answer that stopped mid-sentence was presented as complete on the UI, the persisted record, the export, and the CLI. Truncation is the generation-side counterpart of the retrieval `degraded` flag: same honesty contract, missing wire. `LLMClient` now captures `finish_reason` on `last_finish_reason` in both `chat()` (response body) and `chat_stream()` (the final SSE delta chunk); `qa.ask()`, the SSE `_h_ask_sse` done frame, and `studio.generate()` set `report["truncated"] = True` when it is `"length"` (getattr-guarded — `ChatBackend` stubs that lack the attribute are unaffected). The flag renders as a warn badge via the shared `reportBadges()` chain (chat, history, Studio cards all covered for free), a `_status_line` bit in Markdown export, and a `cite.truncated` line on the CLI — whose `_cmd_ask`/`_cmd_studio` print guards were widened so a truncated-only report still prints the `---` report section. `spec.md` §11's report schema documents the new key. New tests: `test_chat_records_finish_reason` + `test_chat_stream_records_finish_reason` (attribute capture), `test_ask_flags_truncated_answer` (length → flag, stop/no-attr → none), `TruncatedStreamTest.test_done_frame_flags_truncated` (done frame + persisted reload), `test_status_line_flags_truncated`, and `truncated: true` added to the `reportBadges` class matrix. Verified fail-then-pass (flag absent on pre-change ask/UI paths).
+
+### v0.2.244 (2026-09-22)
+**Fixed (search, stopword needles flooding LIKE-path score)**: English stopwords ≥2 chars ("the", "is", "of", "to", …) became LIKE-scan needles, and `_needle_score` counts **raw occurrences** — so on a mixed-length query that triggers the fallback (e.g. "what is the capital" — "is" is <3 chars and escapes FTS), a chunk dense in function words could outscore a chunk dense in the real term, and a stopword-only chunk was recalled at all. The FTS path never has this divergence: FTS5's bm25 deweights high-document-frequency terms via IDF automatically. `_fallback_needles` now drops terms on the standard Lucene/Elasticsearch English stop list (the minimal widely-deployed set — a bespoke list would be an unverifiable knob) **when a content term remains**; an all-stopword query ("to be") keeps its needles because noisy recall beats zero recall. The FTS query is untouched — the filter exists exactly where the IDF-free scoring was, not where deweighting already happens. New `test_fallback_skips_ascii_stopword_needles`: a `<3-char`-stopword-only chunk (longer ones legitimately reach FTS5) is no longer recalled, while an all-stopword query still finds its text. Verified fail-then-pass (old code recalled it).
+
+### v0.2.243 (2026-09-22)
+**Fixed (pipeline, unchanged refresh churn)**: `refresh_source` re-fetched a URL and unconditionally deleted every chunk and re-inserted it — even when the refetched content was **byte-identical** (same sha256). The delete+reinsert minted fresh rowids, discarded all embeddings (LLM embed calls spent for zero content change), and churned the very rowid-reuse surface v0.2.230's excerpt check exists to guard stored `source_chunk_ids` against. `extracted.sha256 == src.sha256` now returns early (`IndexResult(src, existing_n_chunks, 0)`) before any chunk work — a refresh of unchanged content is a true no-op that keeps chunk ids and embeddings intact. New `test_refresh_source_unchanged_content_is_noop`: a second source occupies higher rowids so delete+reinsert *shifts* the first source's ids (without it rowid reuse makes churn invisible), plus a counting `embed_one` LLM asserts zero embed calls. Verified fail-then-pass (old code shifted ids → assertion fails).
+
+### v0.2.242 (2026-09-22)
+**Fixed (UI, dead SSE meta store)**: the reader dispatch stored each `meta` frame into `let meta = j` and then **never read the variable** — the last unread signal in the dispatch after v0.2.240-241 wired the previously-dead `degraded`/`error` paths. The meta frame's payload (`sources: [{s, title, source_id}]`) is fully redundant with the `done` frame's `report` (`source_map`, `source_id_map`), so there is nothing the stored value could add — the honest fix is dropping the dead store rather than inventing a consumer. The frame itself is still parsed (advancing the SSE buffer); only the unread assignment is gone. New `test_no_dead_sse_meta_store` guards against the dead branch returning. Verified fail-then-pass (old code keeps `ev==="meta"` → test fails).
+
+### v0.2.241 (2026-09-22)
+**Fixed (UI, dropped SSE error frame)**: the server emits `ev==="error"` with `{"code","message"}` when it fails mid-stream — but the client dispatch only handled `meta`/`delta`/`done`, so a mid-stream failure left a **partial answer frozen with zero signal**: no toast, no error text, spinner already gone. The outer `catch` only sees network-level errors, not an error frame that arrived cleanly. The dispatch now handles it: `toast(j.message || j.code || "")`. New `test_sse_error_event_is_surfaced` extracts the real error branch and runs it under node — message-bearing frames toast the message, code-only frames toast the code. Verified fail-then-pass (pre-change: no handler branch existed).
+
+### v0.2.240 (2026-09-22)
+**Fixed (UI, dead degraded badge)**: the pane-head `#degBadge` ("検索のみ") was dead UI — present in the markup with `hidden`, reset in two places, and **never unhidden** — while the SSE `done` frame has carried a `degraded` flag all along (False on the no-hit path, the real bool otherwise). The badge's evident purpose is the *per-answer* retrieval-only signal — the case where the LLM is nominally on but errored mid-answer, distinct from the global banner's "LLM off" — and the per-message `badge dim` scrolls away in a long thread. The `done` handler now sets `$("#degBadge").hidden = !j.degraded`. New `test_done_handler_toggles_degraded_pane_badge` extracts the real `else if (ev==="done")` block and runs it under node — badge shows on a degraded done and hides on a normal one. Verified fail-then-pass.
+
+### v0.2.239 (2026-09-22)
+**Fixed (UI, seal-click title collision)**: on reports predating `source_id_map` the seal click fell back to a title scan and opened the **first** same-titled source — with two same-titled sources (identical `<title>` pages, duplicate file names) the reader verifies the citation against the wrong document: silent misattribution on the very surface built to prevent it. When the stored excerpt is available, `openSeal` now probes each candidate's chunks and opens the source whose text actually contains the excerpt head — the same provable check `renderFullSource` applies to chunk ids (v0.2.230), one level up. A `_sealSeq` counter guards the async probes against a second seal click racing in; single-match and no-excerpt paths are unchanged (no extra fetches). `openSeal` is now async — the `onclick` callers never awaited it anyway. New `test_openSeal_disambiguates_title_collision` executes the real function under node: collision → opens the excerpt-containing source (not the first), single match → no probe fetches, no excerpt → first-match fallback. Verified fail-then-pass (old code picked source 1).
+
+### v0.2.238 (2026-09-22)
+**Fixed (search, negated-term false exclusion)**: `_apply_neg_filter` matched every negated term by substring — so `-api` silently suppressed "capital", `-net` suppressed "network", `-ai` suppressed "train/email/main". Exclusion is the asymmetric harm direction: positive-match overreach merely widens recall the reranker absorbs downstream, but a wrongly-dropped chunk is gone for good and the user sees a confident "found nothing relevant". ASCII negated terms now require word boundaries (the same `[0-9A-Za-z_]` character set `query_terms` tokenizes with, so the exclusion boundary is the same boundary that produced the term); CJK-containing terms keep substring semantics since CJK text has no word boundaries — `書院 -儒学` behaves identically. Verified fail-then-pass: the old code dropped the "capital markets" chunk under `-api` (`test_neg_filter_ascii_word_boundary`).
+
+### v0.2.237 (2026-09-22)
+**Fixed (search, LIKE pool cap ranking)**: the LIKE fallback's 2000-row pool cap was applied in **insertion order** — `WHERE ... LIMIT 2000` with no `ORDER BY` — so on a notebook with more matching chunks than the cap, the densest late-added chunk was silently dropped before Python scoring ever saw it. For a JA-first tool this is the common path: every two-character compound (総説, 経済, 免疫 …) skips the trigram index and lands here, and "found nothing" is the answer shape that produces hallucinated answers. The query now `ORDER BY`s the exact `_needle_score` formula inside SQL — text occurrence count (REPLACE-based, non-overlapping like `str.count`; `LOWER()` matching LIKE's ASCII folding) plus `_CTX_BM25_WEIGHT` for context presence — so the cap keeps the *best* 2000 candidates instead of the first 2000. Verified fail-then-pass: 2005 single-`猫` fillers + a final `猫×20` chunk — the old code returned `行0`, the new code returns the dense chunk (`test_fallback_cap_picks_best_pool`).
+
+### v0.2.236 (2026-09-22)
+**Fixed (UI, Studio badge parity) + test**: the Studio card heading had its **own third badge chain** — and it silently dropped `numeric_mismatch`, `unit_mismatch`, `negation_mismatch`, `misattributed_suggested`, `degraded` and `confirmed`. A fabricated statistic inside a briefing warned in chat but showed **nothing** on the Studio card whose whole job is surfacing exactly that. Its coverage guard was the weak `coverage < LOW` form too (`null < 0.5` → true in JS). The heading now calls the single `reportBadges()` extracted in v0.2.235, so all three surfaces (chat SSE, chat history, Studio) warn identically — the uncited/degenerate/contradict tooltips are preserved by the shared chain. New `test_renderStudio_shows_all_warning_badges` executes the real `renderStudio` + `reportBadges` under node and asserts the full class matrix on the card heading; verified fail-then-pass (the pre-change code emitted only 6 of 10 badges).
+
+### v0.2.235 (2026-09-22)
+**Refactor (UI, single badge chain) + test**: v0.2.234's negation-seal bug was a symptom — the badge row beneath an assistant message existed in **two near-identical copies** (the `addMsg` history path and the SSE `done` path), the exact duplicated-chain shape that produced the drift class twice already (v0.2.77-79). Both copies are now one `reportBadges(c, report)` covering all eleven flags. The copies weren't actually identical: the SSE path's coverage guard was `cited?.length && coverage < COVERAGE_LOW` — `null < 0.5` is **true** in JS, so a report with `cited` set and `coverage: null` would have fired a spurious low-coverage badge on the live path only; the unified chain keeps the history path's stricter `typeof coverage === "number"` guard. ~80 lines removed. New `test_reportBadges_covers_every_flag` executes the real function under node — every flag → expected badge class in order, coverage badge fires on 0.3, `coverage: null` and an empty report fire nothing — pinning the whole warning surface the way `renderWithSeals`' test pins the chips.
+
+### v0.2.234 (2026-09-22)
+**Fixed (UI, negation-flagged seal unstyled)**: the badge row has always flagged `negation_mismatch` red (`badge err` + "出典と逆の主張の可能性"), and the seal's *tooltip* named the same warning — but the chip's class chain was never updated when the check landed (v0.2.201), so a negation-flagged citation rendered as a **plain neutral seal**, identical to an unverified one. Within a single message the badge said "possibly contradicts the source" while the chip said nothing — the one surface whose job is making warnings visible. The `negation` set is now part of the `mis` class group alongside misattributed/numeric/unit (same "possible" hedge level). Caught by the new `renderWithSeals` behavioral test, which executes the real function under node and asserts the complete class matrix — invalid→bad, all four warning checks→mis, confirmed→ok, unflagged→plain — plus full-width `［Ｓ］` NFKC normalization, combined `[S1, S2]` rendering two chips, and non-citation brackets surviving as text. Verified fail-then-pass (the test failed on exactly the negation chip before the fix).
+
+### v0.2.233 (2026-09-22)
+**Tests (behavioral UI coverage, defect-class expansion)**: product-review.md weakness #5 documented that the two defects found *only* via live browser verification (v0.2.177's `SHOIN_LANG` never reaching the UI; v0.2.179's stale export link after the last notebook was deleted) were both runtime state-transitions — outside the static contract tests' scope. v0.2.230 established the mechanism that covers them (lift the real function out of the script block, run it under node against a stub DOM); this version applies it to both classes, so the historical holes are now permanently guarded rather than relying on a human re-clicking them. New tests execute the real `renderNotebook` (export hrefs bound for an open notebook, `removeAttribute`'d when `cur` goes null) and the real lang resolver (`const _serverLang`..`const t` + `I18N`) — localStorage beats the server meta tag, the unsubstituted `__SHOIN_LANG__` placeholder is rejected by the length check and falls through to navigator, unknown locales fall back to en. Both verified fail-then-pass by mutating index.html (relaxing the length check / dropping the removeAttribute). Also factored `_js_block`/`_run_node` helpers so the next state-transition function is one harness away.
+
+### v0.2.232 (2026-09-22)
+**Docs (product-review ledger sync)**: the ledger itself had been missed by v0.2.231's spec sync and was ~50 versions stale — it still named the flagship "引用の機械検証(四段)", listed weakness #5 as "no behavioral UI tests" even though v0.2.230 had added the first node-executed one, and stopped its summary at v0.2.179. Synced the header (v0.2.231, 869 tests), rewrote strength #1 as the ten-check suite + provenance, qualified weakness #5 with the v0.2.230 mechanism (runtime-state transitions are now coverable; real-browser rendering/interaction remains the hole), and added the v0.2.180-231 summary paragraph. Docs-only — a stale ledger misdirects every future cycle's priority pick, and it is the file consulted to pick them.
+
+### v0.2.231 (2026-09-22)
+**Docs (verification-suite sync)**: the public spec of the flagship feature had drifted ~45 versions behind the code — README still advertised "四段の引用検証", spec.md §引用検証仕様 listed the original four checks plus one, and CLAUDE.md's check list stopped at unit consistency (v0.2.190) while the suite had grown to ten checks plus the exemption/suggestion/provenance machinery around them. All three surfaces now describe the actual suite: range, grounding, misattribution (+suggested right source), uncited (+supported split, +named source, structural exemptions), numeric (magnitude/kanji/English/歩合/rate/era), quote (verbatim proof + doctored quotes), unit, negation, self-contradiction (incl. cross-turn), degeneration (incl. cross-turn) — plus the `source_detail` retrieval provenance and the full `CitationReport` field list. Also refreshed CLAUDE.md's export `_status_line`/`_legend` description. Docs-only; the release criterion's "docs updated" was failing before this.
+
+### v0.2.230 (2026-09-22)
+**Fixed (UI, stale cited-passage mark after refresh)**: `chunks.id` is a plain SQLite rowid (no AUTOINCREMENT) — after `refresh_source()` replaces a URL source's chunks, the new rows can **reuse** the exact ids an old report's `source_chunk_ids` stored, so `renderFullSource` could pin the "引用箇所" mark on a chunk the citation never saw. That's a silent misattribution — the one display the app must never get wrong, since the mark is the visual proof of grounding. The stored `source_excerpts[S#]` already carries the text the citation actually used, so the renderer now marks a chunk only when its 24-char head appears in that excerpt; a refreshed source's recycled id whose text diverges marks nothing (honest absence over wrong claim). Without a stored excerpt there is nothing to verify against — old reports keep id-only marking. New contract test extracts `renderFullSource` into node with a stubbed DOM and asserts both directions (stale-id rejection + no-excerpt fallback), the suite's first behavioral UI check beyond syntax/i18n/routes.
+
+### v0.2.229 (2026-09-22)
+**Fixed (explainability, surface parity)**: v0.2.228 added retrieval provenance (`source_detail` — which channel surfaced a source) but surfaced it only in the Web seal viewer, leaving the CLI `[S#]` line and the export legend blind — the same REQ-103 parity gap class as v0.2.130-131's section breadcrumb, fixed the same way. `citation.found_bits()` is now the single extraction (ordered `("fts"|"vec"|"lex", value)` pairs from a detail map) shared by the CLI's per-citation line (`[S1] title (§ sec) [検出: 全文 #2 + 意味 #5]`) and the export `_legend` (chat + Studio sections at once, since they share `_legend`). The signal matters most on the surfaces that get archived/shared: a source surfaced **only** semantically is where unsupported claims live. Old persisted reports without `source_detail` render exactly as before.
+
+### v0.2.228 (2026-09-22)
+**Fixed (explainability, retrieval provenance)**: the report already carried *what* a citation retrieved (excerpts), *where* it sat (section breadcrumb, cited chunk ids), and *how it verified* — but never *why* the source surfaced at all. `Hit.detail` already records exactly that (rrf_bm25_rank / rrf_vec_rank say which channel — full-text vs semantic — ranked it, `lex` records term presence) and was being dropped. `GroundedContext.source_detail` now carries each source's top-hit detail through to `report["source_detail"]` ("S1" → detail map, wired through all four `make_report` call sites: ask×2, SSE, studio), and the source viewer shows a "検出: 全文 #2 + 意味 #5" line under the section label. The signal matters: a source surfaced **only** semantically (no BM25 rank) is exactly the class unsupported claims come from, so provenance belongs next to the excerpt the citation leans on. Absent on old persisted reports — consumers guard.
+
+### v0.2.227 (2026-09-22)
+**Fixed (retrieval, kyūjitai↔shinjitai bridge)**: "學校" and "学校" share ZERO trigrams — a query in modern orthography could never find a source written (or quoting) pre-reform characters, and vice versa. This is the last large kanji-mismatch class after width/kana/numeric/rate/skeleton/era: `_SHIN_TO_KYU` (≈200 common jōyō simplification pairs) emits the fully-converted counterpart of whichever script a term arrives in, for both directions. Two-char terms like 學校 stay below the trigram floor, so they pull the query into the LIKE path where the needle bridges the orthography — same activation mechanism as v0.2.224's skeleton. Ambiguous simplifications (弁, 台, 与) pick the most common predecessor; a wrong old form is harmless since a variant only ever *adds* a needle/gram, never suppresses a document the term itself matched. Three pins updated to variant-free kanji terms — the "no alternate for pure kanji" invariant is now "no alternate for chars with no variants".
+
+### v0.2.226 (2026-09-22)
+**Fixed (eval harness, A/B comparison)**: `shoin eval` measured recall/MRR — but the harness exists to answer "does toggling X help MY notebook?", which requires comparing two runs, and there was no baseline: the user had to run twice and eyeball two printouts. `eval --save baseline.json` now persists a run (scores + per-case results + the `k` it was measured at), and `eval --diff baseline.json` prints the delta — aggregate Δrecall/ΔMRR plus per-case movements. Cases pair by question text, not position (the case file may be reordered between runs — index matching would mislabel edits as regressions); questions present in only one run are listed as new/dropped rather than silently treated as score changes; a `k` mismatch between baseline and current run prints a warning instead of comparing unlike depths.
+
+### v0.2.225 (2026-09-22)
+**Fixed (retrieval + citation, era-name years)**: "令和6年" and "2024年" assert the same year, but nothing bridged them — retrieval missed both directions, and the numeric check could flag a correct restatement. One shared `_ERAS` table now converts both ways:
+
+- `_numbers_expanded` (citation.py) expands `(明治|大正|昭和|平成|令和)(元|digits|kanji)年` → the Gregorian year. The numeric check gains era≡year equivalence **and** `_numeric_query_terms` picks the digits up for free (the query "令和6年" finds the "2024年" source).
+- `_numeric_variants` (search.py) emits era spellings for year-valued digit terms — `2024` → `令和6`, `令和６`, plus `令和元` for year 1 — so the "2024" query finds the "令和6年" document. No 年 suffix needed: `%令和6%`/`令和6`-gram already substring-match it.
+- Bounds reject invalid era years (昭和65年 stays unasserted; 令和 is capped at 2050 — far-future era years are fiction, not data).
+
+### v0.2.224 (2026-09-22)
+**Fixed (retrieval, JA conjugation recall)**: a query "泳いだ" shared **zero trigrams** with a document saying "泳ぐ" — every inflected verb/adjective query was invisible to every other inflection of the same stem (same for okurigana: "切り替える"/"切替える"). `term_variants` now emits a **kanji skeleton** — the term with hiragana stripped ("泳", "切替") — which is <3 chars, so it pulls the query into the LIKE path where '%泳%' bridges every inflection. A dictionary-free stem bridge: Sudachi/Kuromoji solve this via inflection to dictionary form, which requires a morphological dictionary Shoin deliberately doesn't carry.
+
+- Emitted from the NFKC-normalised form only (hiragana and katakana spellings share one skeleton — kana is what gets stripped).
+- Skeleton must still contain a kanji (`0x3400–0x9FFF`): pure-kana residue ("みーつ" → "ー") would otherwise emit a '%ー%' needle matching every long-vowel word.
+- Both paths reach it for free: fts_query drops <3 variants (skeleton stays a LIKE-only signal), `_fallback_needles` keeps 1-char CJK needles already.
+- LIKE-path activation is the mechanism, not a side effect: the <3 skeleton fails the all-variants-covered check, exactly as the design intends for terms FTS can't index.
+
+### v0.2.223 (2026-09-22)
+**Fixed (export parity)**: the Markdown `_status_line` listed `misattributed` as bare `S3` and `uncited_supported` as a bare count — while the CLI and Web UI have carried the fix hint since v0.2.216/220 (`→S<right>`, `→S#`). An exported "S3 is wrong" made the reader re-verify every source by hand; now it reads `S3→S1`, and grounded uncited shows `(N)→S2,S5` with deduped targets in first-seen order.
+
+### v0.2.222 (2026-09-22)
+**Changed (prompt, per-segment section labels)**: v0.2.221's `§` label sat in the source *header*, but a single source can contribute hits from several sections (top-k picks non-adjacent chunks) — one header label was then misinformation for every other segment. Labels now live **per segment**: each excerpt block is prefixed `§ <section>` naming the section its own leading chunk came from, so a multi-section excerpt reads `§ 免疫の基礎\n<text>\n…\n§ 副作用\n<more text>` instead of one header claiming a single origin.
+
+- Header is back to `[S#] title` — strictly accurate at every granularity; the information moved rather than being duplicated.
+- Label is tracked alongside each `seg_parts` entry during merge assembly (leading chunk's section), so the v0.2.207/208 merge and doc-order logic is untouched.
+- Unbilled (~10 chars/segment, outside token accounting): a truncated segment still gets to say where it came from — `§ sec\ntext…`.
+- `source_contexts` (the UI tooltip) is unchanged — still the top hit's section.
+
+### v0.2.221 (2026-09-22)
+**Changed (prompt, contextual retrieval completion)**: the section breadcrumb was computed for the **index** (v0.2.123) and weighted for **ranking** (v0.2.218) — but the prompt never showed it. A source header read `[S1] 免疫レポート` and the excerpt beneath was a chunk torn out of its section, stripped of exactly the heading context that says what the passage is about. The model now sees `[S1] 免疫レポート (§ 免疫の基礎)` — the third and final stage of contextual retrieval: index → rank → prompt.
+
+- Label is the top hit's section (same one `source_contexts` shows the user — model and UI now describe the same location).
+- ~8 tokens per source buys the model the topicality signal v0.2.218 proved matters for ranking.
+- Sources without a stored context (pre-v0.2.123 chunks) leave the header byte-identical.
+
+### v0.2.220 (2026-09-22)
+**Changed (citation report, actionable misattributed)**: `misattributed` told the user *that* an S-number was wrong but not *which* source was right — same gap v0.2.216 fixed for `uncited_supported`. The report now emits **`misattributed_suggested`**: `"S<wrong>" → "S<right>"` from the argmax already computed for the flag, kept instead of discarded.
+
+- Both producers fill one shared map via an optional `suggested` out-param (existing two-tuple callers unaffected — backward compatible):
+  - `verify_grounding` → bigram argmax vs the cited number.
+  - `quote_mismatches` → **verbatim provenance wins**: a quote found verbatim in S_k is stronger evidence than any bigram argmax, so it overwrites. Doctored-quote flags (near-verbatim of the *cited* source — paraphrase wearing quotes) still flag `n` but emit no suggestion (`k == n` is a different complaint, not a wrong number).
+- Surfaces: CLI marker `…誤番→S2`, UI badges `S3→S1` in both render paths. `"S#"` string keys survive JSON round-trip (persisted reports re-read via `json.loads`).
+- Fixed a latent semantics slip caught mid-implementation: the doctored branch must argmax over ALL sources (near-verbatim of the *cited* source is a real flag), not only rivals.
+
+### v0.2.219 (2026-09-22)
+**Changed (generation, runaway bound)**: every chat request now sends `max_tokens: 4096`. Without it the only stop was the endpoint's own default — llama.cpp's `n_predict=-1` and Ollama's `num_predict=-1` both generate until context exhaustion, so the degeneration loops the citation report *detects* (v0.2.188+) also *consumed* the entire remaining context window: minutes of garbage on CPU-scale hardware, bounded only by the 32 MB stream cap.
+
+- `max_tokens` is a core OpenAI-compatible field accepted by llama.cpp, Ollama, vLLM and llamafile alike — no vendor detection needed.
+- **4096 is deliberately generous**: far above any legitimate answer or Studio output for a ~2400-token context budget. The cap bounds runaway generation; it does not shape real output. Truncated degeneration still surfaces via `degenerate_spans` in the report — detection and bounding now cover both ends of the failure.
+- Detection-only before; prevention-side now. Sent on both `chat()` and `chat_stream()` — the SSE `/ask` path is where a parrot loop actually hits users.
+
+### v0.2.218 (2026-09-22)
+**Changed (retrieval, BM25 field weighting)**: the `context` column — the section breadcrumb added by v0.2.123's contextual retrieval — counted toward *recall* but not *ranking*: `bm25(chunks_fts)` defaults every column to 1.0, so a query term in a chunk's heading lifted it exactly as much as a body occurrence. A heading match is the stronger topicality signal (standard BM25F field-weighting result; titles typically get 2–4×).
+
+- **`_CTX_BM25_WEIGHT = 2.0`** (conservative end of the literature range), applied via `bm25(chunks_fts, 2.0, 1.0)` — column order `(context, text)`.
+- **`_needle_score` applies the SAME weight, as per-term presence** (heading names it → +2.0, once) rather than a linear count: the breadcrumb answers a binary question, the cap mirrors FTS5's tf saturation, and it preserves the intended ordering — a body that discusses the term three times still outranks a breadcrumb that names it once. An equal-1.0 fallback would instead have un-ranked exactly the heading matches this weight surfaces for the most common JA query shape (every 2-char compound lands in the LIKE path; the v0.2.77-79 drift lesson).
+- Intra-section order is unaffected: a section's breadcrumb is identical across its chunks, so a context match lifts the whole section uniformly.
+
+### v0.2.217 (2026-09-22)
+**Fixed (citation verification, indented code blocks)**: v0.2.206/209 taught the structure-aware checks to ignore fenced code — but only the ``` / ~~~ form. The other Markdown code form, the **4-space indented block**, still fed every check, producing three demonstrated false positives: `port = 1234` / `port = 5678` in an indented listing were flagged as uncited assertions AND as a self-contradiction (the exact reassignment shape v0.2.209 fixed for fences), and repeated indented lines as a degeneration loop.
+
+- **`_INDENT_CODE_RE`** (`^(?: {4}|\t)`) applied with the CommonMark rule: an indented line is code only when the previous line is blank or the block is already open — otherwise it's a lazy paragraph continuation and stays prose. Blank lines inside the block keep it open; it ends at the first non-indented non-blank line.
+- **`_strip_fences`** now strips indented blocks too (single pass, `in_code`+`prev_blank` state), so `degenerate_spans`/`self_contradictions` get the coverage for free; `uncited_sentences` tracks the same state inline — the splitter emits one `'\n'` fragment per line ending, so a real blank line = **two consecutive separator fragments** (one fragment alone is just a line break, not a blank line — the bug caught and fixed in the first implementation).
+- Verified silent: indented reassignment (contra/uncited/degen), fence-adjacent prose still flags, indented prose after a non-blank line still flags (lazy continuation).
+
+### v0.2.216 (2026-09-22)
+**Changed (citation report, actionable uncited_supported)**: `uncited_supported` told the user *that* a grounded claim was missing its citation but not *which* source to cite — the fix was "re-read every source". The report now also emits **`uncited_supported_source`**: sentence → best-matching `"S#"` (the argmax bigram overlap already computed for the split, just kept instead of discarded).
+
+- CLI marker now reads `[出典内一致=引用欠落の疑い→S2]` / `[matches a source — missing citation→S2]`; both UI badge tooltips append `→S#` the same way. Export's count-only status bit is untouched (no per-sentence surface to carry it).
+- `uncited_supported` itself is unchanged (still the list of sentences) — the map is a separate `NotRequired` field, so old consumers and old persisted reports stay valid.
+- Field contract: present iff `uncited_supported` is present; only sentences in that list appear as keys; ties resolve to the lowest source index (deterministic argmax).
+
+**Fixed (server, report drift)**: the streamed `/ask` path built its `make_report()` call separately from `qa.ask()` and omitted `history=` — so the cross-turn checks added in v0.2.210/v0.2.215 (`degenerate_spans` parrot loops, `self_contradictions` flip detection) fired on the CLI path but silently never fired on the web SSE path, the primary user surface. Same duplicated-call-site drift class as the v0.2.77-79 lesson: the stream now passes the identical `history` join `qa.ask()` uses.
+
+### v0.2.215 (2026-09-22)
+**Fixed (citation verification, cross-turn contradiction)**: `self_contradictions` only compared sentences *within* one answer — every check still analyzed a single message, so a small model that answered **"効果はある"** last turn and silently reversed to **"効果はない"** this turn produced no warning anywhere. The cross-turn mirror of v0.2.210's parrot-loop fix, completing the contradiction-detection coverage (intra-turn done in v0.2.204).
+
+- **`history` kwarg** (same shape as `degenerate_spans`): prior assistant text supplies the "earlier" side of the comparison. The CURRENT answer's sentence is the one flagged — the later claim is the suspect, same convention as within a message. History sentences are never flagged; they are already emitted.
+- **Shared flip predicate** `_single_diff_flip(a, b)`: the strict single-contiguous-span rule (difflib opcodes: exactly one non-equal block) + negation parity / antonym sign / swapped-number checks, extracted so the intra-answer pass and the cross-turn pass apply one identical precision rule. Same protections: "A社は効果がある" → "B社は効果がない" stays silent (two differing spans), an explicit "以前は〜と述べたが" revision adds an attribution span → silent, and identical restatement is silent (repetition is `degenerate_spans`' job, not a contradiction).
+- Shared sentence normalization extracted to `_claim_sents()` so history sentences get identical NFKC/list-prefix/min-length handling — no parallel code path to drift.
+- Wired in `make_report(text, history=...)`; `qa.ask()` already joins prior assistant messages into `history` for the degeneration check, so the same parameter serves both — Studio output stays per-message (no turns to contradict).
+- Example now flagged: history "治療の効果はある。" + answer "治療の効果はない。" → `self_contradiction` = `["治療の効果はない。"]` (⚠ badge, CLI, export — no new surface).
+
+### v0.2.214 (2026-09-22)
+**Fixed (citation verification, rate notation)**: `numeric_mismatches` false-flagged the most common rate restatement — a claim asserting **"0.5"** against a source writing **"50%"** (and the reverse) fired a numeric-mismatch warning, because the presence check compared literal digit strings and `0.5` never occurs in `50%`. Same rate, different notation — a correct restatement accused.
+
+- **`_rate_values(text)`**: canonical value strings *asserted as rates* — numbers marked with `%`, `パーセント`, or `percent` (with a trailing-letter guard so `percentile` is not a marker), plus every wari value （五割→50 already parsed as percent semantics). `_canon()` canonicalizes integral floats so `0.5` and `50` compare as strings.
+- **Asymmetric bridge in `numeric_mismatches`**: a rate-marked claim number also matches its /100 fraction in the source ("50%" ↔ "0.5"); a bare-fraction claim (`0 < f < 1`) also matches a **rate-marked** source value (`0.5` ↔ "50%"). The reverse stays strict — an unmarked claim "50" does not match a bare "0.5", and a fraction claim does not reach an unmarked "50個" (different magnitudes, still flagged).
+- Wari refactor: the 歩合 expansion inside `_numbers_expanded` extracted to `_wari_values()` so the rate-marking set reuses it exactly.
+
+2 tests added (equivalence silence + directional asymmetry). `tests/` now runs 841 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.213 (2026-09-22)
+**Improved (retrieval, numeric vocabulary mismatch)**: citation checks have known numeric equivalence since v0.2.194 (`_numbers_expanded`: 3.2万=32000, 三万二千=32000, 五割=50, three million=3000000) — but the retrieval path never did. A query for "32000" missed every source that wrote the value as shorthand, and a query for "3.2万" missed every source that spelled it out in digits. FTS5 and LIKE match literal characters, so the gap was structural — the same vocabulary-mismatch class `term_variants` already bridges for kana and width.
+
+- **Digit → spelling** (`_numeric_variants`, inside `term_variants`): an all-digit term emits comma-grouped ("32,000"), 千/万/億/兆 shorthand ("3.2万", "32千", "1.2億"), the `X万Y` split form ("3万2000"), and the positional kanji numeral ("三万二千", via a new `_int_to_kanji` — the inverse of `citation._kanji_value`, with standard 一-omission rules: 千 not 一千, but 一万/一億 keep it).
+- **Spelling → digit** (`_numeric_query_terms`): suffixed, chained, kanji, wari, and spelled-out numerals in the raw query resolve to canonical digit strings through `citation._numbers_expanded` — reuse, not a second table that could drift. Resolved at query level because the suffix/punctuation characters fragment "3.2万" into meaningless term pieces before `query_terms` can see them; the digit terms are OR'd into both `fts_query` and the LIKE fallback's needle list, where they pick up the full variant expansion above.
+- Verified end-to-end through `bm25_search`: a "32000" query finds the 3.2万, 32000, and 三万二千 sources; a "三万二千" query finds all three back; "五割" finds "50%".
+
+2 tests added (variant spellings + bidirectional seeded-store retrieval). `tests/` now runs 839 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.212 (2026-09-22)
+**Improved (citation verification, uncited triage)**: the `uncited` list lumped two very different severities identically — an uncited claim that lexically matches a source is a **citation omission** (minor: the evidence exists, the marker is missing) while one matching nothing is the dangerous **unsupported assertion**. The warning gave the user no way to triage.
+
+- **`uncited_supported`**: new report field = subset of `uncited` whose claim reaches `CONFIRM_MIN` (0.30) bigram overlap against some source body — the same evidence `verify_grounding()` uses to confirm citations. `uncited` keeps all flagged sentences; the split annotates, it does not remove.
+- **Display wiring**: CLI suffixes matching lines `[出典内一致=引用欠落の疑い]` / `[matches a source — missing citation]`; the Web badge tooltip annotates matching sentences; Markdown exports append a `⚠出典内一致=引用欠落 (n)` status bit.
+- Ungrounded uncited stays the alarm signal; supported-uncited tells the user the fix is adding `[S#]`, not rewriting.
+
+2 tests added: grounded-vs-ungrounded split + field absent when nothing matches. `tests/` now runs 837 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.211 (2026-09-22)
+**Fixed (qa, truncation honesty)**: a segment cut by the per-source token budget was appended verbatim — the excerpt ends mid-sentence with no continuation marker, so the model (and the UI excerpt view) could present a truncated fragment as a COMPLETE passage.
+
+- **`"…"` cut marker**: a budget-truncated segment now ends with `…`, matching the gap marker the prompt already uses — the model is told the excerpt continues beyond what it can see. A fragment that truncates to nothing contributes nothing (previously an empty string was appended and joined into a stray `…` boundary).
+- The marker is prompt-syntax like the `\n…\n` segment join — not billed to the source budget, and the citation id walk is unchanged (marks the same surviving chunks).
+
+1 test added: truncated excerpt ends with `…` (and is actually shorter than the source). `tests/` now runs 835 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.210 (2026-09-22)
+**Improved (citation verification, cross-turn degeneration)**: every check until now analysed one message at a time, which structurally cannot see the **cross-turn parrot loop** — a classic small-LLM failure where the model gets stuck re-emitting the SAME paragraph every turn (one occurrence per message, so each message passes the ≥3 repeat rule individually).
+
+- `degenerate_spans(text, *, history="")` now takes prior assistant text: history sentences count toward the ≥3 threshold, but only the current answer's own repeated sentences are flagged (a sentence repeated only in history is not this answer's degeneration).
+- `make_report(..., history="")` plumbs it; `qa.ask()` passes the prior assistant messages' joined contents. Studio outputs stay single-shot — no conversation to loop across.
+- The consecutive stuck-tail span scan stays text-only (history adjacency is meaningless there).
+
+2 tests added: cross-turn loop flags at the 3rd occurrence / 2 total stays silent / history-only repeats stay silent. `tests/` now runs 834 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.209 (2026-09-22)
+**Fixed (citation verification, fence awareness)**: completes the structural-line work of v0.2.206 — `degenerate_spans()` and `self_contradictions()` still analysed fenced-code contents as prose, producing two real false positives:
+
+- `result=compute(x)` repeated 3× inside a fence → flagged as a degeneration loop (identical statements in code are not degraded prose).
+- `port = 1234` / `port = 5678` inside a fence → flagged as a self-contradiction (a code reassignment is not a polarity flip).
+
+**`_strip_fences()`** removes ```` ``` ````/`~~~` blocks and their contents before either check runs — including an unterminated fence, which runs to end-of-file per Markdown. `uncited_sentences()` already handled fences inline (it needs the boundary for pending-resolution), so the helper is shared only where a whole-text strip is the right shape.
+
+2 tests added: fenced reassignment silent (contra), fenced repeats silent (degen), unterminated fence, tilde fence — plus prose still fires in both. `tests/` now runs 832 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.208 (2026-09-22)
+**Improved (qa, document-order excerpts)**: completes the adjacent-chunk merge — v0.2.207 only merged hits arriving in ascending seq order, so a pair that arrived reversed (rank k+1 above rank k) kept a false "…" discontinuity and presented the source body out of document order.
+
+- **Document-order assembly**: hits within a source group are now sorted by `seq` before segment assembly — unknown seqs (-1, test-constructed) sort last and stay in relevance order. Every adjacent run merges regardless of retrieval order, and the excerpt for a source is document-ordered text (a source's body IS its document layout).
+- **Deliberate ordering trade-off**: budget consumption now follows document position rather than hit rank — a coherent excerpt beats a slightly-more-relevant fragment. `grouped[]` keeps relevance order untouched for `contexts[0]` (section breadcrumb still comes from the top hit) and `snums`.
+- Replaces v0.2.207's "descending pairs never merge" boundary with the complete behavior; the no-merge boundary is now only unknown seq.
+
+1 test rewritten (reversed pair merges + unknown-seq gap kept). `tests/` now runs 830 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.207 (2026-09-22)
+**Improved (qa, prompt continuity + budget dedup)**: when retrieval surfaces adjacent chunks of the same source (the common case — a topic spanning a chunk boundary), `build_context()` presented them joined by the `"\n…\n"` gap marker. That claims a discontinuity that does not exist AND bills the shared ~CHUNK_OVERLAP-token boundary to the token budget twice (once per chunk).
+
+- **Consecutive-`seq` merging**: `Hit` gains `seq` (populated from the chunks table in all three retrieval paths — FTS5, LIKE fallback, vector). In `build_context`, an ascending `k, k+1` run merges into one continuous segment: `_boundary_overlap()` finds the exact shared boundary and the later chunk contributes only its new text. The `…` marker survives for REAL gaps; descending/unknown seqs never merge.
+- **Exact suffix-prefix dedup**: `_boundary_overlap()` scans downward from the longest candidate ("a ends with b[:k]" is NOT monotone in k, so no binary search) with a 20-char floor to keep coincidental short suffixes from merging.
+- **Truncation-safe citations**: a merged segment truncated by the budget marks only the chunk ids whose text survived the cut — the tail chunk can be dropped by truncation and is then correctly not marked as cited.
+- ~64-token overlap saved per adjacent pair: on the 1000-token default budget one merged pair frees ~6% for further sources.
+
+3 tests added: merge dedups the boundary + ids, unknown/reverse seqs keep the gap, truncated segment marks only surviving chunks. `tests/` now runs 830 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.206 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **markdown structural lines** — ATX headings, pipe-table rows (including `|---|` separators that assert nothing at all), horizontal rules, blockquotes, and fenced code + everything inside it — as uncited "claims". The check exists to flag *sentences* asserting source content; none of these are sentences.
+
+- **`_STRUCTURAL_LINE_RE` + fence tracking**: `#`-headings, `|…|` rows, `---`/`***`/`___` rules, and `>` quotes are matched by one pattern; ```` ``` ````/`~~~` fences toggle `in_fence` so code inside a block (and an unterminated fence, to end-of-file) is skipped too.
+- **Invisible, not claimless**: structural lines are skipped BEFORE the pending-resolution step — a trailing `[S1]` still resolves the sentence above a heading/rule — but they DO break list scope and update the prev-line tracker (a heading between a cited lead-in and its items correctly ends the enumeration's citation scope).
+- Claims after structure still flag normally ("## 概要\n効果は高い。" → flags 効果は高い).
+
+5 tests added: structural lines silent, fenced code + contents silent, unclosed fence to EOF, claim after structure flags, structure doesn't consume a trailing citation. `tests/` now runs 827 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.205 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged every item of a **cited enumeration** — "効果は以下の通り[S1]：\n・効果は高い\n・副作用は少ない" produced two false-positive uncited warnings even though the lead-in's citation introduces and scopes the whole list, the most common LLM list style.
+
+- **List-block citation scoping**: a contiguous run of `_LIST_PREFIX_RE` items is covered when the line immediately preceding the block carries a citation AND ends in an enumeration-introducing shape — a closing colon, or the 通り-enumeration forms (`以下/次/上記/前項/前述の通り・とおり`). Scope persists while items continue and ends at the first non-item line.
+- **Strict boundaries**: a 。-terminated *claim* ("効果は高い[S1]。") does NOT introduce a list — items after it still need their own citations, matching the strict per-sentence rule prose already applies. An uncited lead-in scopes nothing. And "思った通り"-style comparisons don't enumerate — the 通り branch requires the same enumeration words as `_FRAMING_RE`, not just the suffix.
+
+6 tests added: cited colon/通り lead-ins cover, 。-claim lead-in doesn't, uncited lead-in doesn't, scope ends at non-item, comparison 通り excluded. `tests/` now runs 822 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.204 (2026-09-22)
+**Improved (citation verification, self-contradiction)**: a TENTH mechanical check — `self_contradictions()` — the answer-internal counterpart of the polarity check: an answer asserting "効果はある" early and "効果はない" later contradicts itself regardless of sources. Self-contradiction is a documented hallucination class (SelfCheckGPT literature) the previous nine checks cannot see — every other check compares claim-vs-source, never claim-vs-claim.
+
+- **Single-difference precision rule**: sentences are compared pairwise via difflib opcodes and a flag requires EXACTLY ONE contiguous differing span. "A社の治療は効果がある。B社の治療は効果がない。" differs in two spans (subject AND predicate) — a legitimate contrast, silent. "一方で効果は低かったと述べている" adds an attribution span — also silent. Only a bare flip fires.
+- **Three flip shapes within the single difference**: negation parity inversion (same machinery as v0.2.201), antonym-class sign reversal (v0.2.202), or a bare number swap asserting different values ("成長率は15%" … "成長率は20%" — `_numbers_expanded` so 3.2万↔32000 stays silent). List/bullet prefixes are stripped before comparing so renumbering can't hide a flip.
+- **Wired like the answer-internal flags**: `self_contradiction` field flows to the UI badge + tooltip (`chat.contradict`), CLI `cite.contradict`, and the export status line (`status_contradict`), ja + en — the flag names the later sentence (the error is almost always the second assertion).
+
+6 tests added: negation flip, antonym flip (+attribution-span silence), numeric flip, different-subject silence, list-prefix stripping, report wiring. `tests/` now runs 816 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.203 (2026-09-22)
+**Fixed (citation verification, uncited-sentences precision)**: `uncited_sentences()` flagged **framing sentences** — "以下に要点を示します", "要点は以下の通りです", "the following summarizes the sources" — as unsupported assertions. These lines describe the answer's own structure and assert nothing about the sources, so every well-organized answer produced false-positive uncited warnings.
+
+- **`_FRAMING_RE` exemption**: full-match patterns requiring a structural verb (示し/まとめ/説明/記載/列挙/言及/確認/紹介/報告/述べ) or a 通り-phrase, with tightly bounded tails — "以下の通り：効果はある" (framing prefix + real claim in one sentence) does NOT match and is still flagged, as is "上記の治療は効果がある" (上記 + content verb, not a structural verb). Only lines that are framing all the way through are exempt.
+- Same family as the existing exclusions (trivial fragments, disclaimers, questions): the check stays a high-precision signal by only asserting what it can stand behind.
+
+3 tests added: JP framing silence (2 forms), EN framing silence, framing-prefix-plus-claim still flagged. `tests/` now runs 810 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.202 (2026-09-22)
+**Improved (citation verification, antonym polarity)**: the polarity check now covers the second inversion shape — a mirrored claim that swaps a **scale term for its opposite** while negation parity stays equal ("効果は高い" citing "効果は低い", "sales increased" citing "sales decreased"). Negation parity alone cannot see this: both sides are affirmative; the contradiction lives in the degree word.
+
+- **`_ant_signs()`**: ~30 curated antonym classes (JP degree adjectives + inflections, trend verbs, win/lose, succeed/fail, safe/danger, easy/hard; EN increase/decrease, better/worse, more/less/fewer, faster/slower, stronger/weaker, larger/smaller, longer/shorter, easier/harder, success/fail). Each surface maps to (class, sign); the claim flags when a class present in BOTH sides nets opposite signs — a class on only one side is a lexical difference, not an inversion.
+- **Ordering safety**: longest-surface-first regex so 低下/下落 feed the rise/fall class, never the 高/低 adjective class; English surfaces are word-bounded; Japanese past-tense stems (〜かっ) are enumerated explicitly.
+- Same flag, same surfaces: `negation_mismatch` is the polarity-inversion flag (documented scope extension — the check's name covers negation, its semantic is polarity); no new UI/CLI/export wiring needed.
+
+5 tests added: JP degree swap (高↔低), trend inversion (増加↔減少), English swap (increased↔decreased), matching-sign silence, unshared-class silence. `tests/` now runs 807 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.201 (2026-09-22)
+**Improved (citation verification, negation polarity)**: a NINTH mechanical check — `negation_mismatches()` — flags claims that mirror a source sentence with the negation flipped ("効果はない" citing "効果はある"). Bigram overlap *confirms* such a claim (~0.5+ shared) precisely because the wording matches; only a parity count catches the inversion — a documented LLM faithfulness failure class no previous check could see.
+
+- **Symmetric mirror bound**: flags only when each side's bigrams cover ≥50% of the other — a claim restating half of a bipolar source sentence ("Aは効果があるがBはない") is a subset, not a flip, and stays silent.
+- **Parity counting, not presence**: markers are ない/なかっ/なく/ません + the single-kanji negative morphs 未/不/無, and English not/never/no/neither/nor/without/n't — an *odd* count means the clause negates ("なくはない" = 2 = positive). Contrastive constructions (ではなく/じゃな) are exempt: "AではなくB" asserts the same B the source does.
+- **Wired like the other flags**: `negation_mismatch` field flows to the UI badge + seal tooltip, CLI `cite.negation`, and the export status line (ja/en) — a new check the user has to *see*, so display-surface additions with the reason recorded here.
+
+9 tests added: JP flip both directions, bipolar-subset guard, contrastive exemption, double-negation parity, English flip, low-overlap silence, report wiring. `tests/` now runs 802 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.200 (2026-09-22)
+**Changed (context building, rank-proportional source budgets)**: `build_context()` divided `budget_tokens` **uniformly** across sources — the #8-ranked source got the same prompt share as #1 even though retrieval already produced the ranking. The budget now splits as **floor + rank-weighted surplus**: every source keeps `MIN_PER_SOURCE_TOKENS`(64), and the remaining surplus distributes by harmonic weight `1/i` over the ranked order.
+
+- **Invariants preserved**: total allocation still equals `budget_tokens` exactly; the floor still guarantees every included source a usable share; the existing `order` cap (drop the tail the floor can't support) is untouched — `surplus = budget − n·floor ≥ 0` by construction. Single-source callers see identical behaviour (`floor + surplus = budget`).
+- **Rationale**: lost-in-the-middle literature shows small context budgets benefit from front-loading the best evidence — with a fixed 1000-token share across 8 sources the old split gave rank-8 125 tokens, rank-1 125; the new split gives ~243/86 while keeping every source above the documented floor. This supersedes the earlier "fair share" note in `qa.py`'s docstring (the fairness the floor was designed to protect — a *usable* minimum — is retained exactly).
+
+1 test added: two equal-size sources under a 200-token budget now split 112/88 instead of 100/100, floor still holds. `tests/` now runs 793 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.199 (2026-09-22)
+**Improved (citation verification, doctored quotes)**: `quote_mismatches()` now flags near-verbatim spans, not just verbatim ones. A 「…」/"…" span ≥ `_DOCTORED_MIN_LEN`=12 chars sharing ≥ `_DOCTORED_MIN_OVERLAP`=60% of its bigrams with some source — while matching no source verbatim — is a doctored quote: the assertive quote marks claim wording the source never wrote, yet the text clearly derives from a source.
+
+- **Both error shapes flag**: high overlap with the *cited* source is a paraphrase wearing quotes; high overlap with a *different* source is the same near-verbatim misattribution the verbatim rule already catches — either way the citation is wrong.
+- **Bounds stay asymmetric**: below 12 chars a topic-term emphasis-「」 can coincidentally share 60% of its bigrams; below 0.6 the span could be a legitimately loose paraphrase — both stay silent (unchanged behaviour for quotes that either match verbatim or match nothing).
+
+4 tests added: doctored quote of the cited source flags; near-verbatim of a different source flags; a low-overlap quoted paraphrase and a sub-12-char near-miss stay silent. `tests/` now runs 792 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.198 (2026-09-22)
+**Fixed (citation verification, unit conversions)**: `numeric_mismatches()` no longer false-flags when the claim and source state the same quantity in different units — "180分" against "3時間", "1.5km" against "1500m", "0.5kg" against "500g". Conversion is deterministic within each dimension family (time, length, mass, volume); months and years stay out (28–31-day months, 365–366-day years are genuinely ambiguous).
+
+- **Same-family equality, not blind injection**: a claim number is suppressed only when the claim's *own* unit pairs to a canonical value the source produces in the *same* family — "300円" against a source saying "5時間" (→300min) still flags because 円 is not a time unit. Injecting converted values into the number set would have silenced exactly that real mismatch.
+- **Adjacent pairs sum**: "1時間30分" yields 60, 30, AND 90 minutes (pairs separated by ≤2 chars in the same family accumulate), matching how durations are actually written.
+- **Dedicated extractor**: conversion pairs come from `_CONV_NUM_RE`, not `_UNIT_NUM_RE` — the unit check excludes 時/分/秒/日 for date-chain ambiguity, but conversion pairs only ever suppress flags, so that ambiguity cannot cause a miss.
+
+1 test added: same-family conversions silent both directions (180分↔3時間, 1.5km↔1500m, 90分↔1時間30分, 0.5kg↔500g); cross-dimension (300円 vs 5時間) and a different duration still flag. `tests/` now runs 788 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.197 (2026-09-22)
+**Fixed (citation verification, 歩合 notation)**: `_numbers_expanded()` now expands the 割/分/厘 percentage convention — "6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8%. The conversion is deterministic (割=10%, 分=1%, 厘=0.1%), so a claim asserting the percent value no longer false-flags — the last numeral-equivalence FP class.
+
+- **割 is required**: bare "五分" reads as minutes or half of "五分五分" (50-50 odds), never a percentage alone — the pattern only fires with 割 present, and totals above 100% ("十二割" is nonsense) stay unchecked rather than registering a phantom value.
+
+1 test added: 歩合↔percent silence both directions (6割3分, 五割, 2割5分8厘); a differing percentage and the "五分五分" idiom still flag. `tests/` now runs 787 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.196 (2026-09-22)
+**Fixed (citation verification, spelled-out English numerals)**: `_numbers_expanded()` now expands English numeral words — "three million" ↔ "3000000", "twenty-one" ↔ "21". English-language sources assert the same values in words, and the digit-string presence check false-flagged the correct restatement — the same FP class the kanji and digit-shorthand fixes closed, one orthography over.
+
+- **`_en_value()` accumulates, multiplies at scale words**: small numbers (one…ninety) add into a local accumulator; "hundred" multiplies it (empty local reads as one — "a hundred" → 100); "thousand"/"million"/"billion" flush `local × scale` into the total. "three hundred twenty five thousand" → 325,000.
+- **"and" is deliberately not a separator**: "one and two" is a list, not a sum — allowing "and" anywhere would mis-expand lists into phantom values. The BrE form "three hundred and twenty" therefore splits into two runs (a documented miss, not a wrong expansion). Plurals ("millions") never match — the word-boundary lookahead rejects them as vague.
+
+1 test added: spelled↔digits silence both directions (three million, twenty-one, three hundred twenty five thousand); a differing value still flags. `tests/` now runs 786 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.195 (2026-09-22)
+**Fixed (citation verification, full kanji numerals)**: kanji numerals now parse positionally — the v0.2.193 claim that multi-character forms were "ambiguous" was wrong; "二十億" is unambiguously 20億, "百三万" is 103万, and "一億二千万" is 120,000,000. Every remaining kanji FP class is now covered: multi-char numerals (十二万), kanji and mixed chains (一億二千万, 一億2000万), and bare numerals with no magnitude suffix (十二人 ↔ 12人).
+
+- **Replaces special-casing with a general parser**: `_kanji_value()` applies digits to the place char that follows them (十/百/千) or adds them at the end — the v0.2.193 single-kanji guard regex is gone, absorbed into `_NUM_PART` which now accepts either decimal digits or a kanji run for every pair and chain component. `_kanji_value` returns None for pure digit runs ("二三" = "a few", a counting sequence, not a numeral) and consecutive digits ("一二三") — inconclusive forms still stay silent.
+- **Bare-run pass is conservative**: `_KANJI_BARE_RE` requires ≥2 chars ending before a non-numeral char, so a run that's a component of a larger form (十二 before 万) never double-registers.
+
+3 tests added/updated: multi-kanji parse (二十億, 百三万 — equal silent, differing flags), kanji+mixed chains, bare numerals with the counting-sequence guard. `tests/` now runs 785 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.194 (2026-09-22)
+**Fixed (citation verification, chained magnitudes)**: `_numbers_expanded()` now sums chained magnitude suffixes — "1億2000万" = 120,000,000. The chained form is extremely common in Japanese source text, and the single-suffix pass split it into `{1e8, 2e7}` so a claim spelling out "120000000人" still false-flagged — the last known FP class in the magnitude family.
+
+- **Chain-internal parts are components, not asserted values**: pairs inside a ≥2-pair chain (`_MAG_CHAIN_RE`) still get their raw digits stripped, but their per-part expansions are withheld — the claim "1億2000万" asserts 120,000,000, not "1億" and "2000万" separately, and keeping the parts would flag the correct spelling. A standalone "1億" elsewhere in the same text still expands normally (span-guarded, not global removal).
+- **Sum is integral-only**: non-integral chain totals (rare) leave the chain silent rather than registering a value nobody wrote.
+
+2 tests added: chain↔digits silence both directions (1億2000万, 13億5000万); a chain whose sum differs still flags. `tests/` now runs 783 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.193 (2026-09-22)
+**Fixed (citation verification, kanji numerals)**: `_numbers_expanded()` now also expands single-kanji-digit shorthand — "一万" ↔ "10000", "十億" ↔ "1000000000". The v0.2.192 expansion covered digit shorthand only, so a source written "一万円" still false-flagged a claim saying "10000円" — the same FP class one notation over.
+
+- **Lookaround guards, not just a digit class**: the digit kanji must not touch another numeral kanji on either side — "二十億" (20億) would otherwise mis-expand its tail as 十億 (10億), and "百三万" (103万) as 三万. Both stay unchecked → silent, which is correct for genuinely ambiguous forms. Date/unit adjacency is no match since the magnitude suffix is required ("一月"/"十日" never expand).
+- **Additive only**: kanji expansion adds to the set (no digits exist to remove); real value mismatches still flag — "1000000000" against a guarded "二十億" correctly flags because no bogus expansion was registered.
+
+2 tests added: kanji shorthand↔digits silence (一万/十億, both directions); multi-kanji guards (二十億, 百三万 leave unchecked and still flag a differing claim value). `pytest tests/` now runs 781 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.192 (2026-09-22)
+**Fixed (citation verification, magnitude shorthand)**: `_numbers_expanded()` — Japanese shorthand magnitudes no longer false-flag in `numeric_mismatches()`. The check compared digit strings for presence only, so a model restating "3.2万円" as "32000円" (or vice versa) was flagged as an absent number — the same value written in the notation readers actually use. A number carrying a 千/万/百万/千万/億 suffix is now represented by its canonical value instead of the raw digits: `"3.2万" → {"32000"}`.
+
+- **Value replaces raw digits, deliberately**: keeping the raw "3.2" alongside would flag it against a source that spelled the value out — the shorthand digits literally do not occur there. Only integral expansions are added (non-integral values have no canonical spelling → inconclusive → silent).
+- **Two-sided comparison**: the flag now requires a claim number to fail BOTH the expanded-set membership AND the original substring test (`num not in src_nums[n] and num not in src_norm[n]`). Set membership catches `32000 ↔ 3.2万`; the substring fallback preserves v0.2.184's rounding tolerance (`"63"` stays silent inside `"63.5%"`) — no behavioural regression, only new silence for magnitude equivalents.
+- **Bounded**: single suffix only — 千万/百万 precede 万 in the alternation (ordered leftmost matching); spelled-out numerals and multi-suffix chains (`1億2000万`) stay unchecked per the silent-when-ambiguous principle.
+
+4 tests added: shorthand↔spelled-out silence both directions; 億/万-scale expansion; real value swap still flags (3.2万 vs 3.4万 both notations); rounding tolerance preserved (63 vs 63.5%). `pytest tests/` now runs 779 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.191 (2026-09-22)
+**Fixed (citation verification, unit aliases)**: `_UNIT_ALIASES` — cross-script same-unit spellings no longer false-flag. v0.2.190's `_units_compat` only accepted identical or prefix-extending units, so `100キロ` vs `100km`, `3歳` vs `3才`, `12名` vs `12人` — the same count written in another script — were flagged as mismatches. Found while shipping the check: same-unit synonyms are a documented blind spot it produced itself.
+
+- **Directional alias sets, deliberately**: ambiguous colloquial tokens point at ALL their possible readings (`キロ`→{km,kg}, `ミリ`→{mm,ml}) while the precise readings never list each other — `100km` vs `100kg` still flags even though both share the `キロ` alias. The compat check is `a ∈ aliases(b) or b ∈ aliases(a)`, so an ambiguous bare token can only under-flag, never over-flag.
+- **No case-folding**: ASCII units keep case — `100MW` vs `100mW` is a real 9-orders-of-magnitude swap and still flags; NFKC already folds composed forms (㎞→km, ％→%) upstream.
+- **Bounded table**: katakana spellings of SI/imperial units (メートル, グラム, パーセント, ドル, バイト…) plus counter-kanji pairs that mean the same count for every referent (歳/才, 名/人, 軒/棟/戸). 本/冊 (long objects vs volumes) and 番/位 (serial vs rank) are deliberately excluded — they can differ, so they still flag.
+
+6 tests added: cross-script aliases silent (4 cases); counter-kanji aliases silent (3 cases); ambiguous キロ silent vs km and kg; precise readings still flag through the shared alias + キロ vs メートル; ASCII case preserved (MW vs mW); excluded counter pairs still flag (本/冊, 番/位). `pytest tests/` now runs 775 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.190 (2026-09-22)
+**Added (citation verification, check 8)**: `unit_mismatches()` — the eighth machine check, closing the hole in `numeric_mismatches()`' presence test. That check asks only whether a digit string exists in the cited source; a number that IS present but carries a different unit is the same magnitude of fabrication and structurally invisible to it — "100km" vs "100m", "25ppm" vs "25%", "100億円" vs "100万円" all pass the presence check while being wrong. Here each cited clause's (number, unit) pairs are compared against the units the source attaches to that same number.
+
+- **Bounded unit extraction**: three suffix classes after a significant number (same ≥2-digit-or-decimal threshold as `_numbers`): ASCII unit runs (kg, km, GB, kWh, ppm, %, °C, μg), katakana unit runs (キロ, メートル, ドル, パーセント), and a fixed counter-kanji set (人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千 — persons/items/machines/currency/magnitudes). Time counters (年月日時分秒) are deliberately excluded: date chains like "2024年3月" make a bare 年 ambiguous between "year count" and "date part", so checking it would be noise, not signal.
+- **Deliberately asymmetric**: fires only when the source attaches a *different, incompatible* unit to the same number. A source occurrence with no unit is inconclusive (the unit may live in surrounding text); a claim number absent entirely is `numeric_mismatches()`' signal; and prefix-extending units ("1億"→"1億円", "3回"→"3回目") are elaboration, not a swap — `_units_compat` treats them as consistent.
+- **Same attribution machinery**: shares `_segment_claims` with `verify_grounding()`/`numeric_mismatches()`/`quote_mismatches()` — the unit claim in a co-cited sentence is judged against the clause it annotates.
+- **Wired like the numeric signal it extends**: `citation_report.unit_mismatch` (NotRequired, present only when non-empty) renders as an `err` badge + `mis`-class seal tooltip at both Web UI badge sites and in `renderWithSeals` (`chat.unit`, ja/en), as a `cite.unit` CLI marker (ja/en), and as `status_unit` in the Markdown export status line (ja/en). Display surfaces added for a new verification signal — reason documented here.
+- **No spec/schema change**: additive optional field, `.get()`-guarded everywhere.
+
+10 tests added: metric swap flag; matching-unit silence; magnitude-counter swap (億円 vs 万円); unitless-source-occurrence silence; absent-number silence (stays numeric's job); prefix-extension compatibility (2 cases); katakana swap; single-digit exclusion; clause-level attribution; report wiring. `pytest tests/` now runs 769 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.189 (2026-09-22)
+**Changed (retrieval, adaptive-k)**: `_tail_cut()` — score-gap (elbow) cutoff on the reranked candidate pool, applied before `mmr()` in both `retrieve()` and `retrieve_multi()`. Vector search ranks semantically-near chunks that may share zero query terms; RRF then hands that flat tail to MMR, which padded it into the prompt context and the `[S#]` source list whenever the genuinely-relevant set was smaller than k. The cut drops the tail at the first `ADAPTIVE_GAP = 0.25` adjacent score drop that lands on a chunk with `detail["lex"] == 0`.
+
+- **Why two conditions**: `_minmax` stretches RRF scores over [0,1] for ANY pool, so a large blended-score gap alone is routine even between two legitimate hits — a first-pass implementation that cut on the gap alone broke `TestRerankContext` (title-named docs were clipped). The lexical-zero requirement makes the cut fire only where relevance evidence is actually absent: term-bearing chunks are never cut, and BM25-only pools (every hit carries a query term) pass through untouched. Same "stay silent when inconclusive" asymmetry as the citation checks.
+- **Placement before MMR, not after**: the reranked, sorted list is where the cliff is measurable; cutting the pool upstream preserves MMR's own relevance/diversity trade-off on survivors instead of second-guessing its selection with score alone.
+- **Result-count contract**: `retrieve()` already returned ≤k (never guaranteed k), so letting the list end below k is the same contract — it now just also means "fewer than k chunks were actually relevant" instead of always padding.
+
+6 tests added: cliff onto term-free tail drops it; cliff onto term-bearing chunk never cuts (the regression that shaped the design); earliest-gap-wins; smooth-pool passthrough; empty/singleton; end-to-end vector-tail clip. `pytest tests/` now runs 759 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.188 (2026-09-22)
+**Added (answer-quality check, degenerate)**: `degenerate_spans()` — a seventh machine signal in `citation.py`, and the first that inspects the answer itself rather than its citations. Small local LLMs are prone to degeneration/repeat loops (the failure llama.cpp's and Ollama's sampling-time repeat penalties exist to prevent), and every citation check is structurally blind to it: a parroted or tail-stuck answer carries no citation anomaly at all.
+
+- **Two orthogonal shapes**, both mechanical: (a) the same normalised sentence (≥10 non-whitespace chars) appearing ≥3 times — the "parroting" loop; (b) any ≥6-char span repeating ≥3 times *consecutively* — the "stuck tail" loop, even inside one run-on sentence. Comparisons are NFKC-folded, lower-cased, and whitespace-stripped so spacing variants can't disguise a repeat.
+- **Deliberately asymmetric**: nothing fires below the bounds — parallel structures ("Aである。Bである。"), honest emphasis, and filler echoes (はい/です) repeat *differently* or too briefly, so they stay silent. Only verbatim-normalised ≥3× repetition asserts a loop.
+- **Wired end-to-end like the existing signals**: `citation_report.degenerate` (NotRequired, list of offending snippets ≤40 chars, present only when non-empty; answer-internal so no sources needed) renders as a `warn` badge with count + snippet tooltip at all three Web UI sites (chat message, history re-render, Studio card header), as a `cite.degenerate` CLI block (ja/en), and as `status_degenerate` in the Markdown export status line (ja/en). The UI additions are display surfaces for a new verification signal — reason documented here: without them the flag would compute but stay invisible to users.
+- **No spec/schema change**: additive optional field, `.get()`-guarded everywhere.
+
+7 tests added: 3×-sentence flag; consecutive-span flag; parallel-structure silence; sub-threshold filler silence; 2×-emphasis silence; whitespace-variant matching; report wiring + clean-report absence. `pytest tests/` now runs 753 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.187 (2026-09-22)
+**Added (citation verification, check 6)**: `quote_mismatches()` — quoted fabrication/misattribution detection, the sixth machine check. A 「…」/"…" span of ≥8 non-whitespace chars cited to source n but appearing verbatim in a *different* source m is unambiguous proof n is the wrong number for that claim — the exact-string cousin of `verify_grounding()`'s bigram misattributed flag, needing no overlap margin. Quoted fabrication sits at the top of the citation-failure taxonomy (arXiv:2510.20303), and the bigram checks can miss it entirely because a paraphrased *surrounding* sentence still scores overlap with the wrongly-cited source.
+
+- **Deliberately asymmetric**: a span found in NO source could be fabricated — but it could equally be emphasis-「」 (「重要な点」), which never asserts "this wording appears in the source". Inconclusive → silent, the module's core principle. `『…』` (work titles) and `'…'` (apostrophes) are never treated as quotes; spans under 8 non-whitespace chars are concept names, not quotation claims.
+- **Same attribution machinery**: shares `_segment_claims` with `verify_grounding()`/`numeric_mismatches()` — the quote in a co-cited sentence is judged against the clause it annotates, and a trailing `"Claim. [S1]"` fragment inherits the previous sentence.
+- **Folded into the existing flag surface**: the evidence shape is identical to `misattributed` ("this S-number's content lives elsewhere"), so flags merge into `misattributed` — the Web UI badge, CLI marker, and export status line all render it correctly with zero new surface — while a separate `quote_mismatch` field (NotRequired, present only when non-empty) records which numbers were flagged via quotes for inspection.
+- **No spec/schema change**: both fields are additive and optional; old persisted reports read as before via `.get()` guards.
+
+8 tests added: foreign-source flag; cited-source clean; absent-quote silence; sub-8-char concept-name silence; ASCII "…" coverage; clause-level attribution; trailing-fragment inheritance; report merge+field wiring. `pytest tests/` now runs 746 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.186 (2026-09-22)
+**Improved (retrieval precision)**: `rerank()`'s lexical signal now weights query terms by pool-local IDF (`_pool_idf`). The uniform mean treated every term as equally informative — but a term present in *every* candidate is what got them retrieved in the first place, so it carries zero discriminative power for the rerank, while a term few candidates contain is decisive. This is Robertson & Zaragoza's (2009) IDF rationale applied to the retrieved set — the same class of pool statistics the v0.2.182 PRF pass uses for expansion. Measured failure shape: a chunk that merely repeats the common term several times could outscore the chunk actually containing the query's rare, decisive term.
+
+- **Mechanism**: for each query term, `idf = ln(1 + (N - df + 0.5)/(df + 0.5))` over the rerank candidate texts (BM25-style, always positive and finite — df=0 terms get the largest weight but multiply by a saturated tf of 0, contributing nothing). Each term's `tf/(tf+1)` saturation is weighted by its idf and normalised by the weight sum, so the score stays in [0,1].
+- **Degeneracy-safe by construction**: a *weighted* mean reduces to the *uniform* mean exactly when all weights are equal — so pools where every term is equally (un)informative score identically to before, and single-term queries skip the machinery entirely (`idf=None`, byte-identical path). Only multi-term pools with differing discriminability move at all.
+- **Contract preserved**: `detail["lex"]` remains the pure uniform overlap (the hoisted-terms contract test pins `lexical_overlap` to 12 places); the new signal is recorded as `detail["lexw"]` and used in the score — `score = (1-w)*score + w*lexw + w*PROX_WEIGHT*prox` — visible via `SHOIN_DEBUG` alongside lex/prox.
+
+5 tests added: rare-term flip (uniform overlap prefers the repetitive chunk, IDF promotes the rare-term chunk — the flip is asserted both directions), equal-df degeneration to the uniform mean, absent-term weight safety, common<rare ordering, single-term skip. `pytest tests/` now runs 738 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.185 (2026-09-22)
+**Fixed (test-suite flake, root cause)**: `InputValidationSecurityTest` connections used `timeout=5` on localhost HTTP requests. Under full-suite CPU load a request can legitimately take several seconds — the socket timeout fired a `TimeoutError` even though both the server and the code under test were healthy (`test_add_note_with_non_string_body_returns_400` flaked once this way). Root cause: the timeout conflated two different jobs. A client socket timeout can only ever catch "server hung forever" — it must never act as a latency SLA on a shared-CPU test host, because slowness under load is a property of the machine, not a defect in the code under test.
+
+- **Fix**: all six `HTTPConnection(..., timeout=5)` sites in the class now share `_CONN_TIMEOUT = 30`, a liveness bound generous enough to distinguish a dead server from a merely loaded one; a documented comment marks it as a hang guard, not a response-time assertion.
+- **Audit** (the "remaining wall-clock tests" sweep): every other wall-clock dependency in the suite was checked and left intentionally — `_OverlapDetectingLLM.chat_stream`'s `time.sleep(0.15)` widens the mock's critical section so a serialization violation can only ever produce a *missed* detection, never a false failure; `urlopen(timeout=10)`, `t.join(timeout=15)`, and `Event.wait(10)` are already generous bounded liveness guards. No other tight socket timeouts exist.
+- Rollback: revert the `timeout` literals; no production code touched.
+
+`pytest tests/` still runs 733 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.184 (2026-09-22)
+**Added (citation verification, check 5)**: `numeric_mismatches()` — a fifth machine check in `citation.py`'s verification layer. Checks 2–3 (`verify_grounding`) compare *wording* between a cited sentence and its source, which structurally misses the failure shape the citation literature documents as dominant: a correctly-attributed sentence carrying a fabricated statistic. arXiv:2510.20303's audit of real RAG answers found numeric errors at the top of the citation-failure taxonomy, and ACL-industry CiteFix ships the same mechanical check. A claim citing [S1] that asserts a digit string S1 never contains is now flagged.
+
+- **Mechanism**: `numeric_mismatches(text, source_texts)` reuses `verify_grounding()`'s exact sentence-split, trailing-citation `prev_claim` resolution, and clause attribution — `_segment_claims` was hoisted to module level (returning clause *text* rather than bigrams) so the two checks can never drift apart on which text a citation is held responsible for (the v0.2.77-79 duplicated-heuristic lesson). `_numbers()` extracts significant digit strings only: ≥2 digits or a decimal, NFKC-folded (全角 digits compare equal to ASCII), thousand separators stripped ("1,234" = "1234"). Single bare digits are deliberately unchecked — ubiquitous in Japanese text (第3版, 3月) — and spelled-out numbers (三, three) are never examined, deliberately asymmetric like the bigram checks: only an *absent* digit string asserts anything.
+- **Wired end-to-end like the existing flags**: `citation_report.numeric_mismatch` (NotRequired, present only when non-empty) flows from `make_report` into the three surfaces that already render `misattributed` — the Web UI's error badge + seal `mis` styling + tooltip, the CLI's per-source marker (`cite.numeric`, ja/en), and the Markdown export status line (`status_numeric`, ja/en). The UI addition is a display surface for a new verification signal, reason documented here: without it the flag would compute but stay invisible to users.
+- **No spec/schema change**: the report field is additive and optional; old persisted reports read as before via `.get()` guards everywhere.
+
+8 tests added: absent-number flagged; present-number clean; single-digit noise exclusion; comma/fullwidth equality; clause-level attribution (co-cited sentence flags only the wrong clause); trailing-fragment claim inheritance; spelled-out numbers silent; report field wiring. `pytest tests/` now runs 733 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.183 (2026-09-22)
+**Improved (retrieval precision)**: `rerank()` now adds a term-proximity bonus for multi-term queries. BM25 — and every other scorer in the pipeline (`_overlap_from_norm`, the trigram FTS index itself) — treats the query as a bag of words: a chunk where all terms co-occur inside one phrase scores identically to one where they scatter a paragraph apart. The term-dependency literature shows the co-occurrence span is one of the strongest cheap precision signals in IR: Metzler & Croft (SIGIR 2005, "A Markov Random Field Model for Term Dependencies", the Sequential Dependence Model whose unordered-window feature this implements) and Rasolofo & Savoy (2003) both measured sizeable precision gains, and FTS5's trigram index stores no positions — so the window is measured on the chunk text itself, in pure Python, at rerank time where the candidate set is already pool-sized.
+
+- **`_proximity_from_norm()`** computes an SDM-style unordered-window score: a sliding window over each hit's sorted term-occurrence list finds the smallest span containing the most distinct query terms; score = distinct-coverage × tightness = `(covered / len(terms)) × (PROX_SPAN / (span + PROX_SPAN))` with `PROX_SPAN=32` chars (roughly one compact CJK phrase). Fewer than two distinct present terms returns 0.0 — there is no pair to be near — so every single-term scoring path is byte-identical to before.
+- **Additive inside the existing lexical weight, not a new blend**: `score = (1-w)*score + w*lex + w*PROX_WEIGHT*prox` with `PROX_WEIGHT=0.35` → an effective ~0.10 of total score, in SDM's canonical feature-weight range and impossible to outweigh the retrieval signal itself. `detail["lex"]` stays the pure overlap measure (the hoisted-terms contract test pins it exactly), `detail["prox"]` records the new signal for `SHOIN_DEBUG` inspection.
+- Both production paths benefit identically: `retrieve()` and `retrieve_multi()` both call `rerank(clean, fused)` on the neg-stripped query, so negated `-term`s can never masquerade as proximity terms and the verified single/multi-query behavioral equivalence is untouched.
+
+5 tests added: single-term prox=0 identity; tight-window outscores scattered; one-term-present yields 0; equal-score rerank prefers the tight hit and records `detail["prox"]`; single-term rerank score equals the pure overlap blend. `pytest tests/` now runs 725 tests; `scripts/verify.sh` all gates pass.
+
+### v0.2.182 (2026-09-22)
+**Improved (retrieval recall)**: BM25 retrieval now runs one pseudo-relevance-feedback pass when the first pass underfills its candidate pool. BM25's residual weakness is vocabulary mismatch — a chunk sharing no spelling with any query term (even via `term_variants()`' width/kana bridging) is invisible to the index no matter how topically dense it is. The classical answer is relevance modelling: Lavrenko & Croft (SIGIR 2001, "Relevance-based language models", the RM1/RM3 line) and Abdul-Jaleel et al. (TREC 2004, still the standard cross-language/topic recipe of 10–50 feedback docs and 10–20 expansion terms) treat the top-ranked documents as relevant and expand the query with their shared distinctive terms; Jedidi & Lin (SIGIR 2026, "Revisiting BM25 Feedback Models using HyDE") confirm the mechanism still transfers to modern BM25 pipelines, which is what `bm25_search()` is. Unlike the existing multi-query RAG-Fusion path (`SHOIN_MULTI_QUERY`), PRF costs no LLM call and works fully offline — the right fit for a local-first tool targeting 4–8 GB machines.
+
+- **`bm25_prf_search()`** wraps `bm25_search()` rather than modifying it: when the first pass returns fewer hits than the pool size `k`, `_prf_terms()` collects the top `PRF_DOCS=3` hits (the bottom of the classic 3–10 doc range — the fewest feedback docs means the least expansion drift), extracts CJK 2–3-grams and ASCII words ≥3 chars that occur in **≥2** of those docs (`PRF_MIN_DOCS` — a term in only one doc is that doc's noise, not a topical signal), drops grams already covered by the query (raw terms plus every `term_variants()` spelling — re-adding them wastes the OR budget), and re-runs `bm25_search()` on `query + up to PRF_TERMS=8 expansion terms`. Original hits keep their score and rank; expansion-only hits append deduplicated and the merged list re-sorts by `bm25` before capping at `k`. When the pool is already full, or fewer than 2 feedback docs exist, or no surviving candidate gram exists, the function returns the first pass unchanged — zero extra cost in the common case, no single-doc vocabulary hijack.
+- **Wired identically into both production call sites**: `retrieve()`'s single-query pool and `retrieve_multi()`'s per-phrase pool both call `bm25_prf_search`, so every phrasing expands on its own feedback evidence and the verified behavioral equivalence of the two paths (search.py docstring, 400-case fuzz) is preserved. Negated terms propagate identically — expansion terms append after the original text, so `bm25_search()`'s internal `-term` handling and `_apply_neg_filter()` still suppress negated chunks no matter which pass surfaced them.
+- **Deliberately not a spec change**: no DB schema, API shape, UI, or library touched; `bm25_search()`'s single-pass behavior (pinned by existing tests) is untouched. Recall-only improvement in the exact gap product-review's retrieval section documents: queries whose answer chunk uses different vocabulary than the question.
+
+5 tests added: vocabulary-mismatch surfacing with a baseline non-match contrast; `<2` feedback docs returns unchanged; full pool pays for no second pass (spy-asserted `bm25_search` call count); `-term` still excludes expansion-surfaced chunks; `_prf_terms` query-vocabulary exclusion including subsumed grams (学問→学問所). `pytest tests/` now runs 720 tests; `scripts/verify.sh` all gates pass.
 
 ### v0.2.181 (2026-09-22)
 **Fixed (test determinism)**: `GenerationSerializationTest.test_multi_query_rewrite_call_not_serialized_against_other_requests_generation` could fail under load even though the code it guards never serialized anything. The test fired two `/ask` requests 0.1s apart with 0.2s mock LLM sleeps and asserted a wall-clock overlap between request 2's rewrite call and request 1's stream call — an overlap that only materializes if request 1's post-rewrite work (add_message → headers → build_context → meta SSE) finishes within ~0.1s. Under suite load that window routinely exceeds the stagger: measured runs showed request 1's stream starting 0.3s after its rewrite ended, by which time request 2's rewrite had long closed, and the assertion failed despite `retrieve_for_question()` correctly running outside `generation_lock`. Reproduced deterministically once under load, then confirmed the same test passed 3× in isolation — a scheduling race, not a regression. Fixed by making the overlap explicit in the mock rather than implicit in the scheduler: `_TimingLLM` now carries a `rewrite_inflight`/`stream_started` `threading.Event` pair — the second rewrite call announces itself in-flight and stays open until the first stream call has actually started, and that first stream call waits for a second rewrite to be in-flight before recording its interval. The asserted property (a rewrite must be able to run concurrently with a *different* request's generation) is unchanged and now holds regardless of thread timing; all waits are bounded at 10s so a stuck request can never hang the suite. The `chat_stream`-vs-`chat_stream` serialization check (the other half of what `generation_lock` exists for) is untouched and still asserted in the same test.

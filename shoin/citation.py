@@ -16,6 +16,31 @@ every generated text:
    at sentences that already carry a citation. A hallucinated or unsupported
    claim with *zero* citations anywhere in it is invisible to those checks —
    this scans for exactly that gap (docs/product-review.md priority item #1).
+5. Numeric-consistency check (`numeric_mismatches`): checks 2 and 3 compare
+   wording, which misses the most common hallucination shape the citation
+   literature actually documents (arXiv:2510.20303, ACL-industry CiteFix):
+   a correctly-attributed sentence carrying a *fabricated* statistic. A claim
+   citing [S1] that asserts a digit string S1 never contains is flagged — the
+   highest-precision hallucination signal available without an NLI model.
+6. Quote-mismatch check (`quote_mismatches`): a 「…」/"…" span cited to S_n
+   but appearing verbatim in a *different* source is exact-string proof the
+   number is wrong — folded into `misattributed` (v0.2.187).
+7. Degeneration check (`degenerate_spans`): verbatim ≥3× repetition in the
+   answer itself — the failure shape small local LLMs are prone to
+   (v0.2.188).
+8. Unit-consistency check (`unit_mismatches`): the numeric check asks only
+   whether a digit string exists; a number present under a DIFFERENT unit
+   ("100km" vs "100m", "100億円" vs "100万円") is the same magnitude of
+   fabrication and invisible to it (v0.2.190).
+9. Negation-polarity check (`negation_mismatches`): a claim mirroring a
+   source sentence with the negation flipped ("効果はない" citing "効果は
+   ある") scores high bigram overlap and is CONFIRMED by check 2 — only a
+   parity count catches the inversion (v0.2.201, extended to antonym/degree
+   swaps in v0.2.202).
+10. Self-contradiction check (`self_contradictions`): the same flip inside
+   the answer itself — "効果はある" early, "効果はない" later. A single-
+   contiguous-span difference is required so a different-subject contrast
+   ("Aは効果がある。Bは効果がない") stays silent (v0.2.204).
 
 A lexical signal is asymmetric: high overlap reliably *confirms* support, but
 low overlap is inconclusive (a correct synonym paraphrase and a true
@@ -32,6 +57,7 @@ signal — concrete evidence the user can inspect, not a single opaque number.
 
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from typing import NotRequired, TypedDict
@@ -73,6 +99,87 @@ _DISCLAIMER_MARKERS = (
     "not mentioned",
     "not found in the source",
 )
+
+# Framing sentences describe the answer's own structure ("以下に要点を示します",
+# "要点は以下の通りです", "as follows") — they assert nothing about the
+# sources, so flagging them as unsupported assertions is a false positive on
+# every well-organized answer. The patterns require a structural verb and
+# bound the tail tightly, so "以下の通り：効果はある" (framing prefix + real
+# claim) does NOT match — only lines that are framing all the way through.
+_FRAMING_RE = re.compile(
+    r"^(以下|上記|以上|前項|前述|次に)[のにはが：:、]?"
+    r"[^。]{0,10}(示し|まとめ|説明|記載|列挙|言及|確認|紹介|報告|述べ)"
+    r"[^。]{0,10}。?$"
+    r"|^(要点|結論|まとめ|結果)は(以下|上記|前項|前述)の通り(です|である)?。?$"
+    r"|^(the following|as follows|in summary|in conclusion|"
+    r"as (noted|shown|described|mentioned) (above|below))[^.]{0,30}\.?$",
+    re.IGNORECASE,
+)
+
+# A line ending in an enumeration-introducing shape scopes the list block that
+# follows it: "効果は以下の通り[S1]：\n・効果は高い" cites S1 over the whole
+# enumeration, so flagging each item as an unsupported assertion is a false
+# positive on the most common LLM list style. Two shapes qualify — a closing
+# colon, or the 通り-enumeration forms already recognised by _FRAMING_RE. A
+# 。-terminated claim ("効果は高い[S1]。") does NOT introduce a list, and
+# "思った通り"-style comparisons don't enumerate either, so the 通り branch
+# requires the same enumeration words as _FRAMING_RE.
+_LIST_INTRO_RE = re.compile(
+    r"(?:[:：]|(?:以下|次|上記|前項|前述)の(?:通り|とおり)(?:です|である|だ|でした)?)"
+    r"\s*[。．.、,：:]?\s*$"
+)
+
+# Markdown structural lines are not sentences and cannot carry the kind of
+# claim uncited_sentences() exists to flag: an ATX heading is a label, a table
+# row's cells are fragments (and a |---| separator asserts nothing at all), a
+# horizontal rule is pure layout, and a "> " blockquote is itself an
+# attribution form. Fenced code blocks are handled separately below since the
+# code INSIDE them isn't prose either — both need the same exclusion.
+_STRUCTURAL_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s|\|.*\|\s*$|[\-*_~]{3,}\s*$|>)"
+)
+# Fence open/close markers. `in_fence` in uncited_sentences() toggles on these;
+# everything between a pair is code, not prose sentences.
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# Indented code blocks (v0.2.217): a 4-space/tab-indented line is ALSO code —
+# but only when the previous line is blank (or the block is already open).
+# Otherwise the indent is a lazy continuation of a wrapped paragraph
+# (CommonMark), so prose with incidental leading spaces stays visible.
+_INDENT_CODE_RE = re.compile(r"^(?: {4}|\t)")
+
+
+def _strip_fences(text: str) -> str:
+    """Remove code blocks and their contents — fenced and indented alike,
+    since code is not prose: repeated statements or reassigned values inside
+    either must not feed the degeneration/self-contradiction signals
+    (uncited_sentences() tracks the same boundaries inline for its
+    pending-resolution logic). An unterminated fence runs to end-of-file,
+    matching Markdown."""
+    out: list[str] = []
+    in_fence = False
+    in_code = False
+    prev_blank = True
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            in_code = False
+            prev_blank = False
+            continue
+        if in_fence:
+            continue
+        if not line.strip():
+            # Blank lines keep an open indented block alive and are kept in
+            # the output — every consumer ignores them anyway.
+            prev_blank = True
+            out.append(line)
+            continue
+        if _INDENT_CODE_RE.match(line) and (in_code or prev_blank):
+            in_code = True
+            continue
+        in_code = False
+        prev_blank = False
+        out.append(line)
+    return "\n".join(out)
 
 # Common English question-starter words. LLMs asked for "no decoration" often
 # omit trailing "?" in list form; these words reliably identify questions.
@@ -117,13 +224,39 @@ class CitationReport(TypedDict):
     # absent on old persisted reports — consumers must guard with .get().
     source_id_map: NotRequired[dict[str, int]]
     # Grounding checks (present only when source bodies are supplied):
-    #   confirmed     -> S-numbers whose cited sentence is lexically supported
-    #   misattributed -> S-numbers whose cited sentence clearly belongs elsewhere
+    #   confirmed         -> S-numbers whose cited sentence is lexically supported
+    #   misattributed     -> S-numbers whose cited sentence clearly belongs elsewhere
+    #   numeric_mismatch  -> S-numbers whose cited claim asserts a number the
+    #                        source never contains (present only when non-empty)
+    #   quote_mismatch    -> S-numbers cited for a verbatim quote that lives in
+    #                        a different source; also folded into `misattributed`
+    #                        (present only when non-empty)
+    #   unit_mismatch     -> S-numbers whose cited claim asserts a number the
+    #                        source carries under an incompatible unit
+    #                        (present only when non-empty)
     confirmed: NotRequired[list[int]]
     misattributed: NotRequired[list[int]]
+    #   misattributed_suggested -> "S#"-keyed map wrong S-number → the source
+    #                        the claim actually matches (verbatim provenance
+    #                        wins over bigram argmax; v0.2.220)
+    misattributed_suggested: NotRequired[dict[str, str]]
+    numeric_mismatch: NotRequired[list[int]]
+    quote_mismatch: NotRequired[list[int]]
+    unit_mismatch: NotRequired[list[int]]
+    #   negation_mismatch -> S-numbers whose cited claim mirrors a source
+    #                        sentence with the negation polarity flipped
+    #                        (present only when non-empty)
+    negation_mismatch: NotRequired[list[int]]
+    #   self_contradiction -> sentences contradicting an earlier sentence of
+    #                        the same answer (present only when non-empty)
+    self_contradiction: NotRequired[list[str]]
     # True when the LLM was unreachable and the answer is search-only excerpts.
     # Absent on non-degraded responses and old persisted reports.
     degraded: NotRequired[bool]
+    # True when generation ended with finish_reason "length" — the answer hit
+    # MAX_TOKENS mid-output. Generation-side signal (not a citation check);
+    # absent on complete responses and old persisted reports.
+    truncated: NotRequired[bool]
     # Maps "S1" -> excerpt of the text actually retrieved as context for the answer.
     # Allows the UI to show the supporting passage immediately on seal-click without
     # an extra HTTP fetch. Absent on old persisted reports — consumers must guard.
@@ -139,11 +272,31 @@ class CitationReport(TypedDict):
     # instead of trusting a detached excerpt (visual source attribution).
     # Absent on old persisted reports — consumers must guard.
     source_chunk_ids: NotRequired[dict[str, list[int]]]
+    # Maps "S1" -> the retrieval-provenance detail of that source's top hit
+    # (rrf_bm25_rank / rrf_vec_rank / lex) — WHICH retrieval channel surfaced it.
+    # A source found only by vector recall (no bm25 rank, lex==0) is exactly the
+    # class unsupported claims come from, so the why-it-surfaced signal belongs
+    # next to the what-it-said excerpts. Absent on old persisted reports and
+    # degraded reports built without a context — consumers must guard.
+    source_detail: NotRequired[dict[str, dict[str, float]]]
     # Sentences that assert content with zero [S#] citations anywhere in them —
     # invisible to verify_grounding(), which only checks already-cited sentences.
     # Present only when n_sources > 0 (nothing to cite against otherwise).
     # Absent on old persisted reports — consumers must guard.
     uncited: NotRequired[list[str]]
+    #   uncited_supported -> subset of `uncited` whose claim DOES lexically
+    #                        match some source (bigram >= CONFIRM_MIN) — a
+    #                        missing-[S#] citation omission, NOT an unsupported
+    #                        assertion; the ungrounded remainder is the
+    #                        dangerous kind (present only when non-empty)
+    uncited_supported: NotRequired[list[str]]
+    #   uncited_supported_source -> sentence -> best-matching "S#" the
+    #   citation was most likely omitted from
+    uncited_supported_source: NotRequired[dict[str, str]]
+    # Snippets of verbatim repetition signalling an LLM degeneration loop —
+    # answer-internal, so present whenever it fires (no sources needed).
+    # Absent on old persisted reports — consumers must guard.
+    degenerate: NotRequired[list[str]]
 
 
 def extract_citations(text: str) -> list[int]:
@@ -180,13 +333,64 @@ def _overlap(claim: set[str], source: set[str]) -> float:
     return len(claim & source) / len(claim) if claim else 0.0
 
 
-def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int], list[int]]:
+def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
+    """Attribute each citation to the clause-text that precedes it.
+
+    A sentence carrying several citations makes several claims; comparing the
+    WHOLE sentence against each cited source dilutes every one of them with
+    the other clauses' wording. With ordinary Japanese clause joining
+    ("…であり、…") that dilution is severe enough to push a correctly-cited
+    source below CONFIRM_MIN *and* let a different co-cited source win by the
+    MISMATCH_GAP margin — a false "wrong source number" accusation, which is
+    exactly what this module's design forbids (v0.1.4: never accuse a correct
+    answer). The citation markers are themselves the clause delimiters, so the
+    split needs no NLI model or LLM: the text since the previous marker is what
+    this marker cites. Sub-sentence attribution is where citation research is
+    heading (arXiv:2509.20859); this is its dependency-free special case.
+
+    Returns {} when the sentence has fewer than two citation positions — the
+    whole-sentence comparison is already correct there and stays untouched.
+    Shared by verify_grounding() (bigram overlap per clause) and
+    numeric_mismatches() (digit strings per clause) so the two can never
+    diverge on WHICH text a citation is held responsible for — the
+    v0.2.77-79 duplicated-heuristic drift lesson.
+    """
+    spans = list(_BRACKET_RE.finditer(norm))
+    cited_spans = [
+        (m, [int(x) for x in _SNUM_RE.findall(m.group(1)) if int(x) in valid])
+        for m in spans
+    ]
+    cited_spans = [(m, ns) for m, ns in cited_spans if ns]
+    if len(cited_spans) < 2:
+        return {}
+    out: dict[int, str] = {}
+    prev_end = 0
+    for m, ns in cited_spans:
+        seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
+        prev_end = m.end()
+        if not _bigrams(seg):
+            continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
+        for n in ns:
+            out[n] = seg
+    return out
+
+
+def verify_grounding(
+    text: str,
+    source_texts: dict[int, str],
+    *,
+    suggested: dict[int, int] | None = None,
+) -> tuple[list[int], list[int]]:
     """Check each cited sentence against the source(s) it cites, lexically.
 
     Returns (confirmed, misattributed):
     - *confirmed*: S-numbers whose cited sentence is lexically supported by them.
     - *misattributed*: S-numbers whose cited sentence matches a *different* source
       far better than the cited one — a likely wrong citation number.
+
+    *suggested*, when a dict is passed, is filled with the argmax that produced
+    each misattributed flag — wrong S-number → the S-number the claim actually
+    matches (v0.2.220).  Optional so existing two-tuple callers are unaffected.
 
     Sentences whose overlap with the cited source is merely low (no other source
     matches either) are left unflagged: that is the inconclusive case a lexical
@@ -199,44 +403,6 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
     src_bg = {n: _bigrams(t) for n, t in source_texts.items()}
     confirmed: set[int] = set()
     misattributed: set[int] = set()
-
-    def _segment_claims(norm: str, valid: list[int]) -> dict[int, set[str]]:
-        """Attribute each citation to the clause that precedes it.
-
-        A sentence carrying several citations makes several claims; comparing the
-        WHOLE sentence against each cited source dilutes every one of them with
-        the other clauses' wording. With ordinary Japanese clause joining
-        ("…であり、…") that dilution is severe enough to push a correctly-cited
-        source below CONFIRM_MIN *and* let a different co-cited source win by the
-        MISMATCH_GAP margin — a false "wrong source number" accusation, which is
-        exactly what this module's design forbids (v0.1.4: never accuse a correct
-        answer). The citation markers are themselves the clause delimiters, so the
-        split needs no NLI model or LLM: the text since the previous marker is what
-        this marker cites. Sub-sentence attribution is where citation research is
-        heading (arXiv:2509.20859); this is its dependency-free special case.
-
-        Returns {} when the sentence has fewer than two citation positions — the
-        whole-sentence comparison is already correct there and stays untouched.
-        """
-        spans = list(_BRACKET_RE.finditer(norm))
-        cited_spans = [
-            (m, [int(x) for x in _SNUM_RE.findall(m.group(1)) if int(x) in valid])
-            for m in spans
-        ]
-        cited_spans = [(m, ns) for m, ns in cited_spans if ns]
-        if len(cited_spans) < 2:
-            return {}
-        out: dict[int, set[str]] = {}
-        prev_end = 0
-        for m, ns in cited_spans:
-            seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
-            prev_end = m.end()
-            bg = _bigrams(seg)
-            if not bg:
-                continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
-            for n in ns:
-                out[n] = bg
-        return out
     # Carry the most recent non-empty claim bigrams so that citation-only fragments
     # (produced by the (?<=\.)(?=\s) split, e.g. "Sentence. [S1]" → " [S1]") can
     # still be verified against the sentence they annotate.
@@ -272,7 +438,7 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim)
+            claim_n = _bigrams(segments[n]) if n in segments else claim
             overlap_n = _overlap(claim_n, src_bg[n])
             if overlap_n >= CONFIRM_MIN:
                 confirmed.add(n)
@@ -282,13 +448,1031 @@ def verify_grounding(text: str, source_texts: dict[int, str]) -> tuple[list[int]
                 # sentence are correctly cited.
                 # Compare rivals against the SAME clause, or the two sides of the
                 # MISMATCH_GAP comparison would be measured on different units.
-                best_other = max(
-                    (_overlap(claim_n, src_bg[k]) for k in src_bg if k != n), default=0.0
+                best_k, best_other = max(
+                    (
+                        (k, _overlap(claim_n, src_bg[k]))
+                        for k in src_bg
+                        if k != n
+                    ),
+                    key=lambda kv: kv[1],
+                    default=(0, 0.0),
                 )
                 if best_other >= CONFIRM_MIN and best_other - overlap_n >= MISMATCH_GAP:
                     misattributed.add(n)
+                    if suggested is not None:
+                        suggested[n] = best_k
             # otherwise inconclusive (possibly a valid paraphrase) — stay silent
     return sorted(confirmed), sorted(misattributed)
+
+
+# --- numeric consistency (v0.2.184) ------------------------------------------
+
+_NUM_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
+_NUM_COMMA_RE = re.compile(r"(?<=\d),(?=\d)")
+
+
+def _numbers(text: str) -> set[str]:
+    """Significant digit strings in text (NFKC-folded): ≥2 digits or a decimal.
+
+    Single bare digits are excluded — nearly every Japanese text contains one
+    (第3版, 3月), so flagging them would be noise, not signal. Thousand
+    separators are stripped before matching so "1,234" and "1234" compare equal.
+    """
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    return {
+        m.group(0)
+        for m in _NUM_TOKEN_RE.finditer(t)
+        if "." in m.group(0) or len(m.group(0)) >= 2
+    }
+
+
+# Magnitude suffixes that turn "3.2万" into the value 32000 (v0.2.192).
+# Japanese shorthand arithmetic is read constantly — a model legitimately
+# expands "3.2万円" to "32000円" — so a digit-string presence check alone
+# flags a correct restatement. "千万"/"百万" precede "万" in the alternation
+# (ordered leftmost matching). Spelled-out numerals stay unchecked —
+# ambiguous, per the module's silent principle.
+_MAG_SUFFIX = {
+    "千": 1_000,
+    "万": 10_000,
+    "百万": 1_000_000,
+    "千万": 10_000_000,
+    "億": 100_000_000,
+    "兆": 1_000_000_000_000,
+}
+# Kanji numerals are NOT ambiguous — they follow positional notation
+# (digit chars 一…九 plus place chars 十/百/千): "二十億" is unambiguously
+# 20億, "百三万" is 103万, "一億二千万" is 120,000,000 (v0.2.195, replacing
+# the v0.2.193 single-kanji-only approximation). Runs exclude the group
+# separators 万/億/兆, which attach to the run as suffixes.
+_KANJI_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_KANJI_PLACE = {"十": 10, "百": 100, "千": 1_000}
+_KANJI_RUN = r"[一二三四五六七八九十百千]+"
+_NUM_PART = rf"(?:\d+(?:\.\d+)?|{_KANJI_RUN})"
+_MAG_SUF = r"(?:千万|百万|億|万|千|兆)"
+_MAG_NUM_RE = re.compile(rf"({_NUM_PART})(千万|百万|億|万|千|兆)")
+# Chained magnitudes (v0.2.194): "1億2000万" — or kanji "一億二千万", or mixed
+# "一億2000万" — = 120,000,000. A chain is ≥2 adjacent numeral+suffix pairs;
+# the sum is added alongside the per-part values.
+_MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
+# Bare kanji-numeral runs (v0.2.195): "十二人" ↔ "12人". The lookahead keeps
+# the run maximal — a run ending right before another numeral or suffix char
+# is a component of a larger form, not a standalone value.
+_KANJI_BARE_RE = re.compile(r"([一二三四五六七八九十百千]{2,})(?![一二三四五六七八九十百千万億兆])")
+
+# Era-name year spellings (元号) ↔ Gregorian year (v0.2.225): "令和6年" and
+# "2024" assert the same year, but neither the digit extraction nor LIKE/FTS
+# matches can see it.  One shared table keeps the numeric check (which uses
+# the expansions to suppress false mismatches) and the query-side bridge in
+# search._numeric_variants consistent.  (name, gregorian year of 元年,
+# last gregorian year the era covers — bounds reject 昭和65年-type input.)
+_ERAS: tuple[tuple[str, int, int], ...] = (
+    ("明治", 1868, 1912),
+    ("大正", 1912, 1926),
+    ("昭和", 1926, 1989),
+    ("平成", 1989, 2019),
+    ("令和", 2019, 2050),  # ongoing — far-future era years aren't assertable
+)
+_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|[0-9]+|[一二三四五六七八九十百千]+)年")
+_ERA_BASE_END = {name: (base, end) for name, base, end in _ERAS}
+
+# Spelled-out English numerals (v0.2.196): "three million" ↔ "3000000",
+# "twenty-one" ↔ "21" — English sources assert the same values in words and
+# the digit-string presence check flagged the correct restatement. "and" is
+# deliberately not a separator ("one and two" is a list, not a sum), so the
+# BrE "three hundred and twenty" splits into two runs — a documented miss,
+# not a wrong expansion.
+_EN_SMALL = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_EN_BIG = {"thousand": 1_000, "million": 1_000_000, "billion": 1_000_000_000}
+_EN_NUM_RE = re.compile(
+    r"(?<![a-zA-Z])("
+    + "|".join([*_EN_SMALL, "hundred", *_EN_BIG])
+    + r")(?:[ -]("
+    + "|".join([*_EN_SMALL, "hundred", *_EN_BIG])
+    + r"))*(?![a-zA-Z])",
+    re.IGNORECASE,
+)
+
+# 歩合 notation (v0.2.197): "6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8%.
+# 割 = 10%, 分 = 1%, 厘 = 0.1% — deterministic, so a claim asserting the
+# percent value no longer false-flags. 割 is required: bare "五分" reads as
+# minutes or as half of "五分五分" (50-50 odds), never a percentage alone.
+_WARI_RE = re.compile(rf"({_NUM_PART})割(?:({_NUM_PART})分)?(?:({_NUM_PART})厘)?")
+
+# Unit-conversion equivalence (v0.2.198): a claim saying "180分" against a
+# source writing "3時間" asserts the same duration — yet 180 never occurs in
+# the source text, so the presence check false-flagged. The conversion is
+# deterministic within each dimension family; months and years stay out
+# (28–31 days / 365–366 days are genuinely ambiguous).
+_SCALE_FAMILIES: list[dict[str, float]] = [
+    {"秒": 1 / 60, "分": 1.0, "時間": 60.0, "日": 1440.0, "週": 10080.0, "週間": 10080.0},
+    {
+        "mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0,
+        "ミリメートル": 0.001, "センチメートル": 0.01, "メートル": 1.0, "キロメートル": 1000.0,
+    },
+    {"g": 1.0, "kg": 1000.0, "グラム": 1.0, "キログラム": 1000.0},
+    {"ml": 0.001, "cc": 0.001, "L": 1.0, "ミリリットル": 0.001, "リットル": 1.0},
+]
+_UNIT_SCALE = {u: (i, s) for i, fam in enumerate(_SCALE_FAMILIES) for u, s in fam.items()}
+# Dedicated pair extractor — separate from _UNIT_NUM_RE because the unit check
+# deliberately excludes 時/分/秒/日 (indistinguishable from date chains), but
+# conversion pairs only ever SUPPRESS flags, and only same-family equality
+# suppresses, so the ambiguity that justified exclusion cannot cause a miss.
+_CONV_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)(週間|時間|日|週|秒|分|[a-zA-Zμµ°%]+|[ァ-ヶー]+)")
+
+
+def _conv_values(text: str) -> set[tuple[int, float]]:
+    """(family, canonical value) pairs extractable from text, including
+    adjacent same-family sums — "1時間30分" yields (time, 60), (time, 30),
+    and (time, 90)."""
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    ms = list(_CONV_NUM_RE.finditer(t))
+    vals: set[tuple[int, float]] = set()
+    for i, m in enumerate(ms):
+        ent = _UNIT_SCALE.get(m.group(2))
+        if ent is None:
+            continue
+        fam, sc = ent
+        acc = float(m.group(1)) * sc
+        vals.add((fam, acc))
+        for j in range(i + 1, len(ms)):
+            nxt = ms[j]
+            ent2 = _UNIT_SCALE.get(nxt.group(2))
+            if ent2 is None or ent2[0] != fam or len(t[ms[j - 1].end():nxt.start()]) > 2:
+                break
+            acc += float(nxt.group(1)) * ent2[1]
+            vals.add((fam, acc))
+    return vals
+
+
+def _en_value(run: str) -> int | None:
+    """Value of a spelled-out English numeral run, or None when ambiguous.
+
+    Accumulates small numbers, multiplies by hundred/thousand/million/billion:
+    "three hundred twenty five" → 325, "two million" → 2,000,000. An empty
+    local reads as one ("a hundred" → 100, "million" → 1,000,000).
+    """
+    total = 0
+    local = 0
+    used = False
+    for tok in re.split(r"[ -]+", run.lower()):
+        if tok in _EN_SMALL:
+            local += _EN_SMALL[tok]
+        elif tok == "hundred":
+            local = (local or 1) * 100
+        else:
+            total += (local or 1) * _EN_BIG[tok]
+            local = 0
+        used = True
+    return total + local if used else None
+
+
+def _kanji_value(run: str) -> int | None:
+    """Positional value of a kanji-numeral run, or None when ambiguous.
+
+    Digits (一…九) apply to the place char (十/百/千) that follows them, or
+    add to the running total at the end: "百三" → 100+3, "二十" → 2×10.
+    A pure digit run like "二三" ("a few") carries no place char and is a
+    counting sequence, not a numeral — inconclusive → None.
+    """
+    total = 0
+    digit = 0
+    seen_place = False
+    for ch in run:
+        if ch in _KANJI_DIGIT:
+            if digit:
+                return None  # consecutive digits ("一二三") — not a numeral
+            digit = _KANJI_DIGIT[ch]
+        else:
+            total += (digit or 1) * _KANJI_PLACE[ch]
+            digit = 0
+            seen_place = True
+    if not seen_place:
+        return digit if len(run) == 1 else None
+    return total + digit
+
+
+def _part_value(part: str) -> float | None:
+    if part[0].isdigit():
+        return float(part)
+    v = _kanji_value(part)
+    return float(v) if v is not None else None
+
+
+def _numbers_expanded(text: str) -> set[str]:
+    """_numbers() plus canonical values for magnitude-suffixed shorthand.
+
+    A number carrying a 千/万/百万/千万/億/兆 suffix is represented by its
+    expanded value INSTEAD of the raw digits: "3.2万" → {"32000"}. The raw
+    string is removed because the written digits literally do not occur in a
+    source that spelled the value out ("32000"), and keeping it would flag a
+    correct restatement. Kanji numerals (一万, 十二万, 一億二千万) expand
+    additively — no digit string exists to remove. Only integral expansions
+    are added (non-integral values like 1.2345万 have no canonical spelling —
+    inconclusive).
+    """
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    nums = _numbers(t)
+    suffixed: set[str] = set()
+    # Numeral+suffix pairs INSIDE a chain are components, not asserted values:
+    # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
+    # separate members would flag a claim spelling the summed value out.
+    chain_spans = [m.span() for m in _MAG_CHAIN_RE.finditer(t)]
+    for m in _MAG_NUM_RE.finditer(t):
+        part, suf = m.group(1), m.group(2)
+        if part[0].isdigit():
+            suffixed.add(part)
+        if any(cs <= m.start() < ce for cs, ce in chain_spans):
+            continue
+        pv = _part_value(part)
+        if pv is None:
+            continue
+        v = pv * _MAG_SUFFIX[suf]
+        r = round(v)
+        if abs(v - r) < 1e-6:
+            nums.add(str(r))
+    for m in _MAG_CHAIN_RE.finditer(t):
+        total = 0.0
+        for p in _MAG_NUM_RE.finditer(m.group(0)):
+            pv = _part_value(p.group(1))
+            if pv is None:
+                break
+            total += pv * _MAG_SUFFIX[p.group(2)]
+        else:
+            r = round(total)
+            if abs(total - r) < 1e-6:
+                nums.add(str(r))
+    for m in _KANJI_BARE_RE.finditer(t):
+        kv = _kanji_value(m.group(1))
+        if kv is not None and kv > 0:
+            nums.add(str(kv))
+    for m in _EN_NUM_RE.finditer(t):
+        ev = _en_value(m.group(0))
+        if ev is not None and ev > 0:
+            nums.add(str(ev))
+    for m in _ERA_NUM_RE.finditer(t):
+        part = m.group(2)
+        n = 1 if part == "元" else _part_value(part)
+        if n is None:
+            continue
+        base, end = _ERA_BASE_END[m.group(1)]
+        year = base + int(n) - 1
+        if year <= end:
+            nums.add(str(year))
+    nums |= _wari_values(t)
+    return nums - suffixed
+
+
+def _canon(v: float) -> str:
+    """Canonical string for a numeric value: integral floats print as ints."""
+    r = round(v)
+    return str(r) if abs(v - r) < 1e-6 else str(round(v, 10))
+
+
+def _wari_values(t: str) -> set[str]:
+    """Canonical percent values of 歩合 tokens in text (五割→50, 2割5分8厘→25.8)."""
+    out: set[str] = set()
+    for m in _WARI_RE.finditer(t):
+        wari = _part_value(m.group(1))
+        fun = _part_value(m.group(2)) if m.group(2) else 0.0
+        rin = _part_value(m.group(3)) if m.group(3) else 0.0
+        if wari is None or fun is None or rin is None:
+            continue
+        v = wari * 10 + fun + rin * 0.1
+        # >100% is not a real 歩合 value ("十二割" is nonsense) — leave
+        # inconclusive text unchecked rather than registering a phantom.
+        if 0 < v <= 100:
+            out.add(str(round(v)) if abs(v - round(v)) < 1e-6 else str(round(v, 1)))
+    return out
+
+
+# Rate-marked numerals (v0.2.214): a number immediately followed by %,
+# パーセント, or "percent" asserts a rate — so does every wari value.
+_RATE_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|パーセント|percent(?![a-zA-Z]))", re.IGNORECASE)
+
+
+def _rate_values(t: str) -> set[str]:
+    """Canonical value strings asserted as rates (50%→50, 五割→50) — the
+    marking set used to bridge percent↔fraction restatements (0.5 ↔ 50%)
+    asymmetrically: rate-marked numbers may stand in for their /100 fraction."""
+    out = {_canon(float(m.group(1))) for m in _RATE_NUM_RE.finditer(t)}
+    out |= _wari_values(t)
+    return out
+
+
+def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim asserts a number absent from that source.
+
+    verify_grounding() compares wording, which structurally misses the most
+    common hallucination shape the citation literature documents — a correctly
+    attributed sentence carrying a fabricated statistic (arXiv:2510.20303's
+    audit of real RAG answers found numeric errors dominate the citation-failure
+    taxonomy; ACL-industry CiteFix ships the same check). A claim citing [S1]
+    that asserts a digit string S1 never contains is flagged.
+
+    Same sentence- and clause-level attribution as verify_grounding (shared
+    _segment_claims): each citation is judged against the clause it annotates,
+    and a trailing "[S1]" fragment inherits the previous sentence's claim.
+
+    Deliberately asymmetric like the bigram checks: a claim number FOUND in the
+    source is no proof of correctness (rounding, derived arithmetic), and a
+    spelled-out number (three, 三) is never checked (ambiguous). Only an absent
+    digit string asserts anything — the module's "stay silent when inconclusive"
+    principle applied to numerals.
+    """
+    src_norm = {
+        n: _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", t))
+        for n, t in source_texts.items()
+    }
+    src_nums = {n: _numbers_expanded(t) for n, t in src_norm.items()}
+    src_conv = {n: _conv_values(t) for n, t in src_norm.items()}
+    src_rate = {n: _rate_values(t) for n, t in src_norm.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
+            # the substring fallback preserves v0.2.184's rounding tolerance
+            # (claim "63" stays silent inside source "63.5%"); the conversion
+            # check suppresses only when the claim's OWN unit pairs with the
+            # same canonical value in the same family — "300円" against a
+            # source saying "5時間" (→300min) stays flagged because 円 is
+            # not a time unit.
+            conv_by_num: dict[str, set[tuple[int, float]]] = {}
+            for m in _CONV_NUM_RE.finditer(claim_n):
+                ent = _UNIT_SCALE.get(m.group(2))
+                if ent is not None:
+                    conv_by_num.setdefault(m.group(1), set()).add((ent[0], float(m.group(1)) * ent[1]))
+            # Rate restatements (v0.2.214): a claim asserting "50%" matches a
+            # source writing the same rate as the bare fraction "0.5", and a
+            # bare-fraction claim "0.5" matches a source asserting "50%" — but
+            # the reverse directions stay strict: an unmarked claim "50" does
+            # NOT match a bare "0.5" (different magnitudes), and a fraction
+            # claim only bridges to a RATE-marked source value (claim "0.5" vs
+            # source "50個" keeps flagging — 50 was not asserted as a rate).
+            claim_rate = _rate_values(claim_n)
+            def _num_missing(num: str) -> bool:
+                if (
+                    num in src_nums[n]
+                    or num in src_norm[n]
+                    or not conv_by_num.get(num, set()).isdisjoint(src_conv[n])
+                ):
+                    return False
+                f = float(num)
+                if num in claim_rate and _canon(f / 100) in src_nums[n]:
+                    return False
+                if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
+                    return False
+                return True
+            if any(_num_missing(num) for num in _numbers_expanded(claim_n)):
+                out.add(n)
+    return sorted(out)
+
+
+# --- unit consistency (v0.2.190) ----------------------------------------------
+# A significant number followed by a unit suffix. Three bounded suffix classes:
+# - ASCII units/symbols: kg, km, GB, kWh, ppm, %, °C, μg — any letter run
+#   (% and ° included since 25%, 25°C read as single tokens)
+# - katakana units: キロ, メートル, ドル, パーセント — a >=1-char run
+# - a fixed counter-kanji set (persons/items/machines/currency/orders):
+#   time counters (年月日時分秒) are deliberately EXCLUDED — date chains like
+#   "2024年3月" make a bare 年 ambiguous between "year count" and "date part",
+#   so checking it would be noise, not signal.
+_UNIT_ASCII = r"[a-zA-Zμµ°%]+"
+_UNIT_KANA = r"[ァ-ヶー]+"
+_UNIT_KANJI = "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千"
+_UNIT_NUM_RE = re.compile(rf"(\d+(?:\.\d+)?)({_UNIT_ASCII}|{_UNIT_KANA}|[{_UNIT_KANJI}]+)")
+
+# Same-unit spellings across scripts (v0.2.191). NFKC already folds the
+# composed forms (㎞→km, ℓ→l, ％→%), so what remains are genuine aliases:
+# katakana spellings of SI/imperial units, and counter kanji that name the
+# same thing (歳/才, 名/人, 軒/棟/戸). ASCII units keep their
+# case — MW vs mW and B vs b are real distinctions, so no case-folding.
+# Directional on purpose: ambiguous colloquial tokens point at ALL their
+# possible readings (キロ→{km,kg}, ミリ→{mm,ml}) while the precise readings
+# never list each other — "100km" vs "100kg" still flags. The check is
+# `a ∈ aliases(b) or b ∈ aliases(a)`, so a bare ambiguous token can only
+# under-flag, never over-flag.
+_UNIT_ALIASES: dict[str, frozenset[str]] = {
+    "km": frozenset({"キロメートル"}),
+    "キロメートル": frozenset({"km"}),
+    "キロ": frozenset({"km", "kg", "キロメートル", "キログラム"}),
+    "m": frozenset({"メートル"}),
+    "メートル": frozenset({"m"}),
+    "cm": frozenset({"センチ", "センチメートル"}),
+    "センチ": frozenset({"cm"}),
+    "センチメートル": frozenset({"cm"}),
+    "mm": frozenset({"ミリメートル"}),
+    "ミリメートル": frozenset({"mm"}),
+    "ミリ": frozenset({"mm", "ml", "ミリメートル", "ミリリットル"}),
+    "ml": frozenset({"ミリリットル"}),
+    "ミリリットル": frozenset({"ml"}),
+    "kg": frozenset({"キログラム"}),
+    "キログラム": frozenset({"kg"}),
+    "g": frozenset({"グラム"}),
+    "グラム": frozenset({"g"}),
+    "mg": frozenset({"ミリグラム"}),
+    "ミリグラム": frozenset({"mg"}),
+    "t": frozenset({"トン"}),
+    "トン": frozenset({"t"}),
+    "l": frozenset({"リットル"}),
+    "リットル": frozenset({"l"}),
+    "%": frozenset({"パーセント"}),
+    "パーセント": frozenset({"%"}),
+    "$": frozenset({"ドル"}),
+    "ドル": frozenset({"$"}),
+    "€": frozenset({"ユーロ"}),
+    "ユーロ": frozenset({"€"}),
+    "lb": frozenset({"ポンド"}),
+    "ポンド": frozenset({"lb"}),
+    "W": frozenset({"ワット"}),
+    "ワット": frozenset({"W"}),
+    "kW": frozenset({"キロワット"}),
+    "キロワット": frozenset({"kW"}),
+    "V": frozenset({"ボルト"}),
+    "ボルト": frozenset({"V"}),
+    "A": frozenset({"アンペア"}),
+    "アンペア": frozenset({"A"}),
+    "Hz": frozenset({"ヘルツ"}),
+    "ヘルツ": frozenset({"Hz"}),
+    "kHz": frozenset({"キロヘルツ"}),
+    "キロヘルツ": frozenset({"kHz"}),
+    "MHz": frozenset({"メガヘルツ"}),
+    "メガヘルツ": frozenset({"MHz"}),
+    "GHz": frozenset({"ギガヘルツ"}),
+    "ギガヘルツ": frozenset({"GHz"}),
+    "B": frozenset({"バイト"}),
+    "バイト": frozenset({"B"}),
+    "KB": frozenset({"キロバイト"}),
+    "キロバイト": frozenset({"KB"}),
+    "MB": frozenset({"メガバイト"}),
+    "メガバイト": frozenset({"MB"}),
+    "GB": frozenset({"ギガバイト"}),
+    "ギガバイト": frozenset({"GB"}),
+    "TB": frozenset({"テラバイト"}),
+    "テラバイト": frozenset({"TB"}),
+    "hp": frozenset({"馬力"}),
+    "馬力": frozenset({"hp"}),
+    "ha": frozenset({"ヘクタール"}),
+    "ヘクタール": frozenset({"ha"}),
+    # counter-kanji equivalents: same count, different spelling. Deliberately
+    # excludes 本/冊 (long objects vs bound volumes — different semantics) and
+    # 番/位 (serial position vs rank — can differ); only pairs that mean the
+    # same count for every referent qualify.
+    "歳": frozenset({"才"}),
+    "才": frozenset({"歳"}),
+    "名": frozenset({"人"}),
+    "人": frozenset({"名"}),
+    "軒": frozenset({"棟", "戸"}),
+    "棟": frozenset({"軒", "戸"}),
+    "戸": frozenset({"軒", "棟"}),
+}
+
+
+def _unit_pairs(text: str) -> list[tuple[str, str]]:
+    """(number, unit) pairs for significant numbers (same threshold as _numbers)."""
+    t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    return [
+        (m.group(1), m.group(2))
+        for m in _UNIT_NUM_RE.finditer(t)
+        if "." in m.group(1) or len(m.group(1)) >= 2
+    ]
+
+
+def _units_compat(a: str, b: str) -> bool:
+    """Same unit, one extending the other ('1億' vs '1億円' are consistent
+    elaboration, not a swap), or a known cross-script alias (km↔キロメートル,
+    歳↔才) via _UNIT_ALIASES."""
+    return (
+        a == b
+        or a.startswith(b)
+        or b.startswith(a)
+        or a in _UNIT_ALIASES.get(b, frozenset())
+        or b in _UNIT_ALIASES.get(a, frozenset())
+    )
+
+
+def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim asserts a number with a DIFFERENT unit.
+
+    numeric_mismatches() only asks whether a digit string exists in the
+    source; a number that IS present but carries another unit is the same
+    magnitude of fabrication and structurally invisible to it — '100km' vs
+    '100m', '25%' vs '25ppm', '100億円' vs '100万円' all pass the
+    presence check while being wrong. Here the cited claim's (number, unit)
+    pairs are compared against the units the source attaches to that same
+    number.
+
+    Deliberately asymmetric like the other checks: only fires when the
+    source attaches a *different, incompatible* unit to the same number —
+    a source occurrence with no unit is inconclusive (the unit may live in
+    the surrounding text), a claim number absent from the source is
+    numeric_mismatches()' job, and prefix-extending units are elaboration.
+    Same sentence- and clause-level attribution via _segment_claims.
+    """
+    src_norm = {
+        n: _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", t))
+        for n, t in source_texts.items()
+    }
+    src_units = {n: _unit_pairs(t) for n, t in src_norm.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            for num, unit in _unit_pairs(claim_n):
+                if num not in src_norm[n]:
+                    continue  # absent number — numeric_mismatches()' signal
+                units_n = [v for num2, v in src_units[n] if num2 == num]
+                if units_n and not any(_units_compat(unit, v) for v in units_n):
+                    out.add(n)
+                    break
+    return sorted(out)
+
+
+# --- verbatim-quote consistency (v0.2.187) ------------------------------------
+
+_QUOTE_RE = re.compile(r"「([^」]+)」|\"([^\"]+)\"")
+# Minimum non-whitespace chars inside a quote marker for it to count as a
+# verbatim-quotation claim. Shorter 「…」 spans are concept names/emphasis
+# (「重要な点」), which never assert "this wording appears in the source".
+_QUOTE_MIN = 8
+# Near-verbatim (doctored-quote) bounds: a span ≥12 chars sharing ≥60% of its
+# bigrams with some source while matching none verbatim derives from that
+# source but asserts wording it never wrote — an error whether the overlap is
+# with the cited source (paraphrase wearing quotes) or a different one
+# (near-verbatim misattribution). Below 12 chars a topic-term emphasis could
+# coincidentally share 60% of its bigrams; below 0.6 the text could be a
+# legitimately loose quote-adjacent paraphrase — inconclusive, stays silent.
+_DOCTORED_MIN_LEN = 12
+_DOCTORED_MIN_OVERLAP = 0.6
+
+
+def _quote_spans(text: str) -> list[str]:
+    """Quoted spans ≥ _QUOTE_MIN, normalised for verbatim containment checks.
+
+    Only 「…」 and "…" count: 『…』 marks work titles (《書名》), and ASCII
+    apostrophes are too ambiguous to be quotation marks.
+    """
+    out: list[str] = []
+    for m in _QUOTE_RE.finditer(text):
+        q = m.group(1) or m.group(2)
+        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).lower()
+        if len(q) >= _QUOTE_MIN:
+            out.append(q)
+    return out
+
+
+def quote_mismatches(
+    text: str,
+    source_texts: dict[int, str],
+    *,
+    suggested: dict[int, int] | None = None,
+) -> list[int]:
+    """S-numbers cited for a verbatim quote that lives in a *different* source.
+
+    The same evidence shape as verify_grounding()'s misattributed flag, but
+    on the exact-string signal only a direct quotation provides: a 「…」/"…"
+    span whose characters appear verbatim in source m yet not in cited source
+    n is unambiguous proof that n is the wrong number for that claim — no
+    lexical-overlap margin needed. Quoted fabrication is a top entry in the
+    citation-failure taxonomy (arXiv:2510.20303), and bigram checks can miss
+    it entirely because a paraphrased surrounding sentence still scores
+    overlap with the wrongly-cited source.
+
+    A second, near-verbatim shape (v0.2.199): a span ≥ _DOCTORED_MIN_LEN
+    whose bigram overlap with some source exceeds _DOCTORED_MIN_OVERLAP
+    while matching NO source verbatim is a doctored quote — the assertive
+    「…」 claims exact wording the source never wrote, yet the text clearly
+    derives from that source (paraphrase wearing quotes, or near-verbatim
+    of a different source — both are citation errors).
+
+    Deliberately asymmetric like the other checks: a span found in NO source
+    at any meaningful overlap could be fabricated, but it could equally be
+    emphasis-「」 — inconclusive, so it stays silent. Same sentence- and
+    clause-level attribution as verify_grounding()/numeric_mismatches() via
+    the shared _segment_claims.
+    """
+    src_norm = {
+        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).lower()
+        for n, t in source_texts.items()
+    }
+    src_bg = {n: _bigrams(t) for n, t in src_norm.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_n = segments.get(n, claim_text)
+            for q in _quote_spans(claim_n):
+                if q in src_norm[n]:
+                    continue
+                # Verbatim location of the quote, if any — a stronger provenance
+                # signal than bigram argmax, so this assignment wins when both
+                # checks flag the same number (make_report shares one dict).
+                hit_k = next((k for k in src_norm if k != n and q in src_norm[k]), None)
+                if hit_k is not None:
+                    out.add(n)
+                    if suggested is not None:
+                        suggested[n] = hit_k
+                    break
+                if len(q) >= _DOCTORED_MIN_LEN:
+                    # Doctored shape: argmax over ALL sources — a near-verbatim of
+                    # the cited source itself flags too (paraphrase wearing
+                    # quotes: the assertive 「…」 claims wording n never wrote).
+                    # The suggestion only helps when it points elsewhere.
+                    best_k, best_o = max(
+                        ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
+                        key=lambda kv: kv[1],
+                        default=(0, 0.0),
+                    )
+                    if best_o >= _DOCTORED_MIN_OVERLAP:
+                        out.add(n)
+                        if suggested is not None and best_k != n:
+                            suggested[n] = best_k
+                        break
+    return sorted(out)
+
+
+# --- negation-polarity check (v0.2.201) ---------------------------------------
+
+# Negation markers for parity counting (odd = the clause negates, even = it
+# doesn't — "なくはない" counts 2 and reads positive). Japanese: ない/なかっ/
+# なく/ません plus the single-kanji negative morphs 未/不/無, which only fire
+# the parity check when the mirrored source sentence lacks them — "無料" vs
+# "有料" is a real polarity flip worth flagging. English: word-bounded
+# not/never/no/neither/nor/without + the n't contraction.
+_NEG_JP_RUN = re.compile(r"ない|なかっ|なく|ません|未|不|無")
+_NEG_EN_RE = re.compile(r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b", re.IGNORECASE)
+# Contrastive-negation constructions are agreement, not contradiction:
+# "AではなくB" explicitly asserts the same B the source asserts — exempt.
+_NEG_SAFE_RE = re.compile(r"ではな|のではな|じゃな")
+# The claim must mirror the source sentence symmetrically (each side covers
+# >=50% of the other's bigrams): a claim that only restates one clause of a
+# longer bipolar source sentence ("Aは効果があるがBはない") is a subset, not
+# a flip.
+_NEG_OVERLAP_MIN = 0.5
+
+# Antonym/degree classes (v0.2.202): the second polarity-inversion shape —
+# same mirror sentence, same negation parity, but a scale term swapped for
+# its opposite ("効果は高い" citing "効果は低い", "sales increased" citing
+# "sales decreased"). Each surface maps to (class, sign); a claim flags when
+# a class present in BOTH sides nets a different sign. Entries are full
+# inflected forms, longest first so 低下 (rise/fall) never feeds the 高/低
+# adjective class.
+_ANT: dict[str, tuple[str, int]] = {
+    **{s: ("rise", 1) for s in ("上昇", "上が", "向上", "高ま")},
+    **{s: ("rise", -1) for s in ("低下", "下降", "下が", "下落")},
+    **{s: ("inc", 1) for s in ("増加", "増大", "増幅", "拡大", "増え")},
+    **{s: ("inc", -1) for s in ("減少", "縮小", "減量", "減っ", "減り")},
+    **{s: ("better", 1) for s in ("改善", "改良", "好転")},
+    **{s: ("better", -1) for s in ("悪化",)},
+    **{s: ("win", 1) for s in ("勝利", "勝ち", "勝つ", "勝った")},
+    **{s: ("win", -1) for s in ("敗北", "負け", "負けた")},
+    **{s: ("succeed", 1) for s in ("成功",)},
+    **{s: ("succeed", -1) for s in ("失敗",)},
+    **{s: ("safe", 1) for s in ("安全",)},
+    **{s: ("safe", -1) for s in ("危険",)},
+    **{s: ("easy", 1) for s in ("簡単", "容易", "易しい")},
+    **{s: ("easy", -1) for s in ("困難", "難しい", "難しく", "難しかっ")},
+    **{s: ("high", 1) for s in ("高い", "高く", "高さ", "最高", "高かっ")},
+    **{s: ("high", -1) for s in ("低い", "低く", "低さ", "最低", "低かっ")},
+    **{s: ("big", 1) for s in ("大きい", "大きく", "大きさ", "大きかっ")},
+    **{s: ("big", -1) for s in ("小さい", "小さく", "小ささ", "小さかっ")},
+    **{s: ("many", 1) for s in ("多い", "多く", "多さ", "多かっ")},
+    **{s: ("many", -1) for s in ("少ない", "少なく", "少なさ", "少なかっ")},
+    **{s: ("strong", 1) for s in ("強い", "強く", "強かっ")},
+    **{s: ("strong", -1) for s in ("弱い", "弱く", "弱かっ")},
+    **{s: ("long", 1) for s in ("長い", "長く", "長かっ")},
+    **{s: ("long", -1) for s in ("短い", "短く", "短かっ")},
+    **{s: ("wide", 1) for s in ("広い", "広く", "広かっ")},
+    **{s: ("wide", -1) for s in ("狭い", "狭く", "狭かっ")},
+    **{s: ("fast", 1) for s in ("早い", "早く", "速い", "速く", "早かっ", "速かっ")},
+    **{s: ("fast", -1) for s in ("遅い", "遅く", "遅かっ")},
+    **{s: ("new", 1) for s in ("新しい", "新しく", "新しかっ")},
+    **{s: ("new", -1) for s in ("古い", "古く", "古かっ")},
+    **{s: ("deep", 1) for s in ("深い", "深く", "深かっ")},
+    **{s: ("deep", -1) for s in ("浅い", "浅く", "浅かっ")},
+    **{s: ("heavy", 1) for s in ("重い", "重く", "重かっ")},
+    **{s: ("heavy", -1) for s in ("軽い", "軽く", "軽かっ")},
+    **{s: ("thick", 1) for s in ("厚い", "厚く", "厚かっ")},
+    **{s: ("thick", -1) for s in ("薄い", "薄く", "薄かっ")},
+    **{s: ("en_inc", 1) for s in ("increase", "increased", "increases", "increasing", "rose", "risen", "rises", "higher", "growth", "grew")},
+    **{s: ("en_inc", -1) for s in ("decrease", "decreased", "decreases", "decreasing", "decline", "declined", "declines", "dropped", "fell", "fallen", "falls", "lower", "shrank")},
+    **{s: ("en_bet", 1) for s in ("better", "improved", "improves", "improvement")},
+    **{s: ("en_bet", -1) for s in ("worse", "worsened", "deteriorated")},
+    **{s: ("en_amt", 1) for s in ("more", "greater")},
+    **{s: ("en_amt", -1) for s in ("less", "fewer")},
+    **{s: ("en_spd", 1) for s in ("faster", "quicker")},
+    **{s: ("en_spd", -1) for s in ("slower",)},
+    **{s: ("en_str", 1) for s in ("stronger",)},
+    **{s: ("en_str", -1) for s in ("weaker",)},
+    **{s: ("en_siz", 1) for s in ("larger", "bigger")},
+    **{s: ("en_siz", -1) for s in ("smaller",)},
+    **{s: ("en_len", 1) for s in ("longer",)},
+    **{s: ("en_len", -1) for s in ("shorter",)},
+    **{s: ("en_eas", 1) for s in ("easier",)},
+    **{s: ("en_eas", -1) for s in ("harder",)},
+    **{s: ("en_win", 1) for s in ("success", "succeeded", "successful")},
+    **{s: ("en_win", -1) for s in ("failed", "failure", "fails")},
+}
+_ANT_RE = re.compile(
+    "|".join(
+        rf"\b{s}\b" if s.isascii() else s
+        for s in sorted(_ANT, key=len, reverse=True)
+    )
+)
+
+
+def _ant_signs(norm: str) -> dict[str, int]:
+    """Net sign per antonym class present in the text."""
+    signs: dict[str, int] = {}
+    for m in _ANT_RE.finditer(norm):
+        cls, sign = _ANT[m.group(0)]
+        signs[cls] = signs.get(cls, 0) + sign
+    return signs
+
+
+def _neg_parity(norm: str) -> int:
+    """Negation parity of NFKC-normalised text with whitespace collapsed to
+    single spaces (not stripped — English markers need the word boundaries)."""
+    if _NEG_SAFE_RE.search(norm):
+        return 0
+    return (len(_NEG_JP_RUN.findall(norm)) + len(_NEG_EN_RE.findall(norm))) & 1
+
+
+def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
+    """S-numbers whose cited claim inverts the polarity of a mirrored sentence.
+
+    The last uncovered cell of the citation-failure taxonomy: the claim is a
+    near-verbatim mirror of a source sentence — except the negation is
+    flipped ("効果はない" citing "効果はある"). Bigram checks CONFIRM such a
+    claim (~0.5+ overlap) precisely because the wording matches; only a
+    parity check catches the inversion (LLM polarity-flip is a documented
+    faithfulness failure class).
+
+    A claim flags when its bigrams cover >= _NEG_OVERLAP_MIN of a source
+    sentence AND that sentence covers >= _NEG_OVERLAP_MIN of the claim's —
+    both directions required so a claim restating only half of a bipolar
+    source sentence stays silent — and the polarity inverts: either the
+    negation parities differ, or an antonym class shared by both sides nets
+    opposite signs ("効果は高い" citing "効果は低い"). Contrastive
+    constructions ("AではなくB") are exempt: they assert the same B the
+    source asserts.
+    """
+    src_sents = {
+        n: [
+            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).lower().strip()
+            for s in _SENTENCE_SPLIT_RE.split(t)
+            if s.strip()
+        ]
+        for n, t in source_texts.items()
+    }
+    # _bigrams() strips whitespace itself, so the space-collapsed form serves
+    # both the mirror check and the parity count.
+    src_bg = {n: [_bigrams(s) for s in sents] for n, sents in src_sents.items()}
+    src_par = {n: [_neg_parity(s) for s in sents] for n, sents in src_sents.items()}
+    src_ant = {n: [_ant_signs(s) for s in sents] for n, sents in src_sents.items()}
+    out: set[int] = set()
+    prev_claim = ""
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        nums = [n for n in extract_citations(sentence) if n in source_texts]
+        bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+        if not nums:
+            if bare:
+                prev_claim = bare
+            continue
+        claim_text = bare or prev_claim
+        if bare:
+            prev_claim = bare
+        if not claim_text:
+            continue
+        segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
+        for n in nums:
+            claim_norm = re.sub(
+                r"\s+", " ", unicodedata.normalize("NFKC", segments.get(n, claim_text))
+            ).lower().strip()
+            cb = _bigrams(claim_norm)
+            if not cb:
+                continue
+            best_i, best_o = -1, 0.0
+            for i, sb in enumerate(src_bg[n]):
+                o = _overlap(cb, sb)
+                if o > best_o:
+                    best_o, best_i = o, i
+            if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
+                continue
+            sb = src_bg[n][best_i]
+            if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
+                continue  # claim is only a subset of a longer source sentence
+            claim_ant = _ant_signs(claim_norm)
+            if _neg_parity(claim_norm) != src_par[n][best_i] or any(
+                claim_ant[c] != src_ant[n][best_i][c]
+                for c in claim_ant.keys() & src_ant[n][best_i].keys()
+            ):
+                out.add(n)
+    return sorted(out)
+
+
+# --- self-contradiction signals (v0.2.204) ------------------------------------
+
+# Leading list/bullet markers on a sentence line are layout, not content —
+# strip them before comparing so a numbered list renumbering doesn't hide a
+# flip ("1. 効果はある" vs "2. 効果はない"). Covers ・, -, *, digits with a
+# closing marker, and numbered CJK parens.
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:[・•\-\*◦▪]|\d+[\.、\)）]|\([0-9]+\))\s*")
+
+
+def _claim_sents(text: str) -> list[tuple[str, str]]:
+    """(normalised, raw) sentence pairs for claim-vs-claim comparison."""
+    sents: list[tuple[str, str]] = []
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        bare = _LIST_PREFIX_RE.sub(
+            "", _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence))
+        )
+        norm = re.sub(r"\s+", " ", bare).lower().strip()
+        if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
+            continue
+        sents.append((norm, sentence))
+    return sents
+
+
+def _single_diff_flip(a: str, b: str) -> bool:
+    """a and b differ in exactly one contiguous span carrying a flip —
+    the contradiction precision rule shared by the intra-answer and
+    cross-turn comparisons."""
+    if a == b:
+        return False
+    ops = [
+        op
+        for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+        if op[0] != "equal"
+    ]
+    if len(ops) != 1:
+        return False  # multi-span difference — contrast, not a flip
+    if _neg_parity(a) != _neg_parity(b):
+        return True
+    ant_a, ant_b = _ant_signs(a), _ant_signs(b)
+    if any(ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()):
+        return True
+    _, i1, i2, j1, j2 = ops[0]
+    num_a = _numbers_expanded(a[i1:i2])
+    num_b = _numbers_expanded(b[j1:j2])
+    return bool(num_a) and bool(num_b) and num_a != num_b
+
+
+def self_contradictions(text: str, *, history: str = "") -> list[str]:
+    """Sentences contradicting an earlier sentence — in this answer or a
+    prior assistant turn.
+
+    The answer-internal counterpart of the polarity check: an LLM that
+    asserts "効果はある" early and "効果はない" later contradicts itself
+    regardless of sources. ``history`` (v0.2.215) carries prior assistant
+    text so the same flip ACROSS turns is caught too — a small model that
+    silently reverses last turn's claim shows one differing span exactly
+    like the intra-turn case; the current answer's sentence is flagged
+    (the later claim is the suspect, same convention as within a message).
+    History sentences are never flagged — they are already emitted.
+
+    Pairwise comparison uses a strict precision rule — the sentences must
+    differ in EXACTLY ONE contiguous span (difflib opcodes: one non-equal
+    block), so a different-subject contrast like
+    "Aは効果がある。Bは効果がない。" (two differing spans: subject AND
+    predicate) stays silent. Within that single difference a flag fires
+    when the negation parity flips, a shared antonym class nets opposite
+    signs, or the swapped digits assert different values.
+    """
+    sents = _claim_sents(_strip_fences(text))
+    # reassigned values inside code aren't contradictions
+    hist = [n for n, _ in _claim_sents(_strip_fences(history))] if history else []
+    out: list[str] = []
+    flagged: set[int] = set()
+    for i, (a, _) in enumerate(sents):
+        for j in range(i + 1, len(sents)):
+            b, raw_b = sents[j]
+            if j in flagged:
+                continue
+            if _single_diff_flip(a, b):
+                out.append(raw_b)
+                flagged.add(j)
+    for i, (a, raw_a) in enumerate(sents):
+        if i in flagged:
+            continue
+        if any(_single_diff_flip(h, a) for h in hist):
+            out.append(raw_a)
+            flagged.add(i)
+    return out
+
+
+# --- generation-degeneration signals (v0.2.188) --------------------------------
+
+# Minimum normalised length of a repeated unit for it to count as degeneration:
+# short phrases recur legitimately ("である。", "for example"), while a ≥6-char
+# span repeating ≥3 times consecutively — or a ≥10-char sentence appearing ≥3
+# times in one answer — is the classic repeat-loop failure shape of small LLMs
+# (the reason llama.cpp/Ollama ship repeat-penalty sampling guards).
+_DEGEN_SPAN_MIN = 6
+_DEGEN_SENT_MIN = 10
+_DEGEN_REPEAT = 3
+_DEGEN_SNIP = 40
+_DEGEN_SPAN_RE = re.compile(rf"(.{{{_DEGEN_SPAN_MIN},}}?)\1{{{_DEGEN_REPEAT - 1},}}")
+
+
+def degenerate_spans(text: str, *, history: str = "") -> list[str]:
+    """Snippets of repeated content signalling an LLM degeneration loop.
+
+    Two orthogonal shapes, both mechanical and dependency-free:
+    - the same normalised sentence (≥10 chars) appearing ≥3 times in the
+      answer — the "parroting" loop;
+    - any ≥6-char span repeating ≥3 times *consecutively* anywhere in the
+      text — the "stuck tail" loop sampling guards exist to prevent.
+
+    ``history`` (v0.2.210) carries prior assistant text so a cross-turn loop
+    is caught too: small models can get stuck re-emitting the SAME paragraph
+    every turn, which a per-message check structurally cannot see (one
+    occurrence per message). Sentences in ``history`` count toward the ≥3
+    threshold; only the current answer's own repeated sentences are flagged.
+
+    Deliberately asymmetric like the other checks: nothing is flagged below
+    these bounds — parallel structures ("Aである。Bである。") and honest
+    emphasis repeat *differently*, never verbatim-normed ≥3 times.
+    """
+    text = _strip_fences(text)  # repeated statements inside code aren't degeneration
+    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).lower()
+    out: set[str] = set()
+    counts: dict[str, int] = {}
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        if len(s) >= _DEGEN_SENT_MIN:
+            counts[s] = counts.get(s, 0) + 1
+    for raw in _SENTENCE_SPLIT_RE.split(history):
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        if s in counts:
+            counts[s] += 1
+    for s, c in counts.items():
+        if c >= _DEGEN_REPEAT:
+            out.add(s[:_DEGEN_SNIP])
+    for m in _DEGEN_SPAN_RE.finditer(low):
+        out.add(m.group(1)[:_DEGEN_SNIP])
+    return sorted(out)
 
 
 # Minimum non-whitespace character count in a sentence's citation-stripped body for
@@ -323,13 +1507,56 @@ def uncited_sentences(text: str) -> list[str]:
     """
     out: list[str] = []
     pending: str | None = None  # most recent uncited sentence, awaiting a trailing citation
+    prev_bare, prev_cited = "", False  # previous non-empty sentence's bare text / citation state
+    list_scope = False  # inside a list block opened by a cited enumeration lead-in
+    in_fence = False  # inside a fenced code block — its content is not prose
+    in_code = False  # inside an indented code block (v0.2.217) — same rule
+    # The splitter emits one ''/'\n' fragment per line ending, so a BLANK
+    # line shows up as two consecutive separator fragments — that is what
+    # `prev_blank` must detect for the CommonMark "indent after blank =
+    # code, indent after content = lazy continuation" rule.
+    nls = 0  # consecutive newline-separator fragments
+    prev_blank = True  # file start counts as blank for the CommonMark rule
     for raw in _SENTENCE_SPLIT_RE.split(text):
         sentence = raw.strip()
         if not sentence:
+            if "\n" in raw:
+                nls += 1
+                if nls >= 2:
+                    prev_blank = True  # a real blank line keeps in_code alive
             continue
+        nls = 0
         nums = extract_citations(sentence)
         bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
         has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+        is_item = _LIST_PREFIX_RE.match(sentence) is not None
+        # A cited enumeration lead-in ("…[S1]：" or "…の通り[S1]。") scopes the
+        # contiguous list block it introduces — its citation covers every item.
+        # Scope persists while items continue and ends at the first non-item line.
+        list_scope = is_item and (
+            list_scope or (prev_cited and _LIST_INTRO_RE.search(prev_bare) is not None)
+        )
+        prev_bare, prev_cited = bare, bool(nums)
+        if _FENCE_RE.match(sentence):
+            in_fence = not in_fence
+            in_code = False
+            prev_blank = False
+            continue
+        if not in_fence and _INDENT_CODE_RE.match(raw) and (in_code or prev_blank):
+            # Indented code line — code, not a prose sentence. Same
+            # not-prose treatment as in_fence: skipped without flushing a
+            # pending trailing citation. (`not in_fence` so indented lines
+            # inside a ``` block don't leave a stale in_code behind.)
+            in_code = True
+            prev_blank = False
+            continue
+        in_code = False
+        prev_blank = False
+        if in_fence or _STRUCTURAL_LINE_RE.match(sentence):
+            # Code, headings, table rows, rules, quotes — markdown structure,
+            # not a sentence asserting source content. Invisible to the claim
+            # check: skipped without flushing a pending trailing citation.
+            continue
         if nums and not has_claim:
             # Citation-only fragment (e.g. the "[S1]" tail of "Sentence. [S1]") —
             # resolves whatever sentence it trails; that sentence is not uncited.
@@ -342,10 +1569,14 @@ def uncited_sentences(text: str) -> list[str]:
             pending = None
         if nums:
             continue  # this fragment carries its own citation — not uncited
+        if list_scope:
+            continue  # enumeration item covered by the cited lead-in
         if not has_claim:
             continue  # too short/trivial to carry a claim worth flagging
         if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
+        if _FRAMING_RE.match(bare):
+            continue  # describes the answer's structure, not source content
         # A question asserts nothing; the faq/study_guide kinds ask 5-8 questions
         # per output (studio.py prompts), and each becomes its own citation-less
         # sentence at this split boundary — flagging them would violate this
@@ -359,6 +1590,26 @@ def uncited_sentences(text: str) -> list[str]:
     return out
 
 
+def found_bits(detail: dict[str, float] | None) -> list[tuple[str, float]]:
+    """Ordered (channel, value) pairs from a retrieval-provenance detail map.
+
+    `report["source_detail"]["S#"]` holds `Hit.detail` of the top hit — which
+    RRF channel surfaced the source (rrf_bm25_rank / rrf_vec_rank, 1-based
+    ranks) and whether its terms were present (`lex`). Every surface that
+    explains "why this source was retrieved" (CLI [S#] line, export legend)
+    shares this one extraction so they can't drift on key names or order.
+    """
+    if not detail:
+        return []
+    out: list[tuple[str, float]] = []
+    for key in ("rrf_bm25_rank", "rrf_vec_rank", "lex"):
+        v = detail.get(key)
+        kind = {"rrf_bm25_rank": "fts", "rrf_vec_rank": "vec", "lex": "lex"}[key]
+        if isinstance(v, (int, float)) and v:
+            out.append((kind, float(v)))
+    return out
+
+
 def make_report(
     text: str,
     source_titles: list[str],
@@ -366,8 +1617,10 @@ def make_report(
     source_bodies: list[str] | None = None,
     source_contexts: list[str] | None = None,
     source_chunk_ids: list[list[int]] | None = None,
+    source_detail: list[dict[str, float]] | None = None,
     *,
     check_uncited: bool = True,
+    history: str = "",
 ) -> CitationReport:
     """Build the citation_report attached to every generated answer/output.
 
@@ -399,11 +1652,33 @@ def make_report(
             raise ValueError(
                 f"source_bodies length {len(source_bodies)} must match source_titles length {n}"
             )
-        confirmed, misattributed = verify_grounding(
-            text, {i + 1: body for i, body in enumerate(source_bodies)}
-        )
+        sugg: dict[int, int] = {}
+        src_bodies_map = {i + 1: body for i, body in enumerate(source_bodies)}
+        confirmed, misattributed = verify_grounding(text, src_bodies_map, suggested=sugg)
         report["confirmed"] = confirmed
         report["misattributed"] = misattributed
+        num_mis = numeric_mismatches(text, src_bodies_map)
+        if num_mis:
+            report["numeric_mismatch"] = num_mis
+        quote_mis = quote_mismatches(text, src_bodies_map, suggested=sugg)
+        if quote_mis:
+            # Same evidence shape as misattributed — the claim's content lives
+            # in a different source — so it merges into that flag, while
+            # quote_mismatch records which numbers were flagged via quotes.
+            report["misattributed"] = sorted(set(misattributed) | set(quote_mis))
+            report["quote_mismatch"] = quote_mis
+        if sugg:
+            # "S#"-keyed so JSON round-trips keep string keys (persisted reports
+            # are re-read via json.loads, which stringifies int keys anyway).
+            report["misattributed_suggested"] = {
+                f"S{n}": f"S{k}" for n, k in sorted(sugg.items())
+            }
+        unit_mis = unit_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if unit_mis:
+            report["unit_mismatch"] = unit_mis
+        neg_mis = negation_mismatches(text, {i + 1: body for i, body in enumerate(source_bodies)})
+        if neg_mis:
+            report["negation_mismatch"] = neg_mis
         # Each body is already bounded by the context token budget (~300–400 tokens
         # ≈ 1 200 chars max), so storing the full body is compact and safe.
         report["source_excerpts"] = {f"S{i + 1}": body for i, body in enumerate(source_bodies)}
@@ -425,8 +1700,48 @@ def make_report(
         sci = {f"S{i + 1}": ids for i, ids in enumerate(source_chunk_ids) if ids}
         if sci:
             report["source_chunk_ids"] = sci
+    if source_detail is not None:
+        if len(source_detail) != n:
+            raise ValueError(
+                f"source_detail length {len(source_detail)} must match"
+                f" source_titles length {n}"
+            )
+        sd = {f"S{i + 1}": d for i, d in enumerate(source_detail) if d}
+        if sd:
+            report["source_detail"] = sd
     if n and check_uncited:
         uncited = uncited_sentences(text)
         if uncited:
             report["uncited"] = uncited
+            # Split citation-omission from hallucination (v0.2.212): an uncited
+            # claim that DOES lexically match a source is a missing-[S#] fix,
+            # not an unsupported assertion — only the ungrounded ones are the
+            # dangerous kind the badge should alarm about. Same CONFIRM_MIN
+            # bigram evidence verify_grounding() uses to confirm citations.
+            body_bigrams = [_bigrams(b) for b in source_bodies or []]
+            supported: list[str] = []
+            supported_src: dict[str, str] = {}
+            for s in uncited:
+                cb = _bigrams(s)
+                if not cb:
+                    continue
+                best_i, best_o = -1, 0.0
+                for i, sb in enumerate(body_bigrams):
+                    o = _overlap(cb, sb)
+                    if o > best_o:
+                        best_o, best_i = o, i
+                if best_o >= CONFIRM_MIN:
+                    supported.append(s)
+                    # Name the best-matching source so the fix is "add [S#]",
+                    # not "re-read every source" (v0.2.216).
+                    supported_src[s] = f"S{best_i + 1}"
+            if supported:
+                report["uncited_supported"] = supported
+                report["uncited_supported_source"] = supported_src
+    deg = degenerate_spans(text, history=history)
+    if deg:
+        report["degenerate"] = deg
+    contra = self_contradictions(text, history=history)
+    if contra:
+        report["self_contradiction"] = contra
     return report

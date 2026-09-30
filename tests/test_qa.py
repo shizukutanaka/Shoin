@@ -21,6 +21,7 @@ from shoin.citation import (
     validate_citations,
     verify_grounding,
 )
+from shoin.config import MAX_QUESTION_LEN
 from shoin.llm import LLMError, Message
 from shoin.qa import (
     NO_HIT_TEXT,
@@ -557,6 +558,31 @@ class TestMultiTurn(unittest.TestCase):
 
     def test_query_no_expand_empty_history(self) -> None:
         self.assertEqual(expand_query("短問", []), "短問")
+
+    def test_query_expand_respects_max_question_len(self) -> None:
+        """v0.2.254: a max-length prior turn must not push the expanded query
+        past MAX_QUESTION_LEN — the expanded string feeds the FTS5 OR-expression
+        whose length bound the raw question was already validated against."""
+        prev = "前" * (MAX_QUESTION_LEN - 30)  # max in DB; user turn ≤ the limit
+        history: list[dict[str, str]] = [
+            {"role": "user", "content": prev},
+            {"role": "assistant", "content": "回答"},
+        ]
+        question = "詳しく"
+        expanded = expand_query(question, history)
+        self.assertLessEqual(len(expanded), MAX_QUESTION_LEN)
+        self.assertTrue(expanded.endswith(question), "current question survives whole")
+        # The context prefix keeps the head of the prior question (topics lead).
+        self.assertTrue(expanded.startswith(prev[:10]))
+
+    def test_query_expand_maximal_short_question_still_bounded(self) -> None:
+        """Edge: the largest expandable question (29 chars) still must not
+        exceed the bound when combined with a prior turn."""
+        history: list[dict[str, str]] = [{"role": "user", "content": "x" * 50}]
+        q = "a" * 29  # largest expandable question
+        out = expand_query(q, history)
+        self.assertLessEqual(len(out), MAX_QUESTION_LEN)
+        self.assertTrue(out.endswith(q))
 
 
 class TestCitationSourceIds(unittest.TestCase):
