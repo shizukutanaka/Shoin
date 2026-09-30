@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.430")
+        self.assertEqual(VERSION, "0.2.432")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12964,6 +12964,49 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertGreaterEqual(
             total, 15, "expected >=15 Store() call sites — non-vacuous"
+        )
+
+    def test_store_exit_never_commits_or_executes(self) -> None:
+        """`Store.__exit__` must only close the connection — never commit,
+        never execute. A commit inside __exit__ republishes every write
+        left pending by a `with self.conn:` block that failed mid-block
+        (the exact defect class v0.2.419-425 pinned shut at the statement,
+        call-site, and nesting levels): `with Store(db) as s: ...` would
+        flush the orphaned write on cleanup even when the failing inner
+        transaction already rolled it back. An __enter__ that executes
+        (e.g. opens a BEGIN) is the symmetric hazard — writes could then
+        sit pending from construction. AST-pin both dunder bodies to
+        contain no execute/commit/rollback call."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "store.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        dunders: dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name in ("__enter__", "__exit__")
+            ):
+                dunders[node.name] = node
+        self.assertEqual(
+            set(dunders), {"__enter__", "__exit__"},
+            "Store needs both context dunders for the pin to mean anything",
+        )
+        bad: list[str] = []
+        for name, fn in dunders.items():
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else (func.id if isinstance(func, ast.Name) else "")
+                )
+                if called in ("execute", "executemany", "executescript", "commit", "rollback"):
+                    bad.append(f"{name}:{node.lineno} calls .{called}()")
+        self.assertEqual(
+            bad, [], f"Store context dunders must not touch the transaction: {bad}"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
