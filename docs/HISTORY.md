@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.364
+## Version History: v0.1.37 → v0.2.365
+
+### v0.2.365 (2026-09-29)
+
+- Pin the chunks_au update trigger end-to-end (test_fts_tracks_chunk_context_update): update_source_title rewrites chunk context prefixes, and if the trigger is lost the FTS index keeps answering the old title forever — stale index, no error anywhere. The test renames a source and asserts the new title MATCHes while the old one doesn't. Fail direction verified (dropping the trigger yields new_hits=0).
 
 ### v0.2.364 (2026-09-29)
 
