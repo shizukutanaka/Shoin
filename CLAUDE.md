@@ -103,7 +103,7 @@ Retrieval combines two signals:
 - `rrf_fuse(bm25_hits, vec_hits)`: `score = Σ 1/(k + rank + 1)` with k=60 (Cormack SIGIR 2009), summed across whichever result lists a chunk appears in
 - Uses only rank positions, bypassing the scale incompatibility between raw FTS5 BM25 values and cosine similarity scores in [0,1] — no per-query normalization or alpha tuning needed
 - A chunk found by both BM25 (rank 1) and vector (rank 1) scores ≈0.0328; found by only one at rank 1 scores ≈0.0164, naturally combining both signals
-- `fuse()`/`adaptive_alpha()` (the earlier convex-combination design: `score = alpha * vec_score + (1-alpha) * bm25_score`, with alpha adjusted for natural-language queries/identifiers/short keywords) still exist in `search.py` for backward compatibility with existing tests, but `retrieve()` no longer calls either — RRF scores are min-max normalized to [0,1] before being passed to the lexical MMR reranker below
+- RRF scores are min-max normalized to [0,1] before being passed to the lexical MMR reranker below. The earlier convex-combination `fuse()`/`adaptive_alpha()` (`score = alpha * vec_score + (1-alpha) * bm25_score`) were deleted in v0.2.150 — `retrieve()` has called only `rrf_fuse` since v0.2.56
 
 **MMR Reranking** (Maximum Marginal Relevance):
 - After fusion, the top-k hits are reranked to maximize relevance while minimizing redundancy
@@ -342,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.412** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.432** — see `docs/HISTORY.md` for what changed and why.
 
 ---
 

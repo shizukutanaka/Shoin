@@ -29,7 +29,198 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.412
+## Version History: v0.1.37 → v0.2.432
+
+### v0.2.432 (2026-09-30)
+
+- pin that Store's context dunders never touch the
+  transaction: a commit inside __exit__ would republish
+  writes left pending by a failed `with self.conn:` block —
+  the fourth wall of the pending-TX defect family was the
+  one unpinned surface. AST-pins __enter__ and __exit__ to
+  contain no execute/commit/rollback call.
+- correct CLAUDE.md's stale fusion claim: the bullet still
+  said fuse()/adaptive_alpha() "exist in search.py" — both
+  were deleted in v0.2.150 (the file's own later section
+  already said so)
+
+### v0.2.431 (2026-09-30)
+
+- sync the product-review ledger to v0.2.430: the v0.2.426-430
+  summary names the interval "contract-pin expansion — kind
+  vocabulary, resource lifetime, input character class"
+  (instructions≡KINDS key-set pin, Store()-with AST pin,
+  unpaired-surrogate 400 mapping)
+
+### v0.2.430 (2026-09-30)
+
+- reject unpaired surrogates at the request-field validators:
+  json.loads materializes them from \ud800 escapes that raw
+  UTF-8 bytes can't carry, and one reaching a write surfaces
+  as an uncaught UnicodeEncodeError from the sqlite3 binding
+  — a raw 500 for a client-side format error. Both _require
+  and _optional_str now run _check_utf8, so the 400 reaches
+  the caller before the bind does.
+
+### v0.2.429 (2026-09-30)
+
+- sync spec.md to v0.2.428: fold the transaction-contract pin
+  trilogy (with-coverage, callee call sites, nested-with ban),
+  the Store() context-expression pin, and the
+  _INSTRUCTIONS==STUDIO_KINDS vocabulary pin into the DB
+  section; refresh the measured quality line (1091 tests)
+
+### v0.2.428 (2026-09-30)
+
+- pin that every production `Store(...)` call is a `with`
+  context expression (AST-level): a bare `store = Store(db)`
+  never calls close() — the thread-affined sqlite3 connection
+  leaks for the process lifetime, an unbounded fd leak on the
+  per-request pattern. All 20 sites verified covered; the AST
+  walk means comments/docstrings mentioning Store() cannot
+  false-positive. Companion audits clean: _retry_on_lock
+  retries only "locked"-class OperationalErrors and re-raises;
+  _migrate_once embeds its version marker inside each script's
+  BEGIN/COMMIT with duplicate-column winner arbitration
+
+### v0.2.427 (2026-09-30)
+
+- pin that studio._INSTRUCTIONS covers STUDIO_KINDS exactly:
+  _h_studio validates kind in KINDS then generate() indexes
+  _INSTRUCTIONS[kind] — a kind added to the store vocabulary
+  without an instruction entry passes handler validation but
+  raises KeyError in _t_kind, which is not a StoreError so the
+  coded-error mapping misses it and returns a bare 500. The
+  ja/en parity test sees each entry but not the key set
+
+### v0.2.426 (2026-09-30)
+
+- sync the product-review ledger to v0.2.425: the
+  pending-transaction interval closed — chat_stream delta
+  normalization plus three structural pins (with-coverage of
+  write verbs, callee call-site coverage, no nested with-owning
+  calls) that make the whole defect class unreintroducible
+
+### v0.2.425 (2026-09-30)
+
+- pin that no `with self.conn:` block calls a with-owning
+  writer: sqlite3's context manager commits on __exit__, so a
+  nested with commits the outer block's still-pending writes
+  early and an outer failure after the inner exit can no
+  longer roll them back. Call-graph audit: 12 with-owning
+  writers, zero nested call sites (only callee-transacted
+  helpers are invoked inside withs); Store.__exit__ closes
+  without committing, so no stray pending write can be
+  published. A future refactor adding e.g. self.add_note()
+  mid-transaction now fails the gate
+
+### v0.2.424 (2026-09-30)
+
+- pin the call-site side of the callee-transaction contract:
+  touch_notebook / _rewrite_chunk_context_titles /
+  _set_embedding_pair carry bare writes by design because their
+  docstrings make the caller own the transaction — the C250 pin
+  checked the callees' statements but couldn't see whether every
+  call site actually sits inside `with self.conn:`. All 13
+  touch + 2 rewrite sites verified covered; _set_embedding_pair
+  pinned single-caller (set_embedding only — its commit=False
+  branch is the documented contract for _embed_chunks' batch
+  transaction). A future caller that forgets the with or calls
+  the pair helper from elsewhere now fails the gate
+
+### v0.2.423 (2026-09-30)
+
+- pin that multi-statement writes run inside `with self.conn:`:
+  a bare write-execute outside a with-block reopens the
+  pending-write leak class (v0.2.419 was behavioral; this is
+  structural — a future writer can't silently regress). The
+  scan's own blind spot found during fail-verification:
+  multi-line signatures close at `) -> T:` (indent 4), which
+  ended method tracking early and made every multi-line
+  signature method invisible
+
+### v0.2.422 (2026-09-30)
+
+- sync spec.md to v0.2.421: studio_outputs gains its
+  (notebook,kind)→1-row prune semantics; the DB section records
+  the with self.conn atomicity pin across all multi-statement
+  writes and the LLM-response shape-normalization contract
+  (bare-string/null deltas no longer escape as raw 500s)
+
+### v0.2.421 (2026-09-30)
+
+- tolerate non-object `delta` shapes in chat_stream: a bare-string
+  or null delta made choice[delta].get raise AttributeError —
+  outside the tolerated (JSONDecodeError, KeyError, IndexError,
+  TypeError) set — escaping the stream as a raw 500 instead of
+  being normalized or skipped. dict → .get(content), str →
+  content verbatim (some compatible servers emit it that way),
+  anything else → skip
+
+### v0.2.420 (2026-09-30)
+
+- sync the product-review ledger to v0.2.419: documents the
+  v0.2.414-419 epoch (dead studio_outputs storage found and
+  pruned, the two Devin Review pending-transaction findings,
+  and the family-wide `with self.conn:` closure across all
+  seven remaining Store writers)
+
+### v0.2.419 (2026-09-30)
+
+- close the pending-transaction leak family: every multi-write
+  Store method that paired a bare write with a late commit left
+  the write pending when the second statement (touch_notebook /
+  embedding_norm) failed — a later commit on the same connection
+  would publish or erase it. add_source, delete_source, add_note,
+  delete_note, add_message, clear_messages and set_embedding's
+  commit path now wrap write+touch in `with self.conn:` (the
+  same atomic block add_studio_output uses), and add_studio_output's
+  touch moved inside its `with` for one atomic unit. 7 rollback
+  regression tests pin every site (fail-verified both directions)
+
+### v0.2.418 (2026-09-30)
+
+- wrap add_studio_output's INSERT+DELETE in `with self.conn:`
+  (Devin Review on PR #287): a failed prune left the rejected row
+  pending for a later commit to publish — MAX(id) would displace
+  the good output; both statements now roll back together
+
+### v0.2.417 (2026-09-30)
+
+- reorder add_studio_output prune to INSERT-then-DELETE (Devin
+  Review on PR #286): delete-first left the erase pending when the
+  insert raised, and a later commit on the same connection would
+  persist the loss despite the failed regeneration; `id < new_id`
+  also preserves a newer concurrent row
+
+### v0.2.416 (2026-09-29)
+
+- prune superseded studio_outputs in add_studio_output: every
+  regeneration left a predecessor row that no read path can reach
+  (latest_studio_outputs is the only reader) — unbounded dead
+  storage per generate() call; delete same-kind rows in the same
+  transaction
+
+### v0.2.415 (2026-09-29)
+
+- README feature list omitted two shipped REQs entirely — notes
+  (REQ-103) and export (REQ-104) were invisible to new users; add
+  bullets covering both (including the v0.2.412 save-as-note path)
+
+### v0.2.414 (2026-09-29)
+
+- sync product-review.md ledger to v0.2.413: the
+  "documented-but-half-true -> implemented + spec-synced" span
+  (zero-marker pin, REQ-103 save-as-note, spec drift fold)
+
+### v0.2.413 (2026-09-29)
+
+- sync spec.md to v0.2.412: REQ-103's ノート化 now genuinely exists
+  (v0.2.412), malformed-port -> INGEST_URL_BLOCKED(400) in the SSRF
+  row (v0.2.407), embedded messages/notes caps + *_omitted disclosure
+  in the DoS row (v0.2.250/409), write-SQL locality (v0.2.405),
+  _read_json validator contract (v0.2.408), zero-marker pin
+  (v0.2.411), test count 1075
 
 ### v0.2.412 (2026-09-29)
 
