@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.350")
+        self.assertEqual(VERSION, "0.2.358")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11580,6 +11580,215 @@ class TestResidualGuards(unittest.TestCase):
             f"undeclared={sorted(third_party - declared)} "
             f"unused={sorted(declared - third_party)}",
         )
+
+    def test_version_markers_agree(self) -> None:
+        """The bump ritual touches five files by hand — one missed edit
+        makes `shoin --version`, `pip show shoin`, and the developer
+        guide report different releases. HISTORY's `### v{VERSION}`
+        heading is pinned separately; this pins the other two markers:
+        pyproject's project.version (what pip installs) and CLAUDE.md's
+        `Current version: **vX.Y.Z**` (what agents read)."""
+        import tomllib
+
+        from shoin.config import VERSION
+
+        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+$",
+                         "VERSION must stay semver — --version output shape")
+
+        root = Path(__file__).resolve().parent.parent
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["project"]["version"], VERSION,
+            "pyproject version drifted from shoin.config.VERSION — "
+            "pip installs a different number than --version reports",
+        )
+        claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"**v{VERSION}**",
+            claude,
+            "CLAUDE.md's Current version marker drifted — "
+            "the bump ritual missed the developer guide",
+        )
+
+    def test_sql_literals_stay_interpolation_free(self) -> None:
+        """User-controlled strings (notebook names, source titles,
+        questions) flow into every query — an f-string, `+`, or `%`
+        inside an execute() argument is an injection path that no
+        amount of input validation elsewhere can fully compensate for.
+        Sanctioned interpolations, all provably not user text: `int(...)`
+        (the schema_migrations stamp), a module-level numeric constant
+        (`{_CTX_BM25_WEIGHT}` in the BM25 scorer), a name bound to
+        `"literal".join()` over literal-only fragments or `"?" * n`
+        (the LIKE fallback's per-needle conditions and IN-list), and —
+        inside executescript only, where DDL composition is inherent —
+        `name.strip()` (the MIGRATIONS body). Every user value still
+        arrives via `?` parameters."""
+        import ast
+
+        def literal_join(value: ast.expr, binds: dict[str, list[ast.expr]]) -> bool:
+            """`"lit".join(x)` where x is a comprehension/List of literal
+            strings, or another name bound to one — the variable-count
+            placeholder pattern (`"?" * n`, per-needle clauses)."""
+            if not (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "join"
+                and isinstance(value.func.value, ast.Constant)
+                and isinstance(value.func.value.value, str)
+                and value.args
+            ):
+                return False
+            arg = value.args[0]
+            if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mult):
+                return isinstance(arg.left, ast.Constant) or isinstance(
+                    arg.right, ast.Constant
+                )
+            if isinstance(arg, (ast.ListComp, ast.GeneratorExp)):
+                return isinstance(arg.elt, ast.Constant) and isinstance(
+                    arg.elt.value, str
+                )
+            if isinstance(arg, (ast.List, ast.Tuple)):
+                return all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in arg.elts
+                )
+            if isinstance(arg, ast.Name):
+                return all(literal_join_item(v) for v in binds.get(arg.id, []))
+            return False
+
+        def literal_join_item(value: ast.expr) -> bool:
+            if isinstance(value, (ast.ListComp, ast.GeneratorExp)):
+                return isinstance(value.elt, ast.Constant) and isinstance(
+                    value.elt.value, str
+                )
+            if isinstance(value, (ast.List, ast.Tuple)):
+                return all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in value.elts
+                )
+            return False
+
+        root = Path(__file__).resolve().parent.parent
+        sql_kw = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b")
+        violations: list[str] = []
+        for py in sorted((root / "shoin").glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=py.name)
+            mod_binds: dict[str, ast.expr] = {}
+            for n in tree.body:
+                if isinstance(n, ast.Assign):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name):
+                            mod_binds[t.id] = n.value
+            esc_args: set[int] = set()
+            for n in ast.walk(tree):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "executescript"
+                ):
+                    for a in n.args:
+                        for sub in ast.walk(a):
+                            if isinstance(sub, ast.JoinedStr):
+                                esc_args.add(id(sub))
+            for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+                binds: dict[str, list[ast.expr]] = {}
+                for n in ast.walk(fn):
+                    if isinstance(n, ast.Assign):
+                        for t in n.targets:
+                            if isinstance(t, ast.Name):
+                                binds.setdefault(t.id, []).append(n.value)
+                for n in ast.walk(fn):
+                    if (
+                        isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Attribute)
+                        and n.func.attr in ("execute", "executemany", "executescript")
+                        and n.args
+                        and isinstance(n.args[0], ast.BinOp)
+                        and isinstance(n.args[0].op, (ast.Add, ast.Mod))
+                    ):
+                        violations.append(
+                            f"{py.name}:{n.lineno} {n.func.attr}() receives "
+                            f"{type(n.args[0].op).__name__}-built SQL"
+                        )
+                    if not isinstance(n, ast.JoinedStr):
+                        continue
+                    literal = "".join(
+                        v.value
+                        for v in n.values
+                        if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                    )
+                    if not sql_kw.search(literal):
+                        continue
+                    for v in n.values:
+                        if not isinstance(v, ast.FormattedValue):
+                            continue
+                        e = v.value
+                        ok = (
+                            (
+                                isinstance(e, ast.Call)
+                                and isinstance(e.func, ast.Name)
+                                and e.func.id == "int"
+                            )
+                            or (
+                                isinstance(e, ast.Name)
+                                and e.id in binds
+                                and all(literal_join(x, binds) for x in binds[e.id])
+                            )
+                            or (
+                                isinstance(e, ast.Name)
+                                and e.id in mod_binds
+                                and isinstance(mod_binds[e.id], ast.Constant)
+                                and isinstance(mod_binds[e.id].value, (int, float))
+                            )
+                            or (
+                                id(n) in esc_args
+                                and isinstance(e, ast.Call)
+                                and isinstance(e.func, ast.Attribute)
+                                and e.func.attr in ("strip", "lstrip", "rstrip")
+                                and isinstance(e.func.value, ast.Name)
+                            )
+                        )
+                        if not ok:
+                            violations.append(
+                                f"{py.name}:{n.lineno} f-string SQL "
+                                "interpolates a value outside the sanctioned "
+                                "shapes (int(), literal join, numeric constant)"
+                            )
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_error_codes_follow_the_domain_detail_taxonomy(self) -> None:
+        """The UI toasts raw `error.code`, so the taxonomy is
+        user-facing: `DOMAIN_DETAIL` in UPPER_SNAKE (e.g.
+        VALIDATION_FIELD_FORMAT_INVALID, INGEST_URL_BLOCKED). A code
+        that drifts from the shape leaks as a lower-case or wordless
+        token the user cannot map to a cause."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        code_re = re.compile(r"^[A-Z]+(_[A-Z0-9]+)+$")
+        err_classes = {"StoreError", "IngestError", "LLMError"}
+        violations: list[str] = []
+        for py in sorted((root / "shoin").glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=py.name)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                f = node.func
+                name = f.id if isinstance(f, ast.Name) else (
+                    f.attr if isinstance(f, ast.Attribute) else ""
+                )
+                arg = node.args[0]
+                if (
+                    name in err_classes
+                    and isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and not code_re.match(arg.value)
+                ):
+                    violations.append(
+                        f"{py.name}:{node.lineno} {name} code "
+                        f"{arg.value!r} breaks the DOMAIN_DETAIL shape"
+                    )
+        self.assertEqual(violations, [], "\n".join(violations))
 
     def test_docs_reference_only_real_env_vars(self) -> None:
         """A `SHOIN_*` name in the docs that no code path reads is a silent
