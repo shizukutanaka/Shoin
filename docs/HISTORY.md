@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.473
+## Version History: v0.1.37 → v0.2.474
+
+### v0.2.474
+- Extended `test_library_prints_never_pollute_stdout` to the twin
+  bypass routes: any `sys.stdout` attribute access outside `cli.py`
+  (write()/reassignment bypasses the same contract print() did) and
+  any `import logging` / `from logging ...` in `shoin/` (the codebase's
+  diagnostic convention is prints to stderr; a logging call emits under
+  an unconfigured logger — lastResort stderr or silence — and a
+  stdout-wired handler would reopen the pollution class). Also audited:
+  single yield-inside-with site (`llm.chat_stream` — GeneratorExit on
+  generator.close() exits the urlopen `with`, closing the socket).
 
 ### v0.2.473
 - Spec sync — `docs/spec.md` folded the four output-plane pins into
