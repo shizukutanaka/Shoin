@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.407
+## Version History: v0.1.37 → v0.2.409
+
+### v0.2.409 (2026-09-29)
+
+- cap notes embedded in GET /api/notebooks/{id} at NB_NOTES_LIMIT=500,
+  disclosing notes_omitted — the same unbounded-embed defect the
+  messages cap closed (v0.2.250): every detail fetch (openNotebook,
+  the SSE-drop recovery refetch) round-tripped every note body, so an
+  accumulating notes pane made each click heavier forever. Newest 500
+  kept so a just-added note is always visible; UI shows the
+  notes.earlier disclosure line; export()/DB keep the full record
+
+### v0.2.408 (2026-09-29)
+
+- pin that _read_json() results only flow through _require() /
+  _optional_str(): a bound body dict read directly (data.get/key) skips
+  the type checks those helpers exist for — a list/dict/bool field then
+  reaches .strip()/str-concat as AttributeError->500 instead of
+  VALIDATION_FIELD_FORMAT_INVALID->400 (the v0.2.38 class). Scope:
+  each bound var is checked only within its assigning def.
 
 ### v0.2.407 (2026-09-29)
 

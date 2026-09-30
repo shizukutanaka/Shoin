@@ -2142,6 +2142,37 @@ class NotebookMessagesCapTest(unittest.TestCase):
         self.assertEqual(j2["messages_omitted"], 0)
         self.assertEqual(len(j2["messages"]), 12)
 
+    def test_notebook_payload_caps_notes_and_reports_omitted(self) -> None:
+        """v0.2.409: notes had the same unbounded-embed defect the messages cap
+        closed — every detail fetch (openNotebook, the SSE-drop recovery
+        refetch) round-trips every note body, so an accumulating notes pane
+        made each click heavier forever. The payload stays honest:
+        notes_omitted reports the real hidden count for the UI's disclosure
+        line; the full record remains in the DB and in export()."""
+        from shoin.store import Store
+
+        import shoin.server as srv
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_note(nb_id, f"n{i}", f"body {i}")
+        with patch.object(srv, "NB_NOTES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["notes"]), 4)
+        self.assertEqual(j["notes_omitted"], 8)
+        # The newest notes are the embedded ones — dropping the oldest means
+        # the note a user just added is always visible.
+        self.assertEqual(j["notes"][0]["title"], "n8")
+        self.assertEqual(j["notes"][-1]["title"], "n11")
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["notes_omitted"], 0)
+        self.assertEqual(len(j2["notes"]), 12)
+
 
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
