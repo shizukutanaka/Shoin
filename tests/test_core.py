@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.468")
+        self.assertEqual(VERSION, "0.2.469")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13872,6 +13872,99 @@ class TestResidualGuards(unittest.TestCase):
             n_sites, 5, f"non-vacuous: expected >=5 header sites (got {n_sites})"
         )
 
+    def test_set_iteration_builds_no_ordered_output(self) -> None:
+        """Iterating a set emits PYTHONHASHSEED-ordered elements — fine for
+        order-insensitive bodies (count/membership accumulation like
+        `counts[g] += 1` in _prf_terms), but `lst.append(x)` / `lst += [x]` /
+        `yield x` inside the loop bakes per-process hash order into output:
+        flag lists, exports, and JSON arrays would reshuffle per run with no
+        test failure. Ordered escapes must go through sorted() — the codebase
+        idiom `return sorted(out)`. This pins the iteration surface: no
+        for-loop/comprehension over a set-bound name may append/extend/
+        list-+=/yield, and no list()/tuple()/.join() call may consume a
+        set-bound name."""
+        import ast
+
+        problems: list[str] = []
+        n_loops = 0
+        for path in sorted(Path("shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for func in ast.walk(tree):
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                bound: set[str] = set()
+                for node in ast.walk(func):
+                    val: ast.expr | None = None
+                    targets: list[ast.expr] = []
+                    if isinstance(node, ast.Assign):
+                        val, targets = node.value, list(node.targets)
+                    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                        val, targets = node.value, [node.target]
+                    if val is None:
+                        continue
+                    if isinstance(val, ast.SetComp) or (
+                        isinstance(val, ast.Call)
+                        and isinstance(val.func, ast.Name)
+                        and val.func.id == "set"
+                    ):
+                        for t in targets:
+                            if isinstance(t, ast.Name):
+                                bound.add(t.id)
+                for node in ast.walk(func):
+                    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        it = node.iter
+                        name: str | None = None
+                        if isinstance(it, ast.Name) and it.id in bound:
+                            name = it.id
+                        if name is None:
+                            continue
+                        n_loops += 1
+                        body = node.body if isinstance(node, (ast.For, ast.AsyncFor)) else []
+                        for sub in ast.walk(ast.Module(body=body, type_ignores=[])):
+                            if isinstance(sub, ast.Yield) or isinstance(sub, ast.YieldFrom):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: yield inside for over set {name}"
+                                )
+                            if (
+                                isinstance(sub, ast.Call)
+                                and isinstance(sub.func, ast.Attribute)
+                                and sub.func.attr in ("append", "extend", "insert")
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: "
+                                    f"{sub.func.attr}() inside for over set {name}"
+                                )
+                            if isinstance(sub, ast.AugAssign) and isinstance(
+                                sub.target, ast.Name
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: += on {sub.target.id} "
+                                    f"inside for over set {name}"
+                                )
+                    if isinstance(node, ast.Call):
+                        fn = node.func
+                        cname = (
+                            fn.id
+                            if isinstance(fn, ast.Name)
+                            else (fn.attr if isinstance(fn, ast.Attribute) else None)
+                        )
+                        if cname in ("list", "tuple", "join"):
+                            for a in node.args:
+                                if isinstance(a, ast.Name) and a.id in bound:
+                                    problems.append(
+                                        f"{path.name}:{node.lineno}: {cname}({a.id})"
+                                    )
+        self.assertEqual(
+            problems,
+            [],
+            f"set iteration producing ordered output unsorted: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_loops, 1,
+            f"non-vacuous: expected >=1 for-over-set loop (got {n_loops})",
+        )
+
+
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
         completion criterion (zero known bugs) says none may ship. Until this
@@ -13948,7 +14041,6 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the invariant must bind to real code — at least one bound body
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

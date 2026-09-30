@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.468
+## Version History: v0.1.37 → v0.2.469
+
+### v0.2.469 (2026-10-01)
+
+- pin set-iteration against ordered-output escapes
+  (test_set_iteration_builds_no_ordered_output): iterating
+  a set emits PYTHONHASHSEED-ordered elements — legitimate
+  for order-insensitive bodies (count/membership
+  accumulation), but append/extend/list-+=/yield inside the
+  loop bakes per-process hash order into flag lists,
+  exports, and JSON arrays, which would reshuffle per run
+  with no test failure. AST-scans for-loops over set-bound
+  names for list-mutation/yield bodies and list()/tuple()/
+  join() calls consuming set-bound names; sorted() remains
+  the only sanctioned ordered escape. Fail direction
+  verified (list(out) and for-append each flagged).
 
 ### v0.2.468 (2026-09-30)
 
