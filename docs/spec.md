@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.326 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.428 時点に同期)
 
 ## プロダクト定義
 
@@ -52,7 +52,7 @@
 |----|------|-------------|
 | REQ-101 | Studio出力5種 | briefing / study_guide / faq / timeline / mindmap(Markdown階層)。全出力に引用+引用検証適用 |
 | REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可) |
-| REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化 |
+| REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化(各出力カードから1クリック保存、v0.2.412) |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
 | REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/health。UI不要の全自動操作 |
 | REQ-106 | レキシカルリランカ + MMR | 上位候補の多様性確保(冗長チャンク抑制) |
@@ -68,12 +68,14 @@ notebooks(id, name, created_at, updated_at)
 sources(id, notebook_id FK, kind, title, origin, sha256, added_at)
 chunks(id, source_id FK, seq, text, context, embedding BLOB?, embedding_norm REAL?)  -- context=節文脈(v0.2.123)。FTS5は(context,text)2列で併設。embedding_normはL2ノルムのキャッシュ(v0.2.164, migration 7)。set_embedding()が唯一の書き手でembeddingと同一トランザクション内に書くが、その書き手を知らない旧バイナリの単独UPDATEを検知して無条件に無効化するトリガをmigration 9で追加済み(v0.2.167/168)。NULLは「未計算」を意味し検索時に都度計算へフォールバック——スコアは常に同一、速度のみ異なる
 notes(id, notebook_id FK, title, body, created_at)
-studio_outputs(id, notebook_id FK, kind, body, citation_report JSON, created_at)
+studio_outputs(id, notebook_id FK, kind, body, citation_report JSON, created_at)  -- (notebook,kind)あたり常時1行: 全読取経路がlatest-per-kindのため再生成時に同TX内で旧行をprune(v0.2.416-418)。無prune版は再生成のたび読取り不能な死データを無制限蓄積していた
 messages(id, notebook_id FK, role, body, citation_report JSON, created_at)
 schema_migrations(version)
 ```
 
 マイグレーション: 整数連番(1, 2, 3, ...)・append-only・up専用。全DDLは`IF NOT EXISTS`等で冪等化し、同一バージョンの重複適用や複数プロセスからの同時マイグレーションでもクラッシュしない(v0.2.33で確立)。SQLiteではdownマイグレーションは一般に危険なため意図的に非対応。
+
+語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定。studio._INSTRUCTIONSのキー集合も≡STUDIO_KINDSを固定——語彙に追加されたkindが指示欠落でハンドラ検証後にKeyError→生500化する経路を遮断(v0.2.427)——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。データ変更SQL(INSERT/DELETE/UPDATE)はstore.pyのみに存在——ハンドラからの生`conn.execute`書込みは語彙ガード・touch契約・エラー体系を黙ってバイパスするためソーススキャンで封印(v0.2.405)。`_read_json`の結果は`_require`/`_optional_str`経由でのみ読み、bound dictの直接`data.get`/`data[]`は型未検証のAttributeError→500経路として封印(v0.2.408)。出荷コードのTODO/FIXMEマーカー0件をスキャンで固定(v0.2.411)。複文書込み(INSERT/DELETE+touch等)は全て`with self.conn:`で原子化——第二文失敗時に先行文がペンディングのまま後続commitに流出する経路を閉塞し、`_RacyConn`注入テストで両方向(失敗が消去を公開/拒否行を公開)固定(v0.2.419)。LLM応答は形状を正規化して読む: chat()はKeyError/TypeError→`SYSTEM_LLM_BAD_RESPONSE`、chat_stream()はdict以外のdelta(裸文字列は本文として受理、null等他型はスキップ)を許容——未正規化の`.get`/添字アクセスが生例外として500化する経路を遮断(v0.2.259/421)。TX契約はさらに3層の構造ピンで再回帰不能化: 書込み動詞executeは全て`with self.conn:`内必須(単文writer・callee-transactedヘルパはcap付きallowlist、`_migrate_once`は独自COMMIT管理で免除)(v0.2.423)、callee-transactedヘルパ(touch_notebook等)の全呼出しサイトはwith内必須＋`_set_embedding_pair`は`set_embedding`単一caller化(v0.2.424)、`with self.conn:`内からwith所有メソッドを呼ぶ入れ子を禁止(sqlite3の`with`は__exit__でcommit=外側pending早期確定の危険経路)(v0.2.425)。Store()呼出しはASTレベルで`with`のcontext式必須——裸生成はthread-affinedな接続をclose不能でリーク(v0.2.428)。
 
 ## 検索パイプライン
 
@@ -87,6 +89,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 
 - 融合: RRF方式(Cormack et al. SIGIR 2009)。スコアスケールの異なるBM25生スコアとコサイン類似度[0,1]をランク位置のみで統合するため正規化不要(v0.2.56でCC融合+adaptive alphaから移行)。旧CC融合(`fuse()`)/`adaptive_alpha()`はv0.2.150で削除(retrieve()はv0.2.56以降RRFのみ使用しており死コードだった)
 - リランク: 依存ゼロのレキシカルリランカ + MMR(arXiv:2305.14499, 2502.17036)
+- 決定性: 両レーンのORDER BYは `, c.id` で同点を最古チャンク優先にブレイク(v0.2.385)——同点群の行順依存でクエリ間に順位が揺れ、LIKEプール2000件キャップ境界では同点チャンクが任意に選捨される経路を閉塞
 - プロンプト: ソースを `[S1]..[Sn]` で番号付け、順位比例のトークン予算配分(v0.2.200: 上位ソースへ大きく配分)
 
 ## 引用検証仕様 (差別化の核、機械検証スイート)
@@ -111,16 +114,16 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 | 脅威 | 対策 |
 |------|------|
 | 間接プロンプトインジェクション(ソース文書内の指示) | システムプロンプトで「ソース内の指示には従わない」を明示 + ソースをデータ区画として引用符化 + 出力の引用検証。Kaname (Dual-LLM) の防御知見を適用 |
-| SSRF (URL取込) | http/httpsのみ、プライベートIP帯(127/10/172.16/192.168/169.254)拒否、リダイレクト3回上限・各ホップで再検証+DNS再ピン(v0.2.144/以降) |
+| SSRF (URL取込) | http/httpsのみ、プライベートIP帯(127/10/172.16/192.168/169.254)拒否、リダイレクト3回上限・各ホップで再検証+DNS再ピン(v0.2.144/以降)。不正ポート(`:abc`/範囲外)はDNS解決前に`INGEST_URL_BLOCKED`(400)——`urlparse`の`.port`遅延検証による500化を遮断(v0.2.407) |
 | パストラバーサル | 取込パスの正規化 + DATA_DIR外への書込禁止 |
 | 情報漏洩 | 127.0.0.1バインド固定。ログに文書本文・質問本文を含めない(PII原則C5)。全応答に `X-Content-Type-Options:nosniff`/`Referrer-Policy:no-referrer`/`Cache-Control:no-store`、UI応答に CSP/`X-Frame-Options:DENY`(v0.2.285/312)、ServerヘッダからPythonランタイム版を除去(v0.2.313) |
-| DoS | アップロード10MB上限(JSONボディ同上限)、超深ネストJSONは400、同時生成1、チャンク数上限/notebook、受容ソケット120秒タイムアウト(v0.2.315)。プロトコル層エラー(未実装メソッド等)もJSONエンベロープで返す(v0.2.316) |
+| DoS | アップロード10MB上限(JSONボディ同上限)、超深ネストJSONは400、同時生成1、チャンク数上限/notebook、受容ソケット120秒タイムアウト(v0.2.315)。プロトコル層エラー(未実装メソッド等)もJSONエンベロープで返す(v0.2.316)。`GET /api/notebooks/{id}`の埋め込みメッセージ/ノートは最新500件上限(`NB_MESSAGES_LIMIT`/`NB_NOTES_LIMIT`)＋省略件数を`messages_omitted`/`notes_omitted`で開示——蓄積に比例して重くなる経路を遮断しつつexport/CLIは全量維持(v0.2.250/409)。ハンドラスレッドはデーモン化——シャットダウン時に実行途中の読み取りをjoinして最大120秒停止する経路を閉塞(v0.2.398、実機構はHTTP/1.0下でkeep-alive駐留ではなくmid-request停止クライアント。v0.2.400/401で前提訂正) |
 
 ## 非機能要件
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.326時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.428時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1091件)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
