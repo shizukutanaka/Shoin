@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.426")
+        self.assertEqual(VERSION, "0.2.427")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1258,6 +1258,19 @@ class TestStore(unittest.TestCase):
         from shoin import store, studio
 
         self.assertIs(studio.KINDS, store.STUDIO_KINDS)
+
+    def test_studio_instructions_cover_every_kind(self) -> None:
+        """`_h_studio` validates `kind in KINDS` (= STUDIO_KINDS) then calls
+        generate() → `_t_kind(kind)` which indexes `_INSTRUCTIONS[kind]`. A
+        kind added to STUDIO_KINDS without an instruction entry passes the
+        handler's own validation but raises KeyError in _t_kind — which is
+        not a StoreError, so the dispatcher's coded-error mapping misses it
+        and returns a bare 500. The ja/en parity test sees each entry but
+        not the key set itself; pin that the instruction table covers the
+        kind vocabulary exactly."""
+        from shoin import store, studio
+
+        self.assertEqual(set(studio._INSTRUCTIONS), set(store.STUDIO_KINDS))
 
     def test_add_source_rejects_unknown_kind(self) -> None:
         """Kind-vocabulary guard, same class as add_message()'s role check and

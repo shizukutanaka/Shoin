@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.426
+## Version History: v0.1.37 → v0.2.427
+
+### v0.2.427 (2026-09-30)
+
+- pin that studio._INSTRUCTIONS covers STUDIO_KINDS exactly:
+  _h_studio validates kind in KINDS then generate() indexes
+  _INSTRUCTIONS[kind] — a kind added to the store vocabulary
+  without an instruction entry passes handler validation but
+  raises KeyError in _t_kind, which is not a StoreError so the
+  coded-error mapping misses it and returns a bare 500. The
+  ja/en parity test sees each entry but not the key set
 
 ### v0.2.426 (2026-09-30)
 
