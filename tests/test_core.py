@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.425")
+        self.assertEqual(VERSION, "0.2.432")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1258,6 +1258,19 @@ class TestStore(unittest.TestCase):
         from shoin import store, studio
 
         self.assertIs(studio.KINDS, store.STUDIO_KINDS)
+
+    def test_studio_instructions_cover_every_kind(self) -> None:
+        """`_h_studio` validates `kind in KINDS` (= STUDIO_KINDS) then calls
+        generate() → `_t_kind(kind)` which indexes `_INSTRUCTIONS[kind]`. A
+        kind added to STUDIO_KINDS without an instruction entry passes the
+        handler's own validation but raises KeyError in _t_kind — which is
+        not a StoreError, so the dispatcher's coded-error mapping misses it
+        and returns a bare 500. The ja/en parity test sees each entry but
+        not the key set itself; pin that the instruction table covers the
+        kind vocabulary exactly."""
+        from shoin import store, studio
+
+        self.assertEqual(set(studio._INSTRUCTIONS), set(store.STUDIO_KINDS))
 
     def test_add_source_rejects_unknown_kind(self) -> None:
         """Kind-vocabulary guard, same class as add_message()'s role check and
@@ -12905,6 +12918,95 @@ class TestResidualGuards(unittest.TestCase):
             covered_callee_calls,
             10,
             "expected >=10 covered callee-helper calls — non-vacuous descent",
+        )
+
+    def test_every_store_construction_is_context_managed(self) -> None:
+        """Every `Store(...)` call site in production code must be the
+        context expression of a `with` statement. A bare `store =
+        Store(db)` never calls close() — the sqlite3 connection (file
+        handle + WAL read-state, thread-affined by check_same_thread)
+        leaks for the lifetime of the process; on a per-request pattern
+        like server.py's that is an unbounded fd leak. All 20 current
+        sites are `with Store(...) as store:` — AST-scan so comments and
+        docstrings that merely mention Store() can't false-positive."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        bad: list[str] = []
+        total = 0
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parent = {
+                child: node
+                for node in ast.walk(tree)
+                for child in ast.iter_child_nodes(node)
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_store_call = (
+                    (isinstance(func, ast.Name) and func.id == "Store")
+                    or (isinstance(func, ast.Attribute) and func.attr == "Store")
+                )
+                if not is_store_call:
+                    continue
+                total += 1
+                p = parent.get(node)
+                if not (
+                    isinstance(p, ast.withitem) and p.context_expr is node
+                ):
+                    bad.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            bad,
+            [],
+            f"Store() outside `with` leaks the connection: {bad}",
+        )
+        self.assertGreaterEqual(
+            total, 15, "expected >=15 Store() call sites — non-vacuous"
+        )
+
+    def test_store_exit_never_commits_or_executes(self) -> None:
+        """`Store.__exit__` must only close the connection — never commit,
+        never execute. A commit inside __exit__ republishes every write
+        left pending by a `with self.conn:` block that failed mid-block
+        (the exact defect class v0.2.419-425 pinned shut at the statement,
+        call-site, and nesting levels): `with Store(db) as s: ...` would
+        flush the orphaned write on cleanup even when the failing inner
+        transaction already rolled it back. An __enter__ that executes
+        (e.g. opens a BEGIN) is the symmetric hazard — writes could then
+        sit pending from construction. AST-pin both dunder bodies to
+        contain no execute/commit/rollback call."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "store.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        dunders: dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name in ("__enter__", "__exit__")
+            ):
+                dunders[node.name] = node
+        self.assertEqual(
+            set(dunders), {"__enter__", "__exit__"},
+            "Store needs both context dunders for the pin to mean anything",
+        )
+        bad: list[str] = []
+        for name, fn in dunders.items():
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else (func.id if isinstance(func, ast.Name) else "")
+                )
+                if called in ("execute", "executemany", "executescript", "commit", "rollback"):
+                    bad.append(f"{name}:{node.lineno} calls .{called}()")
+        self.assertEqual(
+            bad, [], f"Store context dunders must not touch the transaction: {bad}"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
