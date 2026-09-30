@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.442
+## Version History: v0.1.37 → v0.2.443
+
+### v0.2.443 (2026-09-30)
+
+- sync spec.md to v0.2.442 — fold the do_* → _dispatch funnel pin
+  into the information-leakage STRIDE row; header/quality line
+  (v0.2.442, 1100 tests) updated.
 
 ### v0.2.442 (2026-09-30)
 
