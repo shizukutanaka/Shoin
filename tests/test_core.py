@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.440")
+        self.assertEqual(VERSION, "0.2.474")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9625,6 +9625,33 @@ class TestCLI(unittest.TestCase):
         self.assertIn(VERSION, text)
         self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
 
+    def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
+        """`python -m shoin` must reach the same CLI as the `shoin` script.
+
+        The console_script entry only exists after install — running the
+        source tree without `shoin/__main__.py` dies on
+        'No module named shoin.__main__'. Exercise the real end-to-end
+        path: a fresh interpreter, `-m shoin --help`, expect rc 0 and the
+        argparse usage block. Guard rails on the substring only (the exact
+        usage text is argparse's own formatting, not a contract)."""
+        import os
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-m", "shoin", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=root,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[:400])
+        self.assertIn("usage:", proc.stdout.lower())
+
     def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
         import io
         import os
@@ -13174,6 +13201,898 @@ class TestResidualGuards(unittest.TestCase):
             covered, 3, f"expected >=3 locked call sites — non-vacuous (got {covered})"
         )
 
+    def test_every_do_verb_routes_through_dispatch(self) -> None:
+        """Every do_<VERB> method on the handler must route through
+        self._dispatch(...) — the single funnel that runs
+        _reject_cross_site() (the DNS-rebinding / CSRF guard) before any
+        routing. A verb added without the funnel (e.g. a future do_HEAD or
+        do_PUT) serves requests while bypassing the guard silently: every
+        test passes because single-threaded tests never probe a cross-site
+        Origin. AST-pin each do_* body to a self._dispatch(...) call."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        n_verbs = 0
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("do_")):
+                continue
+            n_verbs += 1
+            funneled = any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "_dispatch"
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "self"
+                for n in ast.walk(node)
+            )
+            if not funneled:
+                problems.append(f"server.py:{node.lineno}: {node.name} bypasses _dispatch")
+        self.assertEqual(problems, [], f"do_* method bypasses cross-site guard: {problems}")
+        self.assertGreaterEqual(
+            n_verbs, 4, f"expected >=4 do_* verbs — non-vacuous (got {n_verbs})"
+        )
+
+    def test_sqlite_connect_lives_only_in_store(self) -> None:
+        """sqlite3.connect() must appear only in store.py — the single owner of
+        connection setup (row_factory, WAL/foreign_keys PRAGMAs, private 0600
+        file permissions). A connect() added anywhere else silently produces a
+        connection with foreign keys OFF, journal mode DELETE, and default file
+        permissions — and still passes every test, since all of those gaps are
+        invisible until a cascade delete or a second process relies on them."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_connects = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "connect"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sqlite3"
+                ):
+                    continue
+                n_connects += 1
+                if path.name != "store.py":
+                    problems.append(f"{path.name}:{node.lineno}: sqlite3.connect outside store.py")
+        self.assertEqual(problems, [], f"sqlite3.connect outside store.py: {problems}")
+        self.assertGreaterEqual(n_connects, 1, "non-vacuous: expected the store.py connect site")
+
+    def test_tx_verbs_outside_store_live_only_in_pipeline(self) -> None:
+        """Transaction control verbs (.conn.commit/rollback/executescript/
+        executemany) outside store.py may appear only in pipeline.py — the
+        documented batch-TX owner for _embed_chunks. The data-mutation-SQL pin
+        (v0.2.405) scans SQL text, not TX calls: a new .conn.commit() in a
+        handler or helper silently flushes a callee's pending writes — the
+        same early-commit defect class the with-block pins seal inside
+        store.py, on the caller side. Line-scan every module but store.py and
+        pipeline.py; require the pipeline batch commit to exist so the scan
+        stays non-vacuous."""
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        verb = re.compile(
+            r"\.conn\.(commit|rollback|executescript|executemany)\s*\("
+        )
+        problems: list[str] = []
+        pipeline_sites = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            if path.name == "store.py":
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not verb.search(line):
+                    continue
+                if path.name == "pipeline.py":
+                    pipeline_sites += 1
+                else:
+                    problems.append(f"{path.name}:{i}: TX verb outside store/pipeline")
+        self.assertEqual(problems, [], f"TX verb outside store/pipeline: {problems}")
+        self.assertGreaterEqual(
+            pipeline_sites, 2,
+            f"non-vacuous: expected >=2 pipeline batch-TX sites (got {pipeline_sites})",
+        )
+
+    def test_bare_except_exception_sites_are_curated(self) -> None:
+        """Every `except Exception` in production code must be one of the
+        curated, documented sites — each existing one carries an in-code
+        rationale (PDF parse mapping, per-page extract isolation, the
+        _dispatch umbrella, SSE orphan-prevention persists, rollback
+        best-effort, CLI diagnostic catch-all). A new undocumented catch-all
+        compiles and passes lint (ruff only warns, never errors) while it
+        silently swallows whatever defect class it happens to cover — the
+        exact bug-hiding shape the philosophy forbids. Pin the per-file
+        counts; a legitimate new site must update this test and carry its
+        own documented rationale. The pin also covers the three catch-all
+        BYPASS routes a plain `except Exception` scan cannot see: a bare
+        `except:` (swallows KeyboardInterrupt/SystemExit too — worse than
+        the catalogued class), `except BaseException` (same reach), and
+        `contextlib.suppress(Exception/BaseException)` (the identical
+        silent-swallow under a context manager; the one existing
+        `suppress(OSError)` site is narrow and stays allowed)."""
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        expected = {
+            "ingest.py": 2,
+            "server.py": 7,
+            "cli.py": 1,
+            "pipeline.py": 2,
+        }
+        problems: list[str] = []
+        total = 0
+        n_suppress = 0
+        broad = re.compile(
+            r"except\s*:|except\s+BaseException\b"
+            r"|suppress\(\s*(?:Exception|BaseException)\b"
+        )
+        for path in sorted(shoin_dir.glob("*.py")):
+            n = 0
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if re.search(r"except Exception\b", line):
+                    n += 1
+                if re.search(r"suppress\(", line):
+                    n_suppress += 1
+                if broad.search(line):
+                    problems.append(
+                        f"{path.name}:{i}: uncatalogued broad catch-all"
+                    )
+            total += n
+            limit = expected.get(path.name)
+            if limit is None:
+                if n:
+                    problems.append(
+                        f"{path.name}: {n} uncataloged except-Exception site(s)"
+                    )
+            elif n != limit:
+                problems.append(
+                    f"{path.name}: {n} except-Exception sites, expected {limit}"
+                )
+        self.assertEqual(
+            problems, [], f"uncataloged except-Exception sites: {problems}"
+        )
+        self.assertEqual(total, sum(expected.values()),
+                         "non-vacuous: site counts drifted from the curated total")
+        self.assertGreaterEqual(
+            n_suppress, 1,
+            "non-vacuous: the suppress() route must see the existing OSError site",
+        )
+
+    def test_network_calls_always_pass_a_timeout(self) -> None:
+        """Every network call site must pass an explicit timeout — urlopen's
+        default is socket._GLOBAL_DEFAULT_TIMEOUT (wait forever), and
+        socket.create_connection without a timeout likewise blocks forever.
+        A new call without one would pin a handler thread indefinitely, and
+        ThreadingHTTPServer spawns a thread per request, so stuck calls
+        accumulate into thread exhaustion — invisible to tests because no
+        test makes a real slow network call. AST-scan every module: urlopen()
+        needs a timeout keyword (or 3+ positional args), create_connection()
+        needs a timeout keyword (or 2+ positional args). The _Pinned*Connection
+        classes take timeout as a required constructor arg, so they're already
+        signature-enforced."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_sites = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else ""
+                )
+                kwargs = {kw.arg for kw in node.keywords if kw.arg}
+                n_args = len(node.args)
+                if name == "urlopen":
+                    n_sites += 1
+                    if "timeout" not in kwargs and n_args < 3:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: urlopen without timeout"
+                        )
+                elif name == "create_connection":
+                    n_sites += 1
+                    if "timeout" not in kwargs and n_args < 2:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: create_connection without timeout"
+                        )
+        self.assertEqual(problems, [], f"network calls without timeout: {problems}")
+        self.assertGreaterEqual(
+            n_sites, 5, f"non-vacuous: expected >=5 network call sites (got {n_sites})"
+        )
+
+    def test_module_level_mutable_globals_are_declared(self) -> None:
+        """Module-level mutable collections (dict/set literals, or
+        dict/set/OrderedDict/defaultdict constructors) are shared mutable
+        state across handler threads. The only genuinely mutable one is
+        qa._QUERY_VEC_CACHE — guarded under _QUERY_VEC_LOCK and pinned by
+        the lock-coverage tests. Everything else is a constant lookup table
+        (_STRINGS, _INSTRUCTIONS, unit/era/kanji tables, MIGRATIONS, …) that
+        is never written after import. A NEW module-level mutable added
+        without the allowlist update is a shared-state defect the lock pins
+        cannot see — single-threaded tests all pass while concurrent access
+        races. Pin the exact (file, name) set so any addition is deliberate."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        allowed = {
+            "__init__.py": {"__all__"},
+            "citation.py": {
+                "_MAG_SUFFIX", "_KANJI_DIGIT", "_KANJI_PLACE", "_EN_SMALL",
+                "_EN_BIG", "_SCALE_FAMILIES", "_UNIT_ALIASES", "_ANT",
+            },
+            "cli.py": {"_STRINGS"},
+            "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
+            "ingest.py": {"_EXT_KIND"},
+            "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
+            "search.py": {"_SHIN_TO_KYU"},
+            "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
+            "store.py": {"MIGRATIONS"},
+            "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
+        }
+        ctor_names = {"dict", "set", "list", "OrderedDict", "defaultdict", "Counter"}
+
+        def mutable_value(node: ast.expr) -> bool:
+            if isinstance(node, (ast.Dict, ast.Set, ast.List)):
+                return True
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = f.attr if isinstance(f, ast.Attribute) else (
+                    f.id if isinstance(f, ast.Name) else ""
+                )
+                return name in ctor_names
+            return False
+
+        problems: list[str] = []
+        n_found = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                target_ids: list[str] = []
+                value: ast.expr | None = None
+                if isinstance(node, ast.Assign):
+                    value = node.value
+                    target_ids = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    value = node.value
+                    if isinstance(node.target, ast.Name):
+                        target_ids = [node.target.id]
+                if value is None or not mutable_value(value):
+                    continue
+                for name in target_ids:
+                    n_found += 1
+                    if name not in allowed.get(path.name, set()):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: undeclared module-level mutable {name}"
+                        )
+        self.assertEqual(problems, [], f"undeclared module-level mutables: {problems}")
+        self.assertGreaterEqual(
+            n_found, 15, f"non-vacuous: expected >=15 mutable globals (got {n_found})"
+        )
+
+    def test_no_dangerous_primitives_or_mutable_defaults(self) -> None:
+        """Two code-shape defect classes that lints/tests do not see:
+
+        1. Dynamic-execution / deserialization primitives — eval, exec,
+           compile, __import__, globals()/locals() mutation, pickle,
+           marshal, subprocess/os.system/os.popen, ctypes. Shoin is a
+           stdlib-only local tool: NONE of these is ever legitimate here,
+           and any one of them is either a code-injection sink (eval'd
+           source text, pickled model output) or a sandbox escape. Today
+           there are zero; the pin keeps it zero.
+
+        2. Mutable default arguments — `def f(x=[], y={})` binds ONE list/
+           dict shared across every call; the classic aliasing bug that
+           passes every test that only calls once. Today there are zero;
+           the pin keeps it zero.
+        """
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        banned_calls = {"eval", "exec", "compile", "__import__", "globals", "locals"}
+        banned_attrs = {"loads", "load"}  # only when receiver is pickle/marshal
+        banned_mods = {"pickle", "marshal", "subprocess", "ctypes", "code", "pty"}
+        problems: list[str] = []
+        n_funcs = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            imported: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        imported.add(a.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".")[0])
+            bad_imports = imported & banned_mods
+            if bad_imports:
+                problems.append(
+                    f"{path.name}: banned imports {sorted(bad_imports)}"
+                )
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    n_funcs += 1
+                    for d in list(node.args.defaults) + [
+                        x for x in node.args.kw_defaults if x is not None
+                    ]:
+                        if isinstance(
+                            d, (ast.List, ast.Dict, ast.Set,
+                                ast.ListComp, ast.DictComp, ast.SetComp)
+                        ):
+                            problems.append(
+                                f"{path.name}:{node.lineno}: mutable default in {node.name}"
+                            )
+                elif isinstance(node, ast.Call):
+                    f = node.func
+                    name = f.id if isinstance(f, ast.Name) else ""
+                    if name in banned_calls:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: call to {name}()"
+                        )
+                    if isinstance(f, ast.Attribute):
+                        root = f.value
+                        root_name = root.id if isinstance(root, ast.Name) else ""
+                        if root_name in banned_mods and f.attr in banned_attrs | {
+                            "run", "call", "Popen", "system", "popen"
+                        }:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: {root_name}.{f.attr}()"
+                            )
+                        # os carries the same shell-exec family under a
+                        # legitimate-looking module name: os.system, os.popen,
+                        # os.spawn*, os.exec*, os.startfile — banning the
+                        # "subprocess"/"pty" imports alone leaves this twin
+                        # route open. os.* for ordinary fs calls (open, remove)
+                        # stays allowed; only the exec/spawn attr family trips.
+                        if root_name == "os" and (
+                            f.attr in {"system", "popen", "startfile"}
+                            or f.attr.startswith(("exec", "spawn"))
+                        ):
+                            problems.append(
+                                f"{path.name}:{node.lineno}: os.{f.attr}()"
+                            )
+        self.assertEqual(problems, [], f"dangerous constructs: {problems}")
+        self.assertGreaterEqual(
+            n_funcs, 100, f"non-vacuous: expected >=100 functions scanned (got {n_funcs})"
+        )
+
+    def test_regexes_have_no_catastrophic_geometry(self) -> None:
+        """ReDoS-shaped regex geometry passes lint and tests silently:
+
+        a regex only blows up on adversarial INPUT length, which no unit
+        test with ordinary strings reveals. The catastrophic shapes are
+        precise and AST/sre-checkable:
+
+        - a SUBPATTERN containing an unbounded repeat, nested inside an
+          unbounded repeat — the classic (x+)+ blowup;
+        - a BRANCH whose alternatives can match overlapping leading
+          tokens, inside an unbounded repeat — (a|ab)+ ambiguity.
+
+        Bounded repetitions (? {0,10}), top-level alternations of fixed
+        literals, and single-class repeats ([x]+) are all safe and stay
+        allowed — today's 35 literal patterns are zero-problem.
+
+        The second half of the hole is pattern CONSTRUCTION: any
+        re.compile built from a non-literal is catalogued below so a new
+        dynamic site cannot land without a deliberate edit here — the
+        discipline every current site already follows is constant-table
+        alternation or re.escape() around anything derived from input.
+        """
+        import ast
+        import sre_parse  # noqa: PLC2701
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        maxr = sre_parse.MAXREPEAT
+
+        def unbounded(op: object, av: object) -> bool:
+            return op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT) and av[1] == maxr
+
+        def heads_overlap(branches: object) -> bool:
+            heads: list[str] = []
+            for alt in branches:
+                for o2, a2 in alt:
+                    if o2 is sre_parse.LITERAL:
+                        heads.append(f"L{a2}")
+                        break
+                    if o2 is sre_parse.IN:
+                        heads.append(f"I{tuple(sorted(map(str, a2)))}")
+                        break
+                else:
+                    heads.append("other")
+            return len(heads) != len(set(heads))
+
+        problems: list[str] = []
+        dyn: list[str] = []
+        n_lit = 0
+
+        def scan(seq: object, inside_unbounded: bool, loc: str) -> None:
+            for op, av in seq:
+                if op is sre_parse.SUBPATTERN:
+                    scan(av[-1], inside_unbounded, loc)
+                elif op is sre_parse.BRANCH:
+                    if inside_unbounded and heads_overlap(av[1]):
+                        problems.append(
+                            f"{loc}: ambiguous alternation under unbounded repeat"
+                        )
+                    for alt in av[1]:
+                        scan(alt, inside_unbounded, loc)
+                elif unbounded(op, av):
+                    if inside_unbounded:
+                        problems.append(f"{loc}: nested unbounded repeat")
+                    for o2, a2 in av[2]:
+                        if o2 is sre_parse.SUBPATTERN and any(
+                            unbounded(o3, a3) for o3, a3 in a2[-1]
+                        ):
+                            problems.append(
+                                f"{loc}: unbounded repeat inside unbounded group"
+                            )
+                    scan(av[2], True, loc)
+                elif op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT):
+                    scan(av[2], inside_unbounded, loc)
+
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "compile"
+                ):
+                    continue
+                arg = node.args[0] if node.args else None
+                loc = f"{path.name}:{node.lineno}"
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    n_lit += 1
+                    scan(sre_parse.parse(arg.value), False, loc)
+                else:
+                    dyn.append(loc)
+
+        # Every non-literal compile in production today; each is a
+        # constant-table alternation (citation/search builder) or an
+        # re.escape'd interpolation. Adding one means deliberately
+        # re-auditing the construction for injection geometry.
+        expected_dyn = {
+            "chunk.py:100",
+            "citation.py:513", "citation.py:517", "citation.py:554",
+            "citation.py:567", "citation.py:867", "citation.py:1231",
+            "citation.py:1436",
+            "search.py:53", "search.py:752",
+        }
+        for loc in sorted(set(dyn) - expected_dyn):
+            problems.append(f"{loc}: uncatalogued dynamic re.compile")
+
+        self.assertEqual(problems, [], f"regex defects: {problems}")
+        self.assertGreaterEqual(
+            n_lit, 30, f"non-vacuous: expected >=30 literal patterns (got {n_lit})"
+        )
+
+    def test_all_sources_parse_under_the_declared_311_grammar(self) -> None:
+        """requires-python >=3.11 while dev runs a 3.12 interpreter:
+
+        3.12-relaxed f-strings (same-quote nesting) and new syntax like
+        `type X = ...` compile silently here but SyntaxError on the
+        declared floor — a first-run crash for floor users that no
+        ruff/mypy pass catches (they enforce API/typing, not grammar).
+        ast.parse(feature_version=(3,11)) replays the 3.11 grammar over
+        every shipped file, pinning the syntax floor the metadata
+        promises."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        problems: list[str] = []
+        n = 0
+        for d in ("shoin", "tests"):
+            for path in sorted((root / d).glob("*.py")):
+                n += 1
+                src = path.read_text(encoding="utf-8")
+                try:
+                    ast.parse(src, filename=str(path), feature_version=(3, 11))
+                except SyntaxError as exc:
+                    problems.append(f"{path.name}:{exc.lineno}: {exc.msg}")
+        self.assertEqual(
+            problems, [], f"syntax outside the 3.11 floor: {problems}"
+        )
+        self.assertGreaterEqual(
+            n, 15, f"non-vacuous: expected >=15 source files (got {n})"
+        )
+
+    def test_error_codes_match_the_declared_taxonomy(self) -> None:
+        """Catalog every error code the package raises or emits.
+
+        `_dispatch` maps codes by suffix/prefix — a new code spelled
+        without the `_NOT_FOUND` / `_ALREADY_EXISTS` / `SYSTEM_`
+        convention silently lands in the 400 bucket (a typo'd
+        `*_NOTFOUND` would emit HTTP 400 instead of 404 and no test
+        would see it). Assert the complete code set, so adding a code
+        requires updating this catalog — a documented-rationale edit —
+        and every code conforms to the name-family taxonomy."""
+        import ast
+
+        declared = {
+            # store.py raises (StoreError)
+            "CHUNK_NOT_FOUND",
+            "EMBEDDING_INVALID",
+            "INGEST_REFRESH_NOT_URL",
+            "NOTEBOOK_EMPTY",
+            "NOTEBOOK_NOT_FOUND",
+            "NOTE_NOT_FOUND",
+            "SOURCE_ALREADY_EXISTS",
+            "SOURCE_NOT_FOUND",
+            "STUDIO_KIND_INVALID",
+            "SYSTEM_DB_LOCKED",
+            "SYSTEM_IO_ERROR",
+            "SYSTEM_SERVICE_UNAVAILABLE",
+            # ingest.py / pipeline.py / server.py raises (IngestError)
+            "INGEST_EMPTY",
+            "INGEST_FILE_TOO_LARGE",
+            "INGEST_NOTEBOOK_FULL",
+            "INGEST_PDF_SUPPORT_MISSING",
+            "INGEST_FETCH_FAILED",
+            "INGEST_PARSE_FAILED",
+            "INGEST_UNSUPPORTED_FORMAT",
+            "INGEST_URL_BLOCKED",
+            # llm.py raises (LLMError)
+            "SYSTEM_EMBED_DISABLED",
+            "SYSTEM_LLM_TIMEOUT",
+            "SYSTEM_LLM_BAD_RESPONSE",
+            "SYSTEM_LLM_HTTP_ERROR",
+            # server.py raises (StoreError) + emit literals
+            "METHOD_NOT_ALLOWED",
+            "ROUTE_NOT_FOUND",
+            "SECURITY_CROSS_ORIGIN_BLOCKED",
+            "SECURITY_HOST_NOT_ALLOWED",
+            "SYSTEM_INTERNAL_ERROR",
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            "VALIDATION_INTEGER_OVERFLOW",
+            "VALIDATION_REQUIRED_FIELD_MISSING",
+        }
+        taxonomy = re.compile(
+            r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
+            r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
+        )
+        root = Path(__file__).resolve().parent.parent
+        found: set[str] = set()
+        problems: list[str] = []
+        for path in sorted((root / "shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise):
+                    call = node.exc
+                    if not (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id in {"StoreError", "LLMError", "IngestError"}
+                        and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        continue
+                    code = call.args[0].value
+                    if not isinstance(code, str) or not code.isupper():
+                        continue
+                    found.add(code)
+                    if code not in declared:
+                        problems.append(f"{path.name}:{node.lineno}: {code}")
+                    if not taxonomy.match(code):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: "
+                            f"{code} outside the name taxonomy"
+                        )
+                elif isinstance(node, ast.Constant) and isinstance(
+                    node.value, str
+                ):
+                    v = node.value
+                    if v in declared and v not in found:
+                        found.add(v)
+        self.assertEqual(
+            found, declared,
+            f"raised/emitted codes != declared catalog: "
+            f"missing={declared - found}, extra={found - declared}",
+        )
+        self.assertEqual(problems, [], f"undeclared or ill-formed codes: {problems}")
+        self.assertGreaterEqual(
+            len(found), 30, f"non-vacuous: expected >=30 codes (got {len(found)})"
+        )
+
+    def test_header_values_have_no_interpolated_user_data(self) -> None:
+        """Every send_header value must be a constant or provably safe —
+        a future `extra={"X": f"...{user_value}..."}` is a CRLF/header-
+        injection sink that no behavior test sees (BaseHTTPRequestHandler
+        writes the bytes verbatim; http.client never validates).
+
+        Safe shapes today: str(len(body)), constants, `_EXPORT_*[fmt]`
+        subscripts (closed maps), `safe_lang` (ja|en whitelist), and
+        f-strings interpolating only route-captured ints ({nb_id} —
+        the route regex is \\d+, so it is always digits)."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        n_sites = 0
+
+        def safe_value(v: ast.expr) -> bool:
+            if isinstance(v, ast.Constant):
+                return isinstance(v.value, str)
+            if (
+                isinstance(v, ast.Call)
+                and isinstance(v.func, ast.Name)
+                and v.func.id == "str"
+                and len(v.args) == 1
+            ):
+                inner = v.args[0]
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "len":
+                    return True  # str(len(body)) — byte count
+                if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                    return True  # route-regex ints
+                return False
+            if isinstance(v, ast.Subscript):
+                return True  # closed lookup maps (_EXPORT_MIME/_EXPORT_EXT)
+            if isinstance(v, ast.Name) and v.id == "safe_lang":
+                return True  # whitelisted ja|en
+            if isinstance(v, ast.JoinedStr):
+                for part in v.values:
+                    if not isinstance(part, ast.FormattedValue):
+                        continue
+                    inner = part.value
+                    if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                        continue  # route-regex ints
+                    if isinstance(inner, ast.Subscript):
+                        continue  # closed lookup maps
+                    return False
+                return True
+            return False
+
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr == "send_header" and len(node.args) >= 2:
+                n_sites += 1
+                # The (extra or {}).items() loop is the only dynamic site;
+                # direct calls must carry a constant value.
+                if not safe_value(node.args[1]) and not isinstance(
+                    node.args[1], (ast.Name, ast.Tuple)
+                ):
+                    problems.append(f"server.py:{node.lineno}: non-constant header value")
+            if node.func.attr == "_headers" and len(node.args) >= 3:
+                third = node.args[2]
+                if isinstance(third, ast.Dict):
+                    n_sites += 1
+                    for v in third.values:
+                        if not safe_value(v):
+                            problems.append(
+                                f"server.py:{node.lineno}: interpolated extra-header value"
+                            )
+        self.assertEqual(
+            problems, [], f"header values outside the safe shapes: {problems}"
+        )
+        self.assertGreaterEqual(
+            n_sites, 5, f"non-vacuous: expected >=5 header sites (got {n_sites})"
+        )
+
+    def test_set_iteration_builds_no_ordered_output(self) -> None:
+        """Iterating a set emits PYTHONHASHSEED-ordered elements — fine for
+        order-insensitive bodies (count/membership accumulation like
+        `counts[g] += 1` in _prf_terms), but `lst.append(x)` / `lst += [x]` /
+        `yield x` inside the loop bakes per-process hash order into output:
+        flag lists, exports, and JSON arrays would reshuffle per run with no
+        test failure. Ordered escapes must go through sorted() — the codebase
+        idiom `return sorted(out)`. This pins the iteration surface: no
+        for-loop/comprehension over a set-bound name may append/extend/
+        list-+=/yield, and no list()/tuple()/.join() call may consume a
+        set-bound name."""
+        import ast
+
+        problems: list[str] = []
+        n_loops = 0
+        for path in sorted(Path("shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for func in ast.walk(tree):
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                bound: set[str] = set()
+                for node in ast.walk(func):
+                    val: ast.expr | None = None
+                    targets: list[ast.expr] = []
+                    if isinstance(node, ast.Assign):
+                        val, targets = node.value, list(node.targets)
+                    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                        val, targets = node.value, [node.target]
+                    if val is None:
+                        continue
+                    if isinstance(val, ast.SetComp) or (
+                        isinstance(val, ast.Call)
+                        and isinstance(val.func, ast.Name)
+                        and val.func.id == "set"
+                    ):
+                        for t in targets:
+                            if isinstance(t, ast.Name):
+                                bound.add(t.id)
+                for node in ast.walk(func):
+                    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        it = node.iter
+                        name: str | None = None
+                        if isinstance(it, ast.Name) and it.id in bound:
+                            name = it.id
+                        if name is None:
+                            continue
+                        n_loops += 1
+                        body = node.body if isinstance(node, (ast.For, ast.AsyncFor)) else []
+                        for sub in ast.walk(ast.Module(body=body, type_ignores=[])):
+                            if isinstance(sub, ast.Yield) or isinstance(sub, ast.YieldFrom):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: yield inside for over set {name}"
+                                )
+                            if (
+                                isinstance(sub, ast.Call)
+                                and isinstance(sub.func, ast.Attribute)
+                                and sub.func.attr in ("append", "extend", "insert")
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: "
+                                    f"{sub.func.attr}() inside for over set {name}"
+                                )
+                            if isinstance(sub, ast.AugAssign) and isinstance(
+                                sub.target, ast.Name
+                            ):
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: += on {sub.target.id} "
+                                    f"inside for over set {name}"
+                                )
+                    if isinstance(node, ast.Call):
+                        fn = node.func
+                        cname = (
+                            fn.id
+                            if isinstance(fn, ast.Name)
+                            else (fn.attr if isinstance(fn, ast.Attribute) else None)
+                        )
+                        if cname in ("list", "tuple", "join"):
+                            for a in node.args:
+                                if isinstance(a, ast.Name) and a.id in bound:
+                                    problems.append(
+                                        f"{path.name}:{node.lineno}: {cname}({a.id})"
+                                    )
+        self.assertEqual(
+            problems,
+            [],
+            f"set iteration producing ordered output unsorted: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_loops, 1,
+            f"non-vacuous: expected >=1 for-over-set loop (got {n_loops})",
+        )
+
+
+    def test_library_prints_never_pollute_stdout(self) -> None:
+        """Stdout is a machine-readable contract: `shoin eval` and
+        structured CLI output must stay parseable when piped. A `print()`
+        buried in the library layer writes progress chatter straight into
+        a consumer's JSON/parser — invisible to every unit test, since
+        nothing asserts on streams. Pin the rule the code already
+        follows: outside `cli.py` (which legitimately owns stdout), every
+        `print()` must redirect to `file=sys.stderr` — the only exception
+        is `server.serve()`, whose startup banner is its user-facing
+        surface."""
+        import ast
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_stderr = 0
+        n_serve = 0
+        for f in sorted(root.glob("*.py")):
+            if f.name == "cli.py":
+                continue
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=f.name)
+            parents: dict[ast.AST, ast.AST] = {}
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    parents[child] = node
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                ):
+                    continue
+                to_stderr = any(
+                    kw.arg == "file"
+                    and isinstance(kw.value, ast.Attribute)
+                    and kw.value.attr == "stderr"
+                    and isinstance(kw.value.value, ast.Name)
+                    and kw.value.value.id == "sys"
+                    for kw in node.keywords
+                )
+                if to_stderr:
+                    n_stderr += 1
+                    continue
+                owner = parents.get(node)
+                while owner is not None and not isinstance(
+                    owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    owner = parents.get(owner)
+                if owner is not None and owner.name == "serve":
+                    n_serve += 1
+                    continue
+                problems.append(f"{f.name}:{node.lineno}: print() to stdout")
+            # Twin routes around print(): a bare `sys.stdout` reference
+            # (write()/reassignment) bypasses the same contract — ban the
+            # attribute entirely outside cli.py. `import logging` is also
+            # banned: the codebase's diagnostic convention is prints to
+            # stderr; a logging call would emit under a logger nobody
+            # configures (lastResort stderr or silence), and a handler
+            # wired to stdout would reopen the pollution class.
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys"
+                ):
+                    problems.append(f"{f.name}:{node.lineno}: sys.stdout access")
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.name == "logging" or a.name.startswith("logging."):
+                            problems.append(f"{f.name}:{node.lineno}: import logging")
+                if isinstance(node, ast.ImportFrom) and (
+                    node.module or ""
+                ).startswith("logging"):
+                    problems.append(f"{f.name}:{node.lineno}: import logging")
+        self.assertEqual(problems, [])
+        self.assertGreaterEqual(
+            n_stderr, 5,
+            f"non-vacuous: expected >=5 stderr prints (got {n_stderr})",
+        )
+        self.assertGreaterEqual(
+            n_serve, 1,
+            f"non-vacuous: expected the serve() banner (got {n_serve})",
+        )
+
+    def test_fts_match_expression_is_fully_quoted(self) -> None:
+        """FTS5 MATCH is its own query language: `AND`, `OR`, `NEAR`, `:`,
+        `*`, and bare `"` are operators, not literals. A term interpolated
+        unquoted lets a query like `x:y` or `" jailbreak` silently change
+        WHERE's semantics (no exception, wrong rows — invisible to tests).
+        The contract: `fts_query` emits ONLY double-quoted atoms (inner
+        quotes doubled by `_fts_escape` post-variant) OR-joined, and the
+        single `MATCH` site binds the expression through `?`."""
+        from shoin.search import fts_query
+        probes = [
+            "rain AND drop",
+            "x:y",
+            '"literal"',
+            "a*b",
+            "温度上昇 rate 3%",
+            "fullwidth\uff02quote",
+            "NEAR/3 one two",
+            "col:text",
+        ]
+        for probe in probes:
+            out = fts_query(probe)
+            if not out:
+                continue  # tokenizer dropped every term — LIKE fallback path
+            atoms = out.split(" OR ")
+            for a in atoms:
+                self.assertRegex(
+                    a, r'\A"(?:[^"]|"")*"\Z',
+                    f"unquoted FTS5 atom {a!r} for query {probe!r}",
+                )
+            # Nothing outside quoted atoms + the OR separator.
+            self.assertEqual(" OR ".join(atoms), out)
+        # Structural: exactly one MATCH site, bound through ?.
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        sites = []
+        for f in sorted(root.glob("*.py")):
+            for i, line in enumerate(
+                f.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
+                    sites.append(f"{f.name}:{i}")
+        self.assertEqual(
+            sites, ["search.py:556"],
+            f"MATCH sites drifted: {sites}",
+        )
+
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
         completion criterion (zero known bugs) says none may ship. Until this
@@ -13250,7 +14169,6 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the invariant must bind to real code — at least one bound body
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
