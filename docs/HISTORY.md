@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.398
+## Version History: v0.1.37 → v0.2.399
+
+### v0.2.399 (2026-09-29)
+
+- pin CLI parser↔dispatch parity: every declared subcommand and action
+  must have a branch — a parser entry without one silently no-ops (rc=0)
 
 ### v0.2.398 (2026-09-29)
 
