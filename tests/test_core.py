@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.441")
+        self.assertEqual(VERSION, "0.2.442")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13172,6 +13172,39 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"LLM generation call outside lock: {problems}")
         self.assertGreaterEqual(
             covered, 3, f"expected >=3 locked call sites — non-vacuous (got {covered})"
+        )
+
+    def test_every_do_verb_routes_through_dispatch(self) -> None:
+        """Every do_<VERB> method on the handler must route through
+        self._dispatch(...) — the single funnel that runs
+        _reject_cross_site() (the DNS-rebinding / CSRF guard) before any
+        routing. A verb added without the funnel (e.g. a future do_HEAD or
+        do_PUT) serves requests while bypassing the guard silently: every
+        test passes because single-threaded tests never probe a cross-site
+        Origin. AST-pin each do_* body to a self._dispatch(...) call."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        n_verbs = 0
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("do_")):
+                continue
+            n_verbs += 1
+            funneled = any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "_dispatch"
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "self"
+                for n in ast.walk(node)
+            )
+            if not funneled:
+                problems.append(f"server.py:{node.lineno}: {node.name} bypasses _dispatch")
+        self.assertEqual(problems, [], f"do_* method bypasses cross-site guard: {problems}")
+        self.assertGreaterEqual(
+            n_verbs, 4, f"expected >=4 do_* verbs — non-vacuous (got {n_verbs})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:

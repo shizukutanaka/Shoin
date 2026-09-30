@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.441
+## Version History: v0.1.37 → v0.2.442
+
+### v0.2.442 (2026-09-30)
+
+- pin that every do_<VERB> handler routes through
+  self._dispatch(...) — the funnel that runs _reject_cross_site()
+  before routing, so a future do_HEAD/do_PUT cannot silently
+  bypass the DNS-rebinding / CSRF guard (AST walk; non-vacuous
+  floor of 4 verbs).
 
 ### v0.2.441 (2026-09-30)
 
