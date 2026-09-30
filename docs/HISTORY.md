@@ -29,7 +29,46 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.393
+## Version History: v0.1.37 → v0.2.396
+
+### v0.2.396 (2026-09-29)
+
+- Pin the eval baseline round-trip: report_from_dict(report_to_dict(rep, k))
+  must read back every written field identically. Writer/reader key or dtype
+  drift would surface only at --diff time, far from the edit that caused it.
+- Correct the v0.2.395 comment: `shoin src refresh` (same-id content rewrite
+  bumping sha256) is the cross-process writer the fingerprint guards against;
+  `shoin reindex` only re-embeds vectors, which suggestions never read.
+- Same-cycle audit, all clean: every store getter carries an explicit ORDER BY,
+  all 133 UI function/const names are referenced by tests, fetch_url bounds the
+  decoded body (_check_size after decode), refresh/rename title paths fully
+  guarded, suggest_questions validates every filter.
+
+### v0.2.395 (2026-09-29)
+
+- Make the questions cache fingerprint content-aware: (id, sha256,
+  title) per source instead of ids only. A same-id content rewrite
+  from another process (CLI reindex/refresh while serve runs) left
+  the fingerprint matching, so the server kept serving suggestions
+  generated from dead chunks indefinitely — only the in-process
+  refresh/delete pops covered it. Fail-first verified (id-only
+  fingerprint serves a stale hit: chat_count stays 1).
+- Same-cycle audit, all clean: zero dead I18N.ja keys, zero
+  unreferenced element ids, _STRINGS keys all dynamically reachable,
+  port-0 banner prints the actual bound port, every except Exception
+  site documented, cli.py:765 is the mypy-required fallthrough, and
+  citation.py's zero-bigram tail is provably unreachable under
+  _MIN_CLAIM_CHARS=5.
+
+### v0.2.394 (2026-09-29)
+
+- Cover store.py's last two defensive tails with _RacyConn race tests:
+  add_chunks' FOREIGN KEY -> SOURCE_NOT_FOUND mapping (the third
+  sibling replace_chunks_for_source already proved) and
+  update_source_sha256's in-transaction re-read catching a concurrent
+  delete. Both mutants verified fail-first. Remaining misses are the
+  provably unreachable AssertionError and citation.py/cli.py's
+  defensive edges.
 
 ### v0.2.393 (2026-09-29)
 

@@ -571,6 +571,38 @@ class ServerTest(unittest.TestCase):
         self._json("GET", f"/api/notebooks/{nb_id}/questions")  # invalidated
         self.assertEqual(self.llm.chat_count, before + 2)
 
+    def test_questions_cache_invalidates_on_content_change_same_id(self) -> None:
+        """Content rewrite under an unchanged source id must expire the cache.
+
+        A reindex/refresh from ANOTHER process (CLI `shoin reindex` while
+        `serve` runs) rewrites chunks and bumps sources.sha256 without any
+        pop reaching this server's questions_cache — an id-only fingerprint
+        still matched, so suggestions generated from dead content were
+        served indefinitely. The (id, sha256, title) fingerprint
+        self-expires exactly when what fed the suggestions changed."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "fp-content"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("内容のある文書。" * 50).encode(),
+            {"X-Filename": "c.txt"},
+        )
+        self._json("GET", f"/api/notebooks/{nb_id}/questions")  # prime cache
+        before = self.llm.chat_count
+        # Cross-process writer: same source id, new content + new sha256 —
+        # exactly what pipeline.refresh_source / CLI reindex performs.
+        with Store(str(Path(self.tmp.name) / "s.db")) as other:
+            src = other.sources_for_notebook(nb_id)[0]
+            other.replace_chunks_for_source(
+                src.id, ["変わった内容。" * 50], sha256="fresh-sha", title=src.title
+            )
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.llm.chat_count, before + 1)  # regenerated, not stale
+
     def test_questions_cache_stale_write_does_not_overwrite_newer_entry(self) -> None:
         """A concurrent source-add must not let a stale fingerprint clobber the cache.
 
