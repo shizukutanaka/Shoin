@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.406
+## Version History: v0.1.37 → v0.2.407
+
+### v0.2.407 (2026-09-29)
+
+- map malformed URL ports to INGEST_URL_BLOCKED: urlparse validates
+  .port lazily, so :abc / out-of-range / negative ports raised
+  ValueError inside fetch_url — outside the IngestError handling —
+  and surfaced as HTTP 500 instead of 400 (same class as zone-scoped
+  IPv6, v0.2.45); validate .port inside validate_public_url before DNS
 
 ### v0.2.406 (2026-09-29)
 
