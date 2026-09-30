@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.429
+## Version History: v0.1.37 → v0.2.430
+
+### v0.2.430 (2026-09-30)
+
+- reject unpaired surrogates at the request-field validators:
+  json.loads materializes them from \ud800 escapes that raw
+  UTF-8 bytes can't carry, and one reaching a write surfaces
+  as an uncaught UnicodeEncodeError from the sqlite3 binding
+  — a raw 500 for a client-side format error. Both _require
+  and _optional_str now run _check_utf8, so the 400 reaches
+  the caller before the bind does.
 
 ### v0.2.429 (2026-09-30)
 
