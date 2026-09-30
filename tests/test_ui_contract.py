@@ -2460,11 +2460,21 @@ console.log("ok")
 """
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
-        # Wire check: health() tracks _embedOn both ways, and all three ingest
-        # toasts (upload, URL add, refresh) append embedNote(j).
+        # Wire check: health() tracks _embedOn both ways, all three ingest
+        # toasts (upload, URL add, refresh) append embedNote(j), and every
+        # toast line that announces a completed ingest carries the suffix —
+        # a future ingest path that forgets embedNote fails here even when
+        # the call count is unchanged.
         self.assertIn("window._embedOn = !!j.embed_model", src)
         self.assertIn("window._embedOn=false", src)
         self.assertEqual(src.count("embedNote(j)"), 4)  # 1 definition + 3 call sites
+        toast_lines = [
+            line for line in src.splitlines()
+            if "toast(" in line and ('t("sources.added")' in line or 't("src.refresh.ok")' in line)
+        ]
+        self.assertEqual(len(toast_lines), 3)
+        for line in toast_lines:
+            self.assertIn("embedNote(j)", line, f"ingest toast without embedNote: {line.strip()}")
 
     def test_source_row_delete_and_rename_guard(self) -> None:
         """v0.2.329: the source row's remaining three unpinned wirings —

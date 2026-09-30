@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.390
+## Version History: v0.1.37 → v0.2.392
+
+### v0.2.392 (2026-09-29)
+
+- Pin HISTORY.md's `Version History: … → vX.Y.Z` header tip to VERSION
+  (test_history_md_records_current_version extension) — the last ritual
+  marker no pin covered; a stale tip could survive correct entries.
+- Same-cycle audit, all already guarded: INGEST_EMPTY rejects
+  empty-extraction sources before add_source (no ghost sources);
+  messages_omitted is consumed by the UI marker (chat.earlier); studio
+  generation does not consume chat history (no stale [S#] path).
+
+### v0.2.391 (2026-09-29)
+
+- Strengthened the ingest-toast wire pin: beyond counting `embedNote(j)` call sites, the test now scans every `toast(` line announcing a completed ingest (`sources.added` / `src.refresh.ok`) and requires the embed-skip suffix on each — a future ingest path that forgets `embedNote` fails even when the call count is unchanged (the class of drift a count-only pin misses). Same-cycle audit: `_embed_chunks` model-version ordering (`set_setting` only when `done and (not force or done == len(texts))` — a partial force-reindex keeps the OLD model recorded so the mismatch guard stays armed), `_file_config` type filtering, `snums` S# numbering single-sourced from `enumerate(order)`, per-request `Store` (default `check_same_thread` safe by construction), and all Content-Length parsing — already guarded.
 
 ### v0.2.390 (2026-09-29)
 
