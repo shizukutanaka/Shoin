@@ -29,7 +29,330 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.434
+## Version History: v0.1.37 → v0.2.474
+
+### v0.2.474
+- Extended `test_library_prints_never_pollute_stdout` to the twin
+  bypass routes: any `sys.stdout` attribute access outside `cli.py`
+  (write()/reassignment bypasses the same contract print() did) and
+  any `import logging` / `from logging ...` in `shoin/` (the codebase's
+  diagnostic convention is prints to stderr; a logging call emits under
+  an unconfigured logger — lastResort stderr or silence — and a
+  stdout-wired handler would reopen the pollution class). Also audited:
+  single yield-inside-with site (`llm.chat_stream` — GeneratorExit on
+  generator.close() exits the urlopen `with`, closing the socket).
+
+### v0.2.473
+- Spec sync — `docs/spec.md` folded the four output-plane pins into
+  the invariants paragraph: header-value AST whitelist (v0.2.468),
+  set-iteration ordered-escape ban (v0.2.469), library print()-stderr
+  rule (v0.2.470), FTS5 MATCH quoting (v0.2.471). Header → v0.2.472,
+  tests 1114.
+
+### v0.2.472
+- Ledger sync — `docs/product-review.md` was 5 versions stale
+  (v0.2.467): new `v0.2.467-471 の要約` block — 「出力面の機械可読
+  契約」 (header-value AST whitelist, set-iteration ordered-escape
+  ban, library print-to-stderr rule, FTS5 MATCH quoting). Header
+  → v0.2.471, tests 1110→1114, module count 15→16 (`__main__.py`).
+
+### v0.2.471
+- `test_fts_match_expression_is_fully_quoted` — FTS5 MATCH is its own
+  query language (`AND`/`OR`/`NEAR`/`:`/`*`/`"` are operators); an
+  unquoted term would silently re-interpret WHERE semantics. Pin: every
+  `fts_query` atom is double-quoted (`_fts_escape` post-variant doubles
+  inner quotes), and exactly one `MATCH ?` site exists (search.py:556).
+  Audit: zero violations; `x:y`/`a*b` tokenize to nothing (LIKE
+  fallback); class-level mutable attrs and unquoted MATCH sites: none.
+
+### v0.2.470
+- `test_library_prints_never_pollute_stdout` — stdout is a machine-readable
+  contract (`shoin eval` and piped structured output); a library-layer
+  `print()` writes chatter into a consumer's parser, invisible to unit
+  tests. AST pin: outside `cli.py`, every `print()` must pass
+  `file=sys.stderr`; `server.serve()`'s startup banner is the sole
+  exception. Audited live: 9 stderr prints (pipeline model-change warning,
+  search `_debug_print`, server dispatch/disconnect/citation-report
+  warnings) + the serve banner — zero violations.
+
+### v0.2.469 (2026-10-01)
+
+- pin set-iteration against ordered-output escapes
+  (test_set_iteration_builds_no_ordered_output): iterating
+  a set emits PYTHONHASHSEED-ordered elements — legitimate
+  for order-insensitive bodies (count/membership
+  accumulation), but append/extend/list-+=/yield inside the
+  loop bakes per-process hash order into flag lists,
+  exports, and JSON arrays, which would reshuffle per run
+  with no test failure. AST-scans for-loops over set-bound
+  names for list-mutation/yield bodies and list()/tuple()/
+  join() calls consuming set-bound names; sorted() remains
+  the only sanctioned ordered escape. Fail direction
+  verified (list(out) and for-append each flagged).
+
+### v0.2.468 (2026-09-30)
+
+- pin header values to safe shapes: every send_header value is
+  a constant or provably safe (str(len(...)), closed
+  _EXPORT_*[fmt] lookups, whitelisted safe_lang, route-regex
+  ints like {nb_id}) — a future interpolated extra={} entry is
+  a CRLF injection sink no behavior test sees, since
+  BaseHTTPRequestHandler writes the bytes verbatim.
+  Fail-verified with a Name-valued header injection.
+
+### v0.2.467 (2026-09-30)
+
+- sync the product-review ledger to v0.2.466 — the v0.2.463-466
+  window lands (the 32-code error taxonomy catalog plus the
+  usual doc syncs). Header and test count (1110) updated.
+
+### v0.2.466 (2026-09-30)
+
+- fold the v0.2.465 error-code catalog pin into spec.md's
+  invariants paragraph; header and quality line (1110 tests)
+  refreshed. Audit notes from this cycle: emit-side response
+  meta, SSRF redirect re-pinning per hop, questions-cache
+  invalidation, sqlite busy_timeout, bidirectional env-var
+  doc parity, and deterministic ORDER BY are all verified
+  already-covered.
+
+### v0.2.465 (2026-09-30)
+
+- catalog every raised/emitted error code: _dispatch maps by
+  suffix/prefix, so a typo'd `*_NOTFOUND` silently lands in the
+  400 bucket instead of 404 and no test sees it. A 32-code AST
+  scan now pins the declared set plus a name-family taxonomy —
+  new codes require a documented-rationale catalog update.
+  Fail-verified with a `NOTE_NOTFOUND` injection.
+
+### v0.2.464 (2026-09-30)
+
+- sync spec.md to v0.2.463 — REQ-105 notes the python -m
+  equivalence, the pin paragraph gains the catch-all bypass
+  closure (v0.2.460) and the 3.11 grammar replay (v0.2.461),
+  and the quality line reflects 1109 tests.
+
+### v0.2.463 (2026-09-30)
+
+- sync the product-review ledger to v0.2.462 — the v0.2.457-462
+  window lands (the python -m entry point, the catch-all
+  bypass-route closure, the 3.11 grammar pin, the README
+  discovery line) plus the usual two doc syncs.
+
+### v0.2.462 (2026-09-30)
+
+- document `python -m shoin` in the README installation block —
+  the v0.2.459 __main__ entry point was invisible in the docs,
+  so running from the source tree without `pip install` was
+  undiscoverable. One sentence noting both invocations delegate
+  to the same `cli.main`.
+
+### v0.2.461 (2026-09-30)
+
+- pin the declared 3.11 syntax floor: dev runs 3.12, so relaxed
+  f-strings (same-quote nesting) and `type` statements would
+  compile here but SyntaxError for floor users — a first-run
+  crash lint and mypy cannot see (they check API/typing, not
+  grammar). Every shipped file is now ast.parse'd under
+  feature_version=(3,11). Fail-verified with a `type` statement.
+
+### v0.2.460 (2026-09-30)
+
+- close the three catch-all bypass routes the except-Exception
+  catalog could not see: bare `except:` (swallows
+  KeyboardInterrupt/SystemExit), `except BaseException` (same
+  reach), and `contextlib.suppress(Exception/BaseException)` —
+  the identical silent-swallow under a context manager. All
+  zero today; the existing suppress(OSError) chmod site stays
+  allowed and anchors a non-vacuity check. Fail-verified all
+  three injected shapes.
+
+### v0.2.459 (2026-09-30)
+
+- add shoin/__main__.py so `python -m shoin` works — the
+  console_script entry exists only post-install, so running the
+  source tree died on 'No module named shoin.__main__'. Both
+  invocations now delegate to the same cli.main(). New file:
+  entry-point only (3 lines), documented here per the
+  file-change policy. End-to-end subprocess test asserts
+  `-m shoin --help` exits 0 with a usage block; fail-verified
+  by removing the file.
+
+### v0.2.458 (2026-09-30)
+
+- sync spec.md to v0.2.458 (dangerous-primitives + os.* pin pair,
+  ReDoS geometry pin + dynamic-compile catalog).
+
+### v0.2.457 (2026-09-30)
+
+- sync product-review ledger to v0.2.456 (v0.2.453-456 summary
+  block: dangerous-primitives pin, os.* twin-route repair, ReDoS
+  geometry pin).
+
+### v0.2.456 (2026-09-30)
+
+- pin regexes against ReDoS geometry: an unbounded repeat nested in
+  an unbounded group ((x+)+) or an overlapping-head alternation
+  under an unbounded repeat is flagged at scan time. All 35 literal
+  re.compile sites are zero-problem today; the 10 dynamic compiles
+  are catalogued (constant-table alternation or re.escape'd
+  interpolation) so new ones need a deliberate edit to land.
+  Fail-verified against an injected (a+)+ and an uncatalogued
+  dynamic compile.
+
+### v0.2.455 (2026-09-30)
+
+- close the os.* shell-exec hole in the v0.2.454 pin: banning the
+  subprocess/pty imports left os.system/os.popen/os.spawn*/os.exec*/
+  os.startfile — the same defect class under a legitimate-looking
+  module root — reachable. The pin now flags the exec/spawn attr
+  family on the os root while leaving ordinary os.* fs calls
+  (open, remove) alone. Fail-verified against an injected
+  os.system call.
+
+### v0.2.454 (2026-09-30)
+
+- pin zero tolerance for dangerous primitives (eval/exec/compile/
+  __import__/globals/locals calls; pickle/marshal/subprocess/
+  ctypes/code/pty imports and call sites) and mutable default
+  arguments — both defect classes pass lint silently today at
+  zero sites.
+
+### v0.2.453 (2026-09-30)
+
+- sync product-review ledger to v0.2.452 (explicit-timeout pin,
+  declared module-level mutables pin).
+
+### v0.2.452 (2026-09-30)
+
+- sync spec.md to v0.2.451 (curated except-Exception catalog,
+  explicit-timeout network calls, declared module-level mutables;
+  test count 1105).
+
+### v0.2.451 (2026-09-30)
+
+- pin that module-level mutable collections are only the declared
+  (file, name) set — the one truly mutable global
+  (_QUERY_VEC_CACHE) is lock-guarded and lock-pinned; a new
+  unguarded shared mutable races under per-request threads while
+  every single-threaded test passes.
+
+### v0.2.450 (2026-09-30)
+
+- pin that every network call passes an explicit timeout (urlopen
+  needs timeout= or 3+ positional, create_connection needs
+  timeout= or 2+ positional) — an unbounded call pins a handler
+  thread forever, and per-request threads accumulate into
+  thread exhaustion.
+
+### v0.2.449 (2026-09-30)
+
+- sync product-review ledger to v0.2.448 (TX-verb caller-side pin,
+  curated except-Exception catalog).
+
+### v0.2.448 (2026-09-30)
+
+- pin that every `except Exception` in production code is one of the
+  curated, documented sites (per-file counts: ingest 2, server 7,
+  cli 1, pipeline 2) — a new undocumented catch-all lints clean
+  while silently swallowing whatever defect class it covers.
+
+### v0.2.447 (2026-09-30)
+
+- sync spec.md to v0.2.446 (sqlite3.connect single-ownership pin,
+  caller-side TX-verb pin; test count 1102).
+
+### v0.2.446 (2026-09-30)
+
+- pin that TX verbs (.conn.commit/rollback/executescript/
+  executemany) outside store.py live only in pipeline.py — the
+  data-mutation-SQL pin scans SQL text, not TX calls, so a new
+  .conn.commit() in a handler would silently flush a callee's
+  pending writes (caller-side early-commit).
+
+### v0.2.445 (2026-09-30)
+
+- sync the product-review ledger to v0.2.444 — name the
+  security-funnel section (do_* -> _dispatch pin +
+  sqlite3.connect ownership pin, v0.2.441-444); header/test
+  counts updated.
+
+### v0.2.444 (2026-09-30)
+
+- pin that sqlite3.connect() lives only in store.py — a connect
+  site added anywhere else silently skips row_factory, the WAL /
+  foreign_keys PRAGMAs and the private 0600 file permissions
+  while still passing every test (AST walk across shoin/).
+
+### v0.2.443 (2026-09-30)
+
+- sync spec.md to v0.2.442 — fold the do_* → _dispatch funnel pin
+  into the information-leakage STRIDE row; header/quality line
+  (v0.2.442, 1100 tests) updated.
+
+### v0.2.442 (2026-09-30)
+
+- pin that every do_<VERB> handler routes through
+  self._dispatch(...) — the funnel that runs _reject_cross_site()
+  before routing, so a future do_HEAD/do_PUT cannot silently
+  bypass the DNS-rebinding / CSRF guard (AST walk; non-vacuous
+  floor of 4 verbs).
+
+### v0.2.441 (2026-09-30)
+
+- sync the product-review ledger to v0.2.440 — name the
+  boundary-invariant section (stat-before-read fix +
+  gzip-bomb pin + generation_lock pin, v0.2.436-440);
+  header/test counts updated.
+
+### v0.2.440 (2026-09-30)
+
+- sync spec.md to v0.2.439 — fold the stat-before-read
+  size gate (v0.2.437), the decompressed-body bound
+  (v0.2.438), and the generation_lock call-site pin
+  (v0.2.439) into the DoS / pin sections; quality line
+  now v0.2.439 / 1099 tests.
+
+### v0.2.439 (2026-09-30)
+
+- pin that LLM-generation call sites in server.py run
+  under `with self.generation_lock:` — the STRIDE DoS
+  control; an unserialized new call site works correctly
+  (unthrottled) and fails no test. Call sites pinned:
+  generate(), suggest_questions(), self._stream_chat().
+  floor >=3.
+
+### v0.2.438 (2026-09-30)
+
+- pin the decompressed-body size bound end-to-end: a gzip
+  bomb (small on the wire, huge inflated) must hit
+  INGEST_FILE_TOO_LARGE via fetch_url. The _check_size
+  inside _decode_content_encoding already enforced it;
+  it was the last bounded-size invariant with no test.
+
+### v0.2.437 (2026-09-30)
+
+- extract_file() size-gates on stat() before read_bytes()
+  — an oversized local file was fully buffered in memory
+  before the 10MB check ran; now rejected from metadata.
+  The post-read _check_size stays (growth between stat
+  and read).
+
+### v0.2.436 (2026-09-30)
+
+- sync the product-review ledger to v0.2.435 — name the
+  concurrency-contract sealing section (Store dunder TX
+  pin + questions_cache/_QUERY_VEC_CACHE lock-coverage
+  pins, v0.2.431-435); header/test counts updated.
+
+### v0.2.435 (2026-09-30)
+
+- sync spec.md to v0.2.434 — fold the unpaired-surrogate
+  400 mapping (v0.2.430), the Store dunder TX pin (v0.2.432),
+  and the shared-cache lock-coverage pins
+  (questions_cache/_QUERY_VEC_CACHE, v0.2.433/434) into the
+  DB/validation section; quality line now v0.2.434 /
+  1096 tests.
 
 ### v0.2.434 (2026-09-30)
 
