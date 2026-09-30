@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.436
+## Version History: v0.1.37 → v0.2.437
+
+### v0.2.437 (2026-09-30)
+
+- extract_file() size-gates on stat() before read_bytes()
+  — an oversized local file was fully buffered in memory
+  before the 10MB check ran; now rejected from metadata.
+  The post-read _check_size stays (growth between stat
+  and read).
 
 ### v0.2.436 (2026-09-30)
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.436")
+        self.assertEqual(VERSION, "0.2.437")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2568,6 +2568,23 @@ class TestIngest(unittest.TestCase):
             with self.assertRaises(IngestError) as cm:
                 extract_file(p)
             self.assertEqual(cm.exception.code, "INGEST_FILE_TOO_LARGE")
+
+    def test_size_limit_consults_stat_before_reading(self) -> None:
+        """The oversize guard must reject from stat() metadata, not by loading
+        the file — read_bytes() before the check means a huge local file is
+        fully buffered in memory just to learn it is over the limit."""
+        from shoin.config import MAX_UPLOAD_BYTES
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "big.txt"
+            p.write_bytes(b"x")
+            fake = os.stat_result((0, 0, 0, 0, 0, 0, MAX_UPLOAD_BYTES + 1, 0, 0, 0))
+            with patch.object(Path, "stat", return_value=fake), patch.object(
+                Path, "read_bytes", side_effect=AssertionError("read_bytes ran")
+            ):
+                with self.assertRaises(IngestError) as cm:
+                    extract_file(p)
+                self.assertEqual(cm.exception.code, "INGEST_FILE_TOO_LARGE")
 
     def test_empty_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
