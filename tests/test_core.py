@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.422")
+        self.assertEqual(VERSION, "0.2.423")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12632,6 +12632,94 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the pin must not go vacuous — store.py actually holds the writes.
         store_text = (root / "store.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(len(verb.findall(store_text)), 10)
+
+    def test_write_statements_run_inside_conn_transactions(self) -> None:
+        """Multi-statement writes must live inside `with self.conn:`.
+
+        sqlite3 legacy isolation opens ONE implicit transaction per
+        connection — `with conn:` only commits/rolls back, it does not
+        BEGIN. A bare `conn.execute(<write>)` followed by a late
+        `conn.commit()` means a failed second statement leaves the first
+        write pending for whatever commit runs next — publishing a
+        delete/add its owner reported as failed (the class closed
+        behaviorally in v0.2.419; this pins it structurally). Documented
+        caller-transacted helpers and single-statement writers are
+        allowlisted with a maximum bare-write count — adding a second
+        bare write to any of them reopens the leak.
+        """
+        verb = re.compile(
+            r"\b(?:INSERT|REPLACE)\s+INTO\b|\bDELETE\s+FROM\b|\bUPDATE\s+\w+\s+SET\b"
+            r"|\bALTER\s+TABLE\b|\bDROP\s+TABLE\b|\bCREATE\s+TABLE\b"
+        )
+        allow: dict[str, int | None] = {
+            "_migrate_once": None,  # executescript issues its own COMMIT
+            "touch_notebook": 1,  # callee — docstring: callers must commit
+            "_rewrite_chunk_context_titles": 1,  # runs inside caller's with
+            "_set_embedding_pair": 2,  # caller-transacted when commit=False
+            "create_notebook": 1,
+            "rename_notebook": 1,
+            "delete_notebook": 1,
+            "set_setting": 1,
+        }
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        with_indent: int | None = None
+        bare: dict[str, list[int]] = {}
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            if ".execute" not in line:
+                continue
+            blob, bal, j = line, line.count("(") - line.count(")"), i
+            while bal > 0 and j < len(lines):
+                blob += "\n" + lines[j]
+                bal += lines[j].count("(") - lines[j].count(")")
+                j += 1
+            if verb.search(blob) and with_indent is None:
+                bare.setdefault(method, []).append(i)
+        problems = []
+        for meth, linenos in bare.items():
+            cap = allow.get(meth)
+            if cap is None:
+                if meth in allow:
+                    continue  # explicitly unbounded (own commit management)
+                problems.append(f"{meth}:{linenos} (not allowlisted)")
+            elif len(linenos) > cap:
+                problems.append(f"{meth}:{linenos} (cap {cap})")
+        self.assertEqual(
+            problems,
+            [],
+            f"bare write-executes outside `with self.conn:` reopen the "
+            f"pending-write leak class: {problems}",
+        )
+        # Floor: allowlisted single-statement writes exist — non-vacuous.
+        self.assertTrue(bare, "expected some allowlisted bare writes")
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
