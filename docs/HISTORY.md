@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.466
+## Version History: v0.1.37 → v0.2.467
+
+### v0.2.467 (2026-09-30)
+
+- sync the product-review ledger to v0.2.466 — the v0.2.463-466
+  window lands (the 32-code error taxonomy catalog plus the
+  usual doc syncs). Header and test count (1110) updated.
 
 ### v0.2.466 (2026-09-30)
 
