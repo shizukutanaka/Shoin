@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.417")
+        self.assertEqual(VERSION, "0.2.418")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1070,6 +1070,32 @@ class TestStore(unittest.TestCase):
                 s.add_studio_output(nb.id, "faq", "doomed", "{}")
             s.conn = s.conn._inner  # type: ignore[attr-defined]
             s.conn.commit()  # a later write committing must not take the row
+            rows = list(
+                s.conn.execute(
+                    "SELECT body FROM studio_outputs WHERE notebook_id=?",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
+
+    def test_add_studio_output_failed_prune_does_not_publish(self) -> None:
+        """v0.2.418 (Devin Review on PR #287): if the prune DELETE fails, the
+        INSERT must not stay pending — a later commit on the same connection
+        would publish the rejected row, and latest_studio_outputs's MAX(id)
+        would displace the good output. Pin: both statements roll back
+        together on any failure."""
+        with make_store() as s:
+            nb = s.create_notebook("publish-guard")
+            s.add_studio_output(nb.id, "faq", "keep-me", "{}")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "DELETE FROM studio_outputs",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_studio_output(nb.id, "faq", "doomed", "{}")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not publish it
             rows = list(
                 s.conn.execute(
                     "SELECT body FROM studio_outputs WHERE notebook_id=?",
