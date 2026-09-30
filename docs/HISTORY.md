@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.460
+## Version History: v0.1.37 → v0.2.461
+
+### v0.2.461 (2026-09-30)
+
+- pin the declared 3.11 syntax floor: dev runs 3.12, so relaxed
+  f-strings (same-quote nesting) and `type` statements would
+  compile here but SyntaxError for floor users — a first-run
+  crash lint and mypy cannot see (they check API/typing, not
+  grammar). Every shipped file is now ast.parse'd under
+  feature_version=(3,11). Fail-verified with a `type` statement.
 
 ### v0.2.460 (2026-09-30)
 

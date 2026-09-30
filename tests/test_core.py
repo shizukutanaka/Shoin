@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.460")
+        self.assertEqual(VERSION, "0.2.461")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13667,6 +13667,36 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"regex defects: {problems}")
         self.assertGreaterEqual(
             n_lit, 30, f"non-vacuous: expected >=30 literal patterns (got {n_lit})"
+        )
+
+    def test_all_sources_parse_under_the_declared_311_grammar(self) -> None:
+        """requires-python >=3.11 while dev runs a 3.12 interpreter:
+
+        3.12-relaxed f-strings (same-quote nesting) and new syntax like
+        `type X = ...` compile silently here but SyntaxError on the
+        declared floor — a first-run crash for floor users that no
+        ruff/mypy pass catches (they enforce API/typing, not grammar).
+        ast.parse(feature_version=(3,11)) replays the 3.11 grammar over
+        every shipped file, pinning the syntax floor the metadata
+        promises."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        problems: list[str] = []
+        n = 0
+        for d in ("shoin", "tests"):
+            for path in sorted((root / d).glob("*.py")):
+                n += 1
+                src = path.read_text(encoding="utf-8")
+                try:
+                    ast.parse(src, filename=str(path), feature_version=(3, 11))
+                except SyntaxError as exc:
+                    problems.append(f"{path.name}:{exc.lineno}: {exc.msg}")
+        self.assertEqual(
+            problems, [], f"syntax outside the 3.11 floor: {problems}"
+        )
+        self.assertGreaterEqual(
+            n, 15, f"non-vacuous: expected >=15 source files (got {n})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
