@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.419
+## Version History: v0.1.37 → v0.2.420
+
+### v0.2.420 (2026-09-30)
+
+- sync the product-review ledger to v0.2.419: documents the
+  v0.2.414-419 epoch (dead studio_outputs storage found and
+  pruned, the two Devin Review pending-transaction findings,
+  and the family-wide `with self.conn:` closure across all
+  seven remaining Store writers)
 
 ### v0.2.419 (2026-09-30)
 
