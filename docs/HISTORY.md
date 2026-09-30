@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.425
+## Version History: v0.1.37 → v0.2.426
+
+### v0.2.426 (2026-09-30)
+
+- sync the product-review ledger to v0.2.425: the
+  pending-transaction interval closed — chat_stream delta
+  normalization plus three structural pins (with-coverage of
+  write verbs, callee call-site coverage, no nested with-owning
+  calls) that make the whole defect class unreintroducible
 
 ### v0.2.425 (2026-09-30)
 
