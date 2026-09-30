@@ -29,7 +29,82 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.466
+## Version History: v0.1.37 → v0.2.474
+
+### v0.2.474
+- Extended `test_library_prints_never_pollute_stdout` to the twin
+  bypass routes: any `sys.stdout` attribute access outside `cli.py`
+  (write()/reassignment bypasses the same contract print() did) and
+  any `import logging` / `from logging ...` in `shoin/` (the codebase's
+  diagnostic convention is prints to stderr; a logging call emits under
+  an unconfigured logger — lastResort stderr or silence — and a
+  stdout-wired handler would reopen the pollution class). Also audited:
+  single yield-inside-with site (`llm.chat_stream` — GeneratorExit on
+  generator.close() exits the urlopen `with`, closing the socket).
+
+### v0.2.473
+- Spec sync — `docs/spec.md` folded the four output-plane pins into
+  the invariants paragraph: header-value AST whitelist (v0.2.468),
+  set-iteration ordered-escape ban (v0.2.469), library print()-stderr
+  rule (v0.2.470), FTS5 MATCH quoting (v0.2.471). Header → v0.2.472,
+  tests 1114.
+
+### v0.2.472
+- Ledger sync — `docs/product-review.md` was 5 versions stale
+  (v0.2.467): new `v0.2.467-471 の要約` block — 「出力面の機械可読
+  契約」 (header-value AST whitelist, set-iteration ordered-escape
+  ban, library print-to-stderr rule, FTS5 MATCH quoting). Header
+  → v0.2.471, tests 1110→1114, module count 15→16 (`__main__.py`).
+
+### v0.2.471
+- `test_fts_match_expression_is_fully_quoted` — FTS5 MATCH is its own
+  query language (`AND`/`OR`/`NEAR`/`:`/`*`/`"` are operators); an
+  unquoted term would silently re-interpret WHERE semantics. Pin: every
+  `fts_query` atom is double-quoted (`_fts_escape` post-variant doubles
+  inner quotes), and exactly one `MATCH ?` site exists (search.py:556).
+  Audit: zero violations; `x:y`/`a*b` tokenize to nothing (LIKE
+  fallback); class-level mutable attrs and unquoted MATCH sites: none.
+
+### v0.2.470
+- `test_library_prints_never_pollute_stdout` — stdout is a machine-readable
+  contract (`shoin eval` and piped structured output); a library-layer
+  `print()` writes chatter into a consumer's parser, invisible to unit
+  tests. AST pin: outside `cli.py`, every `print()` must pass
+  `file=sys.stderr`; `server.serve()`'s startup banner is the sole
+  exception. Audited live: 9 stderr prints (pipeline model-change warning,
+  search `_debug_print`, server dispatch/disconnect/citation-report
+  warnings) + the serve banner — zero violations.
+
+### v0.2.469 (2026-10-01)
+
+- pin set-iteration against ordered-output escapes
+  (test_set_iteration_builds_no_ordered_output): iterating
+  a set emits PYTHONHASHSEED-ordered elements — legitimate
+  for order-insensitive bodies (count/membership
+  accumulation), but append/extend/list-+=/yield inside the
+  loop bakes per-process hash order into flag lists,
+  exports, and JSON arrays, which would reshuffle per run
+  with no test failure. AST-scans for-loops over set-bound
+  names for list-mutation/yield bodies and list()/tuple()/
+  join() calls consuming set-bound names; sorted() remains
+  the only sanctioned ordered escape. Fail direction
+  verified (list(out) and for-append each flagged).
+
+### v0.2.468 (2026-09-30)
+
+- pin header values to safe shapes: every send_header value is
+  a constant or provably safe (str(len(...)), closed
+  _EXPORT_*[fmt] lookups, whitelisted safe_lang, route-regex
+  ints like {nb_id}) — a future interpolated extra={} entry is
+  a CRLF injection sink no behavior test sees, since
+  BaseHTTPRequestHandler writes the bytes verbatim.
+  Fail-verified with a Name-valued header injection.
+
+### v0.2.467 (2026-09-30)
+
+- sync the product-review ledger to v0.2.466 — the v0.2.463-466
+  window lands (the 32-code error taxonomy catalog plus the
+  usual doc syncs). Header and test count (1110) updated.
 
 ### v0.2.466 (2026-09-30)
 
