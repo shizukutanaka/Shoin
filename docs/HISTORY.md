@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.462
+## Version History: v0.1.37 → v0.2.463
+
+### v0.2.463 (2026-09-30)
+
+- sync the product-review ledger to v0.2.462 — the v0.2.457-462
+  window lands (the python -m entry point, the catch-all
+  bypass-route closure, the 3.11 grammar pin, the README
+  discovery line) plus the usual two doc syncs.
 
 ### v0.2.462 (2026-09-30)
 

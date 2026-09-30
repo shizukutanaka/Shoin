@@ -1,6 +1,6 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.457 時点、2026-09-30 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.462 時点、2026-09-30 更新)
 
-shoin/ 15モジュール + 単一HTML UI・テスト1107件・ドキュメント一式の精査結果。
+shoin/ 15モジュール + 単一HTML UI・テスト1109件・ドキュメント一式の精査結果。
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
 v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位で残って
@@ -277,6 +277,25 @@ pickle/marshal/subprocess/ctypes/code/ptyのimport+呼出しサイト、
 alternation）を固定し、非リテラル`re.compile`10サイトを
 カタログ化——定数テーブルalternationか`re.escape`補間のみの
 構築規律を宣言化(v0.2.456)。v0.2.453は台帳同期。
+
+**v0.2.457-462 の要約**: 「呼び出し面の完結——`python -m`経路の修復と
+catch-allバイパス3経路の閉塞」区間——実欠陥1件・構造ピン2件・
+文書3件。console_script経路(`shoin`コマンド)はインストール後のみ
+存在するため、ソースツリーからの直接実行`python -m shoin`は
+`No module named shoin.__main__`で失敗していた標準invocation規約の
+欠落を修復——3行の`__main__.py`で`cli.main()`へ委譲し両経路を
+永遠にドリフト不能化、フレッシュインタプリタでの`-m shoin --help`
+e2eテストも付帯(v0.2.459)。except-Exceptionカタログが見えない
+3つの同型バイパス経路を同一テスト内で閉塞——裸`except:`・
+`except BaseException`・`contextlib.suppress(Exception/BaseException)`
+(KI/SystemExitも呑込む、またはCM経由の同一静寂呑込み)。
+既存`suppress(OSError)`は狭域のため許可維持＋非真空チェックの
+アンカー化(v0.2.460)。宣言`requires-python >=3.11`と実構文の乖離
+を恒久封印——devが3.12インタプリタで緩和構文(同一引用符ネスト
+f-string・`type`文)が静かにコンパイルされフロアユーザーで初回実行
+クラッシュする経路を、全ファイルの`ast.parse(feature_version=(3,11))`
+リプレイで遮蔽(v0.2.461)。READMEへ`python -m`代替経路の発見可能
+1行を追記(v0.2.462)。v0.2.457/458は台帳・仕様書の同期。
 
 **v0.2.436-440 の要約**: 「境界不変条件の実証——サイズガードの
 読み取り順序と圧縮展開」区間——実欠陥1件・構造ピン2件・文書同期2件。
