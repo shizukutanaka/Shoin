@@ -482,6 +482,71 @@ const fetch = async (path, opts) => {
             f"{sorted(sent_params - read_params)}",
         )
 
+    def test_template_placeholder_and_value_contracts(self) -> None:
+        """Value-level contracts below the field-name layer.
+
+        `_h_ui` substitutes `__SHOIN_LANG__` with the server locale — it
+        must appear EXACTLY once (a second occurrence is also corrupted
+        by the blind byte replace) and the literal must survive in the
+        server's replace call, or language seeding silently dies — the
+        exact half-true bug this file's header warns about. Likewise the
+        meta name itself: `meta[name="X"]` JS selectors ⊆ `meta name="X"`
+        in markup. Below that, two value sets the UI offers must be ones
+        the pipeline honours: `accept=` extensions ⊆ `_EXT_KIND` (a
+        selectable file that ingest then rejects), and `?format=` values
+        ⊆ export `FORMATS` (a link that 400s at click time)."""
+        html = _html()
+        script = _script_body(html)
+        server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
+        ingest = (_UI.parent.parent / "ingest.py").read_text(encoding="utf-8")
+        export_mod = (_UI.parent.parent / "export.py").read_text(encoding="utf-8")
+
+        # Server template placeholder: exactly one occurrence, server
+        # substitutes it, JS reads the same meta name.
+        self.assertEqual(
+            html.count("__SHOIN_LANG__"), 1,
+            "__SHOIN_LANG__ must appear exactly once — the byte replace "
+            "would corrupt every occurrence equally",
+        )
+        self.assertIn(
+            'b"__SHOIN_LANG__"', server,
+            "server must substitute the __SHOIN_LANG__ placeholder",
+        )
+        meta_sel = set(re.findall(r'meta\[name="([^"]+)"\]', script))
+        meta_names = set(re.findall(r'<meta name="([^"]+)"', html))
+        self.assertEqual(
+            meta_sel - meta_names, set(),
+            f"meta names the JS reads but the markup lacks: "
+            f"{sorted(meta_sel - meta_names)}",
+        )
+
+        # accept= ⊆ ingest _EXT_KIND
+        accept_m = re.search(r'accept="([^"]+)"', html)
+        self.assertIsNotNone(accept_m, "file input needs an accept list")
+        assert accept_m is not None
+        offered = {x.strip() for x in accept_m.group(1).split(",") if x.strip()}
+        kind_m = re.search(r"_EXT_KIND\s*=\s*\{([^}]*)\}", ingest)
+        self.assertIsNotNone(kind_m, "ingest._EXT_KIND dict expected")
+        assert kind_m is not None
+        supported = set(re.findall(r'"(\.\w+)"\s*:', kind_m.group(1)))
+        self.assertEqual(
+            offered - supported, set(),
+            f"accept= offers extensions ingest rejects: "
+            f"{sorted(offered - supported)}",
+        )
+
+        # ?format= values ⊆ FORMATS
+        sent_fmts = set(re.findall(r"/api/[^`\"?\s]*\?format=(\w+)", script))
+        formats_m = re.search(r'FORMATS\s*=\s*\(([^)]*)\)', export_mod)
+        self.assertIsNotNone(formats_m, "export.FORMATS tuple expected")
+        assert formats_m is not None
+        formats = set(re.findall(r'"(\w+)"', formats_m.group(1)))
+        self.assertEqual(
+            sent_fmts - formats, set(),
+            f"?format= values the UI sends but export rejects: "
+            f"{sorted(sent_fmts - formats)}",
+        )
+
     def test_request_body_fields_match_server_reads(self) -> None:
         """Every JSON key the UI sends must be a field the handler actually
         reads, and every field the handler requires must be sent. A typo'd
