@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.366")
+        self.assertEqual(VERSION, "0.2.369")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -496,6 +496,26 @@ class TestStore(unittest.TestCase):
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
 
+    def test_chunk_projection_getters_shapes(self) -> None:
+        """The (id, seq, text) / (id, context, text) projections feed the
+        source viewer's cited-passage marks and the reindex path — a
+        SELECT column-order slip silently swaps id<->seq for every
+        caller with no error. Pin shapes against real values."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            ids = s.add_chunks(src.id, ["first", "second"], ["t > a", "t > b"])
+            rows = s.id_seq_text_chunks_for_source(src.id)
+            self.assertEqual(
+                [(i, sq, tx) for i, sq, tx in rows],
+                [(ids[0], 0, "first"), (ids[1], 1, "second")],
+            )
+            rows2 = s.id_context_text_chunks_for_notebook(nb.id)
+            self.assertEqual(
+                [(i, c, tx) for i, c, tx in rows2],
+                [(ids[0], "t > a", "first"), (ids[1], "t > b", "second")],
+            )
+
     def test_every_write_bumps_notebook_timestamp(self) -> None:
         """list_notebooks orders by updated_at DESC — a write path that
         forgets touch_notebook() leaves the notebook ranked as untouched
@@ -585,6 +605,18 @@ class TestStore(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             self.assertEqual(s.get_chunk(chunk.id).embedding, [1.0, 0.0])
+
+    def test_add_message_rejects_unknown_role(self) -> None:
+        """history_messages() coerces any non-"user" role to "assistant" —
+        a typo'd role literal would silently corrupt turn alternation, so
+        add_message must refuse it at the write instead of storing it."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            with self.assertRaises(StoreError) as cm:
+                s.add_message(nb.id, "sysetm", "hi")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            # ...and nothing was stored.
+            self.assertEqual(s.count_messages(nb.id), 0)
 
     def test_add_message_touches_notebook(self) -> None:
         with make_store() as s:
@@ -11898,6 +11930,32 @@ class TestResidualGuards(unittest.TestCase):
                 f"{sorted(unknown)} — users would set a no-op knob",
             )
 
+
+
+    def test_embed_model_setting_key_is_single_sourced(self) -> None:
+        """The settings-table key recording which embedding model built the
+        stored vectors is read in qa.py and written/read in pipeline.py — as
+        a bare "embed_model" literal at three sites until v0.2.369. A typo at
+        ANY one site silently breaks the model-mismatch guard (reads return
+        None forever, or writes land under a key nobody reads — either way the
+        warning never fires or never stops firing). The key must come from
+        config.EMBED_MODEL_SETTING_KEY everywhere except its definition."""
+        import shoin.config as cfg
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        pat = re.compile(r"""(get|set)_setting\(\s*['"]embed_model['"]""")
+        for f in sorted(root.glob("*.py")):
+            if f.name == "config.py":
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()}")
+        self.assertEqual(offenders, [], f"literal setting key outside config.py: {offenders}")
+        # And the constant must actually back the round-trip.
+        with make_store() as s:
+            s.set_setting(cfg.EMBED_MODEL_SETTING_KEY, "m1")
+            self.assertEqual(s.get_setting(cfg.EMBED_MODEL_SETTING_KEY), "m1")
 
 
 if __name__ == "__main__":

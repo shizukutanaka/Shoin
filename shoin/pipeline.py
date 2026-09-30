@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
 from .config import (
+    EMBED_MODEL_SETTING_KEY,
     MAX_CHUNKS_PER_NOTEBOOK,
     MAX_TITLE_LEN,
     chunk_overlap,
@@ -96,7 +97,7 @@ def _embed_chunks(
         if embed_one is None:
             return 0
         embed = lambda batch: [embed_one(t) for t in batch]  # noqa: E731
-    stored_model = (store.get_setting("embed_model") or "").strip()
+    stored_model = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
     if not force and stored_model and stored_model != current_model:
         # Vectors in the DB were produced by a different model; cosine scores
         # between old and new embeddings are meaningless. Skip embedding so the
@@ -161,7 +162,7 @@ def _embed_chunks(
     # model, so the mismatch guard correctly disables vector search until a
     # subsequent reindex fully succeeds.
     if done and (not force or done == len(texts)):
-        store.set_setting("embed_model", current_model)
+        store.set_setting(EMBED_MODEL_SETTING_KEY, current_model)
     return done
 
 

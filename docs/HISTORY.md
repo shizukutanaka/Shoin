@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.366
+## Version History: v0.1.37 → v0.2.369
+
+### v0.2.369 (2026-09-29)
+
+- Single-source the embed_model settings key (test_embed_model_setting_key_is_single_sourced): the key naming which model built the stored vectors was a bare literal at three sites (pipeline write+read, qa read). A typo at any one silently breaks the model-mismatch guard — reads return None forever so the warning never fires (or writes land under a key nobody reads). Now config.EMBED_MODEL_SETTING_KEY; a static pin fails if any get_setting/set_setting call uses the literal outside config.py. Fail direction verified.
+
+### v0.2.368 (2026-09-29)
+
+- add_message rejects unknown roles (test_add_message_rejects_unknown_role): history_messages() coerces any non-"user" role to "assistant", so a typo'd role literal would silently corrupt turn alternation for every later prompt. The store now raises VALIDATION_FIELD_FORMAT_INVALID at the write — same convention as the name-length guards. Fail direction verified (guard removed -> row stored, test fails).
+
+### v0.2.367 (2026-09-29)
+
+- Pin chunk-projection getter shapes (test_chunk_projection_getters_shapes): id_seq_text_chunks_for_source (the source viewer's cited-passage marks) and id_context_text_chunks_for_notebook (the reindex path) had only indirect coverage — selecting a wrong column silently feeds callers swapped data. Asserts exact (id, seq, text) / (id, context, text) values on a live store. Fail direction verified.
 
 ### v0.2.366 (2026-09-29)
 

@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.366"
+VERSION = "0.2.369"
 
 DEFAULT_PORT = 7440
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
@@ -25,6 +25,7 @@ REQUEST_SOCKET_SEC = 120
 MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
 NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI history view)
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
+EMBED_MODEL_SETTING_KEY = "embed_model"  # settings-table key recording which model built stored vectors
 
 
 def config_file() -> Path:
