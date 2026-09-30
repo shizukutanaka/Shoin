@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.445")
+        self.assertEqual(VERSION, "0.2.446")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13235,6 +13235,38 @@ class TestResidualGuards(unittest.TestCase):
                     problems.append(f"{path.name}:{node.lineno}: sqlite3.connect outside store.py")
         self.assertEqual(problems, [], f"sqlite3.connect outside store.py: {problems}")
         self.assertGreaterEqual(n_connects, 1, "non-vacuous: expected the store.py connect site")
+
+    def test_tx_verbs_outside_store_live_only_in_pipeline(self) -> None:
+        """Transaction control verbs (.conn.commit/rollback/executescript/
+        executemany) outside store.py may appear only in pipeline.py — the
+        documented batch-TX owner for _embed_chunks. The data-mutation-SQL pin
+        (v0.2.405) scans SQL text, not TX calls: a new .conn.commit() in a
+        handler or helper silently flushes a callee's pending writes — the
+        same early-commit defect class the with-block pins seal inside
+        store.py, on the caller side. Line-scan every module but store.py and
+        pipeline.py; require the pipeline batch commit to exist so the scan
+        stays non-vacuous."""
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        verb = re.compile(
+            r"\.conn\.(commit|rollback|executescript|executemany)\s*\("
+        )
+        problems: list[str] = []
+        pipeline_sites = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            if path.name == "store.py":
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not verb.search(line):
+                    continue
+                if path.name == "pipeline.py":
+                    pipeline_sites += 1
+                else:
+                    problems.append(f"{path.name}:{i}: TX verb outside store/pipeline")
+        self.assertEqual(problems, [], f"TX verb outside store/pipeline: {problems}")
+        self.assertGreaterEqual(
+            pipeline_sites, 2,
+            f"non-vacuous: expected >=2 pipeline batch-TX sites (got {pipeline_sites})",
+        )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the

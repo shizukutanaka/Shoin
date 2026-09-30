@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.445
+## Version History: v0.1.37 → v0.2.446
+
+### v0.2.446 (2026-09-30)
+
+- pin that TX verbs (.conn.commit/rollback/executescript/
+  executemany) outside store.py live only in pipeline.py — the
+  data-mutation-SQL pin scans SQL text, not TX calls, so a new
+  .conn.commit() in a handler would silently flush a callee's
+  pending writes (caller-side early-commit).
 
 ### v0.2.445 (2026-09-30)
 
