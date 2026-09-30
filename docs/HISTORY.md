@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.452
+## Version History: v0.1.37 → v0.2.453
+
+### v0.2.453 (2026-09-30)
+
+- sync product-review ledger to v0.2.452 (explicit-timeout pin,
+  declared module-level mutables pin).
 
 ### v0.2.452 (2026-09-30)
 
