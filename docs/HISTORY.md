@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.451
+## Version History: v0.1.37 → v0.2.452
+
+### v0.2.452 (2026-09-30)
+
+- sync spec.md to v0.2.451 (curated except-Exception catalog,
+  explicit-timeout network calls, declared module-level mutables;
+  test count 1105).
 
 ### v0.2.451 (2026-09-30)
 
