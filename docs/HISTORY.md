@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.376
+## Version History: v0.1.37 → v0.2.377
+
+### v0.2.377 (2026-09-29)
+
+- fix: `update_source_sha256` rewrote `title` without the chunk-context rewrite or the empty-title guard its sibling `update_source_title` enforces — a caller changing the title through this path would leave the FTS index matching the old title forever and could persist a blank title. It now strips + rejects empty titles and runs `_rewrite_chunk_context_titles` atomically in the same transaction; tests pin both behaviours.
 
 ### v0.2.376 (2026-09-29)
 
