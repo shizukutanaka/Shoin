@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.355
+## Version History: v0.1.37 → v0.2.356
+
+### v0.2.356 (2026-09-29)
+
+- Pin SQL interpolation safety and the error-code taxonomy (test_sql_literals_stay_interpolation_free, test_error_codes_follow_the_domain_detail_taxonomy): user-controlled strings flow into every query, so f-string/+/% inside execute() args is an injection path — sanctioned interpolations are int(), module-level numeric constants, `"literal".join()` over literal fragments or `"?" * n`, and name.strip() inside executescript only (DDL composition). Error codes must match DOMAIN_DETAIL UPPER_SNAKE — the UI toasts them raw. Fail-then-pass verified: param interpolation, +-concat, needle-in-fragment, lowercase code.
 
 ### v0.2.355 (2026-09-29)
 
