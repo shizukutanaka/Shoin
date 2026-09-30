@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.471
+## Version History: v0.1.37 → v0.2.472
+
+### v0.2.472
+- Ledger sync — `docs/product-review.md` was 5 versions stale
+  (v0.2.467): new `v0.2.467-471 の要約` block — 「出力面の機械可読
+  契約」 (header-value AST whitelist, set-iteration ordered-escape
+  ban, library print-to-stderr rule, FTS5 MATCH quoting). Header
+  → v0.2.471, tests 1110→1114, module count 15→16 (`__main__.py`).
 
 ### v0.2.471
 - `test_fts_match_expression_is_fully_quoted` — FTS5 MATCH is its own
