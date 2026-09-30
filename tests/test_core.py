@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.447")
+        self.assertEqual(VERSION, "0.2.448")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13267,6 +13267,49 @@ class TestResidualGuards(unittest.TestCase):
             pipeline_sites, 2,
             f"non-vacuous: expected >=2 pipeline batch-TX sites (got {pipeline_sites})",
         )
+
+    def test_bare_except_exception_sites_are_curated(self) -> None:
+        """Every `except Exception` in production code must be one of the
+        curated, documented sites — each existing one carries an in-code
+        rationale (PDF parse mapping, per-page extract isolation, the
+        _dispatch umbrella, SSE orphan-prevention persists, rollback
+        best-effort, CLI diagnostic catch-all). A new undocumented catch-all
+        compiles and passes lint (ruff only warns, never errors) while it
+        silently swallows whatever defect class it happens to cover — the
+        exact bug-hiding shape the philosophy forbids. Pin the per-file
+        counts; a legitimate new site must update this test and carry its
+        own documented rationale."""
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        expected = {
+            "ingest.py": 2,
+            "server.py": 7,
+            "cli.py": 1,
+            "pipeline.py": 2,
+        }
+        problems: list[str] = []
+        total = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            n = sum(
+                1
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if re.search(r"except Exception\b", line)
+            )
+            total += n
+            limit = expected.get(path.name)
+            if limit is None:
+                if n:
+                    problems.append(
+                        f"{path.name}: {n} uncataloged except-Exception site(s)"
+                    )
+            elif n != limit:
+                problems.append(
+                    f"{path.name}: {n} except-Exception sites, expected {limit}"
+                )
+        self.assertEqual(
+            problems, [], f"uncataloged except-Exception sites: {problems}"
+        )
+        self.assertEqual(total, sum(expected.values()),
+                         "non-vacuous: site counts drifted from the curated total")
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the

@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.447
+## Version History: v0.1.37 → v0.2.448
+
+### v0.2.448 (2026-09-30)
+
+- pin that every `except Exception` in production code is one of the
+  curated, documented sites (per-file counts: ingest 2, server 7,
+  cli 1, pipeline 2) — a new undocumented catch-all lints clean
+  while silently swallowing whatever defect class it covers.
 
 ### v0.2.447 (2026-09-30)
 
