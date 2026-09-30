@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 from shoin.server import _Handler
@@ -583,6 +584,509 @@ const fetch = async (path, opts) => {
                     f"{where}: {verb} {path} omits required field(s) "
                     f"{sorted(required - sent)} — every call 400s",
                 )
+
+    def test_response_fields_match_server_emissions(self) -> None:
+        """Every `v.<field>` the UI reads off a fetch response must be a key the
+        handler's `_json({…})` actually emits. Renaming a response key
+        (`{sources}` → `{items}`) turns every `cur.sources` into `undefined` —
+        no 400, no error, just an empty list. Worse than a bad request field:
+        completely silent.
+
+        Bindings resolve by scope, not name: `const j = await (await
+        api(PATH)).json()` binds `j` to that route's payload for the enclosing
+        block; `cur = j` aliases it (assignment, not declaration → survives
+        outside the function); `for (const s of cur.sources)` and
+        `j.chunks.some(c => …)` bind the element shape;
+        `const last = (d.messages||[]).filter(…).pop()` binds it too. A `const
+        j = JSON.parse(…)` or param `j` shadows correctly. Multi-path handlers
+        emit the INTERSECTION of their `_json` keysets (a key on only some
+        paths may still come back undefined). Emitted shapes come from AST:
+        dict literals, list comprehensions, calls into shoin.server/shoin.store
+        functions (return-shape merge); anything else is opaque — reads under
+        it are unverifiable and never fail."""
+        script = _script_body(_html())
+        n = len(script)
+        IDENT = r"[A-Za-z_$][\w$]*"
+
+        # ---- mask strings/comments/regex literals out of the code ----
+        code = [False] * n
+        depth = [0] * n    # {} depth before char i (code positions)
+        pdepth = [0] * n   # () depth before char i
+        d = pd = 0
+        i = 0
+        state = "code"
+        tpl_stack: list[int] = []  # {} depth at each ${ — its } re-enters tpl
+        KEYWORDS = {
+            "return", "typeof", "case", "throw", "in", "of", "new", "delete",
+            "void", "do", "else", "yield", "await", "instanceof",
+        }
+        while i < n:
+            c = script[i]
+            nxt = script[i + 1] if i + 1 < n else ""
+            if state == "code":
+                code[i] = True
+                depth[i] = d
+                pdepth[i] = pd
+                if c == "/" and nxt == "/":
+                    code[i] = code[i + 1] = False
+                    state = "lc"
+                    i += 2
+                    continue
+                if c == "/" and nxt == "*":
+                    code[i] = code[i + 1] = False
+                    state = "bc"
+                    i += 2
+                    continue
+                if c == "/" and nxt != "=":
+                    # regex literal iff the previous code token can't end an expr
+                    k = i - 1
+                    while k >= 0 and (not code[k] or script[k] in " \t\n"):
+                        k -= 1
+                    prev = script[k] if k >= 0 else ""
+                    is_re = not prev or prev not in ")]}1234567890"
+                    if prev.isalnum() or prev in "_$":
+                        wm = re.search(r"([A-Za-z_$][\w$]*)$", script[: k + 1])
+                        is_re = bool(wm and wm.group(1) in KEYWORDS)
+                    if is_re:
+                        state = "re"
+                        code[i] = False
+                        i += 1
+                        continue
+                if c == "'":
+                    state = "sq"
+                    code[i] = False
+                elif c == '"':
+                    state = "dq"
+                    code[i] = False
+                elif c == "`":
+                    state = "tpl"
+                    code[i] = False
+                elif c == "{":
+                    d += 1
+                elif c == "}":
+                    # interp `}` sits one depth above the recorded ${ depth
+                    if tpl_stack and d == tpl_stack[-1] + 1:
+                        tpl_stack.pop()
+                        d -= 1
+                        state = "tpl"
+                        code[i] = False
+                    else:
+                        d -= 1
+                elif c == "(":
+                    pd += 1
+                elif c == ")":
+                    pd -= 1
+                i += 1
+                continue
+            if state == "lc":
+                if c == "\n":
+                    state = "code"
+                i += 1
+            elif state == "bc":
+                if c == "*" and nxt == "/":
+                    i += 2
+                    state = "code"
+                else:
+                    i += 1
+            elif state == "sq":
+                if c == "\\":
+                    i += 2
+                elif c == "'":
+                    state = "code"
+                    i += 1
+                else:
+                    i += 1
+            elif state == "dq":
+                if c == "\\":
+                    i += 2
+                elif c == '"':
+                    state = "code"
+                    i += 1
+                else:
+                    i += 1
+            elif state == "tpl":
+                if c == "\\":
+                    i += 2
+                elif c == "`":
+                    state = "code"
+                    i += 1
+                elif c == "$" and nxt == "{":
+                    tpl_stack.append(d)
+                    d += 1
+                    state = "code"
+                    i += 2
+                else:
+                    i += 1
+            elif state == "re":
+                if c == "\\":
+                    i += 2
+                elif c == "[":
+                    i += 1
+                    # char class: consume to ] (a / inside can't close the regex)
+                    while i < n:
+                        cc = script[i]
+                        if cc == "\\":
+                            i += 2
+                            continue
+                        i += 1
+                        if cc == "]":
+                            break
+                elif c == "/":
+                    state = "code"
+                    i += 1
+                else:
+                    i += 1
+
+        brace_match: dict[int, int] = {}
+        bstack: list[int] = []
+        for p in range(n):
+            if not code[p]:
+                continue
+            if script[p] == "{":
+                bstack.append(p)
+            elif script[p] == "}" and bstack:
+                brace_match[bstack.pop()] = p
+
+        def next_code(pos: int) -> int:
+            while pos < n and (not code[pos] or script[pos] in " \t\n"):
+                pos += 1
+            return pos
+
+        def enclosing_block_end(pos: int) -> int:
+            """Position of the `}` closing the tightest {}-block holding pos."""
+            d0 = depth[pos]
+            for p in range(pos, n):
+                if code[p] and script[p] == "}" and depth[p] == d0:
+                    return p
+            return n
+
+        def next_block_scope(pos: int) -> int:
+            """End of the first `{` block after pos (for-of/=>{}/fn-body/catch)."""
+            p = pos
+            while p < n:
+                if code[p]:
+                    if script[p] == "{":
+                        return brace_match.get(p, n)
+                    if script[p] == ";":
+                        return p
+                p += 1
+            return n
+
+        def expr_end(pos: int, pd0: int) -> int:
+            """End of an `=>expr` arrow body whose expr starts at paren depth pd0."""
+            p = pos
+            while p < n:
+                if code[p]:
+                    c = script[p]
+                    if c in ";\n":
+                        return p
+                    if c in ",)}" and pdepth[p] <= pd0:
+                        return p
+                p += 1
+            return n
+
+        # ---- emitted shapes from shoin.server/shoin.store AST ----
+        import ast
+
+        import shoin.server
+        import shoin.store
+
+        def funcs_of(mod: object) -> dict[str, ast.AST]:
+            src = Path(mod.__file__).read_text(encoding="utf-8")
+            return {
+                nd.name: nd
+                for nd in ast.walk(ast.parse(src))
+                if isinstance(nd, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+
+        FUNCS: dict[str, ast.AST] = {
+            **funcs_of(shoin.store), **funcs_of(shoin.server)
+        }
+        Shape = object  # dict[str, Shape] | ("list", Shape) | None
+
+        def merge(a: Shape, b: Shape) -> Shape:
+            if a is None or b is None:
+                return None
+            if isinstance(a, dict) and isinstance(b, dict):
+                return {k: merge(a[k], b[k]) for k in a.keys() & b.keys()}
+            if isinstance(a, tuple) and isinstance(b, tuple) and a[0] == b[0] == "list":
+                return ("list", merge(a[1], b[1]))
+            return None
+
+        def each_node(fn: ast.AST) -> Iterator[ast.AST]:
+            # nested FunctionDef bodies are a different scope — prune, don't walk
+            """Yield fn's nodes without descending into nested function defs."""
+            for ch in ast.iter_child_nodes(fn):
+                if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                yield ch
+                yield from each_node(ch)
+
+        def shape_of(node: ast.AST | None, seen: frozenset[str] = frozenset()) -> Shape:
+            if node is None:
+                return None
+            if isinstance(node, ast.Dict):
+                return {
+                    k.value: shape_of(v, seen)
+                    for k, v in zip(node.keys, node.values)
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+            if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
+                return ("list", shape_of(node.elt, seen))
+            if isinstance(node, (ast.List, ast.Tuple)):
+                return ("list", shape_of(node.elts[0], seen) if node.elts else None)
+            if isinstance(node, ast.Call):
+                fname = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else ""
+                )
+                fn = FUNCS.get(fname)
+                if fn is None or fname in seen:
+                    return None
+                assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                merged: Shape = None
+                first = True
+                for nd in each_node(fn):
+                    if isinstance(nd, ast.Return):
+                        s = shape_of(nd.value, seen | {fname})
+                        merged = s if first else merge(merged, s)
+                        first = False
+                return merged
+            return None
+
+        routes = {name: (v, p) for v, p, name in _Handler._ROUTES}
+        emitted: dict[tuple[str, str], Shape] = {}
+        for name, (verb, pat) in routes.items():
+            fn = FUNCS.get(f"_h_{name}")
+            if fn is None:
+                continue
+            merged: Shape = None
+            first = True
+            for nd in each_node(fn):
+                if (
+                    isinstance(nd, ast.Call)
+                    and isinstance(nd.func, ast.Attribute)
+                    and nd.func.attr == "_json"
+                    and nd.args
+                ):
+                    s = shape_of(nd.args[0])
+                    merged = s if first else merge(merged, s)
+                    first = False
+            if merged is not None:
+                emitted[(verb, pat)] = merged
+
+        def route_shape(verb: str, concrete: str) -> Shape:
+            for (v, p), s in emitted.items():
+                if v == verb and re.match(p, concrete):
+                    return s
+            return None
+
+        # ---- bindings: (name, start, scope_end, shape) ----
+        bindings: list[tuple[str, int, int, Shape]] = []
+
+        def bind(name: str, start: int, end: int, shape: Shape) -> None:
+            bindings.append((name, start, end, shape))
+
+        def binding_at(name: str, pos: int) -> Shape:
+            best: tuple[int, Shape] | None = None
+            for nm, st, en, sh in bindings:
+                if nm == name and st <= pos < en and (best is None or st > best[0]):
+                    best = (st, sh)
+            return best[1] if best else None
+
+        def scope_of_prev(name: str, pos: int) -> int:
+            """Scope end for a non-decl assignment: the live binding's scope."""
+            end = -1
+            for nm, st, en, _ in bindings:
+                if nm == name and st <= pos and en > end:
+                    end = en
+            return end if end >= 0 else n
+
+        def member_shape(base: Shape, field: str) -> Shape:
+            return base.get(field) if isinstance(base, dict) else None
+
+        # `v = <rhs>` / `const v = <rhs>` — not `==`, `=>`, or member `x.f =`
+        for m in re.finditer(
+            rf"(?<![\w$.])(?:(const|let|var)\s+)?({IDENT})\s*=(?!=|>)\s*", script
+        ):
+            if not code[m.start()]:
+                continue
+            decl, name = m.group(1), m.group(2)
+            rhs_start = m.end()
+            e = rhs_start
+            while e < n and not (code[e] and script[e] == ";"):
+                e += 1
+            rhs = script[rhs_start:e]
+            start = rhs_start
+            end = enclosing_block_end(start) if decl else scope_of_prev(name, start)
+            api_m = re.match(
+                r"await\s*\(?\s*await\s+(api|jpost)\(\s*[`\"]([^`\"?]*)", rhs
+            )
+            if api_m:
+                shape: Shape = None
+                if ".json()" in rhs:
+                    verb = "POST" if api_m.group(1) == "jpost" else "GET"
+                    if api_m.group(1) == "api":
+                        om = re.search(r'method\s*:\s*"([A-Z]+)"', rhs)
+                        if om:
+                            verb = om.group(1)
+                    concrete = re.sub(r"\$\{[^}]*\}", "1", api_m.group(2)).rstrip("/")
+                    shape = route_shape(verb, concrete)
+                bind(name, start, end, shape)
+                continue
+            if re.match(r"await\b", rhs):
+                # a raw Response/promise — member reads aren't payload fields
+                bind(name, start, end, None)
+                continue
+            # `(<v>.<f>||[])` / `v.f` / `v` / `v[i]` / chains ending .pop()/.at()/.find()/[i]
+            sub = re.match(
+                rf"^\(?\s*({IDENT})\s*(?:\.\s*({IDENT}))?(?:\s*\|\|\s*\[\s*\])?\s*\)?",
+                rhs,
+            )
+            if sub:
+                base = binding_at(sub.group(1), start)
+                shape = base
+                if sub.group(2):
+                    shape = member_shape(base, sub.group(2))
+                tail = rhs[sub.end():]
+                if (
+                    isinstance(shape, tuple)
+                    and shape[0] == "list"
+                    and re.search(r"\.(pop|at|find)\s*\(|\[\s*\d+\s*\]", tail)
+                ):
+                    shape = shape[1]
+                bind(name, start, end, shape)
+                continue
+            bind(name, start, end, None)
+
+        # `const|let|var v` with no initializer → unknown
+        for m in re.finditer(rf"(?:const|let|var)\s+({IDENT})\s*(?=[;,)])", script):
+            if code[m.start()]:
+                bind(m.group(1), m.start(), enclosing_block_end(m.start()), None)
+
+        # `for (const w of <expr>)` — element binding over the body block
+        for m in re.finditer(rf"for\s*\(\s*(?:const|let)\s+({IDENT})\s+of\s+", script):
+            if not code[m.start()]:
+                continue
+            p = m.end()
+            while p < n and not (code[p] and script[p] == ")"):
+                p += 1
+            expr = script[m.end():p]
+            em = re.match(
+                rf"^\(?\s*({IDENT})\s*(?:\.\s*({IDENT}))?(?:\s*\|\|\s*\[\s*\])?\s*\)?\s*$",
+                expr,
+            )
+            shape: Shape = None
+            if em:
+                base = binding_at(em.group(1), m.start())
+                if em.group(2):
+                    base = member_shape(base, em.group(2))
+                if isinstance(base, tuple) and base[0] == "list":
+                    shape = base[1]
+            bind(m.group(1), m.start(), next_block_scope(p + 1), shape)
+
+        def arrow_scope(arrow_pos: int) -> int:
+            bstart = next_code(arrow_pos + 2)
+            if bstart < n and script[bstart] == "{":
+                return brace_match.get(bstart, n)
+            return expr_end(bstart, pdepth[arrow_pos])
+
+        # `.forEach/.map/.filter/…(w =>` — param binds the receiver's element shape
+        METHOD = "forEach|map|filter|some|find|every|flatMap|reduce|findIndex|findLast"
+        method_arrows: set[int] = set()
+        for m in re.finditer(
+            rf"\.({METHOD})\s*\(\s*(?:\(\s*{IDENT}(?:\s*,\s*{IDENT})*\s*\)"
+            rf"|{IDENT})\s*=>",
+            script,
+        ):
+            if not code[m.start()]:
+                continue
+            arrow = m.end() - 2
+            method_arrows.add(arrow)
+            recv_src = script[max(0, m.start() - 120): m.start()]
+            rm = re.search(
+                rf"(\(?\s*{IDENT}(?:\s*\.\s*{IDENT})*(?:\s*\|\|\s*\[\s*\]\s*)?\)?)\s*$",
+                recv_src,
+            )
+            shape: Shape = None
+            if rm:
+                parts = re.findall(IDENT, rm.group(1).replace("||", " "))
+                if parts:
+                    base = binding_at(parts[0], m.start())
+                    for f in parts[1:]:
+                        base = member_shape(base, f)
+                    if isinstance(base, tuple) and base[0] == "list":
+                        shape = base[1]
+            params_txt = m.group(0)[m.group(0).rindex("(") + 1: m.group(0).rindex("=>")]
+            for w in re.findall(IDENT, params_txt):
+                bind(w, m.start(), arrow_scope(arrow), shape)
+
+        # generic arrow params `x=>` / `(x,y)=>` outside method calls → unknown
+        for m in re.finditer(
+            rf"(?:\(\s*({IDENT}(?:\s*,\s*{IDENT})*)\s*\)|({IDENT}))\s*=>", script
+        ):
+            if not code[m.start()]:
+                continue
+            arrow = m.end() - 2
+            if arrow in method_arrows:
+                continue
+            params_txt = m.group(1) or m.group(2) or ""
+            for w in re.findall(IDENT, params_txt):
+                bind(w, m.start(), arrow_scope(arrow), None)
+
+        # function params + catch(e) → unknown over their block
+        for m in re.finditer(rf"function\s*{IDENT}?\s*\(([^)]*)\)", script):
+            if code[m.start()]:
+                for w in re.findall(IDENT, m.group(1)):
+                    bind(w, m.start(), next_block_scope(m.end()), None)
+        for m in re.finditer(rf"catch\s*\(\s*({IDENT})", script):
+            if code[m.start()]:
+                bind(m.group(1), m.start(), next_block_scope(m.end()), None)
+
+        # ---- reads: v.f / v.f.g / v[i].f attributed to the innermost binding ----
+        violations: list[str] = []
+        for m in re.finditer(
+            rf"\b({IDENT})\s*(\[\s*\d+\s*\])?(\s*\.\s*{IDENT})+", script
+        ):
+            if not code[m.start()]:
+                continue
+            name = m.group(1)
+            shape = binding_at(name, m.start())
+            if m.group(2) and isinstance(shape, tuple) and shape[0] == "list":
+                shape = shape[1]
+            if not isinstance(shape, dict):
+                continue
+            pos = m.start() + len(name)
+            line = script[: m.start()].count("\n") + 1
+            while pos < n:
+                hm = re.match(rf"\s*\.\s*({IDENT})", script[pos:])
+                if not hm:
+                    break
+                f = hm.group(1)
+                if f not in shape:
+                    violations.append(
+                        f"line {line}: {name}.{f} not in emitted keys"
+                    )
+                    break
+                shape = shape[f]
+                pos += hm.end()
+                if isinstance(shape, tuple) and shape[0] == "list":
+                    idx = re.match(r"\s*\[\s*\d+\s*\]", script[pos:])
+                    if not idx:
+                        break
+                    shape = shape[1]
+                    pos += idx.end()
+                if not isinstance(shape, dict):
+                    break
+
+        self.assertEqual(
+            violations,
+            [],
+            "UI reads fields the server never emits:\n" + "\n".join(violations),
+        )
 
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
