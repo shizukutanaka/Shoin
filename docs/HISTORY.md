@@ -29,7 +29,424 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.380
+## Version History: v0.1.37 → v0.2.432
+
+### v0.2.432 (2026-09-30)
+
+- pin that Store's context dunders never touch the
+  transaction: a commit inside __exit__ would republish
+  writes left pending by a failed `with self.conn:` block —
+  the fourth wall of the pending-TX defect family was the
+  one unpinned surface. AST-pins __enter__ and __exit__ to
+  contain no execute/commit/rollback call.
+- correct CLAUDE.md's stale fusion claim: the bullet still
+  said fuse()/adaptive_alpha() "exist in search.py" — both
+  were deleted in v0.2.150 (the file's own later section
+  already said so)
+
+### v0.2.431 (2026-09-30)
+
+- sync the product-review ledger to v0.2.430: the v0.2.426-430
+  summary names the interval "contract-pin expansion — kind
+  vocabulary, resource lifetime, input character class"
+  (instructions≡KINDS key-set pin, Store()-with AST pin,
+  unpaired-surrogate 400 mapping)
+
+### v0.2.430 (2026-09-30)
+
+- reject unpaired surrogates at the request-field validators:
+  json.loads materializes them from \ud800 escapes that raw
+  UTF-8 bytes can't carry, and one reaching a write surfaces
+  as an uncaught UnicodeEncodeError from the sqlite3 binding
+  — a raw 500 for a client-side format error. Both _require
+  and _optional_str now run _check_utf8, so the 400 reaches
+  the caller before the bind does.
+
+### v0.2.429 (2026-09-30)
+
+- sync spec.md to v0.2.428: fold the transaction-contract pin
+  trilogy (with-coverage, callee call sites, nested-with ban),
+  the Store() context-expression pin, and the
+  _INSTRUCTIONS==STUDIO_KINDS vocabulary pin into the DB
+  section; refresh the measured quality line (1091 tests)
+
+### v0.2.428 (2026-09-30)
+
+- pin that every production `Store(...)` call is a `with`
+  context expression (AST-level): a bare `store = Store(db)`
+  never calls close() — the thread-affined sqlite3 connection
+  leaks for the process lifetime, an unbounded fd leak on the
+  per-request pattern. All 20 sites verified covered; the AST
+  walk means comments/docstrings mentioning Store() cannot
+  false-positive. Companion audits clean: _retry_on_lock
+  retries only "locked"-class OperationalErrors and re-raises;
+  _migrate_once embeds its version marker inside each script's
+  BEGIN/COMMIT with duplicate-column winner arbitration
+
+### v0.2.427 (2026-09-30)
+
+- pin that studio._INSTRUCTIONS covers STUDIO_KINDS exactly:
+  _h_studio validates kind in KINDS then generate() indexes
+  _INSTRUCTIONS[kind] — a kind added to the store vocabulary
+  without an instruction entry passes handler validation but
+  raises KeyError in _t_kind, which is not a StoreError so the
+  coded-error mapping misses it and returns a bare 500. The
+  ja/en parity test sees each entry but not the key set
+
+### v0.2.426 (2026-09-30)
+
+- sync the product-review ledger to v0.2.425: the
+  pending-transaction interval closed — chat_stream delta
+  normalization plus three structural pins (with-coverage of
+  write verbs, callee call-site coverage, no nested with-owning
+  calls) that make the whole defect class unreintroducible
+
+### v0.2.425 (2026-09-30)
+
+- pin that no `with self.conn:` block calls a with-owning
+  writer: sqlite3's context manager commits on __exit__, so a
+  nested with commits the outer block's still-pending writes
+  early and an outer failure after the inner exit can no
+  longer roll them back. Call-graph audit: 12 with-owning
+  writers, zero nested call sites (only callee-transacted
+  helpers are invoked inside withs); Store.__exit__ closes
+  without committing, so no stray pending write can be
+  published. A future refactor adding e.g. self.add_note()
+  mid-transaction now fails the gate
+
+### v0.2.424 (2026-09-30)
+
+- pin the call-site side of the callee-transaction contract:
+  touch_notebook / _rewrite_chunk_context_titles /
+  _set_embedding_pair carry bare writes by design because their
+  docstrings make the caller own the transaction — the C250 pin
+  checked the callees' statements but couldn't see whether every
+  call site actually sits inside `with self.conn:`. All 13
+  touch + 2 rewrite sites verified covered; _set_embedding_pair
+  pinned single-caller (set_embedding only — its commit=False
+  branch is the documented contract for _embed_chunks' batch
+  transaction). A future caller that forgets the with or calls
+  the pair helper from elsewhere now fails the gate
+
+### v0.2.423 (2026-09-30)
+
+- pin that multi-statement writes run inside `with self.conn:`:
+  a bare write-execute outside a with-block reopens the
+  pending-write leak class (v0.2.419 was behavioral; this is
+  structural — a future writer can't silently regress). The
+  scan's own blind spot found during fail-verification:
+  multi-line signatures close at `) -> T:` (indent 4), which
+  ended method tracking early and made every multi-line
+  signature method invisible
+
+### v0.2.422 (2026-09-30)
+
+- sync spec.md to v0.2.421: studio_outputs gains its
+  (notebook,kind)→1-row prune semantics; the DB section records
+  the with self.conn atomicity pin across all multi-statement
+  writes and the LLM-response shape-normalization contract
+  (bare-string/null deltas no longer escape as raw 500s)
+
+### v0.2.421 (2026-09-30)
+
+- tolerate non-object `delta` shapes in chat_stream: a bare-string
+  or null delta made choice[delta].get raise AttributeError —
+  outside the tolerated (JSONDecodeError, KeyError, IndexError,
+  TypeError) set — escaping the stream as a raw 500 instead of
+  being normalized or skipped. dict → .get(content), str →
+  content verbatim (some compatible servers emit it that way),
+  anything else → skip
+
+### v0.2.420 (2026-09-30)
+
+- sync the product-review ledger to v0.2.419: documents the
+  v0.2.414-419 epoch (dead studio_outputs storage found and
+  pruned, the two Devin Review pending-transaction findings,
+  and the family-wide `with self.conn:` closure across all
+  seven remaining Store writers)
+
+### v0.2.419 (2026-09-30)
+
+- close the pending-transaction leak family: every multi-write
+  Store method that paired a bare write with a late commit left
+  the write pending when the second statement (touch_notebook /
+  embedding_norm) failed — a later commit on the same connection
+  would publish or erase it. add_source, delete_source, add_note,
+  delete_note, add_message, clear_messages and set_embedding's
+  commit path now wrap write+touch in `with self.conn:` (the
+  same atomic block add_studio_output uses), and add_studio_output's
+  touch moved inside its `with` for one atomic unit. 7 rollback
+  regression tests pin every site (fail-verified both directions)
+
+### v0.2.418 (2026-09-30)
+
+- wrap add_studio_output's INSERT+DELETE in `with self.conn:`
+  (Devin Review on PR #287): a failed prune left the rejected row
+  pending for a later commit to publish — MAX(id) would displace
+  the good output; both statements now roll back together
+
+### v0.2.417 (2026-09-30)
+
+- reorder add_studio_output prune to INSERT-then-DELETE (Devin
+  Review on PR #286): delete-first left the erase pending when the
+  insert raised, and a later commit on the same connection would
+  persist the loss despite the failed regeneration; `id < new_id`
+  also preserves a newer concurrent row
+
+### v0.2.416 (2026-09-29)
+
+- prune superseded studio_outputs in add_studio_output: every
+  regeneration left a predecessor row that no read path can reach
+  (latest_studio_outputs is the only reader) — unbounded dead
+  storage per generate() call; delete same-kind rows in the same
+  transaction
+
+### v0.2.415 (2026-09-29)
+
+- README feature list omitted two shipped REQs entirely — notes
+  (REQ-103) and export (REQ-104) were invisible to new users; add
+  bullets covering both (including the v0.2.412 save-as-note path)
+
+### v0.2.414 (2026-09-29)
+
+- sync product-review.md ledger to v0.2.413: the
+  "documented-but-half-true -> implemented + spec-synced" span
+  (zero-marker pin, REQ-103 save-as-note, spec drift fold)
+
+### v0.2.413 (2026-09-29)
+
+- sync spec.md to v0.2.412: REQ-103's ノート化 now genuinely exists
+  (v0.2.412), malformed-port -> INGEST_URL_BLOCKED(400) in the SSRF
+  row (v0.2.407), embedded messages/notes caps + *_omitted disclosure
+  in the DoS row (v0.2.250/409), write-SQL locality (v0.2.405),
+  _read_json validator contract (v0.2.408), zero-marker pin
+  (v0.2.411), test count 1075
+
+### v0.2.412 (2026-09-29)
+
+- wire REQ-103's "studio output -> note" for real: a save button on
+  every studio card POSTs {title: kind label, body: raw body} to
+  /api/notebooks/{id}/notes — before this, "ノート化" was spec text
+  whose only path was manual copy-paste (the "documented but
+  half-true" class, v0.2.75/112/129/148/173)
+
+### v0.2.411 (2026-09-29)
+
+- pin that production code ships zero TODO/FIXME markers: a committed
+  marker is a known issue left unfixed — every gate was blind to one
+  landing in a PR. Scan shoin/**/*.py + the shipped index.html,
+  word-boundary, comments or not
+
+### v0.2.410 (2026-09-29)
+
+- sync the product-review ledger to v0.2.409 (v0.2.406-409 summary:
+  error-mapping boundary closure + embed-cap symmetry — port 400,
+  notes cap + notes_omitted, body-validator pin)
+
+### v0.2.409 (2026-09-29)
+
+- cap notes embedded in GET /api/notebooks/{id} at NB_NOTES_LIMIT=500,
+  disclosing notes_omitted — the same unbounded-embed defect the
+  messages cap closed (v0.2.250): every detail fetch (openNotebook,
+  the SSE-drop recovery refetch) round-tripped every note body, so an
+  accumulating notes pane made each click heavier forever. Newest 500
+  kept so a just-added note is always visible; UI shows the
+  notes.earlier disclosure line; export()/DB keep the full record
+
+### v0.2.408 (2026-09-29)
+
+- pin that _read_json() results only flow through _require() /
+  _optional_str(): a bound body dict read directly (data.get/key) skips
+  the type checks those helpers exist for — a list/dict/bool field then
+  reaches .strip()/str-concat as AttributeError->500 instead of
+  VALIDATION_FIELD_FORMAT_INVALID->400 (the v0.2.38 class). Scope:
+  each bound var is checked only within its assigning def.
+
+### v0.2.407 (2026-09-29)
+
+- map malformed URL ports to INGEST_URL_BLOCKED: urlparse validates
+  .port lazily, so :abc / out-of-range / negative ports raised
+  ValueError inside fetch_url — outside the IngestError handling —
+  and surfaced as HTTP 500 instead of 400 (same class as zone-scoped
+  IPv6, v0.2.45); validate .port inside validate_public_url before DNS
+
+### v0.2.406 (2026-09-29)
+
+- sync product-review.md to v0.2.405 (adds the v0.2.403-405 summary:
+  workflow-instruction truthfulness fix in docs/agents + the
+  write-SQL-lives-in-store.py locality pin; header/test count refreshed)
+
+### v0.2.405 (2026-09-29)
+
+- pin that data-mutation SQL literals (INSERT/REPLACE INTO, DELETE
+  FROM, UPDATE ... SET) live only in store.py — a write issued from
+  anywhere else bypasses every write-path guard shipped there
+  (vocabulary checks, updated_at touches, StoreError taxonomy);
+  direct SELECTs elsewhere stay fine, floor keeps the pin non-vacuous
+
+### v0.2.404 (2026-09-29)
+
+- fix agent-doc push instructions: HEAD:main would bypass the entire
+  stacked-PR chain (and direct main pushes are not permitted anyway);
+  both docs now describe the stacked-PR flow (PR per cycle, base=prior
+  branch, main lands via the rollup PR only)
+
+### v0.2.403 (2026-09-29)
+
+- sync product-review ledger to v0.2.402 (v0.2.397-402 summary:
+  shutdown-path closure + mechanism-claims-verified arc)
+
+### v0.2.402 (2026-09-29)
+
+- sync spec.md to v0.2.401 (test count, coverage misses 5→3,
+  daemon-threads row in the DoS table with the corrected mechanism)
+
+### v0.2.401 (2026-09-29)
+
+- sweep the remaining keep-alive premise references: _drain exists so
+  an error response is not clobbered by RST on close-with-unread-body,
+  and stalled-client timeouts are the routine TimeoutError case
+
+### v0.2.400 (2026-09-29)
+
+- correct the daemon_threads test+comments: the server speaks HTTP/1.0
+  (no keep-alive), so the parked-handler scenario is a client stalled
+  mid-request, not an idle keep-alive connection; rewrite the test to
+  park a handler via a raw partial request so the elapsed assertion
+  actually fails under the mutant
+
+### v0.2.399 (2026-09-29)
+
+- pin CLI parser↔dispatch parity: every declared subcommand and action
+  must have a branch — a parser entry without one silently no-ops (rc=0)
+
+### v0.2.398 (2026-09-29)
+
+- Set daemon_threads=True on the HTTP server: a browser's idle
+  keep-alive connection parks its handler thread in rfile.read()
+  for up to REQUEST_SOCKET_SEC (120s), and non-daemon threads are
+  JOINED by server_close() — Ctrl+C stalled for the full socket
+  timeout whenever any browser connection was open. Fail-first
+  verified (non-daemon close joins the parked handler past the 2s
+  bound). Same choice python -m http.server makes.
+- Same-cycle audit, all clean: spec.md verified still current (no
+  contract-level change since v0.2.388; toasts/cache internals are
+  not spec-level), generation_lock context-managed on every site,
+  health is report-only by design (API/CLI parity), _read_json
+  bounded + drain + close-on-overrun, Store.__exit__ closes only
+  (all writes self-commit), eval baseline round-trip now pinned.
+
+### v0.2.397 (2026-09-29)
+
+- Sync the product-review ledger to v0.2.396 (four versions): the
+  cross-process questions-cache staleness fix, the store.py defensive-
+  tail proofs, and the eval baseline round-trip pin. Same-cycle audit
+  all clean: every store getter carries an explicit ORDER BY; all 133
+  UI function/const names referenced by tests; zero inline event
+  handlers (all addEventListener/arrow); fetch_url bounds the decoded
+  body; export fmt validated 400 server-side + ValueError in lib;
+  studio.generate fully guarded; suggest_questions filters all live.
+
+### v0.2.396 (2026-09-29)
+
+- Pin the eval baseline round-trip: report_from_dict(report_to_dict(rep, k))
+  must read back every written field identically. Writer/reader key or dtype
+  drift would surface only at --diff time, far from the edit that caused it.
+- Correct the v0.2.395 comment: `shoin src refresh` (same-id content rewrite
+  bumping sha256) is the cross-process writer the fingerprint guards against;
+  `shoin reindex` only re-embeds vectors, which suggestions never read.
+- Same-cycle audit, all clean: every store getter carries an explicit ORDER BY,
+  all 133 UI function/const names are referenced by tests, fetch_url bounds the
+  decoded body (_check_size after decode), refresh/rename title paths fully
+  guarded, suggest_questions validates every filter.
+
+### v0.2.395 (2026-09-29)
+
+- Make the questions cache fingerprint content-aware: (id, sha256,
+  title) per source instead of ids only. A same-id content rewrite
+  from another process (CLI reindex/refresh while serve runs) left
+  the fingerprint matching, so the server kept serving suggestions
+  generated from dead chunks indefinitely — only the in-process
+  refresh/delete pops covered it. Fail-first verified (id-only
+  fingerprint serves a stale hit: chat_count stays 1).
+- Same-cycle audit, all clean: zero dead I18N.ja keys, zero
+  unreferenced element ids, _STRINGS keys all dynamically reachable,
+  port-0 banner prints the actual bound port, every except Exception
+  site documented, cli.py:765 is the mypy-required fallthrough, and
+  citation.py's zero-bigram tail is provably unreachable under
+  _MIN_CLAIM_CHARS=5.
+
+### v0.2.394 (2026-09-29)
+
+- Cover store.py's last two defensive tails with _RacyConn race tests:
+  add_chunks' FOREIGN KEY -> SOURCE_NOT_FOUND mapping (the third
+  sibling replace_chunks_for_source already proved) and
+  update_source_sha256's in-transaction re-read catching a concurrent
+  delete. Both mutants verified fail-first. Remaining misses are the
+  provably unreachable AssertionError and citation.py/cli.py's
+  defensive edges.
+
+### v0.2.393 (2026-09-29)
+
+- Sync the product-review ledger to v0.2.392 — header version/test count
+  and a new v0.2.387-392 summary paragraph (vocabulary-guard completion,
+  spec.md contract sync, embed-skip surfacing, wire-pin strengthenings).
+- Same-cycle audit: bind stays 127.0.0.1-only (spec STRIDE), source
+  titles carry filename/URL fallbacks (never blank), no stray files.
+
+### v0.2.392 (2026-09-29)
+
+- Pin HISTORY.md's `Version History: … → vX.Y.Z` header tip to VERSION
+  (test_history_md_records_current_version extension) — the last ritual
+  marker no pin covered; a stale tip could survive correct entries.
+- Same-cycle audit, all already guarded: INGEST_EMPTY rejects
+  empty-extraction sources before add_source (no ghost sources);
+  messages_omitted is consumed by the UI marker (chat.earlier); studio
+  generation does not consume chat history (no stale [S#] path).
+
+### v0.2.391 (2026-09-29)
+
+- Strengthened the ingest-toast wire pin: beyond counting `embedNote(j)` call sites, the test now scans every `toast(` line announcing a completed ingest (`sources.added` / `src.refresh.ok`) and requires the embed-skip suffix on each — a future ingest path that forgets `embedNote` fails even when the call count is unchanged (the class of drift a count-only pin misses). Same-cycle audit: `_embed_chunks` model-version ordering (`set_setting` only when `done and (not force or done == len(texts))` — a partial force-reindex keeps the OLD model recorded so the mismatch guard stays armed), `_file_config` type filtering, `snums` S# numbering single-sourced from `enumerate(order)`, per-request `Store` (default `check_same_thread` safe by construction), and all Content-Length parsing — already guarded.
+
+### v0.2.390 (2026-09-29)
+
+- Surface embed-skip in the source-ingest toasts (add URL / upload / refresh). When embeddings are configured (`window._embedOn`, set by `health()` from `/api/health`'s `embed_model`) but `n_embedded < n_chunks` — endpoint failure, stored-model mismatch, or a partial batch — the toast now appends `src.embed_short` ("⚠ 埋め込み {n}/{total} 件") instead of presenting the index as complete; same defect class `pages_failed` already covers. Silent when embeddings are off, where 0 embedded is the first-class mode. The fields were already in the API responses; only the UI read was missing. New `embedNote(j)` helper + node-level pin covering zero/partial/full/zero-chunks/missing-fields/embed-off cases plus the three wire sites; the existing refresh/add-handler harnesses now inject the real helper.
+
+### v0.2.389 (2026-09-29)
+
+- `docs/spec.md` synced to v0.2.388 (was v0.2.326 — 62 versions behind). The spec is the REQ-level contract doc; changes at spec level since the last sync are now documented: write-time vocabulary guards on `messages.role` / `studio_outputs.kind` (STUDIO_KIND_INVALID) / `sources.kind` with the single-sourced vocabularies and the StoreError→HTTP taxonomy (`*_NOT_FOUND`→404, `*_ALREADY_EXISTS`→409, `SYSTEM_*`→500, else→400), and the `, c.id` deterministic tie-break in both retrieval ORDER BYs. Coverage figure refreshed (99%, 1061 tests). Concurrent audit of the config getters (`port`/`embed_batch`/`chunk_tokens`/`chunk_overlap`), `expand_query` bound, CLI subparser coverage, and every store ORDER BY found all already guarded — invalid→default contracts, MAX_QUESTION_LEN clamp, `required=True` subcommands, explicit deterministic ordering.
+
+### v0.2.388 (2026-09-29)
+
+- `docs/product-review.md` ledger synced to v0.2.386 (was v0.2.380 — 6 versions behind, at the ~7-15-version sync cadence boundary). Header version and test count updated (1051→1059); the v0.2.381-386 arc is summarized as the 「境界入力の字句契約 + 書込み語彙ガードの確立」period: tilde expansion across every CLI path arg with the source-scan pin that seals the defect class, the `, c.id` retrieval tie-break, and the `add_studio_output` kind guard with its single-sourced `STUDIO_KINDS` vocabulary. The ledger is the product's own audit dashboard — its freshness is itself covered by the 文書主張≡実挙動 principle, so a stale ledger is a defect in the same class it exists to catch. Concurrent audit of the notes/upload/refresh/PRF/vector paths found all already guarded.
+
+### v0.2.387 (2026-09-29)
+
+- `add_source` now rejects kinds outside `SOURCE_KINDS` ({"txt","md","html","pdf","url"}) with `VALIDATION_FIELD_FORMAT_INVALID` — third and last of the store-write vocabulary guards (v0.2.368 role, v0.2.386 studio kind). kind is immutable post-insert and is consumed by export's RIS `TY` mapping (url/html→ELEC), the md legend, and the UI source badge, so a typo'd literal silently exported wrong citation types and rendered a nonsense badge with no corrective path. `SOURCE_KINDS` is pinned bidirectionally against what ingest can emit (`_EXT_KIND` values ∪ {"url"}): a new extension kind added without updating the vocabulary is rejected at the write; a ghost value ingest never produces is rejected by the equality pin. Ten test fixtures that seeded sources with the nonexistent kind "file" (all modeling .txt files) were corrected to "txt" — production never emits "file", so fixtures asserting under it covered a value real sources can never carry. Fail-then-pass verified.
+
+### v0.2.386 (2026-09-29)
+
+- `add_studio_output` now rejects kinds outside `STUDIO_KINDS` with `STUDIO_KIND_INVALID` at the write — the store-side sibling of v0.2.368's `add_message` role guard. A typo'd kind literal previously persisted as a phantom `GROUP BY kind` row that `latest_studio_outputs()` returned but no UI section claimed and export rendered under a nonsense heading — invisible dead data with no corrective path. The vocabulary is single-sourced in `store.STUDIO_KINDS` (studio.py re-exports it as `KINDS`; the store cannot import studio.py back), pinned by an identity test so the guard and the generator vocabulary can never drift. Fail-then-pass verified: removing the guard writes the phantom row and fails the test.
+
+### v0.2.385 (2026-09-29)
+
+- fix: deterministic tie-break in both retrieval ORDER BYs — `ORDER BY rank` (FTS) and `ORDER BY score DESC` (LIKE pool) left equal-key order unspecified in SQLite; LIKE scores are small integers so tie groups are common, and at the 2000-row cap tied chunks were arbitrarily included/excluded. `, c.id` (oldest-first) matches the list_notebooks convention from v0.2.308.
+
+### v0.2.384 (2026-09-29)
+
+- fix: expand `~` in `add`'s targets — the last CLI path-accepting arg. A quoted `add nb '~/doc.md'` arrives unexpanded (shell expands a tilde only at word start) and failed INGEST_FETCH_FAILED; URLs pass through unchanged. The scan pin now covers `Path(str(<var>))` on loop variables too, closing the class for every current and future CLI path arg.
+
+### v0.2.383 (2026-09-29)
+
+- fix: extend the `~` contract to `eval`'s path args — `cases`, `--save`, `--diff` went through `Path(str(args.*))` unexpanded, so `eval nb ~/cases.json` failed SYSTEM_IO_ERROR and `--save ~/b.json` wrote a literal `~` directory. Pinned with a source scan requiring every `Path(str(args.*))` in cli.py to call `.expanduser()`.
+
+### v0.2.382 (2026-09-29)
+
+- fix: expand `~` in the `--db` override — the shell only expands a tilde at word start, so `--db=~/x.db` arrived literally and `Store()` would create a real `~` directory in the cwd, while `SHOIN_DATA_DIR` was already expanded inside `db_path()`. New `_db_arg()` helper is used by all three call sites (serve/health/Store) so the override and the default follow the same contract.
+
+### v0.2.381 (2026-09-29)
+
+- docs: sync product-review ledger to v0.2.380 — header, test count (1049→1051), and a new `v0.2.374-380` summary paragraph naming the arc ("sibling-method asymmetry on the write path + the test suite's own verification quality"): 3 real fixes (accept= parity, add_chunks touch, update_source_sha256 context rewrite) plus 4 pin-completeness items; also corrects the previous paragraph's fix count (4→5).
 
 ### v0.2.380 (2026-09-29)
 

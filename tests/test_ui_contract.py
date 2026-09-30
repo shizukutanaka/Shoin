@@ -2147,6 +2147,116 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_render_notes_discloses_omitted_notes(self) -> None:
+        """v0.2.409: GET /api/notebooks/{id} embeds at most NB_NOTES_LIMIT notes
+        and reports notes_omitted. renderNotes must append the disclosure line
+        when the flag is set — capping the payload without an indicator would
+        silently hide user notes. Executes the real function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "function renderNotes")
+        except ValueError:
+            self.fail("no renderNotes function in index.html")
+        harness = (
+            """\
+let cur = {id: 1, notes: [{id: 5, title: "n5", body: "b5"},
+                         {id: 6, title: "n6", body: "b6"}],
+           notes_omitted: 8};
+const noteList = {cleared: 0, kids: [],
+  replaceChildren(){ this.cleared++; this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const map = {"#noteList": noteList};
+const $ = s => map[s];
+function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
+  append(...xs){ this.kids.push(...xs) }, setAttribute(){}, onclick: null} }
+function t(k){ return k + "={n}" }
+function api(){ return Promise.reject(new Error("no net")) }
+function openNotebook(){}
+function toast(){}
+"""
+            + block
+            + """
+renderNotes();
+if (noteList.kids.length !== 3)
+  { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
+if (!String(noteList.kids[0].text).includes("8"))
+  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0])); process.exit(1) }
+cur.notes_omitted = 0;
+renderNotes();
+if (noteList.kids.length !== 2)
+  { console.error("disclosure shown with zero omitted"); process.exit(1) }
+cur.notes_omitted = undefined;  // payloads without the key must render clean
+renderNotes();
+if (noteList.kids.length !== 2)
+  { console.error("disclosure shown when key absent"); process.exit(1) }
+cur.notes = [];
+renderNotes();
+if (noteList.kids.length !== 1 || !noteList.kids[0].kids.length)
+  { console.error("empty state not rendered"); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_render_studio_saves_output_as_note(self) -> None:
+        """v0.2.412: REQ-103 claims studio outputs can be saved as notes, but
+        the only path was manual copy-paste into the note form — the spec
+        capability existed in name only. renderStudio must give every output
+        card a save button that POSTs {title, body} to /api/notebooks/{id}/notes
+        with the raw body (not the seal-rendered DOM). Executes the real
+        function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "function renderStudio")
+        except ValueError:
+            self.fail("no renderStudio function in index.html")
+        harness = (
+            """\
+let cur = {id: 7, studio: [{kind: "briefing", body: "raw md body", report: null}],
+           notes_omitted: 0};
+const studioOut = {cleared: 0, kids: [],
+  replaceChildren(){ this.cleared++; this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const map = {"#studioOut": studioOut};
+const $ = s => map[s];
+function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
+  append(...xs){ this.kids.push(...xs) }, setAttribute(){}, onclick: null, disabled: false} }
+function t(k){ return k }
+function renderWithSeals(){}
+function reportBadges(){}
+const posts = [];
+async function jpost(path, body){ posts.push({path, body}); }
+function toast(){}
+let reopened = 0;
+function openNotebook(){ reopened++ }
+"""
+            + block
+            + """
+renderStudio();
+if (studioOut.kids.length !== 1)
+  { console.error("card count: " + studioOut.kids.length); process.exit(1) }
+const card = studioOut.kids[0];
+const btn = card.kids.find(k => k.tag === "button" && k.text === "studio.savenote");
+if (!btn) { console.error("save-as-note button missing: " + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text))); process.exit(1) }
+btn.onclick();  // async — awaits jpost; wait a tick
+await new Promise(r => setTimeout(r, 10));
+if (posts.length !== 1) { console.error("no note POST: " + posts.length); process.exit(1) }
+if (posts[0].path !== "/api/notebooks/7/notes")
+  { console.error("wrong path: " + posts[0].path); process.exit(1) }
+if (posts[0].body.title !== "studio.briefing" || posts[0].body.body !== "raw md body")
+  { console.error("wrong payload: " + JSON.stringify(posts[0].body)); process.exit(1) }
+if (reopened !== 1) { console.error("notebook not reopened: " + reopened); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_health_failure_reflects_offline_and_recovers(self) -> None:
         """v0.2.264 defect class: a failed /api/health fetch flipped window._llmOn
         to false but left the lamp green and the banner hidden — the UI claimed
@@ -2345,6 +2455,7 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        fn_embed = _js_block(src, "function embedNote")
         harness = """\
 const reg = {};
 function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
@@ -2362,6 +2473,7 @@ function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls;
   e.text=text; e.textContent=text; return e }
 function t(k){ return k === "src.pages_failed" ? "{n} pages failed" : k }
+let window = {};
 let apiCalls = []; let nextJson = {pages_failed: 0}; let failNext = false;
 async function api(path, o){ apiCalls.push({path, method: o && o.method});
   if (failNext) throw new Error("refresh boom");
@@ -2380,7 +2492,7 @@ function startSourceRename(s, tt, row, initial){
   const inp = mkEl(); inp.cls = "src-rename"; return inp;
 }
 const document = { activeElement: null };
-""" + fn + """
+""" + fn_embed + fn + """
 (async () => {
 cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x"}],
   messages:[], studio:[], notes:[] };
@@ -2424,6 +2536,55 @@ console.log("ok")
 """
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
+
+    def test_embed_skip_surfaced_in_ingest_toasts(self) -> None:
+        """v0.2.390: when embeddings are configured (window._embedOn from
+        /api/health) but an ingest embeds fewer chunks than it produced —
+        endpoint failure, stored-model mismatch, or a partial batch — the
+        toast must say so instead of presenting the index as complete (the
+        same defect class pages_failed covers). Silent when embeddings are
+        off, where 0 embedded is the first-class mode."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function embedNote")
+        harness = """\
+function t(k){ return k === "src.embed_short" ? "{n}/{total} embedded" : k }
+let window = {};
+""" + fn + """
+const cases = [
+  [{_embedOn:true},  {n_embedded:0, n_chunks:5}, " 0/5 embedded"],
+  [{_embedOn:true},  {n_embedded:2, n_chunks:5}, " 2/5 embedded"],
+  [{_embedOn:true},  {n_embedded:5, n_chunks:5}, ""],
+  [{_embedOn:true},  {n_embedded:0, n_chunks:0}, ""],
+  [{_embedOn:true},  {}, ""],
+  [{_embedOn:false}, {n_embedded:0, n_chunks:5}, ""],
+];
+for (const [w, j, want] of cases) {
+  window._embedOn = w._embedOn;
+  const got = embedNote(j);
+  if (got !== want)
+    { console.error("embedNote wrong: " + JSON.stringify({w,j,got,want})); process.exit(1) }
+}
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        # Wire check: health() tracks _embedOn both ways, all three ingest
+        # toasts (upload, URL add, refresh) append embedNote(j), and every
+        # toast line that announces a completed ingest carries the suffix —
+        # a future ingest path that forgets embedNote fails here even when
+        # the call count is unchanged.
+        self.assertIn("window._embedOn = !!j.embed_model", src)
+        self.assertIn("window._embedOn=false", src)
+        self.assertEqual(src.count("embedNote(j)"), 4)  # 1 definition + 3 call sites
+        toast_lines = [
+            line for line in src.splitlines()
+            if "toast(" in line and ('t("sources.added")' in line or 't("src.refresh.ok")' in line)
+        ]
+        self.assertEqual(len(toast_lines), 3)
+        for line in toast_lines:
+            self.assertIn("embedNote(j)", line, f"ingest toast without embedNote: {line.strip()}")
 
     def test_source_row_delete_and_rename_guard(self) -> None:
         """v0.2.329: the source row's remaining three unpinned wirings —
@@ -2844,8 +3005,10 @@ console.log("ok")
             except ValueError:
                 self.fail(f"handler not found: {marker}")
         nb_form, file_input, url_btn = blocks
+        fn_embed = _js_block(src, "function embedNote")
         harness = (
-            """\
+            fn_embed
+            + """\
 const calls = {posts: [], opens: [], toasts: []};
 const cur = {id: 9};
 const nbName = {value: "new nb"};
@@ -2866,6 +3029,7 @@ const api = async (p, opts) => {
   return {json: async () => ({pages_failed: 0})};
 };
 const t = k => k;
+let window = {};
 async function openNotebook(id){ calls.opens.push(id) }
 function toast(m){ calls.toasts.push(m) }
 const events = {};
