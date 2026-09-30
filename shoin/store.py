@@ -964,6 +964,11 @@ class Store:
     def add_message(
         self, notebook_id: int, role: str, body: str, citation_report: str = "{}"
     ) -> int:
+        if role not in ("user", "assistant"):
+            # history_messages() coerces any unknown role to "assistant" — a
+            # typo'd literal would silently corrupt turn alternation, so fail
+            # loudly at the write.
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown message role: {role!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             cur = self.conn.execute(

@@ -29,7 +29,55 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.361
+## Version History: v0.1.37 → v0.2.373
+
+### v0.2.373 (2026-09-29)
+
+- Pin latest-per-kind studio output semantics (test_latest_studio_outputs_returns_latest_per_kind): the Studio tab shows latest_studio_outputs() — the MAX(id)-per-kind subquery is what makes a regenerated output REPLACE its predecessor instead of accumulating; dropping or weakening it silently stacks stale/dup outputs. Pins replacement plus kind ordering on a live store. Fail direction verified (MAX -> plain id returns the older row, caught).
+
+### v0.2.372 (2026-09-29)
+
+- Pin read-path invariants (two tests): test_recent_messages_returns_newest_in_order — list_messages_recent must return the NEWEST N in chronological order (DESC+LIMIT then reversed); an ORDER BY drift to ASC silently serves a notebook's oldest messages forever in the history cap and qa history. test_source_getters_field_parity — get_source and sources_for_notebook build Source positionally from SELECT *; a positional drift in one (origin<->sha256 swap invisible to consumers) silently desyncs the paths. Both fail directions verified.
+
+### v0.2.371 (2026-09-29)
+
+- Map SYSTEM_* StoreErrors to HTTP 500, not 400 (test_store_error_with_system_code_returns_500): the error dispatcher routed any code not ending _NOT_FOUND/_ALREADY_EXISTS to the client-error 400 branch, so the store's own internal-failure reports (e.g. unexpected constraint violations) told the caller their request was malformed when the server actually failed. SYSTEM_* codes now map to 500 before the fallback. Fail direction verified (dispatch mutation -> 400, caught).
+
+### v0.2.370 (2026-09-29)
+
+- Pin counts-path parity (test_counts_paths_agree): counts() (detail header) and list_notebooks_with_counts() (list view) compute sources/chunks through two different SQL paths; a join-direction or filter drift on either side makes the list row and the detail header silently disagree. Asserts equality on real data including an empty notebook (the LEFT JOIN edge). Fail direction verified (INNER JOIN mutation drops the empty row -> caught).
+
+### v0.2.369 (2026-09-29)
+
+- Single-source the embed_model settings key (test_embed_model_setting_key_is_single_sourced): the key naming which model built the stored vectors was a bare literal at three sites (pipeline write+read, qa read). A typo at any one silently breaks the model-mismatch guard — reads return None forever so the warning never fires (or writes land under a key nobody reads). Now config.EMBED_MODEL_SETTING_KEY; a static pin fails if any get_setting/set_setting call uses the literal outside config.py. Fail direction verified.
+
+### v0.2.368 (2026-09-29)
+
+- add_message rejects unknown roles (test_add_message_rejects_unknown_role): history_messages() coerces any non-"user" role to "assistant", so a typo'd role literal would silently corrupt turn alternation for every later prompt. The store now raises VALIDATION_FIELD_FORMAT_INVALID at the write — same convention as the name-length guards. Fail direction verified (guard removed -> row stored, test fails).
+
+### v0.2.367 (2026-09-29)
+
+- Pin chunk-projection getter shapes (test_chunk_projection_getters_shapes): id_seq_text_chunks_for_source (the source viewer's cited-passage marks) and id_context_text_chunks_for_notebook (the reindex path) had only indirect coverage — selecting a wrong column silently feeds callers swapped data. Asserts exact (id, seq, text) / (id, context, text) values on a live store. Fail direction verified.
+
+### v0.2.366 (2026-09-29)
+
+- Pin the updated_at touch contract behaviorally (test_every_write_bumps_notebook_timestamp): list_notebooks orders by updated_at DESC, so a write path that forgets touch_notebook() leaves the notebook ranked as untouched forever — stale ordering, no error. All eight mutating ops (add_source, update_source_title, update_source_sha256, delete_source, add_note, delete_note, add_studio_output, add_message) run against a live store and must move the stamp forward. Fail direction verified.
+
+### v0.2.365 (2026-09-29)
+
+- Pin the chunks_au update trigger end-to-end (test_fts_tracks_chunk_context_update): update_source_title rewrites chunk context prefixes, and if the trigger is lost the FTS index keeps answering the old title forever — stale index, no error anywhere. The test renames a source and asserts the new title MATCHes while the old one doesn't. Fail direction verified (dropping the trigger yields new_hits=0).
+
+### v0.2.364 (2026-09-29)
+
+- Pin connect-time PRAGMAs on live connections (test_connection_pragmas): foreign_keys OFF turns every ON DELETE CASCADE into an orphan generator with no error; non-WAL journal_mode serializes ThreadingHTTPServer readers against the writer; a shrunken busy_timeout surfaces 'database is locked' to users under contention. Asserts foreign_keys=1, busy_timeout=5000, and journal_mode=wal on a real file-backed DB. Fail-then-pass verified.
+
+### v0.2.363 (2026-09-29)
+
+- Pin migration version ordering (test_migration_versions_strictly_increase): _migrate_once skips `version <= current`, so a migration committed with a duplicate or out-of-order version silently never applies on any already-migrated database — schema drift with no error anywhere. Versions must stay unique and strictly ascending. Audited clean (1-9); fail-direction verified by mutation.
+
+### v0.2.362 (2026-09-29)
+
+- Pin script hygiene + focus visibility (test_script_hygiene_and_focus_visibility): the :focus-visible outline rule is the only way keyboard users see focus — its silent removal leaves them blind — and debug/eval constructs (console.*, debugger, eval, new Function, document.write, javascript: URLs, inline on*= handlers) ship noise or injection surface. Audited clean today; now pinned both directions.
 
 ### v0.2.361 (2026-09-29)
 

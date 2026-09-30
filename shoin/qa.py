@@ -20,6 +20,7 @@ from typing import Protocol
 from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, estimate_tokens, is_cjk
 from .citation import CitationReport, make_report
 from .config import (
+    EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
     QUERY_VEC_CACHE_SIZE,
     TOP_K,
@@ -536,7 +537,7 @@ def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     current = (llm.embedding_model or "").strip()
     if not current:
         return True  # embedding disabled: nothing to mismatch
-    stored = (store.get_setting("embed_model") or "").strip()
+    stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
     return not stored or stored == current
 
 
