@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.360
+## Version History: v0.1.37 → v0.2.361
+
+### v0.2.361 (2026-09-29)
+
+- Fix a skipped heading level + pin document structure (test_document_structure_contract): the viewer dialog's title was h3 under a single h1 — AT users navigate by headings and a skipped level reads as a missing section. Now h2 (CSS selector updated). Pin requires exactly one non-empty <title>, charset + viewport meta, one <main>, exactly one <h1>, no skipped heading levels, and no positive tabindex in markup or JS (positive values fight natural tab order). Fail-then-pass verified.
 
 ### v0.2.360 (2026-09-29)
 

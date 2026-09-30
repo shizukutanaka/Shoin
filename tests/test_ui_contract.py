@@ -1194,6 +1194,49 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_document_structure_contract(self) -> None:
+        """Document chrome and outline: the structural bits AT and
+        browsers lean on that degrade silently — found in v0.2.361
+        that the viewer dialog's heading was h3 after a single h1
+        (skipped level). Pins: exactly one non-empty <title>, charset
+        and viewport meta, one <main>, exactly one <h1> and no skipped
+        heading levels, and no positive tabindex (markup or JS-set:
+        positive values fight the natural tab order)."""
+        html = _html()
+        markup = re.sub(
+            r"<script.*?</script>|<style.*?</style>", "", html, flags=re.S
+        )
+        titles = re.findall(r"<title>([^<]*)</title>", markup)
+        self.assertEqual(len(titles), 1, "expected exactly one <title>")
+        self.assertTrue(titles[0].strip(), "empty <title>")
+        self.assertIn("charset", markup, "missing charset meta")
+        self.assertIn("viewport", markup, "missing viewport meta")
+        self.assertEqual(
+            len(re.findall(r"<main\b", markup)), 1, "expected one <main>"
+        )
+        headings = [
+            int(n) for n in re.findall(r"<h([1-6])\b", markup)
+        ]
+        self.assertEqual(
+            headings.count(1), 1, "expected exactly one <h1>"
+        )
+        top = 0
+        skipped = []
+        for n in headings:
+            if n > top + 1:
+                skipped.append(f"h{top} -> h{n}")
+            top = max(top, n)
+        self.assertEqual(
+            skipped, [], f"heading levels must not skip: {skipped}"
+        )
+        bad = re.findall(r'tabindex="(\d+)"', html) + [
+            v for v in re.findall(r"tabIndex\s*=\s*(\d+)", html)
+        ]
+        positive = [v for v in bad if int(v) > 0]
+        self.assertEqual(
+            positive, [], f"positive tabindex found: {positive}"
+        )
+
     def test_form_controls_have_accessible_names(self) -> None:
         """A control whose only name is its placeholder loses that name
         the moment the user types — assistive tech then announces an
