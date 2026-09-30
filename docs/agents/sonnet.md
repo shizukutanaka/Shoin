@@ -33,8 +33,11 @@
 5. **完了条件** — `./scripts/verify.sh` 全ゲート全緑（lint / mypy --strict /
    unittest+coverage≥90% / detect-secrets。`python3` が 3.11+ でない環境では
    `PYTHON=.venv/bin/python ./scripts/verify.sh`）。unittest 単独では残り4ゲートを通らない。
-6. **push** — 指定作業ブランチに push し、`git push origin HEAD:main` で
-   公開 `main` を追従。タグ push・`.github/workflows/` 書き込みは権限上不可。
+6. **push** — 指定作業ブランチに push して PR を開く。`git push origin HEAD:main`
+   による `main` 直接追従は**禁止**——現在は積層PR運用（各サイクルが前PRの
+   ブランチ先端に積み、base=先行ブランチでPRを開く）で、`main` への着地は
+   ロールアップPRのみ経由。直接pushは開いているチェーン全体をバイパスする。
+   タグ push・`.github/workflows/` 書き込みは権限上不可。
 
 ## 2. 推奨タスク（この範囲で価値を出す）
 
@@ -95,7 +98,7 @@
    CLAUDE.md 側のポインタ行も更新
 9. PYTHON=.venv/bin/python ./scripts/verify.sh   # 全ゲート全緑が完了条件
 10. （verify.sh が ruff check . / mypy --strict / coverage / detect-secrets を兼ねるため追加の手実行は不要）
-11. commit → push 指定ブランチ → git push origin HEAD:main
+11. commit → push 指定ブランチ → PR作成（base=先行PRのブランチ。main直接push禁止）
 ```
 
 ### レシピ C: i18n 文字列の追加

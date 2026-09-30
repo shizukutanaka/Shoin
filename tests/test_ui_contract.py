@@ -2147,6 +2147,116 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_render_notes_discloses_omitted_notes(self) -> None:
+        """v0.2.409: GET /api/notebooks/{id} embeds at most NB_NOTES_LIMIT notes
+        and reports notes_omitted. renderNotes must append the disclosure line
+        when the flag is set — capping the payload without an indicator would
+        silently hide user notes. Executes the real function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "function renderNotes")
+        except ValueError:
+            self.fail("no renderNotes function in index.html")
+        harness = (
+            """\
+let cur = {id: 1, notes: [{id: 5, title: "n5", body: "b5"},
+                         {id: 6, title: "n6", body: "b6"}],
+           notes_omitted: 8};
+const noteList = {cleared: 0, kids: [],
+  replaceChildren(){ this.cleared++; this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const map = {"#noteList": noteList};
+const $ = s => map[s];
+function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
+  append(...xs){ this.kids.push(...xs) }, setAttribute(){}, onclick: null} }
+function t(k){ return k + "={n}" }
+function api(){ return Promise.reject(new Error("no net")) }
+function openNotebook(){}
+function toast(){}
+"""
+            + block
+            + """
+renderNotes();
+if (noteList.kids.length !== 3)
+  { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
+if (!String(noteList.kids[0].text).includes("8"))
+  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0])); process.exit(1) }
+cur.notes_omitted = 0;
+renderNotes();
+if (noteList.kids.length !== 2)
+  { console.error("disclosure shown with zero omitted"); process.exit(1) }
+cur.notes_omitted = undefined;  // payloads without the key must render clean
+renderNotes();
+if (noteList.kids.length !== 2)
+  { console.error("disclosure shown when key absent"); process.exit(1) }
+cur.notes = [];
+renderNotes();
+if (noteList.kids.length !== 1 || !noteList.kids[0].kids.length)
+  { console.error("empty state not rendered"); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_render_studio_saves_output_as_note(self) -> None:
+        """v0.2.412: REQ-103 claims studio outputs can be saved as notes, but
+        the only path was manual copy-paste into the note form — the spec
+        capability existed in name only. renderStudio must give every output
+        card a save button that POSTs {title, body} to /api/notebooks/{id}/notes
+        with the raw body (not the seal-rendered DOM). Executes the real
+        function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        try:
+            block = _js_block(src, "function renderStudio")
+        except ValueError:
+            self.fail("no renderStudio function in index.html")
+        harness = (
+            """\
+let cur = {id: 7, studio: [{kind: "briefing", body: "raw md body", report: null}],
+           notes_omitted: 0};
+const studioOut = {cleared: 0, kids: [],
+  replaceChildren(){ this.cleared++; this.kids = [] },
+  append(x){ this.kids.push(x) }};
+const map = {"#studioOut": studioOut};
+const $ = s => map[s];
+function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
+  append(...xs){ this.kids.push(...xs) }, setAttribute(){}, onclick: null, disabled: false} }
+function t(k){ return k }
+function renderWithSeals(){}
+function reportBadges(){}
+const posts = [];
+async function jpost(path, body){ posts.push({path, body}); }
+function toast(){}
+let reopened = 0;
+function openNotebook(){ reopened++ }
+"""
+            + block
+            + """
+renderStudio();
+if (studioOut.kids.length !== 1)
+  { console.error("card count: " + studioOut.kids.length); process.exit(1) }
+const card = studioOut.kids[0];
+const btn = card.kids.find(k => k.tag === "button" && k.text === "studio.savenote");
+if (!btn) { console.error("save-as-note button missing: " + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text))); process.exit(1) }
+btn.onclick();  // async — awaits jpost; wait a tick
+await new Promise(r => setTimeout(r, 10));
+if (posts.length !== 1) { console.error("no note POST: " + posts.length); process.exit(1) }
+if (posts[0].path !== "/api/notebooks/7/notes")
+  { console.error("wrong path: " + posts[0].path); process.exit(1) }
+if (posts[0].body.title !== "studio.briefing" || posts[0].body.body !== "raw md body")
+  { console.error("wrong payload: " + JSON.stringify(posts[0].body)); process.exit(1) }
+if (reopened !== 1) { console.error("notebook not reopened: " + reopened); process.exit(1) }
+console.log("ok")
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_health_failure_reflects_offline_and_recovers(self) -> None:
         """v0.2.264 defect class: a failed /api/health fetch flipped window._llmOn
         to false but left the lamp green and the banner hidden — the UI claimed
