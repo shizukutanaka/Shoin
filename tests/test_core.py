@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.414")
+        self.assertEqual(VERSION, "0.2.418")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1027,6 +1027,82 @@ class TestStore(unittest.TestCase):
                 [(str(r["kind"]), str(r["body"])) for r in rows],
                 [("briefing", "b1"), ("faq", "new-faq")],
             )
+
+    def test_add_studio_output_prunes_superseded_kind_rows(self) -> None:
+        """v0.2.416: latest_studio_outputs() is the only reader, so every
+        regeneration left its predecessor as an unreadable dead row — the
+        table grew per generate() call with nothing able to reach the old
+        versions. add_studio_output must delete superseded same-kind rows in
+        the same transaction; other kinds must be untouched."""
+        with make_store() as s:
+            nb = s.create_notebook("prune")
+            for i in range(3):
+                s.add_studio_output(nb.id, "faq", f"faq-{i}", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = list(
+                s.conn.execute(
+                    "SELECT kind, body FROM studio_outputs"
+                    " WHERE notebook_id=? ORDER BY kind",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "faq-2")],
+            )
+
+    def test_add_studio_output_failed_insert_leaves_prior_row(self) -> None:
+        """v0.2.417 (Devin Review on PR #286): DELETE-before-INSERT left the
+        erase pending when the INSERT raised — the exception escapes without
+        rollback, so a later commit on the same connection persisted the
+        deletion and the prior output was lost despite the failed
+        regeneration. Pin: a failed add_studio_output never erases the
+        existing row, even after a subsequent committing write."""
+        with make_store() as s:
+            nb = s.create_notebook("orphan-guard")
+            s.add_studio_output(nb.id, "faq", "keep-me", "{}")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "INSERT INTO studio_outputs",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_studio_output(nb.id, "faq", "doomed", "{}")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not take the row
+            rows = list(
+                s.conn.execute(
+                    "SELECT body FROM studio_outputs WHERE notebook_id=?",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
+
+    def test_add_studio_output_failed_prune_does_not_publish(self) -> None:
+        """v0.2.418 (Devin Review on PR #287): if the prune DELETE fails, the
+        INSERT must not stay pending — a later commit on the same connection
+        would publish the rejected row, and latest_studio_outputs's MAX(id)
+        would displace the good output. Pin: both statements roll back
+        together on any failure."""
+        with make_store() as s:
+            nb = s.create_notebook("publish-guard")
+            s.add_studio_output(nb.id, "faq", "keep-me", "{}")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "DELETE FROM studio_outputs",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_studio_output(nb.id, "faq", "doomed", "{}")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not publish it
+            rows = list(
+                s.conn.execute(
+                    "SELECT body FROM studio_outputs WHERE notebook_id=?",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
 
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
