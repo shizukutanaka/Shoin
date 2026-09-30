@@ -232,7 +232,15 @@ class LLMClient:
                         # choices[0].finish_reason arrives on the final delta
                         # chunk (None on intermediate ones); keep the last one.
                         choice = obj["choices"][0]
-                        delta = choice["delta"].get("content")
+                        raw_delta = choice["delta"]
+                        if isinstance(raw_delta, dict):
+                            delta = raw_delta.get("content")
+                        elif isinstance(raw_delta, str):
+                            # Compatible servers may emit the delta as a bare
+                            # string instead of the OpenAI object shape.
+                            delta = raw_delta
+                        else:
+                            delta = None
                         if isinstance(delta, list):
                             delta = _message_text(delta)
                         if isinstance(choice.get("finish_reason"), str):

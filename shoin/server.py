@@ -78,6 +78,23 @@ _EXPORT_MIME = {
 # BibTeX files are universally expected to have the .bib extension, not .bibtex.
 _EXPORT_EXT = {"md": "md", "bibtex": "bib", "ris": "ris"}
 
+
+def _check_utf8(key: str, value: str) -> None:
+    """Reject strings that cannot round-trip through UTF-8.
+
+    json.loads materializes lone surrogates from \ud800-style escapes that raw
+    UTF-8 request bytes cannot carry. One reaching a write surfaces as an
+    uncaught UnicodeEncodeError out of the sqlite3 binding — or out of
+    json.dumps(...).encode("utf-8") if it ever reaches a response — a raw 500
+    for what is a client-side format error.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID", f"{key} contains an unpaired surrogate"
+        ) from None
+
 # Hostnames a browser may legitimately use to reach this loopback server.
 # Anything else (e.g. attacker.example rebound to 127.0.0.1) is rejected:
 # DNS rebinding / CSRF defense for the local web UI (spec STRIDE).
@@ -285,6 +302,7 @@ class _Handler(BaseHTTPRequestHandler):
         value = (raw or "").strip()
         if not value:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}")
+        _check_utf8(key, value)
         return value
 
     def _optional_str(self, data: Json, key: str) -> str:
@@ -300,7 +318,9 @@ class _Handler(BaseHTTPRequestHandler):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
             )
-        return raw or ""
+        value = raw or ""
+        _check_utf8(key, value)
+        return value
 
     # --- routing --------------------------------------------------------
 
