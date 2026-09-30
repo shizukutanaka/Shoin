@@ -457,6 +457,15 @@ def extract_file(path: Path | str) -> Extracted:
     if kind is None:
         raise IngestError("INGEST_UNSUPPORTED_FORMAT", f"unsupported extension: {p.suffix!r}")
     try:
+        # Size-gate on stat() before read_bytes() — a huge local file must be
+        # rejected without loading it into memory just to learn it is over the
+        # limit. read_bytes() still feeds _check_size below: the file could
+        # grow between the stat and the read.
+        if p.stat().st_size > MAX_UPLOAD_BYTES:
+            raise IngestError(
+                "INGEST_FILE_TOO_LARGE",
+                f"source exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
+            )
         data = p.read_bytes()
     except OSError as exc:
         raise IngestError("INGEST_FETCH_FAILED", f"cannot read file: {exc}") from exc
