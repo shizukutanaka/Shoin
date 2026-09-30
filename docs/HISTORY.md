@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.454
+## Version History: v0.1.37 → v0.2.455
+
+### v0.2.455 (2026-09-30)
+
+- close the os.* shell-exec hole in the v0.2.454 pin: banning the
+  subprocess/pty imports left os.system/os.popen/os.spawn*/os.exec*/
+  os.startfile — the same defect class under a legitimate-looking
+  module root — reachable. The pin now flags the exec/spawn attr
+  family on the os root while leaving ordinary os.* fs calls
+  (open, remove) alone. Fail-verified against an injected
+  os.system call.
 
 ### v0.2.454 (2026-09-30)
 

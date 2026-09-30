@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.454")
+        self.assertEqual(VERSION, "0.2.455")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13491,6 +13491,19 @@ class TestResidualGuards(unittest.TestCase):
                         }:
                             problems.append(
                                 f"{path.name}:{node.lineno}: {root_name}.{f.attr}()"
+                            )
+                        # os carries the same shell-exec family under a
+                        # legitimate-looking module name: os.system, os.popen,
+                        # os.spawn*, os.exec*, os.startfile — banning the
+                        # "subprocess"/"pty" imports alone leaves this twin
+                        # route open. os.* for ordinary fs calls (open, remove)
+                        # stays allowed; only the exec/spawn attr family trips.
+                        if root_name == "os" and (
+                            f.attr in {"system", "popen", "startfile"}
+                            or f.attr.startswith(("exec", "spawn"))
+                        ):
+                            problems.append(
+                                f"{path.name}:{node.lineno}: os.{f.attr}()"
                             )
         self.assertEqual(problems, [], f"dangerous constructs: {problems}")
         self.assertGreaterEqual(
