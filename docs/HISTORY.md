@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.426
+## Version History: v0.1.37 → v0.2.428
+
+### v0.2.428 (2026-09-30)
+
+- pin that every production `Store(...)` call is a `with`
+  context expression (AST-level): a bare `store = Store(db)`
+  never calls close() — the thread-affined sqlite3 connection
+  leaks for the process lifetime, an unbounded fd leak on the
+  per-request pattern. All 20 sites verified covered; the AST
+  walk means comments/docstrings mentioning Store() cannot
+  false-positive. Companion audits clean: _retry_on_lock
+  retries only "locked"-class OperationalErrors and re-raises;
+  _migrate_once embeds its version marker inside each script's
+  BEGIN/COMMIT with duplicate-column winner arbitration
+
+### v0.2.427 (2026-09-30)
+
+- pin that studio._INSTRUCTIONS covers STUDIO_KINDS exactly:
+  _h_studio validates kind in KINDS then generate() indexes
+  _INSTRUCTIONS[kind] — a kind added to the store vocabulary
+  without an instruction entry passes handler validation but
+  raises KeyError in _t_kind, which is not a StoreError so the
+  coded-error mapping misses it and returns a bare 500. The
+  ja/en parity test sees each entry but not the key set
 
 ### v0.2.426 (2026-09-30)
 
