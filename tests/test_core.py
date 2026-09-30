@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.470")
+        self.assertEqual(VERSION, "0.2.474")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14015,6 +14015,29 @@ class TestResidualGuards(unittest.TestCase):
                     n_serve += 1
                     continue
                 problems.append(f"{f.name}:{node.lineno}: print() to stdout")
+            # Twin routes around print(): a bare `sys.stdout` reference
+            # (write()/reassignment) bypasses the same contract — ban the
+            # attribute entirely outside cli.py. `import logging` is also
+            # banned: the codebase's diagnostic convention is prints to
+            # stderr; a logging call would emit under a logger nobody
+            # configures (lastResort stderr or silence), and a handler
+            # wired to stdout would reopen the pollution class.
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys"
+                ):
+                    problems.append(f"{f.name}:{node.lineno}: sys.stdout access")
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.name == "logging" or a.name.startswith("logging."):
+                            problems.append(f"{f.name}:{node.lineno}: import logging")
+                if isinstance(node, ast.ImportFrom) and (
+                    node.module or ""
+                ).startswith("logging"):
+                    problems.append(f"{f.name}:{node.lineno}: import logging")
         self.assertEqual(problems, [])
         self.assertGreaterEqual(
             n_stderr, 5,
@@ -14023,6 +14046,51 @@ class TestResidualGuards(unittest.TestCase):
         self.assertGreaterEqual(
             n_serve, 1,
             f"non-vacuous: expected the serve() banner (got {n_serve})",
+        )
+
+    def test_fts_match_expression_is_fully_quoted(self) -> None:
+        """FTS5 MATCH is its own query language: `AND`, `OR`, `NEAR`, `:`,
+        `*`, and bare `"` are operators, not literals. A term interpolated
+        unquoted lets a query like `x:y` or `" jailbreak` silently change
+        WHERE's semantics (no exception, wrong rows — invisible to tests).
+        The contract: `fts_query` emits ONLY double-quoted atoms (inner
+        quotes doubled by `_fts_escape` post-variant) OR-joined, and the
+        single `MATCH` site binds the expression through `?`."""
+        from shoin.search import fts_query
+        probes = [
+            "rain AND drop",
+            "x:y",
+            '"literal"',
+            "a*b",
+            "温度上昇 rate 3%",
+            "fullwidth\uff02quote",
+            "NEAR/3 one two",
+            "col:text",
+        ]
+        for probe in probes:
+            out = fts_query(probe)
+            if not out:
+                continue  # tokenizer dropped every term — LIKE fallback path
+            atoms = out.split(" OR ")
+            for a in atoms:
+                self.assertRegex(
+                    a, r'\A"(?:[^"]|"")*"\Z',
+                    f"unquoted FTS5 atom {a!r} for query {probe!r}",
+                )
+            # Nothing outside quoted atoms + the OR separator.
+            self.assertEqual(" OR ".join(atoms), out)
+        # Structural: exactly one MATCH site, bound through ?.
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        sites = []
+        for f in sorted(root.glob("*.py")):
+            for i, line in enumerate(
+                f.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
+                    sites.append(f"{f.name}:{i}")
+        self.assertEqual(
+            sites, ["search.py:556"],
+            f"MATCH sites drifted: {sites}",
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
