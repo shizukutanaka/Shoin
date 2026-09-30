@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.432
+## Version History: v0.1.37 → v0.2.433
+
+### v0.2.433 (2026-09-30)
+
+- pin that every self.questions_cache read/write sits inside
+  `with self.questions_cache_lock:` — an unguarded access
+  reopens the v0.2.395 stale-fingerprint overwrite race and
+  fails no test, since it works single-threaded. All 7
+  accesses across 5 blocks verified covered; a `with` line
+  disguised by a trailing comment is flagged.
 
 ### v0.2.432 (2026-09-30)
 

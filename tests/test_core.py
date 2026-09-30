@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.432")
+        self.assertEqual(VERSION, "0.2.433")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13007,6 +13007,40 @@ class TestResidualGuards(unittest.TestCase):
                     bad.append(f"{name}:{node.lineno} calls .{called}()")
         self.assertEqual(
             bad, [], f"Store context dunders must not touch the transaction: {bad}"
+        )
+
+    def test_questions_cache_access_under_lock(self) -> None:
+        """Every `self.questions_cache` read/write must sit inside a
+        `with self.questions_cache_lock:` block. The lock exists because a
+        plain dict's check-then-set is not atomic across handler threads —
+        Thread A can read a stale fingerprint, generate for it, and have
+        Thread B's pop cleared by A's write (the v0.2.395 race the lock
+        closed). An unguarded access reopens it silently: the operation
+        still works single-threaded, so no test notices until the race
+        wins. Scan for the access pattern and require coverage."""
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        access = re.compile(r"self\.questions_cache(?![\w])")
+        problems: list[str] = []
+        covered = 0
+        lock_indent: int | None = None
+        for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if lock_indent is not None and indent <= lock_indent:
+                lock_indent = None
+            if re.fullmatch(r"with\s+self\.questions_cache_lock\s*:\s*", stripped):
+                lock_indent = indent
+                continue
+            if access.search(stripped):
+                if lock_indent is not None:
+                    covered += 1
+                else:
+                    problems.append(f"server.py:{i}: unguarded questions_cache access")
+        self.assertEqual(problems, [], f"questions_cache access outside lock: {problems}")
+        self.assertGreaterEqual(
+            covered, 5, f"expected >=5 locked accesses — non-vacuous (got {covered})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
