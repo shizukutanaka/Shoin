@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.395")
+        self.assertEqual(VERSION, "0.2.396")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -11231,6 +11231,28 @@ class TestResidualGuards(unittest.TestCase):
             report_from_dict({"cases": ["x"], "recall": 0.0, "mrr": 0.0})
         with self.assertRaises(ValueError):
             report_from_dict({"cases": []})
+
+    def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
+        """--save → --diff fidelity: every field report_to_dict writes must be
+        read back identically by report_from_dict. A writer/reader key or dtype
+        drift (e.g. `rr` renamed on one side only, `k` dropped) would make a
+        saved baseline unparseable or silently skip the k-mismatch warning —
+        and the failure would surface only when a user diffs, far from the edit."""
+        from shoin.evaluate import CaseResult, EvalReport, report_from_dict, report_to_dict
+
+        rep = EvalReport(
+            cases=[CaseResult("q1", [1, 2], [2, 9], 0.5, 0.5)],
+            recall=0.5,
+            mrr=0.5,
+        )
+        rebuilt, k = report_from_dict(report_to_dict(rep, 7))
+        self.assertEqual(k, 7)
+        self.assertEqual(rebuilt.recall, rep.recall)
+        self.assertEqual(rebuilt.mrr, rep.mrr)
+        self.assertEqual(len(rebuilt.cases), 1)
+        c = rebuilt.cases[0]
+        self.assertEqual((c.question, c.expected, c.retrieved), ("q1", [1, 2], [2, 9]))
+        self.assertEqual((c.recall, c.reciprocal_rank), (0.5, 0.5))
 
     def test_status_line_lists_each_mismatch(self) -> None:
         from shoin.export import _status_line
