@@ -1,6 +1,6 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.409 時点、2026-09-29 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.430 時点、2026-09-30 更新)
 
-shoin/ 15モジュール + 単一HTML UI・テスト1073件・ドキュメント一式の精査結果。
+shoin/ 15モジュール + 単一HTML UI・テスト1093件・ドキュメント一式の精査結果。
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
 v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位で残って
@@ -210,6 +210,69 @@ openNotebookとSSE切断リカバリ再取得の両方が重くなり続ける�
 直接`data.get`/`data[]`は型検証を潜り抜けてlist/dict/boolフィールドが
 `.strip()`でAttributeError→500となる経路を、代入した`def`単位のスコープ
 スキャンで封印(v0.2.408)。v0.2.406はこの台帳自体の同期。
+
+**v0.2.410-413 の要約**: 「仕様文言の半真区間を実装で解消 + 仕様書自体の
+同期」区間——実装1件・ガード1件・文書同期2件。出荷コードの
+TODO/FIXMEマーカー0件をスキャンで恒久固定——コミット済みマーカーは
+「未修正の既知問題」そのものであり、全ゲート(lint/types/tests/coverage/
+secrets)が素通しする完了条件唯一の監査抜けだった(v0.2.411)。REQ-103が
+約束する「Studio出力のノート化」は仕様文言のみで実体は手動コピペ
+経路だけだった——繰り返し観測された"documented but half-true"クラス
+(v0.2.75/112/129/148/173)の残件。`renderStudio`の各カードに保存ボタンを
+追加し`{title: 種別ラベル, body: 生Markdown}`を既存POST /notesへ送信、
+サーバ変更ゼロで1クリックノート化を実装(v0.2.412)。v0.2.410はこの台帳
+自体の同期、v0.2.413は`docs/spec.md`の11版ドリフト解消——SSRF行の
+不正ポート→400、DoS行の埋め込みメッセージ/ノート上限+*_omitted開示、
+書込みSQL局所性・バリデータ契約・ゼロマーカーピンを仕様書へ折込。
+
+**v0.2.426-430 の要約**: 「契約ピンの外延——kind語彙・リソース寿命・
+入力文字クラス」区間——実欠陥1件・構造ピン2件・文書同期2件。
+`_INSTRUCTIONS`のキー集合がSTUDIO_KINDSと非対称のまま語彙追加されると、
+ハンドラ検証を通ったkindが`_t_kind`でKeyError→StoreError系のcoded-error
+写像を抜けて生500化する経路をキー集合同値ピンで閉塞(v0.2.427)。
+`Store(...)`呼出し全てをASTレベルで`with`のcontext式必須化——裸生成は
+thread-affinedなsqlite3接続をclose不能のままリークし、per-request
+パターンでは無制限のfdリークになる経路を封印(v0.2.428)。
+`_read_json`の`\ud800`型エスケープが単独サロゲートとして受理され、
+書込み時にsqlite3バインドで未捕捉UnicodeEncodeError→生500化する
+経路を、`_check_utf8`(UTF-8往復検証)を全バリデータへ導入して
+400 `VALIDATION_FIELD_FORMAT_INVALID`化(v0.2.430)——入力境界の
+最後の未防御文字クラス。v0.2.429は仕様書同期(TX契約3層ピン・
+語彙ピン・Store-with式ピンをDB節へ折込)、v0.2.426はこの台帳自体の同期。
+
+**v0.2.420-425 の要約**: 「ペンディングTX欠陥クラスの構造封印——挙動修正
+から恒久的な契約ピンへ」区間——実欠陥1件・構造ピン3件・文書同期2件。
+`chat_stream`のdelta解析がdict形状を仮定し、互換サーバの裸文字列deltaや
+role-onlyチャンクのnull deltaで`.get`がAttributeError→生500に化ける
+(v0.2.259正規化哲学の残件)を形状正規化で閉塞(v0.2.421)。v0.2.419は
+欠陥クラスを7サイトの挙動修正で潰したが、将来のwriterが裸commit列へ
+回帰する余地は残った——3連ピンで構造封印: 書込み動詞executeの
+`with self.conn:`内必須スキャン(単文writer・callee契約はcap付きallowlist、
+fail検証で複数行シグネチャ閉じ行`) -> T:`がメソッド追跡を早期終了させる
+ピン自身の盲点を発見・修正)(v0.2.423)、callee-transactedヘルパ3種の
+全16呼出しサイトのwith内必須化+`_set_embedding_pair`の`set_embedding`
+単一caller化(v0.2.424)、with所有メソッド12個の入れ子呼出しゼロ
+(sqlite3の`with`は__exit__でcommit=外側pending早期確定の危険経路)
+(v0.2.425)。store.py外の`.conn.`参照も全棚卸し——read SELECTまたは
+`_embed_chunks`のTX所有commit/rollbackのみでTX面は完全閉鎖。
+v0.2.420/422は台帳・仕様書同期。
+
+**v0.2.414-419 の要約**: 「死データ蓄積の発見 → ペンディングTX欠陥クラスの
+全局面根絶」区間——実欠陥1件・レビュー駆動修正2件・クラス一掃1件・
+文書同期2件。`studio_outputs`は再生成のたび追記されるが唯一の読取経路
+(latest_studio_outputsのMAX(id)群)に旧行は永遠に届かず、無制限の死データと
+して蓄積していた——`add_studio_output`が同TX内でkind一致の旧行をprune
+(v0.2.416)。Devin Reviewが同修正の残余を2連で指摘: DELETE-firstはINSERT
+失敗時に消去がペンディング残りし後続commitが前行を消す(v0.2.417で
+INSERT-then-DELETE + `id < lastrowid`化)、prune失敗は逆にrejected行を
+publishする(v0.2.418で`with self.conn:`原子化)。その教訓を全Store書込みへ
+展開——bare書込み+遅いcommitで第二文(touch/embedding_norm)失敗時に先行
+書込みが宙に浮く同型が`add_source`/`delete_source`/`add_note`/`delete_note`/
+`add_message`/`clear_messages`/`set_embedding`の7サイトに残存していたため
+全て`with self.conn:`へ統一し、`_RacyConn`ロールバックテスト7件で全方向
+ピン(v0.2.419)。README機能一覧に出荷済みノート/エクスポートの記載が
+欠落していた「省略による半真」を解消(v0.2.415)。v0.2.414はこの台帳自体の
+同期。
 
 **v0.2.374-380 の要約**: 「書込み面の兄弟メソッド対称性 + テスト自身の検証品質」
 区間——契約ピンが全層を網羅した後の残存欠陥は「同じ責務を持つ2メソッドの非対称」
