@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.400
+## Version History: v0.1.37 → v0.2.401
+
+### v0.2.401 (2026-09-29)
+
+- sweep the remaining keep-alive premise references: _drain exists so
+  an error response is not clobbered by RST on close-with-unread-body,
+  and stalled-client timeouts are the routine TimeoutError case
 
 ### v0.2.400 (2026-09-29)
 
