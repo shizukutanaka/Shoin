@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.434
+## Version History: v0.1.37 → v0.2.435
+
+### v0.2.435 (2026-09-30)
+
+- sync spec.md to v0.2.434 — fold the unpaired-surrogate
+  400 mapping (v0.2.430), the Store dunder TX pin (v0.2.432),
+  and the shared-cache lock-coverage pins
+  (questions_cache/_QUERY_VEC_CACHE, v0.2.433/434) into the
+  DB/validation section; quality line now v0.2.434 /
+  1096 tests.
 
 ### v0.2.434 (2026-09-30)
 
