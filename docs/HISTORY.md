@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.438
+## Version History: v0.1.37 → v0.2.439
+
+### v0.2.439 (2026-09-30)
+
+- pin that LLM-generation call sites in server.py run
+  under `with self.generation_lock:` — the STRIDE DoS
+  control; an unserialized new call site works correctly
+  (unthrottled) and fails no test. Call sites pinned:
+  generate(), suggest_questions(), self._stream_chat().
+  floor >=3.
 
 ### v0.2.438 (2026-09-30)
 

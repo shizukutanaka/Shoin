@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.438")
+        self.assertEqual(VERSION, "0.2.439")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13139,6 +13139,39 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"_QUERY_VEC_CACHE access outside lock: {problems}")
         self.assertGreaterEqual(
             covered, 4, f"expected >=4 locked accesses — non-vacuous (got {covered})"
+        )
+
+    def test_llm_generation_calls_run_under_generation_lock(self) -> None:
+        """Every LLM-generation call site in server.py must sit inside a
+        `with self.generation_lock:` block — the spec.md STRIDE DoS control
+        (concurrent unserialized generation multiplies memory/compute load on
+        the lightweight local endpoint). A new call site without the lock
+        fails no test: it works correctly, just unthrottled. Call sites:
+        generate(), suggest_questions(), self._stream_chat(). CLI calls are
+        single-process by design and live outside this scan."""
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        call = re.compile(r"\b(generate|suggest_questions)\s*\(|self\._stream_chat\s*\(")
+        problems: list[str] = []
+        covered = 0
+        lock_indent: int | None = None
+        for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if lock_indent is not None and indent <= lock_indent:
+                lock_indent = None
+            if re.fullmatch(r"with\s+self\.generation_lock\s*:\s*", stripped):
+                lock_indent = indent
+                continue
+            if call.search(stripped):
+                if lock_indent is not None:
+                    covered += 1
+                else:
+                    problems.append(f"server.py:{i}: LLM generation call outside generation_lock")
+        self.assertEqual(problems, [], f"LLM generation call outside lock: {problems}")
+        self.assertGreaterEqual(
+            covered, 3, f"expected >=3 locked call sites — non-vacuous (got {covered})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
