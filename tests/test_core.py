@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.443")
+        self.assertEqual(VERSION, "0.2.444")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13206,6 +13206,35 @@ class TestResidualGuards(unittest.TestCase):
         self.assertGreaterEqual(
             n_verbs, 4, f"expected >=4 do_* verbs — non-vacuous (got {n_verbs})"
         )
+
+    def test_sqlite_connect_lives_only_in_store(self) -> None:
+        """sqlite3.connect() must appear only in store.py — the single owner of
+        connection setup (row_factory, WAL/foreign_keys PRAGMAs, private 0600
+        file permissions). A connect() added anywhere else silently produces a
+        connection with foreign keys OFF, journal mode DELETE, and default file
+        permissions — and still passes every test, since all of those gaps are
+        invisible until a cascade delete or a second process relies on them."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_connects = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "connect"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sqlite3"
+                ):
+                    continue
+                n_connects += 1
+                if path.name != "store.py":
+                    problems.append(f"{path.name}:{node.lineno}: sqlite3.connect outside store.py")
+        self.assertEqual(problems, [], f"sqlite3.connect outside store.py: {problems}")
+        self.assertGreaterEqual(n_connects, 1, "non-vacuous: expected the store.py connect site")
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the

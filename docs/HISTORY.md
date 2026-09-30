@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.443
+## Version History: v0.1.37 → v0.2.444
+
+### v0.2.444 (2026-09-30)
+
+- pin that sqlite3.connect() lives only in store.py — a connect
+  site added anywhere else silently skips row_factory, the WAL /
+  foreign_keys PRAGMAs and the private 0600 file permissions
+  while still passing every test (AST walk across shoin/).
 
 ### v0.2.443 (2026-09-30)
 
