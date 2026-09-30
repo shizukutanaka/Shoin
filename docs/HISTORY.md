@@ -29,9 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.367
+## Version History: v0.1.37 → v0.2.368
 
-### v0.2.366
+### v0.2.368 (2026-09-29)
+
+- add_message rejects unknown roles (test_add_message_rejects_unknown_role): history_messages() coerces any non-"user" role to "assistant", so a typo'd role literal would silently corrupt turn alternation for every later prompt. The store now raises VALIDATION_FIELD_FORMAT_INVALID at the write — same convention as the name-length guards. Fail direction verified (guard removed -> row stored, test fails).
 
 ### v0.2.367 (2026-09-29)
 
