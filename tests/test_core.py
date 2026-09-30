@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.437")
+        self.assertEqual(VERSION, "0.2.438")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2959,6 +2959,52 @@ class TestIngest(unittest.TestCase):
             with self.assertRaises(IngestError) as cm:
                 ing.fetch_url("http://example.com/page")
         self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+
+    def test_fetch_url_rechecks_size_after_decompression(self) -> None:
+        """The wire cap bounds compressed bytes only — a gzip bomb (small on
+        the wire, huge inflated) must be rejected after decompression (the
+        _check_size inside _decode_content_encoding), not indexed as an
+        unbounded source."""
+        import gzip as _gzip
+
+        import shoin.ingest as ing
+        from shoin.config import MAX_UPLOAD_BYTES
+
+        bomb = _gzip.compress(b"a" * (MAX_UPLOAD_BYTES + 1))
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class FakeResp:
+            status = 200
+
+            def getheader(self, name: str, default: str = "") -> str:
+                if name == "Content-Encoding":
+                    return "gzip"
+                if name == "Content-Type":
+                    return "text/plain"
+                return default
+
+            def read(self, n: int = -1) -> bytes:
+                return bomb
+
+        class FakeConn:
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> FakeResp:
+                return FakeResp()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn()),
+        ):
+            with self.assertRaises(IngestError) as cm:
+                ing.fetch_url("http://example.com/page")
+        self.assertEqual(cm.exception.code, "INGEST_FILE_TOO_LARGE")
 
     def test_extracted_dataclass(self) -> None:
         ex = Extracted("txt", "t", "body", "o", "h")

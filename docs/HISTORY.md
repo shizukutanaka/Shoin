@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.437
+## Version History: v0.1.37 → v0.2.438
+
+### v0.2.438 (2026-09-30)
+
+- pin the decompressed-body size bound end-to-end: a gzip
+  bomb (small on the wire, huge inflated) must hit
+  INGEST_FILE_TOO_LARGE via fetch_url. The _check_size
+  inside _decode_content_encoding already enforced it;
+  it was the last bounded-size invariant with no test.
 
 ### v0.2.437 (2026-09-30)
 
