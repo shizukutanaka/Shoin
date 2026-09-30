@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.430
+## Version History: v0.1.37 → v0.2.431
+
+### v0.2.431 (2026-09-30)
+
+- sync the product-review ledger to v0.2.430: the v0.2.426-430
+  summary names the interval "contract-pin expansion — kind
+  vocabulary, resource lifetime, input character class"
+  (instructions≡KINDS key-set pin, Store()-with AST pin,
+  unpaired-surrogate 400 mapping)
 
 ### v0.2.430 (2026-09-30)
 
