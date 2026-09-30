@@ -102,7 +102,45 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.362")
+        self.assertEqual(VERSION, "0.2.365")
+
+    def test_migration_versions_strictly_increase(self) -> None:
+        """_migrate_once skips `version <= current` — so a migration added
+        with a duplicate or out-of-order version never applies on any
+        already-migrated DB: silent schema drift with no error. Versions
+        must be unique and strictly ascending (append-only)."""
+        versions = [v for v, _ in MIGRATIONS]
+        self.assertEqual(
+            versions,
+            sorted(set(versions)),
+            "MIGRATIONS versions must be unique and strictly ascending",
+        )
+
+    def test_connection_pragmas(self) -> None:
+        """The three connect-time PRAGMAs are load-bearing and silent if
+        dropped: foreign_keys OFF turns every ON DELETE CASCADE into an
+        orphan generator with no error; journal_mode other than WAL
+        serializes the ThreadingHTTPServer's concurrent readers against
+        the writer; busy_timeout too small surfaces 'database is locked'
+        to users under contention. Assert them on a live connection."""
+        with make_store() as s:
+            self.assertEqual(
+                s.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+            self.assertEqual(
+                s.conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000
+            )
+            self.assertIn(
+                s.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                {"wal", "memory"},  # :memory: cannot go WAL
+            )
+        with tempfile.TemporaryDirectory() as d:
+            with Store(str(Path(d) / "wal.db")) as s2:
+                self.assertEqual(
+                    s2.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                    "wal",
+                    "file-backed DB must be in WAL mode",
+                )
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -457,6 +495,27 @@ class TestStore(unittest.TestCase):
             c = s.counts(nb.id)
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
+
+    def test_fts_tracks_chunk_context_update(self) -> None:
+        """The migration-6 chunks_au trigger keeps chunks_fts in sync when
+        update_source_title rewrites chunk contexts — without it the FTS
+        index would keep answering the old title forever (stale index, no
+        error). Assert the renamed title matches and the old one doesn't."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "旧題名アルファ", "o", "h")
+            s.add_chunks(src.id, ["本文のテキスト"], ["旧題名アルファ > 節1"])
+            s.update_source_title(src.id, "新題名ベータ", "o")
+            new_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:新題名ベータ'"
+            ).fetchone()["n"]
+            old_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:旧題名アルファ'"
+            ).fetchone()["n"]
+            self.assertEqual(int(new_hits), 1)
+            self.assertEqual(int(old_hits), 0)
 
     def test_cascade_delete_cleans_fts(self) -> None:
         with make_store() as s:

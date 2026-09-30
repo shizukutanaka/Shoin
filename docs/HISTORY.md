@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.362
+## Version History: v0.1.37 → v0.2.365
+
+### v0.2.365 (2026-09-29)
+
+- Pin the chunks_au update trigger end-to-end (test_fts_tracks_chunk_context_update): update_source_title rewrites chunk context prefixes, and if the trigger is lost the FTS index keeps answering the old title forever — stale index, no error anywhere. The test renames a source and asserts the new title MATCHes while the old one doesn't. Fail direction verified (dropping the trigger yields new_hits=0).
+
+### v0.2.364 (2026-09-29)
+
+- Pin connect-time PRAGMAs on live connections (test_connection_pragmas): foreign_keys OFF turns every ON DELETE CASCADE into an orphan generator with no error; non-WAL journal_mode serializes ThreadingHTTPServer readers against the writer; a shrunken busy_timeout surfaces 'database is locked' to users under contention. Asserts foreign_keys=1, busy_timeout=5000, and journal_mode=wal on a real file-backed DB. Fail-then-pass verified.
+
+### v0.2.363 (2026-09-29)
+
+- Pin migration version ordering (test_migration_versions_strictly_increase): _migrate_once skips `version <= current`, so a migration committed with a duplicate or out-of-order version silently never applies on any already-migrated database — schema drift with no error anywhere. Versions must stay unique and strictly ascending. Audited clean (1-9); fail-direction verified by mutation.
 
 ### v0.2.362 (2026-09-29)
 
