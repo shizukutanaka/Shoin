@@ -22,6 +22,8 @@ pip install .
 shoin serve              # 起動したら http://localhost:7440 をブラウザで開く
 ```
 
+`pip install` せずにソースツリーから直接動かす場合は `python -m shoin serve` も使えます(v0.2.459 以降、両者は同一エントリに委譲)。
+
 > **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
 > メンテナの認証情報が必要)。リポジトリから直接入れる場合は **ref を明示**してください —
 > 既定ブランチは古い版を指していることがあります:
