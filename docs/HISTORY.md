@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.370
+## Version History: v0.1.37 → v0.2.371
+
+### v0.2.371 (2026-09-29)
+
+- Map SYSTEM_* StoreErrors to HTTP 500, not 400 (test_store_error_with_system_code_returns_500): the error dispatcher routed any code not ending _NOT_FOUND/_ALREADY_EXISTS to the client-error 400 branch, so the store's own internal-failure reports (e.g. unexpected constraint violations) told the caller their request was malformed when the server actually failed. SYSTEM_* codes now map to 500 before the fallback. Fail direction verified (dispatch mutation -> 400, caught).
 
 ### v0.2.370 (2026-09-29)
 
