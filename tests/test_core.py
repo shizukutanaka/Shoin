@@ -9209,6 +9209,32 @@ class TestCLI(unittest.TestCase):
                 else:
                     os.environ["HOME"] = home
 
+    def test_add_passes_url_target_through_unchanged(self) -> None:
+        """Tilde expansion in `add` must not route URL targets through Path(),
+        which collapses "https://" to "https:/" and breaks URL ingest."""
+        import tempfile
+
+        from shoin import cli
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        seen: list[str] = []
+
+        def fake_index(store: object, nb_id: int, target: str, llm: object) -> object:
+            seen.append(target)
+            raise cli.IngestError("INGEST_FETCH_FAILED", "stub")
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with patch.object(cli, "index_source", fake_index):
+                cli.main(
+                    ["--db", db_file, "add", str(nb.id), "https://example.com/a/b?q=1"],
+                    llm=FakeLLM(),
+                )
+        self.assertEqual(seen, ["https://example.com/a/b?q=1"])
+
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError
         (an ArithmeticError, NOT the OSError the serve try/except catches) —
