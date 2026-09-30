@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.373")
+        self.assertEqual(VERSION, "0.2.432")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -214,8 +214,9 @@ class TestStore(unittest.TestCase):
             self.assertEqual(s.get_notebook(nb.id).name, "論文")
             self.assertEqual(len(s.list_notebooks()), 1)
             s.delete_notebook(nb.id)
-            with self.assertRaises(StoreError):
+            with self.assertRaises(StoreError) as cm:
                 s.get_notebook(nb.id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
     def test_empty_name_rejected(self) -> None:
         with make_store() as s:
@@ -442,6 +443,41 @@ class TestStore(unittest.TestCase):
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
             self.assertIn("chunk replacement", str(cm.exception))
 
+    def test_add_chunks_fk_violation_maps_to_not_found(self) -> None:
+        """add_chunks must translate a FOREIGN KEY violation — the source row
+        deleted between its get_source() pre-check and the chunk INSERT — into
+        SOURCE_NOT_FOUND, not let it escape as a raw sqlite3 error. Same
+        mapping replace_chunks_for_source proves above; this third sibling's
+        branch was never exercised (coverage tail: store.py)."""
+        with make_store() as s:
+            nb = s.create_notebook("race-fk-add")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-fk-add")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "INSERT INTO chunks", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.add_chunks(src.id, ["orphaned chunk"])
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("during chunk insertion", str(cm.exception))
+
+    def test_update_source_sha256_reread_concurrent_delete_raises(self) -> None:
+        """update_source_sha256 re-reads the title inside its transaction so the
+        context rewrite keys off the live row; when the source vanishes between
+        get_source() and that re-read it must raise SOURCE_NOT_FOUND, not
+        proceed on a stale snapshot. The earlier of its two concurrent-delete
+        guards — the rowcount tail is pinned in test_rowcount_guards above
+        (coverage tail: store.py)."""
+        with make_store() as s:
+            nb = s.create_notebook("race-reread")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-rr")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SELECT title FROM sources", "DELETE FROM sources WHERE id=?", (src.id,)
+            )
+            with self.assertRaises(StoreError) as cm:
+                s.update_source_sha256(src.id, "sha-rr2", "t2")
+            self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+            self.assertIn("concurrently", str(cm.exception))
+
     def test_replace_chunks_contexts_must_match_texts(self) -> None:
         """contexts shorter/longer than texts is a caller bug — rejected before
         any row is touched rather than silently misaligning breadcrumbs."""
@@ -520,16 +556,21 @@ class TestStore(unittest.TestCase):
         """list_notebooks orders by updated_at DESC — a write path that
         forgets touch_notebook() leaves the notebook ranked as untouched
         forever (stale ordering, no error). Every mutating op must bump:
-        add_source, update_source_title, update_source_sha256,
+        rename_notebook, add_source, update_source_title,
+        update_source_sha256, add_chunks, replace_chunks_for_source,
         delete_source, add_note, delete_note, add_studio_output,
-        add_message. Behavioral pin: run each op and assert the stamp
-        moved forward."""
+        add_message, clear_messages. (create_notebook/delete_notebook set
+        or remove the row itself; set_embedding/set_setting/migrate
+        deliberately don't: derived data, not user content.) Behavioral
+        pin: run each op and assert the stamp moved forward."""
         import time
 
         def stamp(s: Store, nb_id: int) -> str:
             return s.get_notebook(nb_id).updated_at
 
         ops = [
+            ("rename_notebook",
+             lambda s, nb: s.rename_notebook(nb.id, "renamed-nb")),
             ("add_source",
              lambda s, nb: s.add_source(nb.id, "txt", "t2", "o2", "h2")),
             ("update_source_title",
@@ -538,6 +579,12 @@ class TestStore(unittest.TestCase):
             ("update_source_sha256",
              lambda s, nb: s.update_source_sha256(
                  s.sources_for_notebook(nb.id)[0].id, "h-new", "t")),
+            ("add_chunks",
+             lambda s, nb: s.add_chunks(
+                 s.sources_for_notebook(nb.id)[0].id, ["extra-chunk"])),
+            ("replace_chunks_for_source",
+             lambda s, nb: s.replace_chunks_for_source(
+                 s.sources_for_notebook(nb.id)[0].id, ["replaced-chunk"])),
             ("add_note", lambda s, nb: s.add_note(nb.id, "nt", "nb-body")),
             ("delete_note",
              lambda s, nb: s.delete_note(
@@ -546,6 +593,7 @@ class TestStore(unittest.TestCase):
              lambda s, nb: s.add_studio_output(nb.id, "briefing", "b", "{}")),
             ("add_message",
              lambda s, nb: s.add_message(nb.id, "user", "hi")),
+            ("clear_messages", lambda s, nb: s.clear_messages(nb.id)),
             ("delete_source",
              lambda s, nb: s.delete_source(
                  s.sources_for_notebook(nb.id)[0].id)),
@@ -636,7 +684,7 @@ class TestStore(unittest.TestCase):
     def test_update_source_title(self) -> None:
         with make_store() as s:
             nb = s.create_notebook("nb")
-            src = s.add_source(nb.id, "file", "tmp.txt", "/tmp/tmp.txt", "h1")
+            src = s.add_source(nb.id, "txt", "tmp.txt", "/tmp/tmp.txt", "h1")
             t0 = s.get_notebook(nb.id).updated_at
             s.update_source_title(src.id, "report.txt", "report.txt")
             updated = s.get_source(src.id)
@@ -738,16 +786,34 @@ class TestStore(unittest.TestCase):
             self.assertEqual(texts, ["existing chunk"])
 
     def test_update_source_sha256_and_title(self) -> None:
-        """update_source_sha256 must update both sha256 and title, and touch the notebook."""
+        """update_source_sha256 must update both sha256 and title, rewrite the
+        chunk context titles (same _rewrite_chunk_context_titles contract as
+        update_source_title — without it the FTS index keeps matching the old
+        title forever), reject an empty title, and touch the notebook."""
         with make_store() as s:
             nb = s.create_notebook("nb")
             src = s.add_source(nb.id, "url", "old title", "https://example.com", "sha-old")
+            s.add_chunks(src.id, ["body"], ["old title > sect"])
             t0 = s.get_notebook(nb.id).updated_at
             s.update_source_sha256(src.id, "sha-new", "new title")
             updated = s.get_source(src.id)
             self.assertEqual(updated.sha256, "sha-new")
             self.assertEqual(updated.title, "new title")
+            ctxs = [c for _, c, _ in s.id_context_text_chunks_for_source(src.id)]
+            self.assertEqual(ctxs, ["new title > sect"])
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_sha256_empty_title_rejected(self) -> None:
+        """update_source_sha256 must reject an empty/whitespace-only title like
+        update_source_title does — before this guard the method could persist a
+        blank title the sibling path refuses."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "url", "t", "https://example.com", "sha")
+            for bad in ("", "   "):
+                with self.assertRaises(StoreError) as cm:
+                    s.update_source_sha256(src.id, "sha2", bad)
+                self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_update_source_sha256_missing_raises(self) -> None:
         with make_store() as s:
@@ -962,6 +1028,202 @@ class TestStore(unittest.TestCase):
                 [("briefing", "b1"), ("faq", "new-faq")],
             )
 
+    def test_add_studio_output_prunes_superseded_kind_rows(self) -> None:
+        """v0.2.416: latest_studio_outputs() is the only reader, so every
+        regeneration left its predecessor as an unreadable dead row — the
+        table grew per generate() call with nothing able to reach the old
+        versions. add_studio_output must delete superseded same-kind rows in
+        the same transaction; other kinds must be untouched."""
+        with make_store() as s:
+            nb = s.create_notebook("prune")
+            for i in range(3):
+                s.add_studio_output(nb.id, "faq", f"faq-{i}", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = list(
+                s.conn.execute(
+                    "SELECT kind, body FROM studio_outputs"
+                    " WHERE notebook_id=? ORDER BY kind",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "faq-2")],
+            )
+
+    def test_add_studio_output_failed_insert_leaves_prior_row(self) -> None:
+        """v0.2.417 (Devin Review on PR #286): DELETE-before-INSERT left the
+        erase pending when the INSERT raised — the exception escapes without
+        rollback, so a later commit on the same connection persisted the
+        deletion and the prior output was lost despite the failed
+        regeneration. Pin: a failed add_studio_output never erases the
+        existing row, even after a subsequent committing write."""
+        with make_store() as s:
+            nb = s.create_notebook("orphan-guard")
+            s.add_studio_output(nb.id, "faq", "keep-me", "{}")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "INSERT INTO studio_outputs",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_studio_output(nb.id, "faq", "doomed", "{}")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not take the row
+            rows = list(
+                s.conn.execute(
+                    "SELECT body FROM studio_outputs WHERE notebook_id=?",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
+
+    def test_add_studio_output_failed_prune_does_not_publish(self) -> None:
+        """v0.2.418 (Devin Review on PR #287): if the prune DELETE fails, the
+        INSERT must not stay pending — a later commit on the same connection
+        would publish the rejected row, and latest_studio_outputs's MAX(id)
+        would displace the good output. Pin: both statements roll back
+        together on any failure."""
+        with make_store() as s:
+            nb = s.create_notebook("publish-guard")
+            s.add_studio_output(nb.id, "faq", "keep-me", "{}")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "DELETE FROM studio_outputs",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_studio_output(nb.id, "faq", "doomed", "{}")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not publish it
+            rows = list(
+                s.conn.execute(
+                    "SELECT body FROM studio_outputs WHERE notebook_id=?",
+                    (nb.id,),
+                ).fetchall()
+            )
+            self.assertEqual([str(r["body"]) for r in rows], ["keep-me"])
+
+    def test_add_source_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_source's INSERT+touch must commit atomically — a
+        failed touch leaving the INSERT pending would publish the source on
+        the next commit (caller saw an error, yet the row appears). Same
+        leak class as the v0.2.417-418 add_studio_output fixes."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-src")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_source(nb.id, "txt", "t", "o", "sha-x")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()  # a later write committing must not publish it
+            self.assertEqual(s.sources_for_notebook(nb.id), [])
+
+    def test_delete_source_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave delete_source's DELETE
+        pending — the next commit would silently finish the deletion the
+        caller believes failed."""
+        with make_store() as s:
+            nb_id = seed(s)
+            src_id = s.sources_for_notebook(nb_id)[0].id
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.delete_source(src_id)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            remaining = [src.id for src in s.sources_for_notebook(nb_id)]
+            self.assertIn(src_id, remaining)  # the failed delete rolled back
+            self.assertEqual(len(remaining), 2)
+
+    def test_add_note_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_note's INSERT+touch must commit atomically."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-note")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_note(nb.id, "t", "body")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.list_notes(nb.id), [])
+
+    def test_delete_note_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave delete_note's DELETE
+        pending."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-delnote")
+            nid = s.add_note(nb.id, "t", "body")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.delete_note(nid)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual([int(r["id"]) for r in s.list_notes(nb.id)], [nid])
+
+    def test_add_message_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: add_message's INSERT+touch must commit atomically."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-msg")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.add_message(nb.id, "user", "hello")
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.list_messages(nb.id), [])
+
+    def test_clear_messages_failed_touch_does_not_publish(self) -> None:
+        """v0.2.419: a failed touch must not leave clear_messages' DELETE
+        pending."""
+        with make_store() as s:
+            nb = s.create_notebook("leak-clear")
+            s.add_message(nb.id, "user", "hello")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE notebooks SET updated_at",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.clear_messages(nb.id)
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertEqual(s.count_messages(nb.id), 1)
+
+    def test_set_embedding_failed_norm_does_not_publish(self) -> None:
+        """v0.2.419: the vector+norm pair must land atomically — a failed
+        norm write leaving the vector pending would publish an unnormed
+        embedding on the next commit."""
+        with make_store() as s:
+            nb_id = seed(s)
+            cid = s.chunks_for_notebook(nb_id)[0].id
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn,
+                "UPDATE chunks SET embedding_norm",
+                raise_exc=sqlite3.OperationalError("simulated disk full"),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                s.set_embedding(cid, [1.0, 0.0])
+            s.conn = s.conn._inner  # type: ignore[attr-defined]
+            s.conn.commit()
+            self.assertIsNone(s.chunks_for_notebook(nb_id)[0].embedding)
+
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
         from unittest.mock import patch
@@ -973,6 +1235,69 @@ class TestStore(unittest.TestCase):
                 with self.assertRaises(StoreError) as cm:
                     s.add_studio_output(nb.id, "briefing", "body", "{}")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
+    def test_add_studio_output_rejects_unknown_kind(self) -> None:
+        """Kind-vocabulary guard, same class as add_message()'s role check.
+
+        latest_studio_outputs() GROUP BYs on kind, so a typo'd literal
+        ('audoo') would persist as a phantom kind — grouped out of every UI
+        section and exported under a nonsense heading — that no caller can
+        ever overwrite. The store must fail loudly at the write."""
+        with make_store() as s:
+            nb = s.create_notebook("kind-vocab")
+            with self.assertRaises(StoreError) as cm:
+                s.add_studio_output(nb.id, "audoo", "body", "{}")
+            self.assertEqual(cm.exception.code, "STUDIO_KIND_INVALID")
+            self.assertEqual(s.latest_studio_outputs(nb.id), [])
+
+    def test_studio_kind_vocabulary_is_single_sourced(self) -> None:
+        """studio.KINDS must BE store.STUDIO_KINDS — the store guards on its own
+        constant because it cannot import studio.py back; two spellings would
+        let one drift (a new kind addable via studio.generate() but rejected at
+        the write, or vice versa)."""
+        from shoin import store, studio
+
+        self.assertIs(studio.KINDS, store.STUDIO_KINDS)
+
+    def test_studio_instructions_cover_every_kind(self) -> None:
+        """`_h_studio` validates `kind in KINDS` (= STUDIO_KINDS) then calls
+        generate() → `_t_kind(kind)` which indexes `_INSTRUCTIONS[kind]`. A
+        kind added to STUDIO_KINDS without an instruction entry passes the
+        handler's own validation but raises KeyError in _t_kind — which is
+        not a StoreError, so the dispatcher's coded-error mapping misses it
+        and returns a bare 500. The ja/en parity test sees each entry but
+        not the key set itself; pin that the instruction table covers the
+        kind vocabulary exactly."""
+        from shoin import store, studio
+
+        self.assertEqual(set(studio._INSTRUCTIONS), set(store.STUDIO_KINDS))
+
+    def test_add_source_rejects_unknown_kind(self) -> None:
+        """Kind-vocabulary guard, same class as add_message()'s role check and
+        add_studio_output()'s kind check.
+
+        kind is immutable post-insert and consumed by export's RIS TY mapping
+        (_RIS_TYPE: url/html→ELEC, other→GEN), the md legend, and the UI badge —
+        a typo'd literal silently exports wrong citation types and renders a
+        nonsense badge forever. The store must fail loudly at the write."""
+        with make_store() as s:
+            nb = s.create_notebook("src-kind-vocab")
+            with self.assertRaises(StoreError) as cm:
+                s.add_source(nb.id, "urll", "t", "o", "sha-bad")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            self.assertEqual(s.sources_for_notebook(nb.id), [])
+
+    def test_source_kind_vocabulary_matches_ingest(self) -> None:
+        """store.SOURCE_KINDS must exactly cover what ingest can emit —
+        _EXT_KIND values for files plus the 'url' kind — in both directions:
+        a new extension kind added to _EXT_KIND but not SOURCE_KINDS would be
+        rejected at the write; a vocabulary kind ingest never produces is a
+        ghost value the guard would wrongly accept."""
+        from shoin import ingest, store
+
+        self.assertEqual(
+            set(store.SOURCE_KINDS), set(ingest._EXT_KIND.values()) | {"url"}
+        )
 
     def test_list_notebooks_with_counts_single_query(self) -> None:
         with make_store() as s:
@@ -1311,6 +1636,11 @@ class TestStore(unittest.TestCase):
                         "UNIQUE constraint failed: sources.notebook_id, sources.sha256"
                     )
                 return self._real.execute(sql, *args, **kwargs)
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
@@ -1340,6 +1670,11 @@ class TestStore(unittest.TestCase):
                 if "INSERT INTO sources" in sql:
                     raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
                 return self._real.execute(sql, *args, **kwargs)
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
@@ -2273,6 +2608,26 @@ class TestIngest(unittest.TestCase):
             "http://192.168.1.1/admin",
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]/",
+        ):
+            with self.assertRaises(IngestError) as cm:
+                validate_public_url(url)
+            self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_ssrf_malformed_port_blocked(self) -> None:
+        """A malformed port must raise INGEST_URL_BLOCKED, not escape as 500.
+
+        urlparse is lazy about the port field: ':abc', out-of-range, and
+        negative ports only raise ValueError when .port is first accessed —
+        which used to happen inside fetch_url's request loop, outside the
+        IngestError handling, so the raw ValueError reached _dispatch's
+        catch-all as HTTP 500 SYSTEM_INTERNAL_ERROR instead of the correct
+        HTTP 400 INGEST_URL_BLOCKED (same defect class as zone-scoped IPv6,
+        v0.2.45). Validating .port inside validate_public_url — before any
+        DNS resolution — maps it to the input-error code."""
+        for url in (
+            "http://example.com:99999/x",
+            "http://example.com:abc/x",
+            "http://example.com:-1/x",
         ):
             with self.assertRaises(IngestError) as cm:
                 validate_public_url(url)
@@ -3361,6 +3716,36 @@ class TestSearch(unittest.TestCase):
     def test_lexical_overlap(self) -> None:
         self.assertGreater(lexical_overlap("書院", "書院は書斎"), 0.0)
         self.assertEqual(lexical_overlap("xyz", "書院"), 0.0)
+
+    def test_like_ties_order_by_chunk_id(self) -> None:
+        """Equal LIKE scores must order deterministically by chunk id. LIKE
+        scores are small integers (occurrence counts), so tie groups are
+        common — without the `, c.id` key SQLite picks an unspecified order,
+        and at the 2000-row cap arbitrarily includes/excludes tied chunks.
+        Same convention list_notebooks already uses for updated_at ties."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["aa 猫 aa", "猫 bb", "cc 猫 cc"])
+            hits = bm25_search(s, nb.id, "猫", 10)
+            ids = [h.chunk_id for h in hits]
+            self.assertEqual(len(ids), 3)
+            self.assertEqual(ids, sorted(ids))
+
+    def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
+        """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
+        `ORDER BY score` leaves equal-key order unspecified in SQLite —
+        deterministic in practice but never contractual, and silently
+        arbitrary at every LIMIT boundary."""
+        import inspect
+        import re
+
+        import shoin.search
+
+        src = inspect.getsource(shoin.search)
+        self.assertIn("ORDER BY rank, c.id", src)
+        like_orders = re.findall(r'ORDER BY \{score_expr\} DESC([^"]*)', src)
+        self.assertEqual(like_orders, [", c.id"], like_orders)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
@@ -9020,6 +9405,168 @@ class TestCLI(unittest.TestCase):
 
         self.assertEqual(_pos_int("3"), 3)
 
+    def test_db_arg_expands_tilde_and_passes_none(self) -> None:
+        """--db=~/x.db arrives unexpanded (shell only expands a tilde at word
+        start, not after =), and Path("~/x.db") would create a literal `~`
+        directory in the cwd. _db_arg must expand it — same contract
+        SHOIN_DATA_DIR already follows inside db_path()."""
+        import argparse
+
+        from shoin.cli import _db_arg
+
+        ns = argparse.Namespace(db="~/x.db")
+        self.assertEqual(_db_arg(ns), str(Path("~/x.db").expanduser()))
+        self.assertTrue(_db_arg(ns).startswith(str(Path.home())))  # not a literal ~
+        ns = argparse.Namespace(db="/abs/x.db")
+        self.assertEqual(_db_arg(ns), "/abs/x.db")
+        ns = argparse.Namespace(db=None)
+        self.assertIsNone(_db_arg(ns))
+
+    def test_every_cli_path_arg_expands_tilde(self) -> None:
+        """The tilde contract is per-arg, not per-command: a new path-accepting
+        flag added later must expand the same way or `--flag=~/x` silently
+        reads/writes a literal `~` directory. Pin every Path(str(args.*)) in
+        cli.py to carry .expanduser()."""
+        import inspect
+        import re
+
+        import shoin.cli
+
+        src = inspect.getsource(shoin.cli)
+        sites = re.findall(r"Path\(str\((?:args\.\w+|\w+)\)\)(?:\.\w+\(\))?", src)
+        self.assertGreaterEqual(len(sites), 5)  # cases, save, diff, db, add targets
+        for site in sites:
+            self.assertIn(".expanduser()", site, site)
+
+    def test_every_cli_subcommand_has_a_dispatch_branch(self) -> None:
+        """A parser entry without a dispatch branch silently no-ops (rc=0).
+
+        argparse `required=True` only forces SOME subcommand — if
+        `sub.add_parser("foo")` (or a nested `Xsub.add_parser("bar")`) lands
+        without a matching `command ==` / `action ==` branch, `shoin foo`
+        parses fine and main() falls through to `return 0` doing nothing.
+        Pin every declared subcommand to a dispatch comparison."""
+        import inspect
+        import re
+
+        import shoin.cli
+
+        src = inspect.getsource(shoin.cli)
+        # Root level: `sub.add_parser(` — \bsub excludes the nested Xsub objects.
+        top = set(re.findall(r"\bsub\.add_parser\(\"([a-z]+)\"", src))
+        self.assertGreaterEqual(len(top), 13)  # REQ-105's full command surface
+        for name in top:
+            self.assertRegex(
+                src,
+                rf"command\)?\s*==\s*\"{name}\"",
+                f"subcommand {name!r} has no dispatch branch in main()",
+            )
+        # Nested action parsers (nbsub/msgssub/notesub/srcsub): same contract
+        # against the `action ==` chains inside the _cmd_* handlers.
+        nested = set(re.findall(r"\b\w+sub\.add_parser\(\"([a-z]+)\"", src))
+        self.assertGreaterEqual(len(nested), 7)  # unique names across notebook/note/source/messages
+        for name in nested:
+            self.assertRegex(
+                src,
+                rf"action\s*==\s*\"{name}\"",
+                f"action {name!r} has no dispatch branch in its _cmd_* handler",
+            )
+
+    def test_eval_reads_tilde_cases(self) -> None:
+        """`eval nb ~/cases.json --save ~/base.json` must open the real home
+        paths — the same expansion _db_arg guarantees for --db. Without it the
+        cases read fails SYSTEM_IO_ERROR and --save writes a literal `~`
+        directory under the cwd."""
+        import json
+        import os
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            Path(td, "cases.json").write_text(
+                json.dumps([{"q": "q", "sources": [1]}]), encoding="utf-8"
+            )
+            home = os.environ.get("HOME")
+            os.environ["HOME"] = td
+            try:
+                rc = main(
+                    ["--db", db_file, "eval", str(nb.id), "~/cases.json",
+                     "--save", "~/base.json"],
+                    llm=FakeLLM(),
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(Path(td, "base.json").exists())
+            finally:
+                if home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = home
+        self.assertFalse(Path("~").exists(), "literal ~ dir must not be created in cwd")
+
+    def test_add_expands_quoted_tilde_target(self) -> None:
+        """`add nb '~/doc.md'` (tilde inside quotes → unexpanded argv) must
+        ingest the real home file, not fail INGEST_FETCH_FAILED on the
+        literal path."""
+        import os
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            Path(td, "doc.md").write_text("# t\n\nbody text here", encoding="utf-8")
+            home = os.environ.get("HOME")
+            os.environ["HOME"] = td
+            try:
+                rc = main(
+                    ["--db", db_file, "add", str(nb.id), "~/doc.md"],
+                    llm=FakeLLM(),
+                )
+                self.assertEqual(rc, 0)
+                with Store(db_file) as s:
+                    self.assertEqual(s.counts(nb.id)["sources"], 1)
+            finally:
+                if home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = home
+
+    def test_add_passes_url_target_through_unchanged(self) -> None:
+        """Tilde expansion in `add` must not route URL targets through Path(),
+        which collapses "https://" to "https:/" and breaks URL ingest."""
+        import tempfile
+
+        from shoin import cli
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        seen: list[str] = []
+
+        def fake_index(store: object, nb_id: int, target: str, llm: object) -> object:
+            seen.append(target)
+            raise cli.IngestError("INGEST_FETCH_FAILED", "stub")
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with patch.object(cli, "index_source", fake_index):
+                cli.main(
+                    ["--db", db_file, "add", str(nb.id), "https://example.com/a/b?q=1"],
+                    llm=FakeLLM(),
+                )
+        self.assertEqual(seen, ["https://example.com/a/b?q=1"])
+
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError
         (an ArithmeticError, NOT the OSError the serve try/except catches) —
@@ -9468,8 +10015,9 @@ class TestCLINoteSourceParity(unittest.TestCase):
             self.assertEqual(rc, 0)
 
             with Store(db_file) as s:
-                with self.assertRaises(StoreError):
+                with self.assertRaises(StoreError) as cm:
                     s.get_source(src_id)
+                self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
         finally:
             os.unlink(db_file)
 
@@ -11007,6 +11555,28 @@ class TestResidualGuards(unittest.TestCase):
         with self.assertRaises(ValueError):
             report_from_dict({"cases": []})
 
+    def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
+        """--save → --diff fidelity: every field report_to_dict writes must be
+        read back identically by report_from_dict. A writer/reader key or dtype
+        drift (e.g. `rr` renamed on one side only, `k` dropped) would make a
+        saved baseline unparseable or silently skip the k-mismatch warning —
+        and the failure would surface only when a user diffs, far from the edit."""
+        from shoin.evaluate import CaseResult, EvalReport, report_from_dict, report_to_dict
+
+        rep = EvalReport(
+            cases=[CaseResult("q1", [1, 2], [2, 9], 0.5, 0.5)],
+            recall=0.5,
+            mrr=0.5,
+        )
+        rebuilt, k = report_from_dict(report_to_dict(rep, 7))
+        self.assertEqual(k, 7)
+        self.assertEqual(rebuilt.recall, rep.recall)
+        self.assertEqual(rebuilt.mrr, rep.mrr)
+        self.assertEqual(len(rebuilt.cases), 1)
+        c = rebuilt.cases[0]
+        self.assertEqual((c.question, c.expected, c.retrieved), ("q1", [1, 2], [2, 9]))
+        self.assertEqual((c.recall, c.reciprocal_rank), (0.5, 0.5))
+
     def test_status_line_lists_each_mismatch(self) -> None:
         from shoin.export import _status_line
 
@@ -11122,8 +11692,9 @@ class TestResidualGuards(unittest.TestCase):
             s.add_source(nb.id, "url", "b", "https://x/b", "sha-b")
             fake = types.SimpleNamespace(sha256="sha-b", title="b", text="x")
             with patch.object(pl, "extract_url", return_value=fake):
-                with self.assertRaises(StoreError):
+                with self.assertRaises(StoreError) as cm:
                     pl.refresh_source(s, src_a.id)
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
 
     def test_python_i18n_tables_have_ja_en_parity(self) -> None:
         """Every server-side string table must define both locales — the UI
@@ -11424,6 +11995,14 @@ class TestResidualGuards(unittest.TestCase):
             f"### v{VERSION}",
             history,
             "HISTORY.md has no entry for the current version — the bump ritual dropped it",
+        )
+        # v0.2.392: the header's range tip is the one version marker no pin
+        # covered — entries could be correct while the `→ v…` header still
+        # reported a stale tip.
+        self.assertIn(
+            f"→ v{VERSION}",
+            history,
+            "HISTORY.md's 'Version History: … → vX.Y.Z' header drifted from VERSION",
         )
 
     @unittest.skipIf(os.name != "posix", "POSIX file modes")
@@ -11954,6 +12533,51 @@ class TestResidualGuards(unittest.TestCase):
                             )
         self.assertEqual(violations, [], "\n".join(violations))
 
+    def test_storeerror_raises_assert_a_code(self) -> None:
+        """Every `assertRaises(<coded error>)` must capture and assert
+        `.exception.code` — StoreError/LLMError/IngestError paths are
+        distinguished by code (NOT_FOUND→404, ALREADY_EXISTS→409,
+        SYSTEM_*→500, else→400), so a raise without a code check passes
+        on ANY error from the call, letting a semantic regression (e.g.
+        collision → wrong code) stay green. Exempted: the
+        `with (..., assertRaises(E), ...)` tuple form — a line whose
+        match ends with a comma — where the raise is incidental plumbing
+        (a fake that always raises) and the assertions below verify the
+        captured side-effects instead."""
+        root = Path(__file__).resolve().parents[1]
+        # Skip this test's own body — its regex literals and messages mention
+        # the pattern by name. Span = from this def to the next def.
+        own_src = Path(__file__).read_text()
+        own_start = own_src.index("def test_storeerror_raises_assert_a_code")
+        own_end = own_src.find("\n    def ", own_start)
+        if own_end < 0:
+            own_end = len(own_src)
+        bad: list[str] = []
+        coded = r"(?:StoreError|LLMError|IngestError)"
+        for f in (root / "tests").glob("test_*.py"):
+            src = f.read_text()
+            for m in re.finditer(
+                rf"assertRaises\({coded}\)(?:\s+as\s+(\w+))?", src
+            ):
+                if f.name == "test_core.py" and own_start <= m.start() < own_end:
+                    continue
+                line_end = src.find("\n", m.end())
+                if line_end < 0:
+                    line_end = len(src)
+                # tuple-form with-item: the raise is incidental (see docstring)
+                if src[m.end():line_end].strip() == ",":
+                    continue
+                var = m.group(1)
+                if not var:
+                    bad.append(f"{f.name}:{src[:m.start()].count(chr(10)) + 1}")
+                    continue
+                block = src[m.end():m.end() + 900]
+                if not re.search(rf"\b{re.escape(var)}\.exception\.code\b", block):
+                    bad.append(f"{f.name}:{src[:m.start()].count(chr(10)) + 1}")
+        self.assertEqual(
+            bad, [], f"coded-error assertRaises without a .exception.code check: {bad}"
+        )
+
     def test_error_codes_follow_the_domain_detail_taxonomy(self) -> None:
         """The UI toasts raw `error.code`, so the taxonomy is
         user-facing: `DOMAIN_DETAIL` in UPPER_SNAKE (e.g.
@@ -12040,6 +12664,477 @@ class TestResidualGuards(unittest.TestCase):
         with make_store() as s:
             s.set_setting(cfg.EMBED_MODEL_SETTING_KEY, "m1")
             self.assertEqual(s.get_setting(cfg.EMBED_MODEL_SETTING_KEY), "m1")
+
+    def test_data_mutation_sql_lives_in_store_py(self) -> None:
+        """Every write-path guarantee shipped in the last several versions —
+        the vocabulary guards (message role, source kind, studio kind), the
+        updated_at touch contract, the StoreError taxonomy — lives inside
+        store.py's methods. A `store.conn.execute("INSERT INTO ...")` written
+        in a handler or pipeline module bypasses all of them silently: the
+        ghost-kind/ghost-role corruption those guards reject would land
+        unchallenged. Direct read queries (SELECTs in search.py/studio.py/
+        pipeline.py) are fine — pin that data-mutation SQL literals appear
+        ONLY in store.py. (# comments are exempt — doc text may name verbs.)
+        """
+        verb = re.compile(
+            r"\b(?:INSERT|REPLACE)\s+INTO\b|\bDELETE\s+FROM\b|\bUPDATE\s+\w+\s+SET\b"
+        )
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        for f in sorted(root.glob("*.py")):
+            if f.name == "store.py":
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if verb.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()}")
+        self.assertEqual(
+            offenders, [], f"data-mutation SQL outside store.py bypasses its guards: {offenders}"
+        )
+        # Floor: the pin must not go vacuous — store.py actually holds the writes.
+        store_text = (root / "store.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(len(verb.findall(store_text)), 10)
+
+    def test_write_statements_run_inside_conn_transactions(self) -> None:
+        """Multi-statement writes must live inside `with self.conn:`.
+
+        sqlite3 legacy isolation opens ONE implicit transaction per
+        connection — `with conn:` only commits/rolls back, it does not
+        BEGIN. A bare `conn.execute(<write>)` followed by a late
+        `conn.commit()` means a failed second statement leaves the first
+        write pending for whatever commit runs next — publishing a
+        delete/add its owner reported as failed (the class closed
+        behaviorally in v0.2.419; this pins it structurally). Documented
+        caller-transacted helpers and single-statement writers are
+        allowlisted with a maximum bare-write count — adding a second
+        bare write to any of them reopens the leak.
+        """
+        verb = re.compile(
+            r"\b(?:INSERT|REPLACE)\s+INTO\b|\bDELETE\s+FROM\b|\bUPDATE\s+\w+\s+SET\b"
+            r"|\bALTER\s+TABLE\b|\bDROP\s+TABLE\b|\bCREATE\s+TABLE\b"
+        )
+        allow: dict[str, int | None] = {
+            "_migrate_once": None,  # executescript issues its own COMMIT
+            "touch_notebook": 1,  # callee — docstring: callers must commit
+            "_rewrite_chunk_context_titles": 1,  # runs inside caller's with
+            "_set_embedding_pair": 2,  # caller-transacted when commit=False
+            "create_notebook": 1,
+            "rename_notebook": 1,
+            "delete_notebook": 1,
+            "set_setting": 1,
+        }
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        with_indent: int | None = None
+        bare: dict[str, list[int]] = {}
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            if ".execute" not in line:
+                continue
+            blob, bal, j = line, line.count("(") - line.count(")"), i
+            while bal > 0 and j < len(lines):
+                blob += "\n" + lines[j]
+                bal += lines[j].count("(") - lines[j].count(")")
+                j += 1
+            if verb.search(blob) and with_indent is None:
+                bare.setdefault(method, []).append(i)
+        problems = []
+        for meth, linenos in bare.items():
+            cap = allow.get(meth)
+            if cap is None:
+                if meth in allow:
+                    continue  # explicitly unbounded (own commit management)
+                problems.append(f"{meth}:{linenos} (not allowlisted)")
+            elif len(linenos) > cap:
+                problems.append(f"{meth}:{linenos} (cap {cap})")
+        self.assertEqual(
+            problems,
+            [],
+            f"bare write-executes outside `with self.conn:` reopen the "
+            f"pending-write leak class: {problems}",
+        )
+        # Floor: allowlisted single-statement writes exist — non-vacuous.
+        self.assertTrue(bare, "expected some allowlisted bare writes")
+
+    def test_callee_transaction_contract_call_sites_covered(self) -> None:
+        """Callee-transacted helpers (`touch_notebook`,
+        `_rewrite_chunk_context_titles`, `_set_embedding_pair`) contain
+        bare write-executes by design — their docstrings make the CALLER
+        own the transaction. The C250 pin checks the callees' statements
+        against the allowlist, but cannot see whether every call site
+        actually sits inside `with self.conn:` — a new caller that forgets
+        the with silently reopens the pending-write leak class even
+        though every individual scan still passes. Pin the call-site
+        side of the contract: every call must be covered by an enclosing
+        `with self.conn:`, except `_set_embedding_pair`'s documented
+        `commit=False` branch inside `set_embedding` (whose only caller,
+        `_embed_chunks`, owns the batch transaction).
+        """
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        call = re.compile(
+            r"self\.(touch_notebook|_rewrite_chunk_context_titles|_set_embedding_pair)\s*\("
+        )
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        with_indent: int | None = None
+        sites: dict[str, list[tuple[int, str, bool]]] = {}
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            for hit in call.finditer(line):
+                callee = hit.group(1)
+                sites.setdefault(callee, []).append(
+                    (i, method, with_indent is not None)
+                )
+
+        problems = []
+        for callee, found in sites.items():
+            for lineno, caller, covered in found:
+                if callee == "_set_embedding_pair":
+                    # May only ever be invoked from `set_embedding` — the
+                    # commit=False contract is meaningful only because
+                    # that one caller documents who owns the transaction.
+                    # A call from anywhere else has no documented owner.
+                    if caller != "set_embedding":
+                        problems.append(
+                            f"{callee}:{lineno} (called from {caller})"
+                        )
+                    continue
+                if not covered:
+                    problems.append(f"{callee}:{lineno} (uncovered in {caller})")
+        self.assertEqual(
+            problems,
+            [],
+            f"callee-transacted helper call sites must sit inside "
+            f"`with self.conn:`: {problems}",
+        )
+        # Floors: the contract is exercised — touch sites are numerous.
+        self.assertGreaterEqual(
+            len(sites.get("touch_notebook", [])),
+            10,
+            "expected >=10 touch_notebook call sites — non-vacuous",
+        )
+        self.assertTrue(sites.get("_rewrite_chunk_context_titles"), "non-vacuous")
+        self.assertTrue(sites.get("_set_embedding_pair"), "non-vacuous")
+
+    def test_no_nested_with_conn_call_sites(self) -> None:
+        """sqlite3's context manager commits on __exit__ — a `with self.conn:`
+        nested inside another `with self.conn:` commits the OUTER block's
+        still-pending writes early, so an outer failure after the inner
+        exit can no longer roll them back. Today's call graph keeps every
+        with-owning writer out of every with-block (the only calls inside
+        are the callee-transacted helpers), but nothing stops a future
+        refactor from invoking e.g. `self.add_note(...)` mid-transaction.
+        Pin the invariant: no `self.<with-owning-method>(` call may appear
+        inside `with self.conn:` coverage.
+        """
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        method_has_with: dict[str, bool] = {}
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if method and re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                method_has_with[method] = True
+        withers = set(method_has_with)
+        self.assertGreaterEqual(
+            len(withers), 10, "expected >=10 with-owning writers — non-vacuous"
+        )
+        call = re.compile(r"self\.(\w+)\s*\(")
+
+        method = ""
+        in_sig = False
+        with_indent: int | None = None
+        problems = []
+        covered_callee_calls = 0
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            if with_indent is None:
+                continue
+            for hit in call.finditer(line):
+                name = hit.group(1)
+                if name in (
+                    "touch_notebook",
+                    "_rewrite_chunk_context_titles",
+                    "_set_embedding_pair",
+                ):
+                    covered_callee_calls += 1
+                elif name in withers:
+                    problems.append(
+                        f"{method}:{i} calls self.{name} inside `with self.conn:`"
+                    )
+        self.assertEqual(
+            problems,
+            [],
+            f"nested with-blocks commit outer pending writes early: {problems}",
+        )
+        self.assertGreaterEqual(
+            covered_callee_calls,
+            10,
+            "expected >=10 covered callee-helper calls — non-vacuous descent",
+        )
+
+    def test_every_store_construction_is_context_managed(self) -> None:
+        """Every `Store(...)` call site in production code must be the
+        context expression of a `with` statement. A bare `store =
+        Store(db)` never calls close() — the sqlite3 connection (file
+        handle + WAL read-state, thread-affined by check_same_thread)
+        leaks for the lifetime of the process; on a per-request pattern
+        like server.py's that is an unbounded fd leak. All 20 current
+        sites are `with Store(...) as store:` — AST-scan so comments and
+        docstrings that merely mention Store() can't false-positive."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        bad: list[str] = []
+        total = 0
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parent = {
+                child: node
+                for node in ast.walk(tree)
+                for child in ast.iter_child_nodes(node)
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_store_call = (
+                    (isinstance(func, ast.Name) and func.id == "Store")
+                    or (isinstance(func, ast.Attribute) and func.attr == "Store")
+                )
+                if not is_store_call:
+                    continue
+                total += 1
+                p = parent.get(node)
+                if not (
+                    isinstance(p, ast.withitem) and p.context_expr is node
+                ):
+                    bad.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            bad,
+            [],
+            f"Store() outside `with` leaks the connection: {bad}",
+        )
+        self.assertGreaterEqual(
+            total, 15, "expected >=15 Store() call sites — non-vacuous"
+        )
+
+    def test_store_exit_never_commits_or_executes(self) -> None:
+        """`Store.__exit__` must only close the connection — never commit,
+        never execute. A commit inside __exit__ republishes every write
+        left pending by a `with self.conn:` block that failed mid-block
+        (the exact defect class v0.2.419-425 pinned shut at the statement,
+        call-site, and nesting levels): `with Store(db) as s: ...` would
+        flush the orphaned write on cleanup even when the failing inner
+        transaction already rolled it back. An __enter__ that executes
+        (e.g. opens a BEGIN) is the symmetric hazard — writes could then
+        sit pending from construction. AST-pin both dunder bodies to
+        contain no execute/commit/rollback call."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "store.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        dunders: dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name in ("__enter__", "__exit__")
+            ):
+                dunders[node.name] = node
+        self.assertEqual(
+            set(dunders), {"__enter__", "__exit__"},
+            "Store needs both context dunders for the pin to mean anything",
+        )
+        bad: list[str] = []
+        for name, fn in dunders.items():
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else (func.id if isinstance(func, ast.Name) else "")
+                )
+                if called in ("execute", "executemany", "executescript", "commit", "rollback"):
+                    bad.append(f"{name}:{node.lineno} calls .{called}()")
+        self.assertEqual(
+            bad, [], f"Store context dunders must not touch the transaction: {bad}"
+        )
+
+    def test_no_todo_fixme_markers_in_production(self) -> None:
+        """A committed TODO/FIXME marker is a known issue left unfixed — the
+        completion criterion (zero known bugs) says none may ship. Until this
+        pin existed every gate was blind to one: a marker could land in any
+        PR undetected. Scan production code + the shipped UI for the two
+        canonical markers, word-boundary, comment or not — an inline "TODO:"
+        in a docstring or a stray <!-- TODO --> in index.html is the same
+        violation. Test fixtures live in tests/, so this file is naturally
+        exempt."""
+        marker = re.compile(r"\b(?:TODO|FIXME)\b")
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        for f in sorted(root.rglob("*")):
+            if f.suffix not in (".py", ".html"):
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if marker.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()[:80]}")
+        self.assertEqual(
+            offenders, [], f"TODO/FIXME marker committed in production: {offenders}"
+        )
+
+    def test_read_json_results_flow_through_validators(self) -> None:
+        """`_read_json()`'s dict must only be consumed via _require() /
+        _optional_str(). Those helpers exist because JSON's dynamic typing
+        meets Python's attribute access badly: `data.get("title").strip()`
+        raises AttributeError→500 on a list body field where
+        _require()→VALIDATION_FIELD_FORMAT_INVALID→400 is the contract
+        (the type-confusion class v0.2.38 closed for required fields,
+        _optional_str for optional ones). A bound variable holding the raw
+        body dict is the only place a bypass can hide — pin that every
+        reference to it is as an argument to a validator. (# comments exempt.)
+        """
+        src = (Path(__file__).resolve().parent.parent / "shoin" / "server.py").read_text(
+            encoding="utf-8"
+        )
+        lines = src.splitlines()
+        # Each bound var is only meaningful inside the function that assigned
+        # it — the same name elsewhere (the `data` param of the validators,
+        # `_read_json`'s own local) is unrelated. Record each bound var with
+        # the line range of its enclosing `def` (to the next `def` or EOF).
+        spans: list[tuple[str, int, int]] = []
+        assign = re.compile(r"(\w+)\s*=\s*self\._read_json\(\)")
+        for i, line in enumerate(lines):
+            m = assign.search(line)
+            if not m:
+                continue
+            start = i
+            while start > 0 and not re.match(r"\s+def \w+\(", lines[start]):
+                start -= 1
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if re.match(r"\s+def \w+\(", lines[j]):
+                    end = j
+                    break
+            spans.append((m.group(1), start, end))
+        offenders = []
+        for var, lo, hi in spans:
+            ok = re.compile(rf"self\._(?:require|optional_str)\(\s*{var}\b")
+            for i in range(lo, hi):
+                line = lines[i]
+                if line.lstrip().startswith("#"):
+                    continue
+                if not re.search(rf"\b{var}\b", line):
+                    continue
+                if "self._read_json()" in line or ok.search(line):
+                    continue
+                offenders.append(f"{i + 1}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            f"request-body dict accessed outside _require/_optional_str: {offenders}",
+        )
+        # Floor: the invariant must bind to real code — at least one bound body
+        # dict exists today (_h_note_add reads title+body through the helpers).
+        self.assertGreaterEqual(len(spans), 1)
 
 
 if __name__ == "__main__":

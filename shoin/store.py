@@ -24,6 +24,17 @@ from .config import MAX_NAME_LEN, MAX_TITLE_LEN, data_dir
 
 _T = TypeVar("_T")
 
+# The studio-output kind vocabulary. Defined here — not in studio.py — so the
+# store's own write guard can check it without a circular import; studio.py
+# re-exports it as KINDS for its callers.
+STUDIO_KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
+
+# The source kind vocabulary: ingest._EXT_KIND values plus "url". The store
+# guards writes on it for the same reason as STUDIO_KINDS — export's RIS TY
+# mapping (_RIS_TYPE), the md legend, and the UI badge all consume kind, so a
+# typo'd literal silently degrades exported citations and the source list.
+SOURCE_KINDS = ("txt", "md", "html", "pdf", "url")
+
 
 def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     """Retry `fn` when SQLite reports 'database is locked'.
@@ -503,6 +514,13 @@ class Store:
     def add_source(
         self, notebook_id: int, kind: str, title: str, origin: str, sha256: str
     ) -> Source:
+        if kind not in SOURCE_KINDS:
+            # Same fail-at-the-write class as add_message()'s role guard and
+            # add_studio_output()'s kind guard: kind drives the RIS TY mapping
+            # in export and the UI badge — a typo'd literal silently exports
+            # wrong citation types and renders a nonsense badge with no
+            # corrective path (kind is immutable post-insert).
+            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown source kind: {kind!r}")
         title = title[:MAX_TITLE_LEN]  # silently truncate; titles come from external content
         self.get_notebook(notebook_id)
         dup = self.conn.execute(
@@ -516,11 +534,18 @@ class Store:
             )
         ts = _now()
         try:
-            cur = self.conn.execute(
-                "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (notebook_id, kind, title, origin, sha256, ts),
-            )
+            # `with self.conn:` commits INSERT+touch atomically and rolls both
+            # back on failure — a failed touch must not leave the new row
+            # pending for a later commit on this connection to publish (the
+            # caller sees an error yet the source appears). Same leak class
+            # as the v0.2.417-418 add_studio_output fixes.
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (notebook_id, kind, title, origin, sha256, ts),
+                )
+                self.touch_notebook(notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
@@ -535,8 +560,6 @@ class Store:
             # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate
             # as a generic internal error rather than a misleading NOTEBOOK_NOT_FOUND.
             raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
-        self.touch_notebook(notebook_id)
-        self.conn.commit()
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
@@ -628,11 +651,11 @@ class Store:
 
     def delete_source(self, source_id: int) -> None:
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
-        cur = self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
-        if cur.rowcount == 0:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-        self.touch_notebook(src.notebook_id)
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+            if cur.rowcount == 0:
+                raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+            self.touch_notebook(src.notebook_id)
 
     def replace_chunks_for_source(
         self,
@@ -712,12 +735,29 @@ class Store:
         sha256/title to replace_chunks_for_source instead of calling this separately.
         This method is retained for callers that update metadata without replacing chunks.
         """
-        title = title[:MAX_TITLE_LEN]
+        title = title.strip()[:MAX_TITLE_LEN]
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:
-            cur = self.conn.execute(
-                "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
-            )
+            with self.conn:
+                # Re-read inside the transaction so the context rewrite keys off
+                # the row's actual value, not a stale snapshot — same concern as
+                # update_source_title's in-transaction read.
+                row = self.conn.execute(
+                    "SELECT title FROM sources WHERE id=?", (source_id,)
+                ).fetchone()
+                if row is None:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                old_title = str(row["title"])
+                cur = self.conn.execute(
+                    "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
+                )
+                if cur.rowcount == 0:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                if title != old_title:
+                    self._rewrite_chunk_context_titles(source_id, old_title, title)
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
@@ -728,10 +768,6 @@ class Store:
             # sha256 column) is a genuine unexpected constraint violation, not a
             # duplicate-hash collision. Mirrors the v0.2.53/86/104 fix pattern.
             raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
-        if cur.rowcount == 0:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-        self.touch_notebook(src.notebook_id)
-        self.conn.commit()
 
     def add_chunks(
         self, source_id: int, texts: list[str], contexts: list[str] | None = None
@@ -743,6 +779,7 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -753,6 +790,7 @@ class Store:
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) — this is the genuine
@@ -767,14 +805,7 @@ class Store:
             raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
         return ids
 
-    def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
-        if not vec:
-            raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
-        # Norm computed from the float32 round-trip (array("f", vec)), not from the
-        # float64 input, so it is bit-identical to what search computes on the BLOB
-        # it reads back — a float64 norm would shift scores in the last bits.
-        packed = array.array("f", vec)
-        norm = math.sqrt(sum(map(operator.mul, packed, packed)))
+    def _set_embedding_pair(self, chunk_id: int, blob: bytes, norm: float) -> None:
         # Two statements, one transaction, and the order matters: writing the
         # embedding fires the migration-9 trigger, which clears the cached norm
         # unconditionally; the second statement then writes the norm that belongs
@@ -783,15 +814,33 @@ class Store:
         # guess has a case it gets wrong (migration 8's did — see its note).
         # Measured: the split costs nothing (29.1 us vs 32.5 us per chunk).
         cur = self.conn.execute(
-            "UPDATE chunks SET embedding=? WHERE id=?", (packed.tobytes(), chunk_id)
+            "UPDATE chunks SET embedding=? WHERE id=?", (blob, chunk_id)
         )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         self.conn.execute(
             "UPDATE chunks SET embedding_norm=? WHERE id=?", (norm, chunk_id)
         )
+
+    def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
+        if not vec:
+            raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
+        # Norm computed from the float32 round-trip (array("f", vec)), not from the
+        # float64 input, so it is bit-identical to what search computes on the BLOB
+        # it reads back — a float64 norm would shift scores in the last bits.
+        packed = array.array("f", vec)
+        norm = math.sqrt(sum(map(operator.mul, packed, packed)))
         if commit:
-            self.conn.commit()
+            # This call owns the transaction: `with self.conn:` lands both
+            # statements or rolls both back — a failed norm write must not
+            # leave the vector write pending for a later commit on this
+            # connection to publish unnormed (v0.2.417-418 leak class).
+            with self.conn:
+                self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
+        else:
+            # commit=False callers own the surrounding transaction
+            # (_embed_chunks rolls back a partial batch on failure).
+            self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(
@@ -889,10 +938,14 @@ class Store:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"title too long (max {MAX_NAME_LEN} chars)")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
-            cur = self.conn.execute(
-                "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
-                (notebook_id, title, body, _now()),
-            )
+            # Atomic INSERT+touch — same pending-leak guard as add_source
+            # (v0.2.419): a failed touch must not leave the new note pending.
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
+                    (notebook_id, title, body, _now()),
+                )
+                self.touch_notebook(notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" not in str(e):
                 # notes has no UNIQUE constraint, so the only expected IntegrityError
@@ -903,8 +956,6 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during note insertion",
             )
-        self.touch_notebook(notebook_id)
-        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def list_notes(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -918,22 +969,41 @@ class Store:
         row = self.conn.execute("SELECT notebook_id FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
             raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
-        cur = self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
-        if cur.rowcount == 0:
-            raise StoreError("NOTE_NOT_FOUND", f"note {note_id} was concurrently deleted")
-        self.touch_notebook(int(row["notebook_id"]))
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+            if cur.rowcount == 0:
+                raise StoreError("NOTE_NOT_FOUND", f"note {note_id} was concurrently deleted")
+            self.touch_notebook(int(row["notebook_id"]))
 
     def add_studio_output(
         self, notebook_id: int, kind: str, body: str, citation_report: str
     ) -> int:
+        if kind not in STUDIO_KINDS:
+            # latest_studio_outputs() GROUP BYs on kind, so a typo'd literal
+            # persists as a phantom kind — grouped out of every UI section and
+            # rendered by export under a nonsense heading — with no caller able
+            # to overwrite it. Same fail-at-the-write class as add_message()'s
+            # role guard.
+            raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
-            cur = self.conn.execute(
-                "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
-                " created_at) VALUES (?,?,?,?,?)",
-                (notebook_id, kind, body, citation_report, _now()),
-            )
+            # `with self.conn:` commits INSERT+DELETE atomically and rolls
+            # both back on failure — a failed prune must not leave the
+            # rejected row pending for a later write on this connection to
+            # publish (latest_studio_outputs takes MAX(id), so it would
+            # displace the good output). Insert-then-delete also scopes the
+            # prune to `id < lastrowid`, preserving a newer concurrent row.
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
+                    " created_at) VALUES (?,?,?,?,?)",
+                    (notebook_id, kind, body, citation_report, _now()),
+                )
+                self.conn.execute(
+                    "DELETE FROM studio_outputs WHERE notebook_id=? AND kind=? AND id<?",
+                    (notebook_id, kind, int(cur.lastrowid or 0)),
+                )
+                self.touch_notebook(notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" not in str(e):
                 # studio_outputs has no UNIQUE constraint, so the only expected
@@ -944,8 +1014,6 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during studio output insertion",
             )
-        self.touch_notebook(notebook_id)
-        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def latest_studio_outputs(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -971,11 +1039,15 @@ class Store:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown message role: {role!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
-            cur = self.conn.execute(
-                "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
-                " VALUES (?,?,?,?,?)",
-                (notebook_id, role, body, citation_report, _now()),
-            )
+            # Atomic INSERT+touch — same pending-leak guard as add_source
+            # (v0.2.419): a failed touch must not leave the new message pending.
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (notebook_id, role, body, citation_report, _now()),
+                )
+                self.touch_notebook(notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" not in str(e):
                 # messages has no UNIQUE constraint, so the only expected
@@ -986,8 +1058,6 @@ class Store:
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during message insertion",
             )
-        self.touch_notebook(notebook_id)
-        self.conn.commit()
         return int(cur.lastrowid or 0)
 
     def count_messages(self, notebook_id: int) -> int:
@@ -1013,9 +1083,9 @@ class Store:
 
     def clear_messages(self, notebook_id: int) -> None:
         self.get_notebook(notebook_id)
-        self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
-        self.touch_notebook(notebook_id)
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
+            self.touch_notebook(notebook_id)
 
     def counts(self, notebook_id: int) -> dict[str, int]:
         row = self.conn.execute(
