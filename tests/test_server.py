@@ -358,6 +358,25 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")  # type: ignore[index]
 
+    def test_store_error_with_system_code_returns_500(self) -> None:
+        """A StoreError carrying a SYSTEM_* code (the store's own report of an
+        internal failure, e.g. an unexpected constraint violation) must map to
+        HTTP 500, not the client-error 400 fallback — a 400 tells the caller
+        their request was malformed when the server actually failed."""
+        from unittest.mock import patch
+        import shoin.store as store_mod
+        from shoin.store import StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "sys-err"})
+        nb_id = nb["id"]
+        with patch.object(
+            store_mod.Store, "get_notebook",
+            side_effect=StoreError("SYSTEM_INTERNAL_ERROR", "unexpected constraint violation"),
+        ):
+            status, err = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")  # type: ignore[index]
+
     def test_loopback_only(self) -> None:
         with self.assertRaises(ValueError):
             make_server(host="0.0.0.0")

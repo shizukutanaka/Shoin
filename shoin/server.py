@@ -358,6 +358,8 @@ class _Handler(BaseHTTPRequestHandler):
                         status = 404
                     elif exc.code.endswith("_ALREADY_EXISTS"):
                         status = 409
+                    elif exc.code.startswith("SYSTEM_"):
+                        status = 500
                     else:
                         status = 400
                     self._safe_error(status, exc.code, str(exc))
