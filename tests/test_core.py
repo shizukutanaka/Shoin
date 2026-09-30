@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.433")
+        self.assertEqual(VERSION, "0.2.434")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13041,6 +13041,41 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"questions_cache access outside lock: {problems}")
         self.assertGreaterEqual(
             covered, 5, f"expected >=5 locked accesses — non-vacuous (got {covered})"
+        )
+
+    def test_query_vec_cache_access_under_lock(self) -> None:
+        """Every `_QUERY_VEC_CACHE` read/write in qa.py must sit inside a
+        `with _QUERY_VEC_LOCK:` block — the module-level OrderedDict is
+        shared across handler threads, and LRU mutation (move_to_end /
+        popitem) under a concurrent writer is the same race class as
+        questions_cache. The declaration and the lock's own creation are
+        the only allowed bare references."""
+        path = Path(__file__).resolve().parent.parent / "shoin" / "qa.py"
+        access = re.compile(r"_QUERY_VEC_CACHE(?![\w])")
+        decl = re.compile(r"^(_QUERY_VEC_CACHE|_QUERY_VEC_LOCK)\s*[:=]")
+        problems: list[str] = []
+        covered = 0
+        lock_indent: int | None = None
+        for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if lock_indent is not None and indent <= lock_indent:
+                lock_indent = None
+            if re.fullmatch(r"with\s+_QUERY_VEC_LOCK\s*:\s*", stripped):
+                lock_indent = indent
+                continue
+            if access.search(stripped):
+                if decl.search(stripped):
+                    continue
+                if lock_indent is not None:
+                    covered += 1
+                else:
+                    problems.append(f"qa.py:{i}: unguarded _QUERY_VEC_CACHE access")
+        self.assertEqual(problems, [], f"_QUERY_VEC_CACHE access outside lock: {problems}")
+        self.assertGreaterEqual(
+            covered, 4, f"expected >=4 locked accesses — non-vacuous (got {covered})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:

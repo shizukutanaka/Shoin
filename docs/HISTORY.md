@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.433
+## Version History: v0.1.37 → v0.2.434
+
+### v0.2.434 (2026-09-30)
+
+- pin _QUERY_VEC_CACHE accesses inside `with _QUERY_VEC_LOCK:`
+  — same unguarded-shared-cache race class as
+  questions_cache (v0.2.433), closing the lock-coverage
+  family across both module-level caches. Declaration and
+  the lock's own creation are the only bare references;
+  floor >=4 locked accesses.
 
 ### v0.2.433 (2026-09-30)
 
