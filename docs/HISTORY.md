@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.427
+## Version History: v0.1.37 → v0.2.428
+
+### v0.2.428 (2026-09-30)
+
+- pin that every production `Store(...)` call is a `with`
+  context expression (AST-level): a bare `store = Store(db)`
+  never calls close() — the thread-affined sqlite3 connection
+  leaks for the process lifetime, an unbounded fd leak on the
+  per-request pattern. All 20 sites verified covered; the AST
+  walk means comments/docstrings mentioning Store() cannot
+  false-positive. Companion audits clean: _retry_on_lock
+  retries only "locked"-class OperationalErrors and re-raises;
+  _migrate_once embeds its version marker inside each script's
+  BEGIN/COMMIT with duplicate-column winner arbitration
 
 ### v0.2.427 (2026-09-30)
 
