@@ -37,8 +37,10 @@
    unittest+coverage≥90% / detect-secrets。`python3` が 3.11+ でない環境では
    `PYTHON=.venv/bin/python ./scripts/verify.sh`）。unittest 単独では残り4ゲートを通らない。
    件数が増えたら Version History エントリに新しい総数を記す。
-6. **push** — 指定作業ブランチに push し、`git push origin HEAD:main` で
-   公開 `main` を追従させる（両ブランチとも同一コミットを指すのが正常状態）。
+6. **push** — 指定作業ブランチに push して PR を開く。`git push origin HEAD:main`
+   による `main` 直接追従は**禁止**——現在は積層PR運用（各サイクルが前PRの
+   ブランチ先端に積み、base=先行ブランチでPRを開く）で、`main` への着地は
+   ロールアップPRのみ経由。直接pushは開いているチェーン全体をバイパスする。
    タグ push・`.github/workflows/` への書き込みは権限上不可能（試行不要）。
 
 ## 2. 設計原則（違反 PR は書かない）

@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.403
+## Version History: v0.1.37 → v0.2.405
+
+### v0.2.405 (2026-09-29)
+
+- pin that data-mutation SQL literals (INSERT/REPLACE INTO, DELETE
+  FROM, UPDATE ... SET) live only in store.py — a write issued from
+  anywhere else bypasses every write-path guard shipped there
+  (vocabulary checks, updated_at touches, StoreError taxonomy);
+  direct SELECTs elsewhere stay fine, floor keeps the pin non-vacuous
+
+### v0.2.404 (2026-09-29)
+
+- fix agent-doc push instructions: HEAD:main would bypass the entire
+  stacked-PR chain (and direct main pushes are not permitted anyway);
+  both docs now describe the stacked-PR flow (PR per cycle, base=prior
+  branch, main lands via the rollup PR only)
 
 ### v0.2.403 (2026-09-29)
 

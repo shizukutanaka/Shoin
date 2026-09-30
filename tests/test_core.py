@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.403")
+        self.assertEqual(VERSION, "0.2.405")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12375,6 +12375,37 @@ class TestResidualGuards(unittest.TestCase):
         with make_store() as s:
             s.set_setting(cfg.EMBED_MODEL_SETTING_KEY, "m1")
             self.assertEqual(s.get_setting(cfg.EMBED_MODEL_SETTING_KEY), "m1")
+
+    def test_data_mutation_sql_lives_in_store_py(self) -> None:
+        """Every write-path guarantee shipped in the last several versions —
+        the vocabulary guards (message role, source kind, studio kind), the
+        updated_at touch contract, the StoreError taxonomy — lives inside
+        store.py's methods. A `store.conn.execute("INSERT INTO ...")` written
+        in a handler or pipeline module bypasses all of them silently: the
+        ghost-kind/ghost-role corruption those guards reject would land
+        unchallenged. Direct read queries (SELECTs in search.py/studio.py/
+        pipeline.py) are fine — pin that data-mutation SQL literals appear
+        ONLY in store.py. (# comments are exempt — doc text may name verbs.)
+        """
+        verb = re.compile(
+            r"\b(?:INSERT|REPLACE)\s+INTO\b|\bDELETE\s+FROM\b|\bUPDATE\s+\w+\s+SET\b"
+        )
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        for f in sorted(root.glob("*.py")):
+            if f.name == "store.py":
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if verb.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()}")
+        self.assertEqual(
+            offenders, [], f"data-mutation SQL outside store.py bypasses its guards: {offenders}"
+        )
+        # Floor: the pin must not go vacuous — store.py actually holds the writes.
+        store_text = (root / "store.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(len(verb.findall(store_text)), 10)
 
 
 if __name__ == "__main__":
