@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.377
+## Version History: v0.1.37 → v0.2.378
+
+### v0.2.378 (2026-09-29)
+
+- test: close the touch-contract ops list — `replace_chunks_for_source` was the one mutating Store op missing from `test_every_write_bumps_notebook_timestamp` (its touch was separately pinned but absent from the canonical enumeration that guards future ops). Now all 12 mutating ops are listed; docstring updated to name the legitimate exclusions (create/delete_notebook, touch_notebook, `_rewrite_chunk_context_titles`, set_embedding/set_setting/migrate).
 
 ### v0.2.377 (2026-09-29)
 
