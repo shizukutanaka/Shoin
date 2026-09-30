@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.469
+## Version History: v0.1.37 → v0.2.470
+
+### v0.2.470
+- `test_library_prints_never_pollute_stdout` — stdout is a machine-readable
+  contract (`shoin eval` and piped structured output); a library-layer
+  `print()` writes chatter into a consumer's parser, invisible to unit
+  tests. AST pin: outside `cli.py`, every `print()` must pass
+  `file=sys.stderr`; `server.serve()`'s startup banner is the sole
+  exception. Audited live: 9 stderr prints (pipeline model-change warning,
+  search `_debug_print`, server dispatch/disconnect/citation-report
+  warnings) + the serve banner — zero violations.
 
 ### v0.2.469 (2026-10-01)
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.469")
+        self.assertEqual(VERSION, "0.2.470")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13964,6 +13964,66 @@ class TestResidualGuards(unittest.TestCase):
             f"non-vacuous: expected >=1 for-over-set loop (got {n_loops})",
         )
 
+
+    def test_library_prints_never_pollute_stdout(self) -> None:
+        """Stdout is a machine-readable contract: `shoin eval` and
+        structured CLI output must stay parseable when piped. A `print()`
+        buried in the library layer writes progress chatter straight into
+        a consumer's JSON/parser — invisible to every unit test, since
+        nothing asserts on streams. Pin the rule the code already
+        follows: outside `cli.py` (which legitimately owns stdout), every
+        `print()` must redirect to `file=sys.stderr` — the only exception
+        is `server.serve()`, whose startup banner is its user-facing
+        surface."""
+        import ast
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_stderr = 0
+        n_serve = 0
+        for f in sorted(root.glob("*.py")):
+            if f.name == "cli.py":
+                continue
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=f.name)
+            parents: dict[ast.AST, ast.AST] = {}
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    parents[child] = node
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                ):
+                    continue
+                to_stderr = any(
+                    kw.arg == "file"
+                    and isinstance(kw.value, ast.Attribute)
+                    and kw.value.attr == "stderr"
+                    and isinstance(kw.value.value, ast.Name)
+                    and kw.value.value.id == "sys"
+                    for kw in node.keywords
+                )
+                if to_stderr:
+                    n_stderr += 1
+                    continue
+                owner = parents.get(node)
+                while owner is not None and not isinstance(
+                    owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    owner = parents.get(owner)
+                if owner is not None and owner.name == "serve":
+                    n_serve += 1
+                    continue
+                problems.append(f"{f.name}:{node.lineno}: print() to stdout")
+        self.assertEqual(problems, [])
+        self.assertGreaterEqual(
+            n_stderr, 5,
+            f"non-vacuous: expected >=5 stderr prints (got {n_stderr})",
+        )
+        self.assertGreaterEqual(
+            n_serve, 1,
+            f"non-vacuous: expected the serve() banner (got {n_serve})",
+        )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the
