@@ -858,6 +858,61 @@ console.log("ok")
         src = _script_body(_html())
         self.assertNotIn('ev==="meta"', src)
 
+    def test_sse_payload_fields_match_the_envelope(self) -> None:
+        """Per event, the fields the JS dispatcher reads off `j` must be a
+        subset of the keys the server's `_sse("ev", {...})` payload dicts emit.
+        Renaming `report`→`summary` in the done frame would leave every seal
+        and badge silently absent — the parser still runs, `j.report` is just
+        undefined. The report.* inner keys are pinned separately; this is the
+        envelope."""
+        import ast
+
+        import shoin.server
+
+        server_src = Path(shoin.server.__file__).read_text(encoding="utf-8")
+        # Per event, collect each emission site's top-level payload keys.
+        # Sites must be symmetric: a union would hide one path dropping a key.
+        emitted: dict[str, list[set[str]]] = {}
+        for node in ast.walk(ast.parse(server_src)):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_sse"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                continue
+            ev = str(node.args[0].value)
+            keys: set[str] = set()
+            if len(node.args) > 1 and isinstance(node.args[1], ast.Dict):
+                keys = {
+                    str(k.value)
+                    for k in node.args[1].keys
+                    if isinstance(k, ast.Constant)
+                }
+            emitted.setdefault(ev, []).append(keys)
+
+        src = _script_body(_html())
+        for ev in ("delta", "done", "error"):
+            sites = emitted.get(ev, [])
+            self.assertTrue(sites, f"server never emits an '{ev}' frame")
+            first = sites[0]
+            for i, site in enumerate(sites[1:], 1):
+                self.assertEqual(
+                    site, first,
+                    f"SSE '{ev}' frame: emission site {i} carries "
+                    f"{sorted(site)} but site 0 carries {sorted(first)} — "
+                    "asymmetric envelope",
+                )
+            block = _js_block(src, f'ev==="{ev}"')
+            reads = set(re.findall(r"\bj\.([a-zA-Z_]+)", block))
+            missing = reads - first
+            self.assertEqual(
+                missing, set(),
+                f"SSE '{ev}' frame: JS reads {sorted(missing)} but the "
+                f"envelope only carries {sorted(first)}",
+            )
+
     def test_dropped_stream_restores_persisted_answer(self) -> None:
         """v0.2.246: when the SSE stream ends without a done frame (a proxy or
         network cut), the server has already persisted the complete assistant
