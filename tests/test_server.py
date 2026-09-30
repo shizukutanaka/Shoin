@@ -503,6 +503,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_unpaired_surrogate_in_required_field_returns_400(self) -> None:
+        """json.loads turns \ud800 escapes into lone surrogates raw UTF-8 bytes
+        can't carry; one reaching a write surfaces as an uncaught
+        UnicodeEncodeError out of the sqlite3 binding — a raw 500 for a
+        client-side format error. The field must be rejected at the
+        validator as VALIDATION_FIELD_FORMAT_INVALID."""
+        status, err = self._json("POST", "/api/notebooks", {"name": "nb\ud800"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
+    def test_unpaired_surrogate_in_optional_field_returns_400(self) -> None:
+        """Same surrogate class through the optional-field validator (note body)."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ok"})
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb['id']}/notes",
+            {"title": "t", "body": "x\udfff"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
     def test_studio_on_empty_notebook_returns_400(self) -> None:
         """Studio on a notebook with no sources must return 400 NOTEBOOK_EMPTY."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "空ノートブック"})
@@ -2141,6 +2161,37 @@ class NotebookMessagesCapTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(j2["messages_omitted"], 0)
         self.assertEqual(len(j2["messages"]), 12)
+
+    def test_notebook_payload_caps_notes_and_reports_omitted(self) -> None:
+        """v0.2.409: notes had the same unbounded-embed defect the messages cap
+        closed — every detail fetch (openNotebook, the SSE-drop recovery
+        refetch) round-trips every note body, so an accumulating notes pane
+        made each click heavier forever. The payload stays honest:
+        notes_omitted reports the real hidden count for the UI's disclosure
+        line; the full record remains in the DB and in export()."""
+        from shoin.store import Store
+
+        import shoin.server as srv
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_note(nb_id, f"n{i}", f"body {i}")
+        with patch.object(srv, "NB_NOTES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["notes"]), 4)
+        self.assertEqual(j["notes_omitted"], 8)
+        # The newest notes are the embedded ones — dropping the oldest means
+        # the note a user just added is always visible.
+        self.assertEqual(j["notes"][0]["title"], "n8")
+        self.assertEqual(j["notes"][-1]["title"], "n11")
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["notes_omitted"], 0)
+        self.assertEqual(len(j2["notes"]), 12)
 
 
 class SafeReportTest(unittest.TestCase):
