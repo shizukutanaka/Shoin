@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.428
+## Version History: v0.1.37 → v0.2.429
+
+### v0.2.429 (2026-09-30)
+
+- sync spec.md to v0.2.428: fold the transaction-contract pin
+  trilogy (with-coverage, callee call sites, nested-with ban),
+  the Store() context-expression pin, and the
+  _INSTRUCTIONS==STUDIO_KINDS vocabulary pin into the DB
+  section; refresh the measured quality line (1091 tests)
 
 ### v0.2.428 (2026-09-30)
 
