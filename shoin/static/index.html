@@ -64,7 +64,6 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
   padding:5px 12px;cursor:pointer;font-size:13px}
 .btn:hover{border-color:var(--seiji-ink)}
 .btn.primary{background:var(--seiji);border-color:var(--seiji);color:#062A2C;font-weight:600}
-.btn.danger{color:var(--shu)}
 .field{width:100%;background:var(--paper);border:1px solid var(--border-strong);border-radius:3px;
   padding:7px 10px}
 .muted{color:var(--sumi-soft);font-size:12.5px}
@@ -269,7 +268,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
     <div class="ft"><button class="btn" id="viewerClose" data-i18n="viewer.close">閉じる</button></div>
   </div>
 </div>
-<div id="toast" role="alert"></div>
+<div id="toast" class="toast" role="alert"></div>
 
 <script>
 "use strict";

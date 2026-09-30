@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.356")
+        self.assertEqual(VERSION, "0.2.358")
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -11554,6 +11554,35 @@ class TestResidualGuards(unittest.TestCase):
             f"pyproject dependencies drifted from imports: "
             f"undeclared={sorted(third_party - declared)} "
             f"unused={sorted(declared - third_party)}",
+        )
+
+    def test_version_markers_agree(self) -> None:
+        """The bump ritual touches five files by hand — one missed edit
+        makes `shoin --version`, `pip show shoin`, and the developer
+        guide report different releases. HISTORY's `### v{VERSION}`
+        heading is pinned separately; this pins the other two markers:
+        pyproject's project.version (what pip installs) and CLAUDE.md's
+        `Current version: **vX.Y.Z**` (what agents read)."""
+        import tomllib
+
+        from shoin.config import VERSION
+
+        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+$",
+                         "VERSION must stay semver — --version output shape")
+
+        root = Path(__file__).resolve().parent.parent
+        cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["project"]["version"], VERSION,
+            "pyproject version drifted from shoin.config.VERSION — "
+            "pip installs a different number than --version reports",
+        )
+        claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"**v{VERSION}**",
+            claude,
+            "CLAUDE.md's Current version marker drifted — "
+            "the bump ritual missed the developer guide",
         )
 
     def test_sql_literals_stay_interpolation_free(self) -> None:

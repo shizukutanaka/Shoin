@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.356
+## Version History: v0.1.37 → v0.2.358
+
+### v0.2.358 (2026-09-29)
+
+- Fix two dead-CSS findings + pin the class-name contract (test_css_class_names_stay_in_sync): `.toast` in `.msg,.toast{animation:rise}` was dead because the toast div only carried `id=` — the intended rise animation never ran (added `class="toast"`); `.btn.danger` was defined for a button variant nothing constructs (deleted). Pin checks both directions: every class markup/JS uses (class=, classList.*, className, el() args, composed `"seal "+k` suffixes) must exist in the stylesheet, and every styled class must be constructed by some literal. Fail-then-pass verified in three directions.
+
+### v0.2.357 (2026-09-29)
+
+- Pin version-marker parity (test_version_markers_agree): the five-file bump ritual is manual, so config.VERSION, pyproject project.version, and CLAUDE.md's Current version marker must agree — one missed file makes `shoin --version`, `pip show`, and the developer guide report different releases. VERSION itself pinned to semver shape. Fail-then-pass verified in all three directions.
 
 ### v0.2.356 (2026-09-29)
 
