@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.424")
+        self.assertEqual(VERSION, "0.2.425")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12806,6 +12806,106 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertTrue(sites.get("_rewrite_chunk_context_titles"), "non-vacuous")
         self.assertTrue(sites.get("_set_embedding_pair"), "non-vacuous")
+
+    def test_no_nested_with_conn_call_sites(self) -> None:
+        """sqlite3's context manager commits on __exit__ — a `with self.conn:`
+        nested inside another `with self.conn:` commits the OUTER block's
+        still-pending writes early, so an outer failure after the inner
+        exit can no longer roll them back. Today's call graph keeps every
+        with-owning writer out of every with-block (the only calls inside
+        are the callee-transacted helpers), but nothing stops a future
+        refactor from invoking e.g. `self.add_note(...)` mid-transaction.
+        Pin the invariant: no `self.<with-owning-method>(` call may appear
+        inside `with self.conn:` coverage.
+        """
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
+        method = ""
+        in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
+        method_has_with: dict[str, bool] = {}
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if method and re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                method_has_with[method] = True
+        withers = set(method_has_with)
+        self.assertGreaterEqual(
+            len(withers), 10, "expected >=10 with-owning writers — non-vacuous"
+        )
+        call = re.compile(r"self\.(\w+)\s*\(")
+
+        method = ""
+        in_sig = False
+        with_indent: int | None = None
+        problems = []
+        covered_callee_calls = 0
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            m = re.match(r"def (\w+)\(", stripped)
+            if m and indent == 4:
+                method = m.group(1)
+                with_indent = None
+                in_sig = not stripped.endswith(":")
+                continue
+            if in_sig:
+                if stripped.endswith(":"):
+                    in_sig = False
+                continue
+            if not stripped:
+                continue
+            if indent <= 4:
+                method = ""
+                continue
+            if not method:
+                continue
+            if with_indent is not None and indent <= with_indent:
+                with_indent = None
+            if re.fullmatch(r"with\s+self\.conn\s*:\s*", stripped):
+                with_indent = indent
+                continue
+            if with_indent is None:
+                continue
+            for hit in call.finditer(line):
+                name = hit.group(1)
+                if name in (
+                    "touch_notebook",
+                    "_rewrite_chunk_context_titles",
+                    "_set_embedding_pair",
+                ):
+                    covered_callee_calls += 1
+                elif name in withers:
+                    problems.append(
+                        f"{method}:{i} calls self.{name} inside `with self.conn:`"
+                    )
+        self.assertEqual(
+            problems,
+            [],
+            f"nested with-blocks commit outer pending writes early: {problems}",
+        )
+        self.assertGreaterEqual(
+            covered_callee_calls,
+            10,
+            "expected >=10 covered callee-helper calls — non-vacuous descent",
+        )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the

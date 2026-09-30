@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.424
+## Version History: v0.1.37 → v0.2.425
+
+### v0.2.425 (2026-09-30)
+
+- pin that no `with self.conn:` block calls a with-owning
+  writer: sqlite3's context manager commits on __exit__, so a
+  nested with commits the outer block's still-pending writes
+  early and an outer failure after the inner exit can no
+  longer roll them back. Call-graph audit: 12 with-owning
+  writers, zero nested call sites (only callee-transacted
+  helpers are invoked inside withs); Store.__exit__ closes
+  without committing, so no stray pending write can be
+  published. A future refactor adding e.g. self.add_note()
+  mid-transaction now fails the gate
 
 ### v0.2.424 (2026-09-30)
 
