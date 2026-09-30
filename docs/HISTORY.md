@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.439
+## Version History: v0.1.37 → v0.2.440
+
+### v0.2.440 (2026-09-30)
+
+- sync spec.md to v0.2.439 — fold the stat-before-read
+  size gate (v0.2.437), the decompressed-body bound
+  (v0.2.438), and the generation_lock call-site pin
+  (v0.2.439) into the DoS / pin sections; quality line
+  now v0.2.439 / 1099 tests.
 
 ### v0.2.439 (2026-09-30)
 
