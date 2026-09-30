@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.416
+## Version History: v0.1.37 → v0.2.418
+
+### v0.2.418 (2026-09-30)
+
+- wrap add_studio_output's INSERT+DELETE in `with self.conn:`
+  (Devin Review on PR #287): a failed prune left the rejected row
+  pending for a later commit to publish — MAX(id) would displace
+  the good output; both statements now roll back together
+
+### v0.2.417 (2026-09-30)
+
+- reorder add_studio_output prune to INSERT-then-DELETE (Devin
+  Review on PR #286): delete-first left the erase pending when the
+  insert raised, and a later commit on the same connection would
+  persist the loss despite the failed regeneration; `id < new_id`
+  also preserves a newer concurrent row
 
 ### v0.2.416 (2026-09-29)
 

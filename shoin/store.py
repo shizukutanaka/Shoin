@@ -969,18 +969,22 @@ class Store:
             raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
-            # latest_studio_outputs() is the only reader (UI, export), so the
-            # superseded same-kind row each regeneration leaves behind is
-            # unreadable dead storage — delete it in the same transaction.
-            self.conn.execute(
-                "DELETE FROM studio_outputs WHERE notebook_id=? AND kind=?",
-                (notebook_id, kind),
-            )
-            cur = self.conn.execute(
-                "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
-                " created_at) VALUES (?,?,?,?,?)",
-                (notebook_id, kind, body, citation_report, _now()),
-            )
+            # `with self.conn:` commits INSERT+DELETE atomically and rolls
+            # both back on failure — a failed prune must not leave the
+            # rejected row pending for a later write on this connection to
+            # publish (latest_studio_outputs takes MAX(id), so it would
+            # displace the good output). Insert-then-delete also scopes the
+            # prune to `id < lastrowid`, preserving a newer concurrent row.
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
+                    " created_at) VALUES (?,?,?,?,?)",
+                    (notebook_id, kind, body, citation_report, _now()),
+                )
+                self.conn.execute(
+                    "DELETE FROM studio_outputs WHERE notebook_id=? AND kind=? AND id<?",
+                    (notebook_id, kind, int(cur.lastrowid or 0)),
+                )
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" not in str(e):
                 # studio_outputs has no UNIQUE constraint, so the only expected
