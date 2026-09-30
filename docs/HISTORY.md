@@ -29,7 +29,32 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.471
+## Version History: v0.1.37 → v0.2.474
+
+### v0.2.474
+- Extended `test_library_prints_never_pollute_stdout` to the twin
+  bypass routes: any `sys.stdout` attribute access outside `cli.py`
+  (write()/reassignment bypasses the same contract print() did) and
+  any `import logging` / `from logging ...` in `shoin/` (the codebase's
+  diagnostic convention is prints to stderr; a logging call emits under
+  an unconfigured logger — lastResort stderr or silence — and a
+  stdout-wired handler would reopen the pollution class). Also audited:
+  single yield-inside-with site (`llm.chat_stream` — GeneratorExit on
+  generator.close() exits the urlopen `with`, closing the socket).
+
+### v0.2.473
+- Spec sync — `docs/spec.md` folded the four output-plane pins into
+  the invariants paragraph: header-value AST whitelist (v0.2.468),
+  set-iteration ordered-escape ban (v0.2.469), library print()-stderr
+  rule (v0.2.470), FTS5 MATCH quoting (v0.2.471). Header → v0.2.472,
+  tests 1114.
+
+### v0.2.472
+- Ledger sync — `docs/product-review.md` was 5 versions stale
+  (v0.2.467): new `v0.2.467-471 の要約` block — 「出力面の機械可読
+  契約」 (header-value AST whitelist, set-iteration ordered-escape
+  ban, library print-to-stderr rule, FTS5 MATCH quoting). Header
+  → v0.2.471, tests 1110→1114, module count 15→16 (`__main__.py`).
 
 ### v0.2.471
 - `test_fts_match_expression_is_fully_quoted` — FTS5 MATCH is its own

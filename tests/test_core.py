@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.471")
+        self.assertEqual(VERSION, "0.2.474")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14015,6 +14015,29 @@ class TestResidualGuards(unittest.TestCase):
                     n_serve += 1
                     continue
                 problems.append(f"{f.name}:{node.lineno}: print() to stdout")
+            # Twin routes around print(): a bare `sys.stdout` reference
+            # (write()/reassignment) bypasses the same contract — ban the
+            # attribute entirely outside cli.py. `import logging` is also
+            # banned: the codebase's diagnostic convention is prints to
+            # stderr; a logging call would emit under a logger nobody
+            # configures (lastResort stderr or silence), and a handler
+            # wired to stdout would reopen the pollution class.
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys"
+                ):
+                    problems.append(f"{f.name}:{node.lineno}: sys.stdout access")
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.name == "logging" or a.name.startswith("logging."):
+                            problems.append(f"{f.name}:{node.lineno}: import logging")
+                if isinstance(node, ast.ImportFrom) and (
+                    node.module or ""
+                ).startswith("logging"):
+                    problems.append(f"{f.name}:{node.lineno}: import logging")
         self.assertEqual(problems, [])
         self.assertGreaterEqual(
             n_stderr, 5,
