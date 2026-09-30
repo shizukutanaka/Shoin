@@ -520,7 +520,11 @@ const fetch = async (path, opts) => {
             f"{sorted(meta_sel - meta_names)}",
         )
 
-        # accept= ⊆ ingest _EXT_KIND
+        # accept= ≡ ingest _EXT_KIND (both directions: an offered
+        # extension ingest rejects 400s at upload time; a supported
+        # extension missing from accept= is silently unselectable in
+        # the picker even though the pipeline ingests it — .markdown
+        # and .htm were missing until v0.2.375)
         accept_m = re.search(r'accept="([^"]+)"', html)
         self.assertIsNotNone(accept_m, "file input needs an accept list")
         assert accept_m is not None
@@ -530,9 +534,10 @@ const fetch = async (path, opts) => {
         assert kind_m is not None
         supported = set(re.findall(r'"(\.\w+)"\s*:', kind_m.group(1)))
         self.assertEqual(
-            offered - supported, set(),
-            f"accept= offers extensions ingest rejects: "
-            f"{sorted(offered - supported)}",
+            offered, supported,
+            f"accept= must offer exactly the ingestible extensions — "
+            f"unsupported offered: {sorted(offered - supported)}, "
+            f"ingestible but unselectable: {sorted(supported - offered)}",
         )
 
         # ?format= values ⊆ FORMATS

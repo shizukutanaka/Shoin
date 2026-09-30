@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.374")
+        self.assertEqual(VERSION, "0.2.377")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -520,16 +520,20 @@ class TestStore(unittest.TestCase):
         """list_notebooks orders by updated_at DESC — a write path that
         forgets touch_notebook() leaves the notebook ranked as untouched
         forever (stale ordering, no error). Every mutating op must bump:
-        add_source, update_source_title, update_source_sha256,
-        delete_source, add_note, delete_note, add_studio_output,
-        add_message. Behavioral pin: run each op and assert the stamp
-        moved forward."""
+        rename_notebook, add_source, update_source_title,
+        update_source_sha256, add_chunks, delete_source, add_note,
+        delete_note, add_studio_output, add_message, clear_messages.
+        (set_embedding/set_setting/migrate deliberately don't: derived
+        data, not user content.) Behavioral pin: run each op and assert
+        the stamp moved forward."""
         import time
 
         def stamp(s: Store, nb_id: int) -> str:
             return s.get_notebook(nb_id).updated_at
 
         ops = [
+            ("rename_notebook",
+             lambda s, nb: s.rename_notebook(nb.id, "renamed-nb")),
             ("add_source",
              lambda s, nb: s.add_source(nb.id, "txt", "t2", "o2", "h2")),
             ("update_source_title",
@@ -538,6 +542,9 @@ class TestStore(unittest.TestCase):
             ("update_source_sha256",
              lambda s, nb: s.update_source_sha256(
                  s.sources_for_notebook(nb.id)[0].id, "h-new", "t")),
+            ("add_chunks",
+             lambda s, nb: s.add_chunks(
+                 s.sources_for_notebook(nb.id)[0].id, ["extra-chunk"])),
             ("add_note", lambda s, nb: s.add_note(nb.id, "nt", "nb-body")),
             ("delete_note",
              lambda s, nb: s.delete_note(
@@ -546,6 +553,7 @@ class TestStore(unittest.TestCase):
              lambda s, nb: s.add_studio_output(nb.id, "briefing", "b", "{}")),
             ("add_message",
              lambda s, nb: s.add_message(nb.id, "user", "hi")),
+            ("clear_messages", lambda s, nb: s.clear_messages(nb.id)),
             ("delete_source",
              lambda s, nb: s.delete_source(
                  s.sources_for_notebook(nb.id)[0].id)),
@@ -738,16 +746,34 @@ class TestStore(unittest.TestCase):
             self.assertEqual(texts, ["existing chunk"])
 
     def test_update_source_sha256_and_title(self) -> None:
-        """update_source_sha256 must update both sha256 and title, and touch the notebook."""
+        """update_source_sha256 must update both sha256 and title, rewrite the
+        chunk context titles (same _rewrite_chunk_context_titles contract as
+        update_source_title — without it the FTS index keeps matching the old
+        title forever), reject an empty title, and touch the notebook."""
         with make_store() as s:
             nb = s.create_notebook("nb")
             src = s.add_source(nb.id, "url", "old title", "https://example.com", "sha-old")
+            s.add_chunks(src.id, ["body"], ["old title > sect"])
             t0 = s.get_notebook(nb.id).updated_at
             s.update_source_sha256(src.id, "sha-new", "new title")
             updated = s.get_source(src.id)
             self.assertEqual(updated.sha256, "sha-new")
             self.assertEqual(updated.title, "new title")
+            ctxs = [c for _, c, _ in s.id_context_text_chunks_for_source(src.id)]
+            self.assertEqual(ctxs, ["new title > sect"])
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_source_sha256_empty_title_rejected(self) -> None:
+        """update_source_sha256 must reject an empty/whitespace-only title like
+        update_source_title does — before this guard the method could persist a
+        blank title the sibling path refuses."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "url", "t", "https://example.com", "sha")
+            for bad in ("", "   "):
+                with self.assertRaises(StoreError) as cm:
+                    s.update_source_sha256(src.id, "sha2", bad)
+                self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_update_source_sha256_missing_raises(self) -> None:
         with make_store() as s:
