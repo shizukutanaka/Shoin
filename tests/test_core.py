@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.449")
+        self.assertEqual(VERSION, "0.2.450")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13310,6 +13310,51 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertEqual(total, sum(expected.values()),
                          "non-vacuous: site counts drifted from the curated total")
+
+    def test_network_calls_always_pass_a_timeout(self) -> None:
+        """Every network call site must pass an explicit timeout — urlopen's
+        default is socket._GLOBAL_DEFAULT_TIMEOUT (wait forever), and
+        socket.create_connection without a timeout likewise blocks forever.
+        A new call without one would pin a handler thread indefinitely, and
+        ThreadingHTTPServer spawns a thread per request, so stuck calls
+        accumulate into thread exhaustion — invisible to tests because no
+        test makes a real slow network call. AST-scan every module: urlopen()
+        needs a timeout keyword (or 3+ positional args), create_connection()
+        needs a timeout keyword (or 2+ positional args). The _Pinned*Connection
+        classes take timeout as a required constructor arg, so they're already
+        signature-enforced."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_sites = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else ""
+                )
+                kwargs = {kw.arg for kw in node.keywords if kw.arg}
+                n_args = len(node.args)
+                if name == "urlopen":
+                    n_sites += 1
+                    if "timeout" not in kwargs and n_args < 3:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: urlopen without timeout"
+                        )
+                elif name == "create_connection":
+                    n_sites += 1
+                    if "timeout" not in kwargs and n_args < 2:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: create_connection without timeout"
+                        )
+        self.assertEqual(problems, [], f"network calls without timeout: {problems}")
+        self.assertGreaterEqual(
+            n_sites, 5, f"non-vacuous: expected >=5 network call sites (got {n_sites})"
+        )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
         """A committed TODO/FIXME marker is a known issue left unfixed — the

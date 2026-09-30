@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.449
+## Version History: v0.1.37 → v0.2.450
+
+### v0.2.450 (2026-09-30)
+
+- pin that every network call passes an explicit timeout (urlopen
+  needs timeout= or 3+ positional, create_connection needs
+  timeout= or 2+ positional) — an unbounded call pins a handler
+  thread forever, and per-request threads accumulate into
+  thread exhaustion.
 
 ### v0.2.449 (2026-09-30)
 
