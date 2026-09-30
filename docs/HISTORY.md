@@ -29,7 +29,46 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.428
+## Version History: v0.1.37 → v0.2.432
+
+### v0.2.432 (2026-09-30)
+
+- pin that Store's context dunders never touch the
+  transaction: a commit inside __exit__ would republish
+  writes left pending by a failed `with self.conn:` block —
+  the fourth wall of the pending-TX defect family was the
+  one unpinned surface. AST-pins __enter__ and __exit__ to
+  contain no execute/commit/rollback call.
+- correct CLAUDE.md's stale fusion claim: the bullet still
+  said fuse()/adaptive_alpha() "exist in search.py" — both
+  were deleted in v0.2.150 (the file's own later section
+  already said so)
+
+### v0.2.431 (2026-09-30)
+
+- sync the product-review ledger to v0.2.430: the v0.2.426-430
+  summary names the interval "contract-pin expansion — kind
+  vocabulary, resource lifetime, input character class"
+  (instructions≡KINDS key-set pin, Store()-with AST pin,
+  unpaired-surrogate 400 mapping)
+
+### v0.2.430 (2026-09-30)
+
+- reject unpaired surrogates at the request-field validators:
+  json.loads materializes them from \ud800 escapes that raw
+  UTF-8 bytes can't carry, and one reaching a write surfaces
+  as an uncaught UnicodeEncodeError from the sqlite3 binding
+  — a raw 500 for a client-side format error. Both _require
+  and _optional_str now run _check_utf8, so the 400 reaches
+  the caller before the bind does.
+
+### v0.2.429 (2026-09-30)
+
+- sync spec.md to v0.2.428: fold the transaction-contract pin
+  trilogy (with-coverage, callee call sites, nested-with ban),
+  the Store() context-expression pin, and the
+  _INSTRUCTIONS==STUDIO_KINDS vocabulary pin into the DB
+  section; refresh the measured quality line (1091 tests)
 
 ### v0.2.428 (2026-09-30)
 

@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.421 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.428 時点に同期)
 
 ## プロダクト定義
 
@@ -75,7 +75,7 @@ schema_migrations(version)
 
 マイグレーション: 整数連番(1, 2, 3, ...)・append-only・up専用。全DDLは`IF NOT EXISTS`等で冪等化し、同一バージョンの重複適用や複数プロセスからの同時マイグレーションでもクラッシュしない(v0.2.33で確立)。SQLiteではdownマイグレーションは一般に危険なため意図的に非対応。
 
-語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。データ変更SQL(INSERT/DELETE/UPDATE)はstore.pyのみに存在——ハンドラからの生`conn.execute`書込みは語彙ガード・touch契約・エラー体系を黙ってバイパスするためソーススキャンで封印(v0.2.405)。`_read_json`の結果は`_require`/`_optional_str`経由でのみ読み、bound dictの直接`data.get`/`data[]`は型未検証のAttributeError→500経路として封印(v0.2.408)。出荷コードのTODO/FIXMEマーカー0件をスキャンで固定(v0.2.411)。複文書込み(INSERT/DELETE+touch等)は全て`with self.conn:`で原子化——第二文失敗時に先行文がペンディングのまま後続commitに流出する経路を閉塞し、`_RacyConn`注入テストで両方向(失敗が消去を公開/拒否行を公開)固定(v0.2.419)。LLM応答は形状を正規化して読む: chat()はKeyError/TypeError→`SYSTEM_LLM_BAD_RESPONSE`、chat_stream()はdict以外のdelta(裸文字列は本文として受理、null等他型はスキップ)を許容——未正規化の`.get`/添字アクセスが生例外として500化する経路を遮断(v0.2.259/421)。
+語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定。studio._INSTRUCTIONSのキー集合も≡STUDIO_KINDSを固定——語彙に追加されたkindが指示欠落でハンドラ検証後にKeyError→生500化する経路を遮断(v0.2.427)——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。データ変更SQL(INSERT/DELETE/UPDATE)はstore.pyのみに存在——ハンドラからの生`conn.execute`書込みは語彙ガード・touch契約・エラー体系を黙ってバイパスするためソーススキャンで封印(v0.2.405)。`_read_json`の結果は`_require`/`_optional_str`経由でのみ読み、bound dictの直接`data.get`/`data[]`は型未検証のAttributeError→500経路として封印(v0.2.408)。出荷コードのTODO/FIXMEマーカー0件をスキャンで固定(v0.2.411)。複文書込み(INSERT/DELETE+touch等)は全て`with self.conn:`で原子化——第二文失敗時に先行文がペンディングのまま後続commitに流出する経路を閉塞し、`_RacyConn`注入テストで両方向(失敗が消去を公開/拒否行を公開)固定(v0.2.419)。LLM応答は形状を正規化して読む: chat()はKeyError/TypeError→`SYSTEM_LLM_BAD_RESPONSE`、chat_stream()はdict以外のdelta(裸文字列は本文として受理、null等他型はスキップ)を許容——未正規化の`.get`/添字アクセスが生例外として500化する経路を遮断(v0.2.259/421)。TX契約はさらに3層の構造ピンで再回帰不能化: 書込み動詞executeは全て`with self.conn:`内必須(単文writer・callee-transactedヘルパはcap付きallowlist、`_migrate_once`は独自COMMIT管理で免除)(v0.2.423)、callee-transactedヘルパ(touch_notebook等)の全呼出しサイトはwith内必須＋`_set_embedding_pair`は`set_embedding`単一caller化(v0.2.424)、`with self.conn:`内からwith所有メソッドを呼ぶ入れ子を禁止(sqlite3の`with`は__exit__でcommit=外側pending早期確定の危険経路)(v0.2.425)。Store()呼出しはASTレベルで`with`のcontext式必須——裸生成はthread-affinedな接続をclose不能でリーク(v0.2.428)。
 
 ## 検索パイプライン
 
@@ -123,7 +123,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.421時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1086件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.428時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1091件)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)

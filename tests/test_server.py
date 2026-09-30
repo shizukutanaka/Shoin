@@ -503,6 +503,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_unpaired_surrogate_in_required_field_returns_400(self) -> None:
+        """json.loads turns \ud800 escapes into lone surrogates raw UTF-8 bytes
+        can't carry; one reaching a write surfaces as an uncaught
+        UnicodeEncodeError out of the sqlite3 binding — a raw 500 for a
+        client-side format error. The field must be rejected at the
+        validator as VALIDATION_FIELD_FORMAT_INVALID."""
+        status, err = self._json("POST", "/api/notebooks", {"name": "nb\ud800"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
+    def test_unpaired_surrogate_in_optional_field_returns_400(self) -> None:
+        """Same surrogate class through the optional-field validator (note body)."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ok"})
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb['id']}/notes",
+            {"title": "t", "body": "x\udfff"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
     def test_studio_on_empty_notebook_returns_400(self) -> None:
         """Studio on a notebook with no sources must return 400 NOTEBOOK_EMPTY."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "空ノートブック"})
