@@ -24,6 +24,11 @@ from .config import MAX_NAME_LEN, MAX_TITLE_LEN, data_dir
 
 _T = TypeVar("_T")
 
+# The studio-output kind vocabulary. Defined here — not in studio.py — so the
+# store's own write guard can check it without a circular import; studio.py
+# re-exports it as KINDS for its callers.
+STUDIO_KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
+
 
 def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     """Retry `fn` when SQLite reports 'database is locked'.
@@ -942,6 +947,13 @@ class Store:
     def add_studio_output(
         self, notebook_id: int, kind: str, body: str, citation_report: str
     ) -> int:
+        if kind not in STUDIO_KINDS:
+            # latest_studio_outputs() GROUP BYs on kind, so a typo'd literal
+            # persists as a phantom kind — grouped out of every UI section and
+            # rendered by export under a nonsense heading — with no caller able
+            # to overwrite it. Same fail-at-the-write class as add_message()'s
+            # role guard.
+            raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             cur = self.conn.execute(

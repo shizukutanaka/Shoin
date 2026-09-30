@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.385
+## Version History: v0.1.37 → v0.2.386
+
+### v0.2.386 (2026-09-29)
+
+- `add_studio_output` now rejects kinds outside `STUDIO_KINDS` with `STUDIO_KIND_INVALID` at the write — the store-side sibling of v0.2.368's `add_message` role guard. A typo'd kind literal previously persisted as a phantom `GROUP BY kind` row that `latest_studio_outputs()` returned but no UI section claimed and export rendered under a nonsense heading — invisible dead data with no corrective path. The vocabulary is single-sourced in `store.STUDIO_KINDS` (studio.py re-exports it as `KINDS`; the store cannot import studio.py back), pinned by an identity test so the guard and the generator vocabulary can never drift. Fail-then-pass verified: removing the guard writes the phantom row and fails the test.
 
 ### v0.2.385 (2026-09-29)
 
