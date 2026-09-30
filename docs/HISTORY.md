@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.359
+## Version History: v0.1.37 → v0.2.361
+
+### v0.2.361 (2026-09-29)
+
+- Fix a skipped heading level + pin document structure (test_document_structure_contract): the viewer dialog's title was h3 under a single h1 — AT users navigate by headings and a skipped level reads as a missing section. Now h2 (CSS selector updated). Pin requires exactly one non-empty <title>, charset + viewport meta, one <main>, exactly one <h1>, no skipped heading levels, and no positive tabindex in markup or JS (positive values fight natural tab order). Fail-then-pass verified.
+
+### v0.2.360 (2026-09-29)
+
+- Give the four primary inputs durable accessible names + pin the contract (test_form_controls_have_accessible_names): nbName/askInput/noteTitle/noteBody were placeholder-only — a name that disappears the moment the user types — while file/url already used data-i18n-aria. All six controls now carry data-i18n-aria (new keys a11y.nbname/ask/notetitle/notebody in both locales); the notebook-delete × button gains the aria-label its source-delete twin already had. Pin requires every markup form control to have a non-placeholder name (aria-label, aria-labelledby, data-i18n-aria, label for=, wrapping label, or title); fail-then-pass verified.
 
 ### v0.2.359 (2026-09-29)
 
