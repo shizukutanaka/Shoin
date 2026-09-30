@@ -6,7 +6,6 @@ is the only network path and is restricted to public http(s) hosts.
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -358,6 +357,22 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
+def _inflate(body: bytes, wbits: int, *, multi_member: bool = False) -> bytes:
+    """Inflate with the output bounded DURING decompression: a small encoded body
+    can expand ~1000x per layer, so checking the size afterwards is too late."""
+    out = b""
+    data = body
+    while True:
+        d = zlib.decompressobj(wbits)
+        out += d.decompress(data, MAX_UPLOAD_BYTES + 1 - len(out))
+        _check_size(out)
+        if not d.eof:
+            raise zlib.error("incomplete or truncated stream")
+        data = d.unused_data.lstrip(b"\x00")
+        if not (multi_member and data):
+            return out
+
+
 def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
     """Decode a Content-Encoding response body; refuse what we cannot decode.
 
@@ -375,16 +390,15 @@ def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
             continue
         if enc in ("gzip", "x-gzip"):
             try:
-                body = gzip.decompress(body)
-            # gzip.decompress also raises EOFError (not OSError) on truncated input.
-            except (OSError, EOFError) as exc:
+                body = _inflate(body, 16 + zlib.MAX_WBITS, multi_member=True)
+            except zlib.error as exc:
                 raise IngestError("INGEST_FETCH_FAILED", f"corrupt gzip body: {exc}") from exc
         elif enc == "deflate":
             try:
-                body = zlib.decompress(body)
+                body = _inflate(body, zlib.MAX_WBITS)
             except zlib.error:
                 try:
-                    body = zlib.decompressobj(-zlib.MAX_WBITS).decompress(body)
+                    body = _inflate(body, -zlib.MAX_WBITS)
                 except zlib.error as exc:
                     raise IngestError("INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}") from exc
         else:

@@ -562,8 +562,11 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     # expanduser() on each target: `add` takes positional args so word-start
     # `~/x.md` is shell-expanded already, but a quoted '~/x.md' arrives
     # literally — same contract as every other Path(str(*)) in this module.
-    # URLs are unaffected (no leading ~).
-    for target in [str(Path(str(t)).expanduser()) for t in args.targets]:
+    # Only ~-prefixed targets go through Path(): it collapses a URL's "//".
+    for target in [
+        str(Path(str(t)).expanduser()) if str(t).startswith("~") else str(t)
+        for t in args.targets
+    ]:
         try:
             result = index_source(store, int(args.notebook_id), target, llm)
             print(

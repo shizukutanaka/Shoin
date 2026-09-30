@@ -2891,6 +2891,30 @@ class TestIngest(unittest.TestCase):
             fetch_with("gzip", b"not-a-gzip")
         self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
 
+    def test_decode_content_encoding_bounds_inflated_size(self) -> None:
+        """A compression bomb must be rejected while inflating (bounded output),
+        including stacked encodings; truncated and multi-member gzip behave like
+        gzip.decompress."""
+        import gzip as _gzip
+        import zlib as _zlib
+
+        import shoin.ingest as ing
+
+        with patch.object(ing, "MAX_UPLOAD_BYTES", 1000):
+            bomb = _gzip.compress(b"\0" * 100_000)
+            for enc, body in (
+                ("gzip", bomb),
+                ("deflate", _zlib.compress(b"\0" * 100_000)),
+                ("gzip, gzip", _gzip.compress(bomb)),
+            ):
+                with self.assertRaises(IngestError) as cm:
+                    ing._decode_content_encoding(enc, body)
+                self.assertEqual(cm.exception.code, "INGEST_FILE_TOO_LARGE", enc)
+        members = _gzip.compress(b"ab") + _gzip.compress(b"cd")
+        self.assertEqual(ing._decode_content_encoding("gzip", members), b"abcd")
+        with self.assertRaises(IngestError) as cm:
+            ing._decode_content_encoding("gzip", _gzip.compress(b"x" * 500)[:-10])
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
     def test_validate_resolved_zone_scoped_addr_blocked(self) -> None:
         """A getaddrinfo result like 'fe80::1%eth0' is rejected by ip_address() —
         the ValueError tail must map to INGEST_URL_BLOCKED, not escape."""
@@ -9516,6 +9540,32 @@ class TestCLI(unittest.TestCase):
                     os.environ.pop("HOME", None)
                 else:
                     os.environ["HOME"] = home
+
+    def test_add_passes_url_target_through_unchanged(self) -> None:
+        """Tilde expansion in `add` must not route URL targets through Path(),
+        which collapses "https://" to "https:/" and breaks URL ingest."""
+        import tempfile
+
+        from shoin import cli
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        seen: list[str] = []
+
+        def fake_index(store: object, nb_id: int, target: str, llm: object) -> object:
+            seen.append(target)
+            raise cli.IngestError("INGEST_FETCH_FAILED", "stub")
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with patch.object(cli, "index_source", fake_index):
+                cli.main(
+                    ["--db", db_file, "add", str(nb.id), "https://example.com/a/b?q=1"],
+                    llm=FakeLLM(),
+                )
+        self.assertEqual(seen, ["https://example.com/a/b?q=1"])
 
     def test_serve_rejects_out_of_range_port(self) -> None:
         """--port reached serve() unchecked: port -1/99999 raised OverflowError
