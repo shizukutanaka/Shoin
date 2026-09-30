@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.455")
+        self.assertEqual(VERSION, "0.2.456")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13508,6 +13508,116 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"dangerous constructs: {problems}")
         self.assertGreaterEqual(
             n_funcs, 100, f"non-vacuous: expected >=100 functions scanned (got {n_funcs})"
+        )
+
+    def test_regexes_have_no_catastrophic_geometry(self) -> None:
+        """ReDoS-shaped regex geometry passes lint and tests silently:
+
+        a regex only blows up on adversarial INPUT length, which no unit
+        test with ordinary strings reveals. The catastrophic shapes are
+        precise and AST/sre-checkable:
+
+        - a SUBPATTERN containing an unbounded repeat, nested inside an
+          unbounded repeat — the classic (x+)+ blowup;
+        - a BRANCH whose alternatives can match overlapping leading
+          tokens, inside an unbounded repeat — (a|ab)+ ambiguity.
+
+        Bounded repetitions (? {0,10}), top-level alternations of fixed
+        literals, and single-class repeats ([x]+) are all safe and stay
+        allowed — today's 35 literal patterns are zero-problem.
+
+        The second half of the hole is pattern CONSTRUCTION: any
+        re.compile built from a non-literal is catalogued below so a new
+        dynamic site cannot land without a deliberate edit here — the
+        discipline every current site already follows is constant-table
+        alternation or re.escape() around anything derived from input.
+        """
+        import ast
+        import sre_parse  # noqa: PLC2701
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        maxr = sre_parse.MAXREPEAT
+
+        def unbounded(op: object, av: object) -> bool:
+            return op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT) and av[1] == maxr
+
+        def heads_overlap(branches: object) -> bool:
+            heads: list[str] = []
+            for alt in branches:
+                for o2, a2 in alt:
+                    if o2 is sre_parse.LITERAL:
+                        heads.append(f"L{a2}")
+                        break
+                    if o2 is sre_parse.IN:
+                        heads.append(f"I{tuple(sorted(map(str, a2)))}")
+                        break
+                else:
+                    heads.append("other")
+            return len(heads) != len(set(heads))
+
+        problems: list[str] = []
+        dyn: list[str] = []
+        n_lit = 0
+
+        def scan(seq: object, inside_unbounded: bool, loc: str) -> None:
+            for op, av in seq:
+                if op is sre_parse.SUBPATTERN:
+                    scan(av[-1], inside_unbounded, loc)
+                elif op is sre_parse.BRANCH:
+                    if inside_unbounded and heads_overlap(av[1]):
+                        problems.append(
+                            f"{loc}: ambiguous alternation under unbounded repeat"
+                        )
+                    for alt in av[1]:
+                        scan(alt, inside_unbounded, loc)
+                elif unbounded(op, av):
+                    if inside_unbounded:
+                        problems.append(f"{loc}: nested unbounded repeat")
+                    for o2, a2 in av[2]:
+                        if o2 is sre_parse.SUBPATTERN and any(
+                            unbounded(o3, a3) for o3, a3 in a2[-1]
+                        ):
+                            problems.append(
+                                f"{loc}: unbounded repeat inside unbounded group"
+                            )
+                    scan(av[2], True, loc)
+                elif op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT):
+                    scan(av[2], inside_unbounded, loc)
+
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "compile"
+                ):
+                    continue
+                arg = node.args[0] if node.args else None
+                loc = f"{path.name}:{node.lineno}"
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    n_lit += 1
+                    scan(sre_parse.parse(arg.value), False, loc)
+                else:
+                    dyn.append(loc)
+
+        # Every non-literal compile in production today; each is a
+        # constant-table alternation (citation/search builder) or an
+        # re.escape'd interpolation. Adding one means deliberately
+        # re-auditing the construction for injection geometry.
+        expected_dyn = {
+            "chunk.py:100",
+            "citation.py:513", "citation.py:517", "citation.py:554",
+            "citation.py:567", "citation.py:867", "citation.py:1231",
+            "citation.py:1436",
+            "search.py:53", "search.py:752",
+        }
+        for loc in sorted(set(dyn) - expected_dyn):
+            problems.append(f"{loc}: uncatalogued dynamic re.compile")
+
+        self.assertEqual(problems, [], f"regex defects: {problems}")
+        self.assertGreaterEqual(
+            n_lit, 30, f"non-vacuous: expected >=30 literal patterns (got {n_lit})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:

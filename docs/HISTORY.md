@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.455
+## Version History: v0.1.37 → v0.2.456
+
+### v0.2.456 (2026-09-30)
+
+- pin regexes against ReDoS geometry: an unbounded repeat nested in
+  an unbounded group ((x+)+) or an overlapping-head alternation
+  under an unbounded repeat is flagged at scan time. All 35 literal
+  re.compile sites are zero-problem today; the 10 dynamic compiles
+  are catalogued (constant-table alternation or re.escape'd
+  interpolation) so new ones need a deliberate edit to land.
+  Fail-verified against an injected (a+)+ and an uncatalogued
+  dynamic compile.
 
 ### v0.2.455 (2026-09-30)
 
