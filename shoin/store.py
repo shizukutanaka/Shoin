@@ -712,12 +712,29 @@ class Store:
         sha256/title to replace_chunks_for_source instead of calling this separately.
         This method is retained for callers that update metadata without replacing chunks.
         """
-        title = title[:MAX_TITLE_LEN]
+        title = title.strip()[:MAX_TITLE_LEN]
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:
-            cur = self.conn.execute(
-                "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
-            )
+            with self.conn:
+                # Re-read inside the transaction so the context rewrite keys off
+                # the row's actual value, not a stale snapshot — same concern as
+                # update_source_title's in-transaction read.
+                row = self.conn.execute(
+                    "SELECT title FROM sources WHERE id=?", (source_id,)
+                ).fetchone()
+                if row is None:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                old_title = str(row["title"])
+                cur = self.conn.execute(
+                    "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
+                )
+                if cur.rowcount == 0:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                if title != old_title:
+                    self._rewrite_chunk_context_titles(source_id, old_title, title)
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
@@ -728,10 +745,6 @@ class Store:
             # sha256 column) is a genuine unexpected constraint violation, not a
             # duplicate-hash collision. Mirrors the v0.2.53/86/104 fix pattern.
             raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
-        if cur.rowcount == 0:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-        self.touch_notebook(src.notebook_id)
-        self.conn.commit()
 
     def add_chunks(
         self, source_id: int, texts: list[str], contexts: list[str] | None = None
@@ -743,6 +756,7 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -753,6 +767,7 @@ class Store:
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) — this is the genuine
