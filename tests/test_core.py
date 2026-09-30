@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.459")
+        self.assertEqual(VERSION, "0.2.460")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13305,7 +13305,13 @@ class TestResidualGuards(unittest.TestCase):
         silently swallows whatever defect class it happens to cover — the
         exact bug-hiding shape the philosophy forbids. Pin the per-file
         counts; a legitimate new site must update this test and carry its
-        own documented rationale."""
+        own documented rationale. The pin also covers the three catch-all
+        BYPASS routes a plain `except Exception` scan cannot see: a bare
+        `except:` (swallows KeyboardInterrupt/SystemExit too — worse than
+        the catalogued class), `except BaseException` (same reach), and
+        `contextlib.suppress(Exception/BaseException)` (the identical
+        silent-swallow under a context manager; the one existing
+        `suppress(OSError)` site is narrow and stays allowed)."""
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         expected = {
             "ingest.py": 2,
@@ -13315,12 +13321,24 @@ class TestResidualGuards(unittest.TestCase):
         }
         problems: list[str] = []
         total = 0
+        n_suppress = 0
+        broad = re.compile(
+            r"except\s*:|except\s+BaseException\b"
+            r"|suppress\(\s*(?:Exception|BaseException)\b"
+        )
         for path in sorted(shoin_dir.glob("*.py")):
-            n = sum(
-                1
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if re.search(r"except Exception\b", line)
-            )
+            n = 0
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if re.search(r"except Exception\b", line):
+                    n += 1
+                if re.search(r"suppress\(", line):
+                    n_suppress += 1
+                if broad.search(line):
+                    problems.append(
+                        f"{path.name}:{i}: uncatalogued broad catch-all"
+                    )
             total += n
             limit = expected.get(path.name)
             if limit is None:
@@ -13337,6 +13355,10 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertEqual(total, sum(expected.values()),
                          "non-vacuous: site counts drifted from the curated total")
+        self.assertGreaterEqual(
+            n_suppress, 1,
+            "non-vacuous: the suppress() route must see the existing OSError site",
+        )
 
     def test_network_calls_always_pass_a_timeout(self) -> None:
         """Every network call site must pass an explicit timeout — urlopen's

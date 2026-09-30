@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.459
+## Version History: v0.1.37 → v0.2.460
+
+### v0.2.460 (2026-09-30)
+
+- close the three catch-all bypass routes the except-Exception
+  catalog could not see: bare `except:` (swallows
+  KeyboardInterrupt/SystemExit), `except BaseException` (same
+  reach), and `contextlib.suppress(Exception/BaseException)` —
+  the identical silent-swallow under a context manager. All
+  zero today; the existing suppress(OSError) chmod site stays
+  allowed and anchors a non-vacuity check. Fail-verified all
+  three injected shapes.
 
 ### v0.2.459 (2026-09-30)
 
