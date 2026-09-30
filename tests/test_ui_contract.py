@@ -2345,6 +2345,7 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        fn_embed = _js_block(src, "function embedNote")
         harness = """\
 const reg = {};
 function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
@@ -2362,6 +2363,7 @@ function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls;
   e.text=text; e.textContent=text; return e }
 function t(k){ return k === "src.pages_failed" ? "{n} pages failed" : k }
+let window = {};
 let apiCalls = []; let nextJson = {pages_failed: 0}; let failNext = false;
 async function api(path, o){ apiCalls.push({path, method: o && o.method});
   if (failNext) throw new Error("refresh boom");
@@ -2380,7 +2382,7 @@ function startSourceRename(s, tt, row, initial){
   const inp = mkEl(); inp.cls = "src-rename"; return inp;
 }
 const document = { activeElement: null };
-""" + fn + """
+""" + fn_embed + fn + """
 (async () => {
 cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x"}],
   messages:[], studio:[], notes:[] };
@@ -2424,6 +2426,45 @@ console.log("ok")
 """
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
+
+    def test_embed_skip_surfaced_in_ingest_toasts(self) -> None:
+        """v0.2.390: when embeddings are configured (window._embedOn from
+        /api/health) but an ingest embeds fewer chunks than it produced —
+        endpoint failure, stored-model mismatch, or a partial batch — the
+        toast must say so instead of presenting the index as complete (the
+        same defect class pages_failed covers). Silent when embeddings are
+        off, where 0 embedded is the first-class mode."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "function embedNote")
+        harness = """\
+function t(k){ return k === "src.embed_short" ? "{n}/{total} embedded" : k }
+let window = {};
+""" + fn + """
+const cases = [
+  [{_embedOn:true},  {n_embedded:0, n_chunks:5}, " 0/5 embedded"],
+  [{_embedOn:true},  {n_embedded:2, n_chunks:5}, " 2/5 embedded"],
+  [{_embedOn:true},  {n_embedded:5, n_chunks:5}, ""],
+  [{_embedOn:true},  {n_embedded:0, n_chunks:0}, ""],
+  [{_embedOn:true},  {}, ""],
+  [{_embedOn:false}, {n_embedded:0, n_chunks:5}, ""],
+];
+for (const [w, j, want] of cases) {
+  window._embedOn = w._embedOn;
+  const got = embedNote(j);
+  if (got !== want)
+    { console.error("embedNote wrong: " + JSON.stringify({w,j,got,want})); process.exit(1) }
+}
+console.log("ok")
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        # Wire check: health() tracks _embedOn both ways, and all three ingest
+        # toasts (upload, URL add, refresh) append embedNote(j).
+        self.assertIn("window._embedOn = !!j.embed_model", src)
+        self.assertIn("window._embedOn=false", src)
+        self.assertEqual(src.count("embedNote(j)"), 4)  # 1 definition + 3 call sites
 
     def test_source_row_delete_and_rename_guard(self) -> None:
         """v0.2.329: the source row's remaining three unpinned wirings —
@@ -2844,8 +2885,10 @@ console.log("ok")
             except ValueError:
                 self.fail(f"handler not found: {marker}")
         nb_form, file_input, url_btn = blocks
+        fn_embed = _js_block(src, "function embedNote")
         harness = (
-            """\
+            fn_embed
+            + """\
 const calls = {posts: [], opens: [], toasts: []};
 const cur = {id: 9};
 const nbName = {value: "new nb"};
@@ -2866,6 +2909,7 @@ const api = async (p, opts) => {
   return {json: async () => ({pages_failed: 0})};
 };
 const t = k => k;
+let window = {};
 async function openNotebook(id){ calls.opens.push(id) }
 function toast(m){ calls.toasts.push(m) }
 const events = {};
