@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.368")
+        self.assertEqual(VERSION, "0.2.369")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -11930,6 +11930,32 @@ class TestResidualGuards(unittest.TestCase):
                 f"{sorted(unknown)} — users would set a no-op knob",
             )
 
+
+
+    def test_embed_model_setting_key_is_single_sourced(self) -> None:
+        """The settings-table key recording which embedding model built the
+        stored vectors is read in qa.py and written/read in pipeline.py — as
+        a bare "embed_model" literal at three sites until v0.2.369. A typo at
+        ANY one site silently breaks the model-mismatch guard (reads return
+        None forever, or writes land under a key nobody reads — either way the
+        warning never fires or never stops firing). The key must come from
+        config.EMBED_MODEL_SETTING_KEY everywhere except its definition."""
+        import shoin.config as cfg
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        pat = re.compile(r"""(get|set)_setting\(\s*['"]embed_model['"]""")
+        for f in sorted(root.glob("*.py")):
+            if f.name == "config.py":
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()}")
+        self.assertEqual(offenders, [], f"literal setting key outside config.py: {offenders}")
+        # And the constant must actually back the round-trip.
+        with make_store() as s:
+            s.set_setting(cfg.EMBED_MODEL_SETTING_KEY, "m1")
+            self.assertEqual(s.get_setting(cfg.EMBED_MODEL_SETTING_KEY), "m1")
 
 
 if __name__ == "__main__":
