@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.470
+## Version History: v0.1.37 → v0.2.471
+
+### v0.2.471
+- `test_fts_match_expression_is_fully_quoted` — FTS5 MATCH is its own
+  query language (`AND`/`OR`/`NEAR`/`:`/`*`/`"` are operators); an
+  unquoted term would silently re-interpret WHERE semantics. Pin: every
+  `fts_query` atom is double-quoted (`_fts_escape` post-variant doubles
+  inner quotes), and exactly one `MATCH ?` site exists (search.py:556).
+  Audit: zero violations; `x:y`/`a*b` tokenize to nothing (LIKE
+  fallback); class-level mutable attrs and unquoted MATCH sites: none.
 
 ### v0.2.470
 - `test_library_prints_never_pollute_stdout` — stdout is a machine-readable
