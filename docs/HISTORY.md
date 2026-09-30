@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.467
+## Version History: v0.1.37 → v0.2.468
+
+### v0.2.468 (2026-09-30)
+
+- pin header values to safe shapes: every send_header value is
+  a constant or provably safe (str(len(...)), closed
+  _EXPORT_*[fmt] lookups, whitelisted safe_lang, route-regex
+  ints like {nb_id}) — a future interpolated extra={} entry is
+  a CRLF injection sink no behavior test sees, since
+  BaseHTTPRequestHandler writes the bytes verbatim.
+  Fail-verified with a Name-valued header injection.
 
 ### v0.2.467 (2026-09-30)
 

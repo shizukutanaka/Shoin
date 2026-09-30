@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.467")
+        self.assertEqual(VERSION, "0.2.468")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13794,6 +13794,82 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"undeclared or ill-formed codes: {problems}")
         self.assertGreaterEqual(
             len(found), 30, f"non-vacuous: expected >=30 codes (got {len(found)})"
+        )
+
+    def test_header_values_have_no_interpolated_user_data(self) -> None:
+        """Every send_header value must be a constant or provably safe —
+        a future `extra={"X": f"...{user_value}..."}` is a CRLF/header-
+        injection sink that no behavior test sees (BaseHTTPRequestHandler
+        writes the bytes verbatim; http.client never validates).
+
+        Safe shapes today: str(len(body)), constants, `_EXPORT_*[fmt]`
+        subscripts (closed maps), `safe_lang` (ja|en whitelist), and
+        f-strings interpolating only route-captured ints ({nb_id} —
+        the route regex is \\d+, so it is always digits)."""
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        n_sites = 0
+
+        def safe_value(v: ast.expr) -> bool:
+            if isinstance(v, ast.Constant):
+                return isinstance(v.value, str)
+            if (
+                isinstance(v, ast.Call)
+                and isinstance(v.func, ast.Name)
+                and v.func.id == "str"
+                and len(v.args) == 1
+            ):
+                inner = v.args[0]
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "len":
+                    return True  # str(len(body)) — byte count
+                if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                    return True  # route-regex ints
+                return False
+            if isinstance(v, ast.Subscript):
+                return True  # closed lookup maps (_EXPORT_MIME/_EXPORT_EXT)
+            if isinstance(v, ast.Name) and v.id == "safe_lang":
+                return True  # whitelisted ja|en
+            if isinstance(v, ast.JoinedStr):
+                for part in v.values:
+                    if not isinstance(part, ast.FormattedValue):
+                        continue
+                    inner = part.value
+                    if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
+                        continue  # route-regex ints
+                    if isinstance(inner, ast.Subscript):
+                        continue  # closed lookup maps
+                    return False
+                return True
+            return False
+
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr == "send_header" and len(node.args) >= 2:
+                n_sites += 1
+                # The (extra or {}).items() loop is the only dynamic site;
+                # direct calls must carry a constant value.
+                if not safe_value(node.args[1]) and not isinstance(
+                    node.args[1], (ast.Name, ast.Tuple)
+                ):
+                    problems.append(f"server.py:{node.lineno}: non-constant header value")
+            if node.func.attr == "_headers" and len(node.args) >= 3:
+                third = node.args[2]
+                if isinstance(third, ast.Dict):
+                    n_sites += 1
+                    for v in third.values:
+                        if not safe_value(v):
+                            problems.append(
+                                f"server.py:{node.lineno}: interpolated extra-header value"
+                            )
+        self.assertEqual(
+            problems, [], f"header values outside the safe shapes: {problems}"
+        )
+        self.assertGreaterEqual(
+            n_sites, 5, f"non-vacuous: expected >=5 header sites (got {n_sites})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
