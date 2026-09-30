@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.464")
+        self.assertEqual(VERSION, "0.2.465")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13697,6 +13697,103 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertGreaterEqual(
             n, 15, f"non-vacuous: expected >=15 source files (got {n})"
+        )
+
+    def test_error_codes_match_the_declared_taxonomy(self) -> None:
+        """Catalog every error code the package raises or emits.
+
+        `_dispatch` maps codes by suffix/prefix — a new code spelled
+        without the `_NOT_FOUND` / `_ALREADY_EXISTS` / `SYSTEM_`
+        convention silently lands in the 400 bucket (a typo'd
+        `*_NOTFOUND` would emit HTTP 400 instead of 404 and no test
+        would see it). Assert the complete code set, so adding a code
+        requires updating this catalog — a documented-rationale edit —
+        and every code conforms to the name-family taxonomy."""
+        import ast
+
+        declared = {
+            # store.py raises (StoreError)
+            "CHUNK_NOT_FOUND",
+            "EMBEDDING_INVALID",
+            "INGEST_REFRESH_NOT_URL",
+            "NOTEBOOK_EMPTY",
+            "NOTEBOOK_NOT_FOUND",
+            "NOTE_NOT_FOUND",
+            "SOURCE_ALREADY_EXISTS",
+            "SOURCE_NOT_FOUND",
+            "STUDIO_KIND_INVALID",
+            "SYSTEM_DB_LOCKED",
+            "SYSTEM_IO_ERROR",
+            "SYSTEM_SERVICE_UNAVAILABLE",
+            # ingest.py / pipeline.py / server.py raises (IngestError)
+            "INGEST_EMPTY",
+            "INGEST_FILE_TOO_LARGE",
+            "INGEST_NOTEBOOK_FULL",
+            "INGEST_PDF_SUPPORT_MISSING",
+            "INGEST_FETCH_FAILED",
+            "INGEST_PARSE_FAILED",
+            "INGEST_UNSUPPORTED_FORMAT",
+            "INGEST_URL_BLOCKED",
+            # llm.py raises (LLMError)
+            "SYSTEM_EMBED_DISABLED",
+            "SYSTEM_LLM_TIMEOUT",
+            "SYSTEM_LLM_BAD_RESPONSE",
+            "SYSTEM_LLM_HTTP_ERROR",
+            # server.py raises (StoreError) + emit literals
+            "METHOD_NOT_ALLOWED",
+            "ROUTE_NOT_FOUND",
+            "SECURITY_CROSS_ORIGIN_BLOCKED",
+            "SECURITY_HOST_NOT_ALLOWED",
+            "SYSTEM_INTERNAL_ERROR",
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            "VALIDATION_INTEGER_OVERFLOW",
+            "VALIDATION_REQUIRED_FIELD_MISSING",
+        }
+        taxonomy = re.compile(
+            r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
+            r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
+        )
+        root = Path(__file__).resolve().parent.parent
+        found: set[str] = set()
+        problems: list[str] = []
+        for path in sorted((root / "shoin").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise):
+                    call = node.exc
+                    if not (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id in {"StoreError", "LLMError", "IngestError"}
+                        and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        continue
+                    code = call.args[0].value
+                    if not isinstance(code, str) or not code.isupper():
+                        continue
+                    found.add(code)
+                    if code not in declared:
+                        problems.append(f"{path.name}:{node.lineno}: {code}")
+                    if not taxonomy.match(code):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: "
+                            f"{code} outside the name taxonomy"
+                        )
+                elif isinstance(node, ast.Constant) and isinstance(
+                    node.value, str
+                ):
+                    v = node.value
+                    if v in declared and v not in found:
+                        found.add(v)
+        self.assertEqual(
+            found, declared,
+            f"raised/emitted codes != declared catalog: "
+            f"missing={declared - found}, extra={found - declared}",
+        )
+        self.assertEqual(problems, [], f"undeclared or ill-formed codes: {problems}")
+        self.assertGreaterEqual(
+            len(found), 30, f"non-vacuous: expected >=30 codes (got {len(found)})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:

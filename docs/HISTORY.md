@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.464
+## Version History: v0.1.37 → v0.2.465
+
+### v0.2.465 (2026-09-30)
+
+- catalog every raised/emitted error code: _dispatch maps by
+  suffix/prefix, so a typo'd `*_NOTFOUND` silently lands in the
+  400 bucket instead of 404 and no test sees it. A 32-code AST
+  scan now pins the declared set plus a name-family taxonomy —
+  new codes require a documented-rationale catalog update.
+  Fail-verified with a `NOTE_NOTFOUND` injection.
 
 ### v0.2.464 (2026-09-30)
 
