@@ -1194,6 +1194,105 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_css_class_names_stay_in_sync(self) -> None:
+        """Both directions of the class-name contract fail silently:
+
+        - JS toggles a class CSS never defines (`classList.add("foo")`
+          with no `.foo` rule) — the visual state it was meant to paint
+          just doesn't happen.
+        - CSS defines a class nothing constructs (`.toast` on a rule
+          whose element only carried `id=` — found here in v0.2.358) —
+          dead styling that reads as if it works.
+
+        Class names travel through `el("div","cls")`, `className`,
+        `classList.*`, `class="..."`, and composed strings like
+        `"seal "+k`, so "constructed" means: appears as a word inside
+        any quoted literal in the file."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", style))
+        self.assertTrue(defined, "no CSS classes found — <style> scan broken")
+
+        class_ctx: set[str] = set()
+
+        def absorb(v: str) -> None:
+            for w in v.split():
+                if w and not w.startswith(("$", "{")):
+                    class_ctx.add(w)
+
+        for m in re.finditer(
+            r'class\s*=\s*"([^"]*)"|class\s*=\s*\'([^\']*)\'', html
+        ):
+            absorb(m.group(1) or m.group(2) or "")
+        for m in re.finditer(
+            r'classList\.(?:add|remove|toggle|contains)\("([^"]+)"\)', html
+        ):
+            absorb(m.group(1))
+        for m in re.finditer(r"className\s*=\s*([^;]+);", html):
+            for lit in re.findall(r'"([^"]*)"', m.group(1)):
+                absorb(lit)
+        for m in re.finditer(r'el\("[a-z0-9]+",\s*((?:"[^"]*"|[^,])+)', html):
+            argtext = re.sub(r'el\("[a-z0-9]+"', "", m.group(1))
+            for lit in re.findall(r'"([^"]*)"', argtext):
+                absorb(lit)
+
+        self.assertEqual(
+            sorted(class_ctx - defined),
+            [],
+            "markup/JS uses classes the stylesheet never defines",
+        )
+
+        words: set[str] = set()
+        for lit in re.findall(r'"([^"\n]*)"', html) + re.findall(r"'([^'\n]*)'", html):
+            words.update(lit.split())
+        self.assertEqual(
+            sorted(defined - words),
+            [],
+            "CSS classes nothing constructs — dead styling",
+        )
+
+    def test_markup_health_and_offline_scope(self) -> None:
+        """Markup invariants that fail silently rather than loudly.
+
+        - `id=` must be unique: `$("#x")` binds the FIRST element, so a
+          duplicate silently re-routes every lookup to the wrong node.
+        - `<html lang>` seeds the initial a11y locale and
+          `documentElement.lang` must be written on toggle — a removed
+          assignment leaves screen readers pronouncing EN text as JA.
+        - `<button>` inside `<form>` defaults to type="submit": one added
+          without an explicit type turns every click into a form post.
+        - No `src`/`href="http…"` anywhere: the app is offline by design
+          and CSP `connect-src 'self'` + `default-src 'none'` would break
+          the reference anyway — one sneaks in only as a dead feature."""
+        html = _html()
+        script = _script_body(html)
+
+        ids = re.findall(r'\bid="([^"]+)"', html)
+        dup = sorted({x for x in ids if ids.count(x) > 1})
+        self.assertEqual(dup, [], f"duplicate id= values: {dup}")
+
+        html_m = re.search(r'<html lang="([a-z]+)"', html)
+        self.assertIsNotNone(html_m, "<html> needs a lang attribute")
+        assert html_m is not None
+        self.assertIn(html_m.group(1), ("ja", "en"),
+                      f"html lang={html_m.group(1)!r} outside the supported locales")
+        self.assertTrue(
+            re.search(r"documentElement\.lang\s*=", script),
+            "applyI18n must update documentElement.lang on toggle",
+        )
+
+        for m in re.finditer(r"<form\b[^>]*>(.*?)</form>", html, re.S):
+            for b in re.finditer(r"<button\b([^>]*)>", m.group(1)):
+                self.assertIn(
+                    "type=", b.group(1),
+                    f"<button> inside <form> defaults to submit — "
+                    f"give it an explicit type: {b.group(0)!r}",
+                )
+
+        external = re.findall(r'(?:src|href)\s*=\s*"(https?://[^"]+)"', html)
+        self.assertEqual(external, [],
+                         f"external resource references (offline + CSP): {external}")
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element
