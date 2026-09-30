@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.371
+## Version History: v0.1.37 → v0.2.372
+
+### v0.2.372 (2026-09-29)
+
+- Pin read-path invariants (two tests): test_recent_messages_returns_newest_in_order — list_messages_recent must return the NEWEST N in chronological order (DESC+LIMIT then reversed); an ORDER BY drift to ASC silently serves a notebook's oldest messages forever in the history cap and qa history. test_source_getters_field_parity — get_source and sources_for_notebook build Source positionally from SELECT *; a positional drift in one (origin<->sha256 swap invisible to consumers) silently desyncs the paths. Both fail directions verified.
 
 ### v0.2.371 (2026-09-29)
 

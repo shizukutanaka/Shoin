@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.371")
+        self.assertEqual(VERSION, "0.2.372")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -966,6 +966,35 @@ class TestStore(unittest.TestCase):
             self.assertEqual(row["id"], nb_id)
             self.assertEqual(row["counts"]["sources"], 2)
             self.assertGreater(row["counts"]["chunks"], 0)
+
+    def test_recent_messages_returns_newest_in_order(self) -> None:
+        """list_messages_recent must return the NEWEST N messages in
+        chronological order (DESC+LIMIT then reversed). An ORDER BY drift
+        (DESC -> ASC) silently serves the oldest N — the history cap and
+        qa history would pin a notebook's first messages forever."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            ids = [s.add_message(nb.id, "user", f"m{i}") for i in range(5)]
+            rows = s.list_messages_recent(nb.id, 3)
+            self.assertEqual([int(r["id"]) for r in rows], ids[-3:])
+            self.assertEqual([str(r["body"]) for r in rows], ["m2", "m3", "m4"])
+
+    def test_source_getters_field_parity(self) -> None:
+        """get_source and sources_for_notebook each build Source positionally
+        from SELECT * — a positional drift in one (origin<->sha256 swap is
+        invisible to every consumer) silently desyncs the two read paths.
+        Pin the same row identical through both."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "title-x", "orig-y", "sha-z")
+            one = s.get_source(src.id)
+            many = s.sources_for_notebook(nb.id)
+            self.assertEqual(len(many), 1)
+            self.assertEqual(
+                (one.id, one.notebook_id, one.kind, one.title, one.origin, one.sha256),
+                (many[0].id, many[0].notebook_id, many[0].kind,
+                 many[0].title, many[0].origin, many[0].sha256),
+            )
 
     def test_counts_paths_agree(self) -> None:
         """counts() (notebook detail) and list_notebooks_with_counts() (the
