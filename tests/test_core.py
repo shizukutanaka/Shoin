@@ -102,7 +102,45 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.358")
+        self.assertEqual(VERSION, "0.2.373")
+
+    def test_migration_versions_strictly_increase(self) -> None:
+        """_migrate_once skips `version <= current` — so a migration added
+        with a duplicate or out-of-order version never applies on any
+        already-migrated DB: silent schema drift with no error. Versions
+        must be unique and strictly ascending (append-only)."""
+        versions = [v for v, _ in MIGRATIONS]
+        self.assertEqual(
+            versions,
+            sorted(set(versions)),
+            "MIGRATIONS versions must be unique and strictly ascending",
+        )
+
+    def test_connection_pragmas(self) -> None:
+        """The three connect-time PRAGMAs are load-bearing and silent if
+        dropped: foreign_keys OFF turns every ON DELETE CASCADE into an
+        orphan generator with no error; journal_mode other than WAL
+        serializes the ThreadingHTTPServer's concurrent readers against
+        the writer; busy_timeout too small surfaces 'database is locked'
+        to users under contention. Assert them on a live connection."""
+        with make_store() as s:
+            self.assertEqual(
+                s.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+            self.assertEqual(
+                s.conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000
+            )
+            self.assertIn(
+                s.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                {"wal", "memory"},  # :memory: cannot go WAL
+            )
+        with tempfile.TemporaryDirectory() as d:
+            with Store(str(Path(d) / "wal.db")) as s2:
+                self.assertEqual(
+                    s2.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                    "wal",
+                    "file-backed DB must be in WAL mode",
+                )
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be
@@ -458,6 +496,95 @@ class TestStore(unittest.TestCase):
         self.assertEqual(c["sources"], 2)
         self.assertEqual(c["chunks"], 5)
 
+    def test_chunk_projection_getters_shapes(self) -> None:
+        """The (id, seq, text) / (id, context, text) projections feed the
+        source viewer's cited-passage marks and the reindex path — a
+        SELECT column-order slip silently swaps id<->seq for every
+        caller with no error. Pin shapes against real values."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            ids = s.add_chunks(src.id, ["first", "second"], ["t > a", "t > b"])
+            rows = s.id_seq_text_chunks_for_source(src.id)
+            self.assertEqual(
+                [(i, sq, tx) for i, sq, tx in rows],
+                [(ids[0], 0, "first"), (ids[1], 1, "second")],
+            )
+            rows2 = s.id_context_text_chunks_for_notebook(nb.id)
+            self.assertEqual(
+                [(i, c, tx) for i, c, tx in rows2],
+                [(ids[0], "t > a", "first"), (ids[1], "t > b", "second")],
+            )
+
+    def test_every_write_bumps_notebook_timestamp(self) -> None:
+        """list_notebooks orders by updated_at DESC — a write path that
+        forgets touch_notebook() leaves the notebook ranked as untouched
+        forever (stale ordering, no error). Every mutating op must bump:
+        add_source, update_source_title, update_source_sha256,
+        delete_source, add_note, delete_note, add_studio_output,
+        add_message. Behavioral pin: run each op and assert the stamp
+        moved forward."""
+        import time
+
+        def stamp(s: Store, nb_id: int) -> str:
+            return s.get_notebook(nb_id).updated_at
+
+        ops = [
+            ("add_source",
+             lambda s, nb: s.add_source(nb.id, "txt", "t2", "o2", "h2")),
+            ("update_source_title",
+             lambda s, nb: s.update_source_title(
+                 s.sources_for_notebook(nb.id)[0].id, "new-t", "o")),
+            ("update_source_sha256",
+             lambda s, nb: s.update_source_sha256(
+                 s.sources_for_notebook(nb.id)[0].id, "h-new", "t")),
+            ("add_note", lambda s, nb: s.add_note(nb.id, "nt", "nb-body")),
+            ("delete_note",
+             lambda s, nb: s.delete_note(
+                 s.list_notes(nb.id)[0]["id"])),
+            ("add_studio_output",
+             lambda s, nb: s.add_studio_output(nb.id, "briefing", "b", "{}")),
+            ("add_message",
+             lambda s, nb: s.add_message(nb.id, "user", "hi")),
+            ("delete_source",
+             lambda s, nb: s.delete_source(
+                 s.sources_for_notebook(nb.id)[0].id)),
+        ]
+        for name, op in ops:
+            with make_store() as s:
+                nb = s.create_notebook("nb-" + name)
+                src = s.add_source(nb.id, "txt", "t", "o", "h")
+                s.add_chunks(src.id, ["body"])
+                s.add_note(nb.id, "seed-note", "b")
+                time.sleep(0.011)  # _now() second+ms resolution
+                before = stamp(s, nb.id)
+                op(s, nb)
+                self.assertGreater(
+                    stamp(s, nb.id), before,
+                    f"{name} did not bump updated_at",
+                )
+
+    def test_fts_tracks_chunk_context_update(self) -> None:
+        """The migration-6 chunks_au trigger keeps chunks_fts in sync when
+        update_source_title rewrites chunk contexts — without it the FTS
+        index would keep answering the old title forever (stale index, no
+        error). Assert the renamed title matches and the old one doesn't."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "旧題名アルファ", "o", "h")
+            s.add_chunks(src.id, ["本文のテキスト"], ["旧題名アルファ > 節1"])
+            s.update_source_title(src.id, "新題名ベータ", "o")
+            new_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:新題名ベータ'"
+            ).fetchone()["n"]
+            old_hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts "
+                "WHERE chunks_fts MATCH 'context:旧題名アルファ'"
+            ).fetchone()["n"]
+            self.assertEqual(int(new_hits), 1)
+            self.assertEqual(int(old_hits), 0)
+
     def test_cascade_delete_cleans_fts(self) -> None:
         with make_store() as s:
             nb_id = seed(s)
@@ -478,6 +605,18 @@ class TestStore(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             self.assertEqual(s.get_chunk(chunk.id).embedding, [1.0, 0.0])
+
+    def test_add_message_rejects_unknown_role(self) -> None:
+        """history_messages() coerces any non-"user" role to "assistant" —
+        a typo'd role literal would silently corrupt turn alternation, so
+        add_message must refuse it at the write instead of storing it."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            with self.assertRaises(StoreError) as cm:
+                s.add_message(nb.id, "sysetm", "hi")
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            # ...and nothing was stored.
+            self.assertEqual(s.count_messages(nb.id), 0)
 
     def test_add_message_touches_notebook(self) -> None:
         with make_store() as s:
@@ -806,6 +945,23 @@ class TestStore(unittest.TestCase):
                     s.add_note(nb.id, "t", "b")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_latest_studio_outputs_returns_latest_per_kind(self) -> None:
+        """The Studio tab shows latest_studio_outputs() — the MAX(id)-
+        per-kind subquery is what makes a regenerated output REPLACE its
+        predecessor instead of accumulating. A drift dropping that
+        subquery (all rows back) silently stacks stale outputs; a drift
+        grouping wrong quietly returns dupes. Pin replacement + ordering."""
+        with make_store() as s:
+            nb = s.create_notebook("studio")
+            s.add_studio_output(nb.id, "faq", "old-faq", "{}")
+            s.add_studio_output(nb.id, "faq", "new-faq", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = s.latest_studio_outputs(nb.id)
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "new-faq")],
+            )
+
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
         from unittest.mock import patch
@@ -827,6 +983,49 @@ class TestStore(unittest.TestCase):
             self.assertEqual(row["id"], nb_id)
             self.assertEqual(row["counts"]["sources"], 2)
             self.assertGreater(row["counts"]["chunks"], 0)
+
+    def test_recent_messages_returns_newest_in_order(self) -> None:
+        """list_messages_recent must return the NEWEST N messages in
+        chronological order (DESC+LIMIT then reversed). An ORDER BY drift
+        (DESC -> ASC) silently serves the oldest N — the history cap and
+        qa history would pin a notebook's first messages forever."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            ids = [s.add_message(nb.id, "user", f"m{i}") for i in range(5)]
+            rows = s.list_messages_recent(nb.id, 3)
+            self.assertEqual([int(r["id"]) for r in rows], ids[-3:])
+            self.assertEqual([str(r["body"]) for r in rows], ["m2", "m3", "m4"])
+
+    def test_source_getters_field_parity(self) -> None:
+        """get_source and sources_for_notebook each build Source positionally
+        from SELECT * — a positional drift in one (origin<->sha256 swap is
+        invisible to every consumer) silently desyncs the two read paths.
+        Pin the same row identical through both."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "title-x", "orig-y", "sha-z")
+            one = s.get_source(src.id)
+            many = s.sources_for_notebook(nb.id)
+            self.assertEqual(len(many), 1)
+            self.assertEqual(
+                (one.id, one.notebook_id, one.kind, one.title, one.origin, one.sha256),
+                (many[0].id, many[0].notebook_id, many[0].kind,
+                 many[0].title, many[0].origin, many[0].sha256),
+            )
+
+    def test_counts_paths_agree(self) -> None:
+        """counts() (notebook detail) and list_notebooks_with_counts() (the
+        list view) compute sources/chunks through two different SQL paths —
+        a join/filter drift on either side makes the list row and the detail
+        header silently disagree. Pin them equal on real data, including an
+        empty notebook (LEFT JOIN edge)."""
+        with make_store() as s:
+            nb_id = seed(s)
+            empty = s.create_notebook("empty")
+            by_id = {r["id"]: r["counts"] for r in s.list_notebooks_with_counts()}
+            self.assertEqual(by_id[nb_id], s.counts(nb_id))
+            self.assertEqual(by_id[empty.id], s.counts(empty.id))
+            self.assertEqual(by_id[empty.id], {"sources": 0, "chunks": 0})
 
     def test_set_embedding_missing_chunk_raises(self) -> None:
         with make_store() as s:
@@ -2361,7 +2560,6 @@ class TestIngest(unittest.TestCase):
         with self.assertRaises(IngestError) as cm:
             ing._decode_content_encoding("gzip", _gzip.compress(b"x" * 500)[:-10])
         self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
-
     def test_validate_resolved_zone_scoped_addr_blocked(self) -> None:
         """A getaddrinfo result like 'fe80::1%eth0' is rejected by ip_address() —
         the ValueError tail must map to INGEST_URL_BLOCKED, not escape."""
@@ -11816,6 +12014,32 @@ class TestResidualGuards(unittest.TestCase):
                 f"{sorted(unknown)} — users would set a no-op knob",
             )
 
+
+
+    def test_embed_model_setting_key_is_single_sourced(self) -> None:
+        """The settings-table key recording which embedding model built the
+        stored vectors is read in qa.py and written/read in pipeline.py — as
+        a bare "embed_model" literal at three sites until v0.2.369. A typo at
+        ANY one site silently breaks the model-mismatch guard (reads return
+        None forever, or writes land under a key nobody reads — either way the
+        warning never fires or never stops firing). The key must come from
+        config.EMBED_MODEL_SETTING_KEY everywhere except its definition."""
+        import shoin.config as cfg
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        offenders = []
+        pat = re.compile(r"""(get|set)_setting\(\s*['"]embed_model['"]""")
+        for f in sorted(root.glob("*.py")):
+            if f.name == "config.py":
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line):
+                    offenders.append(f"{f.name}:{i}: {line.strip()}")
+        self.assertEqual(offenders, [], f"literal setting key outside config.py: {offenders}")
+        # And the constant must actually back the round-trip.
+        with make_store() as s:
+            s.set_setting(cfg.EMBED_MODEL_SETTING_KEY, "m1")
+            self.assertEqual(s.get_setting(cfg.EMBED_MODEL_SETTING_KEY), "m1")
 
 
 if __name__ == "__main__":

@@ -1194,6 +1194,196 @@ const fetch = async (path, opts) => {
             "UI reads fields the server never emits:\n" + "\n".join(violations),
         )
 
+    def test_script_hygiene_and_focus_visibility(self) -> None:
+        """Two quiet-degradation classes: (a) the visible focus
+        indicator — remove the :focus-visible rule or blanket
+        outline:none and keyboard users can no longer see where focus
+        is; one scoped exemption (.src-rename, whose border is the
+        indicator) is the maximum. (b) script hygiene — console.*,
+        debugger, eval/new Function, document.write, javascript: URLs,
+        and inline on*= handlers all fail CSP-style review and ship
+        noise or injection surface to users."""
+        html = _html()
+        style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        self.assertRegex(
+            style,
+            r":focus(-visible)?\s*\{[^}]*outline",
+            "no visible focus indicator rule in <style>",
+        )
+        self.assertLessEqual(
+            style.count("outline:none"),
+            1,
+            "more than the one sanctioned scoped outline:none",
+        )
+        self.assertEqual(
+            re.findall(r"console\.\w+|debugger\b|\beval\s*\(|new Function|"
+                       r"document\.write", script),
+            [],
+            "debug/eval constructs in <script>",
+        )
+        self.assertEqual(
+            re.findall(r'javascript:|\son\w+="', html),
+            [],
+            "javascript: URL or inline on*= handler present",
+        )
+
+    def test_document_structure_contract(self) -> None:
+        """Document chrome and outline: the structural bits AT and
+        browsers lean on that degrade silently — found in v0.2.361
+        that the viewer dialog's heading was h3 after a single h1
+        (skipped level). Pins: exactly one non-empty <title>, charset
+        and viewport meta, one <main>, exactly one <h1> and no skipped
+        heading levels, and no positive tabindex (markup or JS-set:
+        positive values fight the natural tab order)."""
+        html = _html()
+        markup = re.sub(
+            r"<script.*?</script>|<style.*?</style>", "", html, flags=re.S
+        )
+        titles = re.findall(r"<title>([^<]*)</title>", markup)
+        self.assertEqual(len(titles), 1, "expected exactly one <title>")
+        self.assertTrue(titles[0].strip(), "empty <title>")
+        self.assertIn("charset", markup, "missing charset meta")
+        self.assertIn("viewport", markup, "missing viewport meta")
+        self.assertEqual(
+            len(re.findall(r"<main\b", markup)), 1, "expected one <main>"
+        )
+        headings = [
+            int(n) for n in re.findall(r"<h([1-6])\b", markup)
+        ]
+        self.assertEqual(
+            headings.count(1), 1, "expected exactly one <h1>"
+        )
+        top = 0
+        skipped = []
+        for n in headings:
+            if n > top + 1:
+                skipped.append(f"h{top} -> h{n}")
+            top = max(top, n)
+        self.assertEqual(
+            skipped, [], f"heading levels must not skip: {skipped}"
+        )
+        bad = re.findall(r'tabindex="(\d+)"', html) + [
+            v for v in re.findall(r"tabIndex\s*=\s*(\d+)", html)
+        ]
+        positive = [v for v in bad if int(v) > 0]
+        self.assertEqual(
+            positive, [], f"positive tabindex found: {positive}"
+        )
+
+    def test_form_controls_have_accessible_names(self) -> None:
+        """A control whose only name is its placeholder loses that name
+        the moment the user types — assistive tech then announces an
+        unlabeled field. Every markup <input>/<textarea>/<select> needs
+        a durable name: aria-label, aria-labelledby, the data-i18n-aria
+        indirection, an associated <label for=>, a wrapping <label>, or
+        a title. (type=hidden controls exempt.) Found in v0.2.360: the
+        four primary inputs were placeholder-only while file/url used
+        the data-i18n-aria pattern."""
+        html = _html()
+        markup = re.sub(
+            r"<script.*?</script>|<style.*?</style>", "", html, flags=re.S
+        )
+        labeled_ids = set(
+            re.findall(r'<label\b[^>]*\bfor="([^"]+)"', markup)
+        )
+        wrapped: set[str] = set()
+        for m in re.finditer(r"<label\b[^>]*>(.*?)</label>", markup, re.S):
+            for im in re.finditer(r'id="([^"]+)"', m.group(1)):
+                wrapped.add(im.group(1))
+        violations: list[str] = []
+        for m in re.finditer(r"<(input|textarea|select)\b([^>]*)>", markup):
+            tag, attrs = m.group(1), m.group(2)
+            if 'type="hidden"' in attrs:
+                continue
+            id_m = re.search(r'id="([^"]+)"', attrs)
+            named = (
+                "aria-label" in attrs
+                or "aria-labelledby" in attrs
+                or "data-i18n-aria" in attrs
+                or "title=" in attrs
+                or (id_m and id_m.group(1) in labeled_ids)
+                or (id_m and id_m.group(1) in wrapped)
+            )
+            if not named:
+                violations.append(
+                    f"<{tag}{attrs}> has no accessible name "
+                    "(placeholder is not durable)"
+                )
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_a11y_lexical_contract(self) -> None:
+        """Misspelled a11y vocabulary fails *silently*: `aria-labelled`
+        (no 'by') or `role="tab-panel"` are ignored by assistive tech
+        with no error anywhere — the element simply loses its wiring.
+
+        Pins: every `aria-*` name used in markup or written via
+        `setAttribute` is a real WAI-ARIA attribute; every `role=` value
+        is a real WAI-ARIA role; and the tabs pattern stays complete —
+        each `role="tab"` carries `aria-selected` + `aria-controls`,
+        each `role="tabpanel"` carries `aria-labelledby`."""
+        html = _html()
+        aria_attrs = {
+            "aria-activedescendant", "aria-atomic", "aria-autocomplete",
+            "aria-braillelabel", "aria-brailleroledescription", "aria-busy",
+            "aria-checked", "aria-colcount", "aria-colindex",
+            "aria-colindextext", "aria-colspan", "aria-controls",
+            "aria-current", "aria-describedby", "aria-description",
+            "aria-details", "aria-disabled", "aria-dropeffect",
+            "aria-errormessage", "aria-expanded", "aria-flowto",
+            "aria-grabbed", "aria-haspopup", "aria-hidden", "aria-invalid",
+            "aria-keyshortcuts", "aria-label", "aria-labelledby",
+            "aria-level", "aria-live", "aria-modal", "aria-multiline",
+            "aria-multiselectable", "aria-orientation", "aria-owns",
+            "aria-placeholder", "aria-posinset", "aria-pressed",
+            "aria-readonly", "aria-relevant", "aria-required",
+            "aria-roledescription", "aria-rowcount", "aria-rowindex",
+            "aria-rowindextext", "aria-rowspan", "aria-selected",
+            "aria-setsize", "aria-sort", "aria-valuemax", "aria-valuemin",
+            "aria-valuenow", "aria-valuetext",
+        }
+        roles = {
+            "alert", "alertdialog", "application", "article", "banner",
+            "button", "cell", "checkbox", "columnheader", "combobox",
+            "complementary", "contentinfo", "definition", "dialog",
+            "directory", "document", "feed", "figure", "form", "grid",
+            "gridcell", "group", "heading", "img", "link", "list",
+            "listbox", "listitem", "log", "main", "marquee", "math",
+            "menu", "menubar", "menuitem", "menuitemcheckbox",
+            "menuitemradio", "navigation", "none", "note", "option",
+            "presentation", "progressbar", "radio", "radiogroup", "region",
+            "row", "rowgroup", "rowheader", "scrollbar", "search",
+            "searchbox", "separator", "slider", "spinbutton", "status",
+            "switch", "tab", "table", "tablist", "tabpanel", "term",
+            "textbox", "timer", "toolbar", "tooltip", "tree", "treegrid",
+            "treeitem",
+        }
+
+        used_aria = set(re.findall(r'\baria-[a-z]+', html))
+        self.assertEqual(
+            sorted(used_aria - aria_attrs), [],
+            "aria-* names outside the WAI-ARIA vocabulary — silently ignored",
+        )
+        used_roles = set(re.findall(r'role="([^"]+)"', html))
+        self.assertEqual(
+            sorted(used_roles - roles), [],
+            "role= values outside the WAI-ARIA vocabulary — silently ignored",
+        )
+
+        tabs = re.findall(r'<button\b(?=[^>]*role="tab")([^>]*)>', html)
+        self.assertTrue(tabs, "no role=tab buttons found — tabs pattern gone")
+        for attrs in tabs:
+            self.assertIn("aria-selected", attrs, "role=tab missing aria-selected")
+            self.assertIn("aria-controls", attrs, "role=tab missing aria-controls")
+        self.assertTrue(
+            re.search(r'role="tablist"', html), "tabs lost their tablist role"
+        )
+        for m in re.finditer(r'role="tabpanel"([^>]*)', html):
+            self.assertIn(
+                "aria-labelledby", m.group(1),
+                "role=tabpanel missing aria-labelledby",
+            )
+
     def test_css_class_names_stay_in_sync(self) -> None:
         """Both directions of the class-name contract fail silently:
 
