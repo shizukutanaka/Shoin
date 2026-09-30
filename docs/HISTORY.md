@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.453
+## Version History: v0.1.37 → v0.2.454
+
+### v0.2.454 (2026-09-30)
+
+- pin zero tolerance for dangerous primitives (eval/exec/compile/
+  __import__/globals/locals calls; pickle/marshal/subprocess/
+  ctypes/code/pty imports and call sites) and mutable default
+  arguments — both defect classes pass lint silently today at
+  zero sites.
 
 ### v0.2.453 (2026-09-30)
 

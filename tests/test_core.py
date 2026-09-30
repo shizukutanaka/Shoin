@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.453")
+        self.assertEqual(VERSION, "0.2.454")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13423,6 +13423,78 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(problems, [], f"undeclared module-level mutables: {problems}")
         self.assertGreaterEqual(
             n_found, 15, f"non-vacuous: expected >=15 mutable globals (got {n_found})"
+        )
+
+    def test_no_dangerous_primitives_or_mutable_defaults(self) -> None:
+        """Two code-shape defect classes that lints/tests do not see:
+
+        1. Dynamic-execution / deserialization primitives — eval, exec,
+           compile, __import__, globals()/locals() mutation, pickle,
+           marshal, subprocess/os.system/os.popen, ctypes. Shoin is a
+           stdlib-only local tool: NONE of these is ever legitimate here,
+           and any one of them is either a code-injection sink (eval'd
+           source text, pickled model output) or a sandbox escape. Today
+           there are zero; the pin keeps it zero.
+
+        2. Mutable default arguments — `def f(x=[], y={})` binds ONE list/
+           dict shared across every call; the classic aliasing bug that
+           passes every test that only calls once. Today there are zero;
+           the pin keeps it zero.
+        """
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        banned_calls = {"eval", "exec", "compile", "__import__", "globals", "locals"}
+        banned_attrs = {"loads", "load"}  # only when receiver is pickle/marshal
+        banned_mods = {"pickle", "marshal", "subprocess", "ctypes", "code", "pty"}
+        problems: list[str] = []
+        n_funcs = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            imported: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        imported.add(a.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".")[0])
+            bad_imports = imported & banned_mods
+            if bad_imports:
+                problems.append(
+                    f"{path.name}: banned imports {sorted(bad_imports)}"
+                )
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    n_funcs += 1
+                    for d in list(node.args.defaults) + [
+                        x for x in node.args.kw_defaults if x is not None
+                    ]:
+                        if isinstance(
+                            d, (ast.List, ast.Dict, ast.Set,
+                                ast.ListComp, ast.DictComp, ast.SetComp)
+                        ):
+                            problems.append(
+                                f"{path.name}:{node.lineno}: mutable default in {node.name}"
+                            )
+                elif isinstance(node, ast.Call):
+                    f = node.func
+                    name = f.id if isinstance(f, ast.Name) else ""
+                    if name in banned_calls:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: call to {name}()"
+                        )
+                    if isinstance(f, ast.Attribute):
+                        root = f.value
+                        root_name = root.id if isinstance(root, ast.Name) else ""
+                        if root_name in banned_mods and f.attr in banned_attrs | {
+                            "run", "call", "Popen", "system", "popen"
+                        }:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: {root_name}.{f.attr}()"
+                            )
+        self.assertEqual(problems, [], f"dangerous constructs: {problems}")
+        self.assertGreaterEqual(
+            n_funcs, 100, f"non-vacuous: expected >=100 functions scanned (got {n_funcs})"
         )
 
     def test_no_todo_fixme_markers_in_production(self) -> None:
