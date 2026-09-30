@@ -503,6 +503,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_unpaired_surrogate_in_required_field_returns_400(self) -> None:
+        """json.loads turns \ud800 escapes into lone surrogates raw UTF-8 bytes
+        can't carry; one reaching a write surfaces as an uncaught
+        UnicodeEncodeError out of the sqlite3 binding — a raw 500 for a
+        client-side format error. The field must be rejected at the
+        validator as VALIDATION_FIELD_FORMAT_INVALID."""
+        status, err = self._json("POST", "/api/notebooks", {"name": "nb\ud800"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
+    def test_unpaired_surrogate_in_optional_field_returns_400(self) -> None:
+        """Same surrogate class through the optional-field validator (note body)."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ok"})
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb['id']}/notes",
+            {"title": "t", "body": "x\udfff"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")  # type: ignore[index]
+
     def test_studio_on_empty_notebook_returns_400(self) -> None:
         """Studio on a notebook with no sources must return 400 NOTEBOOK_EMPTY."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "空ノートブック"})
@@ -805,7 +825,7 @@ class ServerTest(unittest.TestCase):
         """v0.2.315: an accepted socket that never completes its request would
         hold its handler thread forever — REQUEST_SOCKET_SEC bounds any single
         blocking socket op, and the timeout close must not spam a traceback
-        (idle keep-alives are expected traffic)."""
+        (clients that stall mid-request are expected traffic)."""
         import io
         import socket
         import shoin.server as srv_mod
@@ -830,6 +850,48 @@ class ServerTest(unittest.TestCase):
             captured.getvalue(),
             "a socket timeout must close quietly, not log a traceback",
         )
+
+    def test_server_close_does_not_join_inflight_handler_threads(self) -> None:
+        """daemon_threads=True: server_close() must not stall on in-flight reads.
+
+        The server speaks HTTP/1.0, so every connection closes after one
+        request — the parked-thread scenario is a client that stalls
+        mid-request (partial request line, abandoned connection), which parks
+        its handler in rfile.read() for up to REQUEST_SOCKET_SEC (120s). With
+        the default daemon_threads=False, server_close() JOINS that thread —
+        Ctrl+C would hang for the full socket timeout while any request is
+        still in flight. Daemon handler threads die with the process instead."""
+        import socket
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "REQUEST_SOCKET_SEC", 3.0):
+            srv = srv_mod.make_server(
+                port=0, db=str(Path(self.tmp.name) / "s-close.db"), llm=FakeLLM()
+            )
+            th = _th.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05})
+            th.start()
+            sock = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+            try:
+                # Partial request line: the handler parks in rfile.read() until
+                # the (patched) socket timeout, so it is still parked when
+                # server_close() runs — exactly what daemon_threads avoids
+                # joining.
+                sock.sendall(b"GET /api/health HT")
+                time.sleep(0.3)
+                srv.shutdown()
+                started = time.monotonic()
+                srv.server_close()
+                elapsed = time.monotonic() - started
+            finally:
+                sock.close()
+                th.join(timeout=5)
+        # Non-daemon close joins the parked handler until its read times out
+        # (~2.7s here: 3s socket timeout minus the 0.3s head start); daemon
+        # close returns immediately.
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(srv.daemon_threads)
 
     def test_json_body_deep_nesting_returns_400(self) -> None:
         """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
@@ -1769,7 +1831,7 @@ class PostStreamStoreErrorTest(unittest.TestCase):
     def test_handle_error_quiets_timeout_failures(self) -> None:
         """Symmetric contract: a TimeoutError escaping a request thread (e.g. a
         stalled write in finish(), outside handle_one_request's own catch) must
-        be swallowed — idle keep-alive timeouts are routine, not failures."""
+        be swallowed — stalled-client socket timeouts are routine, not failures."""
         import io
         from unittest.mock import patch
 
@@ -2099,6 +2161,37 @@ class NotebookMessagesCapTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(j2["messages_omitted"], 0)
         self.assertEqual(len(j2["messages"]), 12)
+
+    def test_notebook_payload_caps_notes_and_reports_omitted(self) -> None:
+        """v0.2.409: notes had the same unbounded-embed defect the messages cap
+        closed — every detail fetch (openNotebook, the SSE-drop recovery
+        refetch) round-trips every note body, so an accumulating notes pane
+        made each click heavier forever. The payload stays honest:
+        notes_omitted reports the real hidden count for the UI's disclosure
+        line; the full record remains in the DB and in export()."""
+        from shoin.store import Store
+
+        import shoin.server as srv
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_note(nb_id, f"n{i}", f"body {i}")
+        with patch.object(srv, "NB_NOTES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["notes"]), 4)
+        self.assertEqual(j["notes_omitted"], 8)
+        # The newest notes are the embedded ones — dropping the oldest means
+        # the note a user just added is always visible.
+        self.assertEqual(j["notes"][0]["title"], "n8")
+        self.assertEqual(j["notes"][-1]["title"], "n11")
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["notes_omitted"], 0)
+        self.assertEqual(len(j2["notes"]), 12)
 
 
 class SafeReportTest(unittest.TestCase):

@@ -25,6 +25,7 @@ from .config import (
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
     NB_MESSAGES_LIMIT,
+    NB_NOTES_LIMIT,
     REQUEST_SOCKET_SEC,
     VERSION,
     db_path,
@@ -77,6 +78,23 @@ _EXPORT_MIME = {
 # BibTeX files are universally expected to have the .bib extension, not .bibtex.
 _EXPORT_EXT = {"md": "md", "bibtex": "bib", "ris": "ris"}
 
+
+def _check_utf8(key: str, value: str) -> None:
+    """Reject strings that cannot round-trip through UTF-8.
+
+    json.loads materializes lone surrogates from \ud800-style escapes that raw
+    UTF-8 request bytes cannot carry. One reaching a write surfaces as an
+    uncaught UnicodeEncodeError out of the sqlite3 binding — or out of
+    json.dumps(...).encode("utf-8") if it ever reaches a response — a raw 500
+    for what is a client-side format error.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID", f"{key} contains an unpaired surrogate"
+        ) from None
+
 # Hostnames a browser may legitimately use to reach this loopback server.
 # Anything else (e.g. attacker.example rebound to 127.0.0.1) is rejected:
 # DNS rebinding / CSRF defense for the local web UI (spec STRIDE).
@@ -119,6 +137,15 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     if len(recent_msgs) > NB_MESSAGES_LIMIT:
         recent_msgs = recent_msgs[len(recent_msgs) - NB_MESSAGES_LIMIT :]
         omitted = store.count_messages(nb_id) - len(recent_msgs)
+    # Same cap for notes: they embed verbatim in this payload, so an
+    # accumulating notes pane would otherwise make every detail fetch
+    # (openNotebook, the SSE-drop recovery refetch) heavier forever. Newest
+    # NB_NOTES_LIMIT are kept — dropping the oldest means the note a user
+    # just added is always visible; notes_omitted discloses the hidden count
+    # and export() still writes the full record.
+    all_notes = store.list_notes(nb_id)
+    notes_omitted = max(0, len(all_notes) - NB_NOTES_LIMIT)
+    notes = all_notes[notes_omitted:]
     return {
         "id": nb.id,
         "name": nb.name,
@@ -128,8 +155,9 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
             for s in store.sources_for_notebook(nb_id)
         ],
         "notes": [
-            {"id": n["id"], "title": n["title"], "body": n["body"]} for n in store.list_notes(nb_id)
+            {"id": n["id"], "title": n["title"], "body": n["body"]} for n in notes
         ],
+        "notes_omitted": notes_omitted,
         "studio": [
             {
                 "kind": o["kind"],
@@ -249,9 +277,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _drain(self, n: int) -> None:
         """Discard an oversize request body (bounded) so the error reaches the client.
 
-        If Content-Length exceeds our drain cap, leftover bytes in the socket
-        would corrupt the next HTTP/1.1 keep-alive request, so we force a
-        connection close in that case.
+        Responding and closing while a large undrained body still sits in the
+        socket's receive buffer makes the kernel send RST, which can destroy
+        the error response before the client reads it — drain bounded bytes
+        first. The cap bounds the read work; beyond it we stop draining and
+        force a close (already the HTTP/1.0 default, kept as a guard for any
+        future protocol_version change).
         """
         remaining = min(n, MAX_UPLOAD_BYTES + 65536)
         while remaining > 0:
@@ -271,6 +302,7 @@ class _Handler(BaseHTTPRequestHandler):
         value = (raw or "").strip()
         if not value:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}")
+        _check_utf8(key, value)
         return value
 
     def _optional_str(self, data: Json, key: str) -> str:
@@ -286,7 +318,9 @@ class _Handler(BaseHTTPRequestHandler):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
             )
-        return raw or ""
+        value = raw or ""
+        _check_utf8(key, value)
+        return value
 
     # --- routing --------------------------------------------------------
 
@@ -919,10 +953,19 @@ def make_server(
 
 
 class _HTTPServer(ThreadingHTTPServer):
+    # Handler threads are daemons: a client that stalls mid-request (partial
+    # request line, abandoned connection) parks its handler in rfile.read() for
+    # up to REQUEST_SOCKET_SEC, and non-daemon threads are JOINED by
+    # server_close() — Ctrl+C would stall for the full socket timeout whenever
+    # any request is still in flight. Local single-user server semantics make a
+    # dead-at-exit thread strictly correct (the same choice python -m
+    # http.server makes).
+    daemon_threads = True
+
     def handle_error(self, request: Any, client_address: Any) -> None:
-        # Idle keep-alive connections simply hit the per-request socket timeout
-        # and get closed — not an error worth a traceback. Everything else keeps
-        # the default (print to stderr).
+        # A client that stalls mid-request simply hits the per-request socket
+        # timeout and gets closed — not an error worth a traceback. Everything
+        # else keeps the default (print to stderr).
         if isinstance(sys.exc_info()[1], TimeoutError):
             return
         super().handle_error(request, client_address)
