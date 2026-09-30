@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.369")
+        self.assertEqual(VERSION, "0.2.373")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -945,6 +945,23 @@ class TestStore(unittest.TestCase):
                     s.add_note(nb.id, "t", "b")
                 self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
 
+    def test_latest_studio_outputs_returns_latest_per_kind(self) -> None:
+        """The Studio tab shows latest_studio_outputs() — the MAX(id)-
+        per-kind subquery is what makes a regenerated output REPLACE its
+        predecessor instead of accumulating. A drift dropping that
+        subquery (all rows back) silently stacks stale outputs; a drift
+        grouping wrong quietly returns dupes. Pin replacement + ordering."""
+        with make_store() as s:
+            nb = s.create_notebook("studio")
+            s.add_studio_output(nb.id, "faq", "old-faq", "{}")
+            s.add_studio_output(nb.id, "faq", "new-faq", "{}")
+            s.add_studio_output(nb.id, "briefing", "b1", "{}")
+            rows = s.latest_studio_outputs(nb.id)
+            self.assertEqual(
+                [(str(r["kind"]), str(r["body"])) for r in rows],
+                [("briefing", "b1"), ("faq", "new-faq")],
+            )
+
     def test_add_studio_output_notebook_deleted_between_check_and_insert(self) -> None:
         """Same FK-race as add_message but for add_studio_output."""
         from unittest.mock import patch
@@ -966,6 +983,49 @@ class TestStore(unittest.TestCase):
             self.assertEqual(row["id"], nb_id)
             self.assertEqual(row["counts"]["sources"], 2)
             self.assertGreater(row["counts"]["chunks"], 0)
+
+    def test_recent_messages_returns_newest_in_order(self) -> None:
+        """list_messages_recent must return the NEWEST N messages in
+        chronological order (DESC+LIMIT then reversed). An ORDER BY drift
+        (DESC -> ASC) silently serves the oldest N — the history cap and
+        qa history would pin a notebook's first messages forever."""
+        with make_store() as s:
+            nb = s.create_notebook("chat")
+            ids = [s.add_message(nb.id, "user", f"m{i}") for i in range(5)]
+            rows = s.list_messages_recent(nb.id, 3)
+            self.assertEqual([int(r["id"]) for r in rows], ids[-3:])
+            self.assertEqual([str(r["body"]) for r in rows], ["m2", "m3", "m4"])
+
+    def test_source_getters_field_parity(self) -> None:
+        """get_source and sources_for_notebook each build Source positionally
+        from SELECT * — a positional drift in one (origin<->sha256 swap is
+        invisible to every consumer) silently desyncs the two read paths.
+        Pin the same row identical through both."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "title-x", "orig-y", "sha-z")
+            one = s.get_source(src.id)
+            many = s.sources_for_notebook(nb.id)
+            self.assertEqual(len(many), 1)
+            self.assertEqual(
+                (one.id, one.notebook_id, one.kind, one.title, one.origin, one.sha256),
+                (many[0].id, many[0].notebook_id, many[0].kind,
+                 many[0].title, many[0].origin, many[0].sha256),
+            )
+
+    def test_counts_paths_agree(self) -> None:
+        """counts() (notebook detail) and list_notebooks_with_counts() (the
+        list view) compute sources/chunks through two different SQL paths —
+        a join/filter drift on either side makes the list row and the detail
+        header silently disagree. Pin them equal on real data, including an
+        empty notebook (LEFT JOIN edge)."""
+        with make_store() as s:
+            nb_id = seed(s)
+            empty = s.create_notebook("empty")
+            by_id = {r["id"]: r["counts"] for r in s.list_notebooks_with_counts()}
+            self.assertEqual(by_id[nb_id], s.counts(nb_id))
+            self.assertEqual(by_id[empty.id], s.counts(empty.id))
+            self.assertEqual(by_id[empty.id], {"sources": 0, "chunks": 0})
 
     def test_set_embedding_missing_chunk_raises(self) -> None:
         with make_store() as s:

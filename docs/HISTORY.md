@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.369
+## Version History: v0.1.37 → v0.2.373
+
+### v0.2.373 (2026-09-29)
+
+- Pin latest-per-kind studio output semantics (test_latest_studio_outputs_returns_latest_per_kind): the Studio tab shows latest_studio_outputs() — the MAX(id)-per-kind subquery is what makes a regenerated output REPLACE its predecessor instead of accumulating; dropping or weakening it silently stacks stale/dup outputs. Pins replacement plus kind ordering on a live store. Fail direction verified (MAX -> plain id returns the older row, caught).
+
+### v0.2.372 (2026-09-29)
+
+- Pin read-path invariants (two tests): test_recent_messages_returns_newest_in_order — list_messages_recent must return the NEWEST N in chronological order (DESC+LIMIT then reversed); an ORDER BY drift to ASC silently serves a notebook's oldest messages forever in the history cap and qa history. test_source_getters_field_parity — get_source and sources_for_notebook build Source positionally from SELECT *; a positional drift in one (origin<->sha256 swap invisible to consumers) silently desyncs the paths. Both fail directions verified.
+
+### v0.2.371 (2026-09-29)
+
+- Map SYSTEM_* StoreErrors to HTTP 500, not 400 (test_store_error_with_system_code_returns_500): the error dispatcher routed any code not ending _NOT_FOUND/_ALREADY_EXISTS to the client-error 400 branch, so the store's own internal-failure reports (e.g. unexpected constraint violations) told the caller their request was malformed when the server actually failed. SYSTEM_* codes now map to 500 before the fallback. Fail direction verified (dispatch mutation -> 400, caught).
+
+### v0.2.370 (2026-09-29)
+
+- Pin counts-path parity (test_counts_paths_agree): counts() (detail header) and list_notebooks_with_counts() (list view) compute sources/chunks through two different SQL paths; a join-direction or filter drift on either side makes the list row and the detail header silently disagree. Asserts equality on real data including an empty notebook (the LEFT JOIN edge). Fail direction verified (INNER JOIN mutation drops the empty row -> caught).
 
 ### v0.2.369 (2026-09-29)
 
