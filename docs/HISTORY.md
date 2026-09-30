@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.458
+## Version History: v0.1.37 → v0.2.459
+
+### v0.2.459 (2026-09-30)
+
+- add shoin/__main__.py so `python -m shoin` works — the
+  console_script entry exists only post-install, so running the
+  source tree died on 'No module named shoin.__main__'. Both
+  invocations now delegate to the same cli.main(). New file:
+  entry-point only (3 lines), documented here per the
+  file-change policy. End-to-end subprocess test asserts
+  `-m shoin --help` exits 0 with a usage block; fail-verified
+  by removing the file.
 
 ### v0.2.458 (2026-09-30)
 

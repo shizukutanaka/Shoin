@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.458")
+        self.assertEqual(VERSION, "0.2.459")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -9624,6 +9624,33 @@ class TestCLI(unittest.TestCase):
         text = out.getvalue()
         self.assertIn(VERSION, text)
         self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
+
+    def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
+        """`python -m shoin` must reach the same CLI as the `shoin` script.
+
+        The console_script entry only exists after install — running the
+        source tree without `shoin/__main__.py` dies on
+        'No module named shoin.__main__'. Exercise the real end-to-end
+        path: a fresh interpreter, `-m shoin --help`, expect rc 0 and the
+        argparse usage block. Guard rails on the substring only (the exact
+        usage text is argparse's own formatting, not a contract)."""
+        import os
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-m", "shoin", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=root,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[:400])
+        self.assertIn("usage:", proc.stdout.lower())
 
     def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
         import io
