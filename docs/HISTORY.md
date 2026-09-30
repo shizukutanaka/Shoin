@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.435
+## Version History: v0.1.37 → v0.2.436
+
+### v0.2.436 (2026-09-30)
+
+- sync the product-review ledger to v0.2.435 — name the
+  concurrency-contract sealing section (Store dunder TX
+  pin + questions_cache/_QUERY_VEC_CACHE lock-coverage
+  pins, v0.2.431-435); header/test counts updated.
 
 ### v0.2.435 (2026-09-30)
 
