@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.363")
+        self.assertEqual(VERSION, "0.2.364")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -115,6 +115,32 @@ class TestStore(unittest.TestCase):
             sorted(set(versions)),
             "MIGRATIONS versions must be unique and strictly ascending",
         )
+
+    def test_connection_pragmas(self) -> None:
+        """The three connect-time PRAGMAs are load-bearing and silent if
+        dropped: foreign_keys OFF turns every ON DELETE CASCADE into an
+        orphan generator with no error; journal_mode other than WAL
+        serializes the ThreadingHTTPServer's concurrent readers against
+        the writer; busy_timeout too small surfaces 'database is locked'
+        to users under contention. Assert them on a live connection."""
+        with make_store() as s:
+            self.assertEqual(
+                s.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+            self.assertEqual(
+                s.conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000
+            )
+            self.assertIn(
+                s.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                {"wal", "memory"},  # :memory: cannot go WAL
+            )
+        with tempfile.TemporaryDirectory() as d:
+            with Store(str(Path(d) / "wal.db")) as s2:
+                self.assertEqual(
+                    s2.conn.execute("PRAGMA journal_mode").fetchone()[0],
+                    "wal",
+                    "file-backed DB must be in WAL mode",
+                )
 
     def test_migrate_idempotent(self) -> None:
         # Derived from MIGRATIONS, not hardcoded: a version literal here has to be

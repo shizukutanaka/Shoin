@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.363
+## Version History: v0.1.37 → v0.2.364
+
+### v0.2.364 (2026-09-29)
+
+- Pin connect-time PRAGMAs on live connections (test_connection_pragmas): foreign_keys OFF turns every ON DELETE CASCADE into an orphan generator with no error; non-WAL journal_mode serializes ThreadingHTTPServer readers against the writer; a shrunken busy_timeout surfaces 'database is locked' to users under contention. Asserts foreign_keys=1, busy_timeout=5000, and journal_mode=wal on a real file-backed DB. Fail-then-pass verified.
 
 ### v0.2.363 (2026-09-29)
 
