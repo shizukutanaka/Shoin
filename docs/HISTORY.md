@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.444
+## Version History: v0.1.37 → v0.2.445
+
+### v0.2.445 (2026-09-30)
+
+- sync the product-review ledger to v0.2.444 — name the
+  security-funnel section (do_* -> _dispatch pin +
+  sqlite3.connect ownership pin, v0.2.441-444); header/test
+  counts updated.
 
 ### v0.2.444 (2026-09-30)
 
