@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.404
+## Version History: v0.1.37 → v0.2.405
+
+### v0.2.405 (2026-09-29)
+
+- pin that data-mutation SQL literals (INSERT/REPLACE INTO, DELETE
+  FROM, UPDATE ... SET) live only in store.py — a write issued from
+  anywhere else bypasses every write-path guard shipped there
+  (vocabulary checks, updated_at touches, StoreError taxonomy);
+  direct SELECTs elsewhere stay fine, floor keeps the pin non-vacuous
 
 ### v0.2.404 (2026-09-29)
 
