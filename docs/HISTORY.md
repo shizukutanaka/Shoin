@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.421
+## Version History: v0.1.37 → v0.2.422
+
+### v0.2.422 (2026-09-30)
+
+- sync spec.md to v0.2.421: studio_outputs gains its
+  (notebook,kind)→1-row prune semantics; the DB section records
+  the with self.conn atomicity pin across all multi-statement
+  writes and the LLM-response shape-normalization contract
+  (bare-string/null deltas no longer escape as raw 500s)
 
 ### v0.2.421 (2026-09-30)
 
