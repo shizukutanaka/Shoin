@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.487
+## Version History: v0.1.37 → v0.2.488
+
+### v0.2.488
+- **Fix + pin**: `import sre_parse` (inside the ReDoS-geometry pin)
+  emitted a DeprecationWarning on every verify run and ImportErrors
+  once CPython removes the alias — migrated to `re._parser`, the
+  canonical 3.11+ name. New pin
+  `test_no_removed_or_deprecated_stdlib_imports` (TestResidualGuards)
+  AST-scans prod AND test files for every scheduled-removal module:
+  PEP 594 dead batteries (cgi/telnetlib/audioop/...), legacy asyncore/
+  asynchat/imp/smtpd, and the sre_* trio. Relative imports
+  (`from .chunk import`) are excluded — they resolve to sibling
+  package modules, not stdlib. Fail-direction: `import sre_parse`
+  and `import telnetlib` each caught at file:line.
 
 ### v0.2.487
 - **Fix + pin**: response-shape collection reads were defensively

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.487")
+        self.assertEqual(VERSION, "0.2.488")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13684,7 +13684,7 @@ class TestResidualGuards(unittest.TestCase):
         alternation or re.escape() around anything derived from input.
         """
         import ast
-        import sre_parse  # noqa: PLC2701
+        import re._parser as sre_parse  # noqa: PLC2701
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         maxr = sre_parse.MAXREPEAT
@@ -14340,6 +14340,52 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(len(a), 32, a)
         # Floor: the single-producer rule binds to real write sites today.
         self.assertGreaterEqual(now_call_sites, 5, now_call_sites)
+
+    def test_no_removed_or_deprecated_stdlib_imports(self) -> None:
+        """Modules scheduled for removal (PEP 594's "dead batteries" plus the
+        sre_* trio) import silently today and ImportError on a future
+        interpreter — exactly what `import sre_parse` did inside the regex
+        pin (it emitted a DeprecationWarning on every verify run and breaks
+        outright once CPython drops it). The pinned tree has zero; the pin
+        keeps it zero, scanning prod AND test files since the defect lived
+        in tests. `re._parser` is the canonical 3.11+ name and stays legal."""
+        import ast
+
+        dead = {
+            # PEP 594 removals (gone in 3.13)
+            "aifc", "audioop", "cgi", "cgitb", "chunk", "crypt", "imghdr",
+            "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
+            "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",
+            # legacy/deprecated primitives
+            "asyncore", "asynchat", "imp", "smtpd",
+            # the deprecated sre_* aliases — use re._parser instead
+            "sre_parse", "sre_compile", "sre_constants",
+        }
+        root = Path(__file__).resolve().parent.parent
+        problems: list[str] = []
+        n_files = 0
+        for path in sorted(root.glob("shoin/*.py")) + sorted(
+            root.glob("tests/*.py")
+        ):
+            n_files += 1
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [a.name.split(".")[0] for a in node.names]
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.level == 0  # `from .chunk import` is ours, not stdlib
+                ):
+                    names = [node.module.split(".")[0]]
+                for name in names:
+                    if name in dead:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: imports {name}"
+                        )
+        self.assertEqual(problems, [], f"deprecated stdlib imports: {problems}")
+        self.assertGreaterEqual(n_files, 20, n_files)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
