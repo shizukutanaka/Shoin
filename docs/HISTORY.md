@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.515
+## Version History: v0.1.37 → v0.2.516
+
+### v0.2.516
+
+- New pin `test_watched_modules_never_mutated`: writes *into* a
+  watched module's namespace mutate shared interpreter state
+  invisibly to every read-side pin. Three shapes sealed:
+  `os.chmod = fake` / `del os.environ` (runtime monkeypatching —
+  every later call site resolves to the replacement), subscript
+  stores into a watched module's mutable data attribute
+  (`os.environ["X"]=`, `sys.modules["os"]=fake` — injects state or
+  fake modules wholesale), and mutator methods on module data
+  attributes (`sys.path.insert`, `os.environ.update`). Reads like
+  `os.environ.get(...)` stay legal; zero-inventory catalog.
+- The sibling binding pin's dynamic set gained `setattr`/`delattr`
+  on watched modules — the monkeypatch primitive that was missing
+  from the getattr-era list.
+- Fail-direction probed: `os.chmod = None`, `os.environ["X"]=`, and
+  `setattr(os, "chmod", ...)` injections each caught at their line.
 
 ### v0.2.515
 

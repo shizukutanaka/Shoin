@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.515")
+        self.assertEqual(VERSION, "0.2.516")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16189,7 +16189,8 @@ class TestResidualGuards(unittest.TestCase):
                     if (
                         isinstance(f, _ast.Name)
                         and f.id in {
-                            "getattr", "vars", "dir", "__import__",
+                            "getattr", "setattr", "delattr",
+                            "vars", "dir", "__import__",
                         }
                         and node.args
                         and isinstance(node.args[0], _ast.Name)
@@ -16555,6 +16556,100 @@ class TestResidualGuards(unittest.TestCase):
             hits, [],
             "dunder traversal reaches capability with no import at "
             "all:\n" + "\n".join(hits),
+        )
+
+    def test_watched_modules_never_mutated(self) -> None:
+        """Writes *into* a watched module's namespace mutate the shared
+        interpreter state invisibly to every read-side pin:
+
+        - `os.chmod = fake` / `sys.stdout = tee` / `del os.environ` —
+          assigning or deleting a module attribute is runtime
+          monkeypatching: every later `os.chmod` call site resolves
+          to the replacement. Flagged on Assign/AnnAssign/AugAssign/
+          Delete targets that are Attributes on a watched module.
+        - `os.environ["X"] = y` / `sys.modules["os"] = fake` —
+          subscript stores into a watched module's mutable data
+          attribute inject state (or fake modules) wholesale.
+          Flagged when the subscript's value chain bottoms out at a
+          watched-module name.
+        - `sys.path.insert(0, x)` / `os.environ.update(...)` —
+          mutator methods called on watched-module data attributes
+          (import search path, process env). Flagged on the common
+          mutation verb set. `os.environ.get(...)` reads stay legal.
+
+        Live tree is clean on all three shapes — the catalog is a
+        zero-inventory, so any arrival is a loud failure."""
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        mut_verbs = {
+            "append", "insert", "extend", "remove", "clear",
+            "update", "setdefault", "pop", "popitem", "add",
+            "discard", "reverse", "sort",
+        }
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(
+                    node,
+                    (_ast.Assign, _ast.AnnAssign, _ast.AugAssign,
+                     _ast.Delete),
+                ):
+                    tgts = (
+                        node.targets
+                        if isinstance(node, (_ast.Assign, _ast.Delete))
+                        else [node.target]
+                    )
+                    for t in tgts:
+                        if (
+                            isinstance(t, _ast.Attribute)
+                            and isinstance(t.value, _ast.Name)
+                            and t.value.id in watched
+                        ):
+                            hits.append(
+                                f"{path.name}:{node.lineno} write "
+                                f"{t.value.id}.{t.attr}"
+                            )
+                        elif isinstance(t, _ast.Subscript):
+                            v = t.value
+                            while isinstance(v, _ast.Attribute):
+                                if (
+                                    isinstance(v.value, _ast.Name)
+                                    and v.value.id in watched
+                                ):
+                                    hits.append(
+                                        f"{path.name}:{node.lineno} "
+                                        f"{v.value.id}.{v.attr}[..] = "
+                                    )
+                                    break
+                                v = v.value
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and f.attr in mut_verbs
+                        and isinstance(f.value, _ast.Attribute)
+                        and isinstance(f.value.value, _ast.Name)
+                        and f.value.value.id in watched
+                    ):
+                        hits.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{f.value.value.id}.{f.value.attr}."
+                            f"{f.attr}()"
+                        )
+        self.assertEqual(
+            hits, [],
+            "writes into a watched module's namespace mutate shared "
+            "interpreter state invisibly to every pin:\n"
+            + "\n".join(hits),
         )
 
 if __name__ == "__main__":
