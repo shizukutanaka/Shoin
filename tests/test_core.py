@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.502")
+        self.assertEqual(VERSION, "0.2.503")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -3476,7 +3476,8 @@ class TestIngest(unittest.TestCase):
         wrapped: list[bool] = []
 
         class FakeSocket:
-            pass
+            def close(self) -> None:
+                pass
 
         def fake_create_connection(addr: tuple[str, int], timeout: float) -> FakeSocket:
             captured_addr.append(addr)
@@ -13764,7 +13765,7 @@ class TestResidualGuards(unittest.TestCase):
         `suppress(OSError)` site is narrow and stays allowed)."""
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         expected = {
-            "ingest.py": 2,
+            "ingest.py": 3,
             "server.py": 7,
             "cli.py": 1,
             "pipeline.py": 2,
@@ -15072,8 +15073,8 @@ class TestResidualGuards(unittest.TestCase):
             "ingest.py": [
                 "(OSError,http.client.HTTPException)",
                 "(LookupError,UnicodeDecodeError)",
-                "Exception", "Exception", "ImportError", "OSError",
-                "ValueError", "ValueError",
+                "Exception", "Exception", "Exception", "ImportError",
+                "OSError", "ValueError", "ValueError",
                 "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
             ],
             "llm.py": [
@@ -15224,7 +15225,7 @@ class TestResidualGuards(unittest.TestCase):
                 "ValueError", "ValueError", "ValueError",
             ],
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 24 + ["zlib.error"],
+            "ingest.py": ["IngestError"] * 24 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError",
@@ -15384,6 +15385,69 @@ class TestResidualGuards(unittest.TestCase):
             '.casefold()', src,
             "non-vacuous: _norm_query_terms must fold via .casefold()",
         )
+
+    def test_tls_handshake_failure_closes_raw_socket(self) -> None:
+        """v0.2.503: _PinnedHTTPSConnection.connect created the raw TCP
+        socket, then handed it to wrap_socket — if the TLS handshake
+        raised (bad cert, protocol error), the raw socket was orphaned:
+        one leaked fd per failed HTTPS attempt on a long-running server,
+        invisible to tests that never open a real socket. The wrap is
+        now paired with close() on the raw socket whenever it raises.
+        The success path must NOT close (the SSLSocket owns the fd).
+        BaseException classes (KeyboardInterrupt/SystemExit) still leak
+        by design — matching the codebase's never-catch-BaseException
+        convention."""
+        import socket as socket_mod
+        import ssl
+        import unittest.mock as mock_mod
+
+        from shoin.ingest import _PinnedHTTPSConnection
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _BoomCtx:
+            def wrap_socket(self, sock: object, server_hostname: str) -> object:
+                raise ssl.SSLError("handshake failed")
+
+        class _GoodCtx:
+            def wrap_socket(self, sock: object, server_hostname: str) -> object:
+                return object()  # the SSLSocket taking ownership
+
+        conn = _PinnedHTTPSConnection(
+            "example.com", 443, "93.184.216.34", 5.0,
+            context=_BoomCtx(),  # type: ignore[arg-type]
+        )
+        raw = _FakeSock()
+        with mock_mod.patch.object(
+            socket_mod, "create_connection", return_value=raw
+        ):
+            with self.assertRaises(ssl.SSLError):
+                conn.connect()
+        self.assertTrue(
+            raw.closed,
+            "failed TLS handshake must close the raw socket — "
+            "each unclosed attempt leaks one fd",
+        )
+
+        conn2 = _PinnedHTTPSConnection(
+            "example.com", 443, "93.184.216.34", 5.0,
+            context=_GoodCtx(),  # type: ignore[arg-type]
+        )
+        raw2 = _FakeSock()
+        with mock_mod.patch.object(
+            socket_mod, "create_connection", return_value=raw2
+        ):
+            conn2.connect()
+        self.assertFalse(
+            raw2.closed,
+            "success path must not close — SSLSocket owns the fd",
+        )
+        self.assertIsNotNone(conn2.sock)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

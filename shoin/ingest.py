@@ -351,7 +351,16 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         raw = socket.create_connection((self._pinned_ip, self.port), self.timeout)
-        self.sock = self._ssl_context.wrap_socket(raw, server_hostname=self.host)
+        try:
+            self.sock = self._ssl_context.wrap_socket(
+                raw, server_hostname=self.host
+            )
+        except Exception:
+            # On handshake failure the SSLSocket may never take ownership of
+            # the fd — close the raw socket so each failed TLS attempt does
+            # not leak one fd.
+            raw.close()
+            raise
 
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})

@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.502
+## Version History: v0.1.37 → v0.2.503
+
+### v0.2.503
+- **Real fix (fd leak on TLS failure)**:
+  `_PinnedHTTPSConnection.connect` created the raw TCP socket then
+  handed it to `wrap_socket` — a handshake failure (bad cert,
+  protocol error) orphaned the raw socket: one leaked fd per failed
+  HTTPS attempt, accumulating on a long-running server and invisible
+  to tests that never open a real socket. The wrap is now paired
+  with `raw.close()` whenever it raises; the success path leaves
+  ownership with the SSLSocket. `except Exception` (not
+  BaseException) keeps the codebase's never-catch-BaseException
+  convention — the three pin baselines (except-Exception sites,
+  handler signatures, raise inventory) updated accordingly.
+- **New pin**: `test_tls_handshake_failure_closes_raw_socket` —
+  fakes `socket.create_connection` + a raising `wrap_socket`,
+  asserts the raw socket is closed on failure and NOT closed on
+  success. Fail-direction verified: removing `raw.close()` is
+  caught by the assertion.
+- Audited this cycle, clean: all `urlopen` sites are `with`;
+  fetch_url's connection is closed in `finally`; `os.open`/`os.close`
+  is immediately paired; `sqlite3.connect` lives behind Store's
+  `with`-pinned lifecycle; `socket.create_connection` results are
+  owned by `self.sock` and closed via `conn.close()`.
 
 ### v0.2.502
 - **Real fix (Unicode recall hole)**: every lexical-matching path folded
