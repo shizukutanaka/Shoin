@@ -29,7 +29,29 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.484
+## Version History: v0.1.37 → v0.2.485
+
+### v0.2.485
+- **Pin**: `test_timestamps_come_only_from_store_now`
+  (TestResidualGuards) — `ORDER BY updated_at DESC` is a string sort,
+  correct only while every timestamp shares `_now()`'s exact shape
+  (`datetime.now(timezone.utc).isoformat(timespec="microseconds")`,
+  fixed 32 chars ending `+00:00`). A second producer — naive
+  `datetime.now()`, `strftime`, `time.time` — still string-sorts but
+  silently corrupts ordering around the offset suffix, and no test
+  would ever write two different producers at once to notice. AST
+  walk: every clock-producing call (`now`/`utcnow`/`today`/`isoformat`/
+  `strftime`/`strptime`/`fromisoformat`/`mktime`/`time`/`monotonic`/
+  `perf_counter`; `time.sleep` the busy-retry exempted) must live
+  lexically inside `store.py::_now`'s body. Behavioral floor:
+  `_now()` output parses via `fromisoformat` with tz, is 32 chars,
+  non-decreasing; ≥5 real `_now()` write sites exist today.
+  Fail-direction: injected `__import__("time").time()` in search.py →
+  `search.py:1418` caught; restored.
+- **Adjacent audit (clean)**: all `updated_at`/`created_at` writes
+  already funnel through `_now()`; zero `fromisoformat`/`strptime`/
+  `mktime`/`time.time`/`monotonic` reads in prod; `datetime`/`time`
+  imports exist only in store.py (sleep for the lock retry).
 
 ### v0.2.484
 - **Fix (UI)**: `localStorage.getItem("shoin.lang")` ran unguarded at

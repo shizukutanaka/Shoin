@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.484")
+        self.assertEqual(VERSION, "0.2.485")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14219,6 +14219,75 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the invariant must bind to real code — at least one bound body
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
+
+    def test_timestamps_come_only_from_store_now(self) -> None:
+        """`ORDER BY updated_at DESC` is a string sort — every timestamp
+        written to the DB must share `_now()`'s exact shape
+        (`datetime.now(timezone.utc).isoformat(timespec="microseconds")`,
+        fixed 32 chars ending `+00:00`). A second producer — naive
+        `datetime.now()`, `strftime`, `time.time` — emits a differently
+        shaped value that still string-sorts, silently corrupting the
+        notebook/note ordering around the offset suffix. AST pin: every
+        clock-producing call must live lexically inside `store.py::_now`'s
+        body; behavioral pin: `_now()` output parses, carries tz, and is
+        non-decreasing."""
+        import ast
+        from datetime import datetime
+
+        root = Path(__file__).resolve().parent.parent
+        verbs = {
+            "now", "utcnow", "today", "isoformat", "strftime",
+            "strptime", "fromisoformat", "mktime", "time",
+            "monotonic", "perf_counter",
+        }
+        problems: list[str] = []
+        now_call_sites = 0
+        now_node = None
+        for path in root.glob("shoin/*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for fn in ast.walk(tree):
+                if (
+                    isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and path.name == "store.py"
+                    and fn.name == "_now"
+                ):
+                    now_node = fn
+            allowed = {id(n) for n in ast.walk(now_node)} if now_node else set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "sleep"
+                ):
+                    continue  # time.sleep is the busy-retry, not a clock
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in verbs
+                    and id(node) not in allowed
+                ):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: clock call "
+                        f"`{node.func.attr}()` outside store._now"
+                    )
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "_now"
+                    and path.name == "store.py"
+                ):
+                    now_call_sites += 1
+        self.assertEqual(problems, [], problems)
+        self.assertIsNotNone(now_node, "store._now producer missing")
+
+        from shoin.store import _now
+
+        a, b = _now(), _now()
+        self.assertLessEqual(a, b)
+        self.assertIsNotNone(datetime.fromisoformat(a).tzinfo)
+        self.assertTrue(a.endswith("+00:00"), a)
+        self.assertEqual(len(a), 32, a)
+        # Floor: the single-producer rule binds to real write sites today.
+        self.assertGreaterEqual(now_call_sites, 5, now_call_sites)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
