@@ -925,8 +925,9 @@ class CliTest(unittest.TestCase):
 
     def test_ask_shows_misattr_citation_marker(self) -> None:
         """CLI _print_report must print the misattribution marker for misattributed citations."""
-        import io as _io
         import contextlib as _cl
+        import io as _io
+
         import shoin.cli as _cli
 
         report = {
@@ -951,8 +952,9 @@ class CliTest(unittest.TestCase):
         """CLI _print_report must surface the cited source's section breadcrumb
         when the report carries source_contexts (v0.2.131) — CLI parity with the
         seal viewer and Markdown export."""
-        import io as _io
         import contextlib as _cl
+        import io as _io
+
         import shoin.cli as _cli
 
         report = {
@@ -1000,8 +1002,9 @@ class CliTest(unittest.TestCase):
         The fix uses _STRINGS['en'][key] so the fallback is always English.
         """
         import os
-        import shoin.cli as cli_mod
         from unittest.mock import patch
+
+        import shoin.cli as cli_mod
 
         # Construct a _STRINGS dict where a key exists only in "ja"
         patched = {
@@ -1033,8 +1036,9 @@ class CliTest(unittest.TestCase):
 
     def test_overflow_notebook_id_returns_1_not_crash(self) -> None:
         """A notebook ID too large for SQLite int64 must print an error and return 1."""
-        from shoin.cli import main
         import io
+
+        from shoin.cli import main
 
         huge_id = str(2**64)  # well beyond int64 range
         err = io.StringIO()
@@ -1045,8 +1049,9 @@ class CliTest(unittest.TestCase):
 
     def test_overlong_question_cli_returns_1(self) -> None:
         """A question longer than MAX_QUESTION_LEN must be rejected by the CLI."""
-        from shoin.cli import main
         import io
+
+        from shoin.cli import main
 
         err = io.StringIO()
         with patch("sys.stderr", err):
@@ -1117,9 +1122,9 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(cases[0].expected_source_ids, [1, 2])
 
     def test_eval_cli_reports_metrics(self) -> None:
+        import contextlib as _cl
         import io as _io
         import json as _json
-        import contextlib as _cl
 
         from shoin.cli import main
 
@@ -1208,9 +1213,9 @@ class EvalTest(unittest.TestCase):
 
     def test_eval_cli_save_and_diff(self) -> None:
         """End-to-end: --save writes a baseline, --diff prints the delta."""
+        import contextlib as _cl
         import io as _io
         import json as _json
-        import contextlib as _cl
 
         from shoin.cli import main
 
@@ -1246,9 +1251,9 @@ class EvalTest(unittest.TestCase):
         expected-vs-got detail line, and --diff against a k-mismatched,
         question-shifted baseline must print the warn + deltas + matched/new/
         dropped tail."""
+        import contextlib as _cl
         import io as _io
         import json as _json
-        import contextlib as _cl
 
         from shoin.cli import main
 
@@ -1293,9 +1298,9 @@ class EvalTest(unittest.TestCase):
         """_cmd_eval's uncovered error branches must exit rc 1 with a clean
         [CODE] stderr line — unreadable cases file, non-JSON cases, valid JSON
         of the wrong shape, and the same trio for a --diff baseline."""
+        import contextlib as _cl
         import io as _io
         import json as _json
-        import contextlib as _cl
 
         from shoin.cli import main
 
@@ -1365,8 +1370,8 @@ class EvalTest(unittest.TestCase):
     def test_pages_failed_printed_on_add_and_refresh(self) -> None:
         """v0.2.275: a partial PDF index must print the pages_failed warning on
         stderr for BOTH `add` and `source refresh` — never a silent ✓."""
-        import io as _io
         import contextlib as _cl
+        import io as _io
 
         from shoin.cli import main
         from shoin.pipeline import IndexResult
@@ -1398,8 +1403,8 @@ class EvalTest(unittest.TestCase):
         """main()'s serve special-case must map OSError to SYSTEM_PORT_IN_USE
         rc 1, and the top-level KeyboardInterrupt handler must exit 130 —
         neither may leak a traceback."""
-        import io as _io
         import contextlib as _cl
+        import io as _io
 
         from shoin.cli import main
 
