@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.521")
+        self.assertEqual(VERSION, "0.2.522")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16874,6 +16874,51 @@ class TestResidualGuards(unittest.TestCase):
             "interpolated re.* call sites drifted — a new interpolated "
             "pattern must be justified (constants only, or the term "
             "wrapped in re.escape)",
+        )
+
+    def test_unicode_predicate_calls_are_cataloged(self) -> None:
+        """`str.isdigit()`/`isnumeric()`/`isdecimal()` are Unicode-wide:
+        '１２３４'.isdigit() and '²'.isdigit() are True, so a bare call
+        on unnormalized text accepts shapes the code never intended.
+        Every call site is cataloged: today's sites are either
+        `isascii() && isdigit()` guarded (search.py), downstream of
+        NFKC normalization that already folded width/superscripts
+        (citation.py `_part_value`), or on export-format keys where a
+        Unicode digit still parses (export.py). A NEW predicate site
+        is a drift event: it must be justified like these."""
+        import ast as _ast
+
+        baseline: dict[str, int] = {
+            "chunk.py": 1,
+            "citation.py": 2,
+            "export.py": 3,
+            "search.py": 2,
+        }
+        preds = {
+            "isdigit", "isnumeric", "isdecimal",
+            "isspace", "isalpha", "isalnum",
+        }
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        hits: list[str] = []
+        counts: dict[str, int] = {}
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            n = 0
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr in preds
+                ):
+                    n += 1
+                    hits.append(f"{path.name}:{node.lineno}")
+            if n:
+                counts[path.name] = n
+        self.assertEqual(
+            counts, baseline,
+            "unicode-wide predicate call sites drifted — a new "
+            "isdigit/isnumeric/isalpha-family call must be justified "
+            "(isascii-guarded or post-NFKC):\n" + "\n".join(hits),
         )
 
 if __name__ == "__main__":

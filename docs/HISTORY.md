@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.521
+## Version History: v0.1.37 → v0.2.522
+
+### v0.2.522
+
+- New pin `test_unicode_predicate_calls_are_cataloged`: the
+  `isdigit`/`isnumeric`/`isdecimal`/`isspace`/`isalpha`/`isalnum`
+  family is Unicode-wide — `'１２３４'.isdigit()` and `'²'.isdigit()`
+  return True, so a bare call on unnormalized text accepts shapes
+  the code never intended. The 8 live sites are cataloged per file:
+  `isascii() &&` guarded (search.py), post-NFKC where width and
+  superscripts already folded (citation.py `_part_value`), or on
+  export keys where a Unicode digit still parses (export.py). A new
+  predicate call is a drift event requiring the same justification.
+- Fail-direction probed: an `isnumeric` injection in studio.py
+  surfaces in the counts drift at its line; restore green.
 
 ### v0.2.521
 
