@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.517
+## Version History: v0.1.37 → v0.2.518
+
+### v0.2.518
+
+- Ledger sync: product-review.md gains the v0.2.496-517 summary
+  block (the pin-system meta-audit arc — 16 structural pins + 1 real
+  defect sealing every escape route past literal-match AST pins:
+  gate-suppression catalogs, file-mutation verbs, except/raise
+  inventories, the symlink chmod fix, alias/from-import/dynamic-
+  dispatch/verb-as-value/dunder/module-namespace-write bans, and
+  the statement-level bans). Header version + test-count markers
+  updated; spec.md's measured line follows the same count.
 
 ### v0.2.517
 
