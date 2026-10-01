@@ -490,7 +490,7 @@ const fetch = async (path, opts) => {
         (e.g. `GET /api/sources/5/text/extra` reaching src_text). Pin the
         anchors lexically AND behaviorally: build the one concrete path a
         pattern matches, then assert junk on either side doesn't match."""
-        for verb, pattern, name in _Handler._ROUTES:
+        for _verb, pattern, name in _Handler._ROUTES:
             self.assertTrue(pattern.startswith("^"), f"{name}: pattern not ^-anchored")
             self.assertTrue(pattern.endswith("$"), f"{name}: pattern not $-anchored")
             concrete = re.sub(r"\(\\d\+\)", "1", pattern.strip("^$"))
