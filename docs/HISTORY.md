@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.512
+## Version History: v0.1.37 → v0.2.513
+
+### v0.2.513
+
+- New pin `test_watched_verbs_never_become_values`: the binding pins
+  cover names; this covers the remaining route — referencing a
+  watched module's dangerous verb as a *value*. `functools.
+  partial(os.chmod, p)` / `map(os.chmod, paths)` / `handler(os.chmod)`
+  never put the attribute in a call `func`, so every module-attribute
+  inventory missed them. Rule: `<watched>.<danger-verb>` Attributes
+  may appear only as a direct call func or a type annotation
+  (`x: threading.Lock` names a type, not a smuggled callable).
+- Three sibling escapes sealed in the same pin:
+  `sys.modules["os"].chmod(p)` and `globals()["os"].chmod(p)`
+  (Subscript receivers, not Names); `builtins.eval`/`builtins.open`
+  (attribute spelling of call-banned primitives); and
+  `operator.methodcaller("unlink")`/`attrgetter("chmod")` (verb names
+  smuggled as strings).
+- Tuning found by the pin itself: `threading.Lock` used as an
+  *annotation* (`generation_lock: threading.Lock`) is a legitimate
+  type reference — annotation subtrees (AnnAssign/args/returns) are
+  exempt so type usage cannot be flagged as a value escape.
+- Fail-direction probed: `map(os.chmod, ...)`, `sys.modules["os"]
+  .chmod`, and `builtins.eval` injections each caught at their line.
 
 ### v0.2.512
 

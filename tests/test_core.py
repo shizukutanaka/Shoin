@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.512")
+        self.assertEqual(VERSION, "0.2.513")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16266,6 +16266,185 @@ class TestResidualGuards(unittest.TestCase):
             star, [],
             "star imports bypass every module-attribute pin:\n"
             + "\n".join(star),
+        )
+
+    def test_watched_verbs_never_become_values(self) -> None:
+        """The binding pins (v0.2.511/512) cover *names*; this pin covers
+        the remaining route — referencing a watched module's dangerous
+        verb as a *value* rather than a call:
+
+        - `functools.partial(os.chmod, p)` / `map(os.chmod, paths)` /
+          `handler(os.chmod)`: the attribute node never sits in a call
+          `func`, so every module-attribute inventory misses it.
+          Rule: an `<watched>.<danger-verb>` Attribute may appear ONLY
+          as the direct `func` of a Call — as a value it is flagged.
+          Data attributes (`os.sep`, `sys.argv`, `signal.SIGINT`,
+          `os.path`) are not verbs and stay legal, as do pure
+          functions (`re.compile`, `json.loads` — not on the list).
+        - `sys.modules["os"].chmod(p)` / `globals()["os"].chmod(p)`:
+          the receiver is a Subscript, not a Name. Flagged.
+        - `builtins.eval(x)` / `builtins.open(p, "w")`: the attribute
+          spelling of call-banned primitives — flagged as call *and*
+          as value.
+        - `operator.methodcaller("unlink")` /
+          `operator.attrgetter("chmod")`: verb names smuggled as
+          strings — flagged when the literal names a danger verb.
+        """
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        danger_verbs = {
+            # filesystem mutation
+            "unlink", "remove", "rmdir", "rename", "replace", "mkdir",
+            "touch", "symlink_to", "hardlink_to", "write_text",
+            "write_bytes", "chmod", "lchmod", "chown", "lchown",
+            "removedirs", "renames", "utime", "mkfifo", "mknod",
+            "chflags", "lchflags", "setxattr", "removexattr",
+            "truncate", "ftruncate", "rmtree", "copy", "copy2",
+            "copytree", "copyfile", "move", "makedirs", "mktemp",
+            "mkdtemp", "NamedTemporaryFile", "TemporaryFile",
+            "TemporaryDirectory", "SpooledTemporaryFile",
+            # process / exec
+            "system", "popen", "spawnl", "spawnle", "spawnlp",
+            "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+            "execl", "execle", "execlp", "execlpe", "execv", "execve",
+            "execvp", "execvpe", "fork", "forkpty", "kill", "killpg",
+            "posix_spawn", "posix_spawnp", "startfile",
+            # process-global mutation / db handle
+            "connect", "setrecursionlimit", "settrace", "setprofile",
+            "setdefaultencoding", "setswitchinterval",
+            "set_asyncgen_hooks", "addaudithook",
+            # net
+            "socket", "create_connection", "wrap_socket", "create_server",
+            "urlopen",
+            # signal / gc / mp primitives
+            "pthread_kill", "set_wakeup_fd", "freeze", "Process",
+            "Pool",
+            # clock / concurrency
+            "sleep", "now", "utcnow", "fromtimestamp",
+            "utcfromtimestamp", "Lock", "RLock", "Thread", "Timer",
+            "Event", "Condition", "Semaphore", "Barrier", "local",
+        }
+        builtin_danger = {
+            "eval", "exec", "compile", "input", "__import__",
+            "getattr", "setattr", "delattr", "globals", "locals",
+            "vars", "open",
+        }
+        verb_values: list[str] = []
+        dyn: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            call_funcs = {
+                id(n.func)
+                for n in _ast.walk(tree)
+                if isinstance(n, _ast.Call)
+            }
+            annotation_nodes: set[int] = set()
+            for n in _ast.walk(tree):
+                if isinstance(n, _ast.AnnAssign) and n.annotation:
+                    annotation_nodes.update(
+                        id(x) for x in _ast.walk(n.annotation)
+                    )
+                elif isinstance(
+                    n, (_ast.FunctionDef, _ast.AsyncFunctionDef)
+                ):
+                    for arg in (
+                        n.args.args + n.args.kwonlyargs
+                        + n.args.posonlyargs
+                        + [a for a in (n.args.vararg, n.args.kwarg) if a]
+                    ):
+                        if arg.annotation:
+                            annotation_nodes.update(
+                                id(x) for x in _ast.walk(arg.annotation)
+                            )
+                    if n.returns:
+                        annotation_nodes.update(
+                            id(x) for x in _ast.walk(n.returns)
+                        )
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Attribute):
+                    # <watched>.<verb> used as a value (not a call func
+                    # or a type annotation — `x: threading.Lock` names
+                    # the type, it does not smuggle the callable)
+                    if (
+                        isinstance(node.value, _ast.Name)
+                        and node.value.id in watched
+                        and node.attr in danger_verbs
+                        and id(node) not in call_funcs
+                        and id(node) not in annotation_nodes
+                    ):
+                        verb_values.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{node.value.id}.{node.attr} as value"
+                        )
+                    # builtins.<danger> spelled through the module
+                    if (
+                        isinstance(node.value, _ast.Name)
+                        and node.value.id == "builtins"
+                        and node.attr in builtin_danger
+                    ):
+                        verb_values.append(
+                            f"{path.name}:{node.lineno} "
+                            f"builtins.{node.attr}"
+                        )
+                    # sys.modules["os"].<verb> / vars()["os"].<verb>
+                    if isinstance(node.value, _ast.Subscript):
+                        sub = node.value
+                        src = sub.value
+                        if (
+                            isinstance(src, _ast.Attribute)
+                            and src.attr == "modules"
+                            and isinstance(src.value, _ast.Name)
+                            and src.value.id == "sys"
+                        ):
+                            dyn.append(
+                                f"{path.name}:{node.lineno} "
+                                f"sys.modules[..].{node.attr}"
+                            )
+                        if (
+                            isinstance(src, _ast.Call)
+                            and isinstance(src.func, _ast.Name)
+                            and src.func.id in {
+                                "globals", "locals", "vars",
+                            }
+                        ):
+                            dyn.append(
+                                f"{path.name}:{node.lineno} "
+                                f"{src.func.id}()[..].{node.attr}"
+                            )
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    # operator.methodcaller("unlink") / attrgetter("chmod")
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and isinstance(f.value, _ast.Name)
+                        and f.value.id == "operator"
+                        and f.attr in {"methodcaller", "attrgetter"}
+                        and node.args
+                        and isinstance(node.args[0], _ast.Constant)
+                        and isinstance(node.args[0].value, str)
+                        and node.args[0].value in danger_verbs
+                    ):
+                        dyn.append(
+                            f"{path.name}:{node.lineno} operator."
+                            f'{f.attr}("{node.args[0].value}")'
+                        )
+        self.assertEqual(
+            verb_values, [],
+            "dangerous verb referenced as a value bypasses every "
+            "module-attribute pin:\n" + "\n".join(verb_values),
+        )
+        self.assertEqual(
+            dyn, [],
+            "indirect module access bypasses every module-attribute "
+            "pin:\n" + "\n".join(dyn),
         )
 
 if __name__ == "__main__":
