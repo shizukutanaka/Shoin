@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.510
+## Version History: v0.1.37 → v0.2.511
+
+### v0.2.511
+
+- New pin `test_time_and_thread_calls_are_cataloged`: the codebase's
+  entire clock/concurrency call surface is exact-match cataloged —
+  `datetime.now(timezone.utc)` in `_now` + the bounded `time.sleep`
+  backoff + three `threading.Lock()` sites. Naive producers
+  (`utcnow`/`fromtimestamp`/bare `now()`/`datetime(...)`), second
+  timestamp formats (`strftime`/`strptime`/`fromisoformat`), and new
+  `threading.Thread`/`Timer`/`Event` spawns all drift the catalog.
+- Arg-level check: the `datetime.now` site must carry a tz (positional
+  or `tz=`) — swapping `_now`'s body to naive local time fails without
+  touching the inventory.
+- Same pin bans aliased imports of watched modules (`import os as o`
+  evades every module-attribute pin — `o.chmod` never matches
+  `func.value.id == "os"`). `cli.py`'s gratuitous `import json as
+  _json` was the one live violation: renamed to canonical `json`.
+- Fail-direction probed: `time.time`/`datetime.now()`/`threading.Timer`
+  injections and `import os as _o` each caught at their line.
 
 ### v0.2.510
 

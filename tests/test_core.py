@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.510")
+        self.assertEqual(VERSION, "0.2.511")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15156,7 +15156,7 @@ class TestResidualGuards(unittest.TestCase):
                 "Exception", "KeyboardInterrupt",
                 "OSError", "OSError", "OSError", "OSError",
                 "OverflowError", "ValueError", "ValueError",
-                "_json.JSONDecodeError", "_json.JSONDecodeError",
+                "json.JSONDecodeError", "json.JSONDecodeError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
             ],
             "config.py": [
@@ -15999,6 +15999,128 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertGreater(
             sum(found.values()), 0, "non-vacuous: the scan must see sites"
+        )
+
+    def test_time_and_thread_calls_are_cataloged(self) -> None:
+        """The codebase's entire clock/concurrency surface is two call
+        sites — `datetime.now(timezone.utc)` in `_now` (v0.2.485 pinned it
+        as the single timestamp producer so ISO strings sort correctly)
+        and the bounded `time.sleep` backoff in the lock-retry loop, plus
+        three `threading.Lock()` constructions. Everything else would be
+        a silent defect class: `utcnow()`/`fromtimestamp()`/bare
+        `datetime.now()` produce naive datetimes that sort or compare
+        inconsistently with the stored aware-UTC ISO strings; a new
+        `threading.Thread/Timer/Event` spawns concurrency invisible to
+        every lock pin; `strftime`/`strptime`/`fromisoformat` introduce a
+        second, unpaired timestamp format. The catalog is exact-match:
+        any new time-ish or threading call drifts the baseline."""
+        import ast as _ast
+
+        time_mods = {"time", "datetime", "date", "calendar"}
+        thread_mods = {"threading"}
+        bare_names = {
+            "now", "today", "utcnow", "fromtimestamp",
+            "utcfromtimestamp", "fromisoformat", "strptime", "strftime",
+            "mktime", "localtime", "gmtime", "ctime", "sleep", "monotonic",
+            "perf_counter", "process_time", "Thread", "Timer", "Event",
+            "Condition", "Semaphore", "Barrier", "local",
+        }
+
+        baseline = {
+            "store.py": ["datetime.now", "time.sleep"],
+            "qa.py": ["threading.Lock"],
+            "server.py": ["threading.Lock", "threading.Lock"],
+        }
+        actual: dict[str, list[str]] = {}
+        sites: list[str] = []
+        naive_now: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                f = node.func
+                dotted: str | None = None
+                if (
+                    isinstance(f, _ast.Attribute)
+                    and isinstance(f.value, _ast.Name)
+                    and f.value.id in time_mods | thread_mods
+                ):
+                    dotted = f"{f.value.id}.{f.attr}"
+                elif isinstance(f, _ast.Name) and f.id in bare_names:
+                    dotted = f.id
+                elif isinstance(f, _ast.Name) and f.id in {
+                    "datetime", "date", "time",
+                }:
+                    # `from datetime import datetime` makes a bare
+                    # `datetime(y, m, d)` call the naive constructor.
+                    dotted = f.id
+                if dotted is not None:
+                    actual.setdefault(path.name, []).append(dotted)
+                    sites.append(f"{path.name}:{node.lineno} {dotted}")
+                    if (
+                        dotted == "datetime.now"
+                        and not node.args
+                        and not any(kw.arg == "tz" for kw in node.keywords)
+                    ):
+                        naive_now.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            {k: sorted(v) for k, v in actual.items()}, baseline,
+            f"time/threading call inventory drifted at {sites} — new "
+            "clock or concurrency calls must be cataloged (and justified)",
+        )
+        self.assertEqual(
+            naive_now, [],
+            "datetime.now() without tz= produces naive local time — the "
+            "stored ISO strings are aware-UTC; a naive value would sort "
+            "and compare inconsistently",
+        )
+        # Every module-attribute pin in this class matches
+        # `func.value.id == "<module>"` literally — an aliased import
+        # (`import os as o` → `o.chmod(...)`, `from datetime import
+        # datetime as dt`) silently bypasses all of them. Watched
+        # modules must be imported under their canonical name; the
+        # pre-existing `_json`/`_qa_t` aliases cover only module-private
+        # names, which no pin keys on.
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        alias_violations: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Import):
+                    for a in node.names:
+                        if (
+                            a.asname
+                            and a.name.split(".")[0] in watched
+                            and a.asname != a.name
+                        ):
+                            alias_violations.append(
+                                f"{path.name}:{node.lineno} import "
+                                f"{a.name} as {a.asname}"
+                            )
+                elif isinstance(node, _ast.ImportFrom):
+                    mod = (node.module or "").split(".")[0]
+                    if node.level == 0 and mod in watched:
+                        for a in node.names:
+                            if a.asname:
+                                alias_violations.append(
+                                    f"{path.name}:{node.lineno} from "
+                                    f"{node.module} import {a.name} as "
+                                    f"{a.asname}"
+                                )
+        self.assertEqual(
+            alias_violations, [],
+            "aliased import of a watched module bypasses every "
+            "module-attribute pin:\n" + "\n".join(alias_violations),
         )
 
 if __name__ == "__main__":
