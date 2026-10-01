@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.503
+## Version History: v0.1.37 → v0.2.504
+
+### v0.2.504
+- **New pin**: `test_finally_blocks_never_swallow_exceptions` —
+  `return`/`break`/`continue` inside a `finally` body silently
+  discards any in-flight exception (the error neither propagates
+  nor logs; a real error path becomes a quiet early exit). CPython
+  SyntaxWarnings `break`/`continue` there in 3.14; `return` is the
+  legal form of the same defect. Zero tolerance in `shoin/` —
+  every finally block scanned for flow statements.
+- **New pin**: `test_single_arg_minmax_sites_are_cataloged` —
+  `min(seq)`/`max(seq)` on one sequence argument is the
+  rarest-input crash class (ValueError on `[]`), invisible to
+  tests that always pass non-empty data. The only sites today are
+  `_minmax`'s guarded pair in search.py; any new single-arg
+  min/max drifts the catalog and must justify its emptiness guard.
+- Audited this cycle, clean: zero flow-statements in finally;
+  every other `min`/`max` site is a two-arg scalar clamp;
+  `_minmax` guards `if not values` before both calls.
+- Fail-direction verified for both pins (injected `return` in a
+  finally body and a bare `min(seq)` — each caught, then reverted).
 
 ### v0.2.503
 - **Real fix (fd leak on TLS failure)**:

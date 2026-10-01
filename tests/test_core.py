@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.503")
+        self.assertEqual(VERSION, "0.2.504")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15448,6 +15448,85 @@ class TestResidualGuards(unittest.TestCase):
             "success path must not close — SSLSocket owns the fd",
         )
         self.assertIsNotNone(conn2.sock)
+
+    def test_finally_blocks_never_swallow_exceptions(self) -> None:
+        """v0.2.504: `return`/`break`/`continue` inside a `finally` body
+        silently discards any in-flight exception — the exception
+        neither propagates nor logs, so a real error path becomes a
+        quiet early exit that no test catches unless an exception
+        happens to cross that finally at runtime. CPython itself
+        SyntaxWarnings `break`/`continue` there (3.14); `return` is the
+        legal form of the same defect. Zero tolerance for all three in
+        production code: cleanup belongs in the finally body, control
+        flow in the try/except/else."""
+        import ast
+
+        problems: list[str] = []
+        n_finally = 0
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Try) and node.finalbody):
+                    continue
+                n_finally += 1
+                for sub in ast.walk(
+                    ast.Module(body=node.finalbody, type_ignores=[])
+                ):
+                    if isinstance(sub, (ast.Return, ast.Break, ast.Continue)):
+                        problems.append(
+                            f"{path.name}:{sub.lineno}: "
+                            f"{type(sub).__name__} inside finally swallows "
+                            "any in-flight exception"
+                        )
+        self.assertEqual(
+            problems, [],
+            f"control-flow statements inside finally: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_finally, 1,
+            "non-vacuous: the scan must see existing finally blocks",
+        )
+
+    def test_single_arg_minmax_sites_are_cataloged(self) -> None:
+        """v0.2.504: `min(seq)`/`max(seq)` on a single sequence argument
+        raises ValueError on an empty sequence — the rarest-input crash
+        class, invisible to tests that always pass non-empty data. The
+        only such call today is `_minmax`'s pair in search.py, guarded
+        by `if not values: return []` directly above. Catalog the sites
+        per file; a new single-arg min/max must be added with its
+        emptiness guard justified."""
+        import ast
+
+        baseline = {"search.py": 2}
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in ("min", "max")
+                    and len(node.args) == 1
+                    and not node.keywords
+                    and not isinstance(
+                        node.args[0],
+                        (ast.Constant, ast.List, ast.Tuple, ast.Set),
+                    )
+                ):
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f"single-arg min()/max() inventory drifted at {sites} — "
+            "unguarded empty-sequence ValueError risk",
+        )
+        self.assertEqual(
+            sum(actual.values()), 2,
+            "non-vacuous: the _minmax pair must be seen",
+        )
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
