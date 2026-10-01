@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.474
+## Version History: v0.1.37 → v0.2.480
+
+### v0.2.480
+- Extended `test_bare_except_exception_sites_are_curated` with an AST
+  pass over `Try`/`TryStar` handler shapes: the line-level regex and
+  catalog counts cannot see `except (Exception, OSError)` (tuple form
+  — no literal `except Exception` text exists to count) or
+  `except* Exception` (TryStar, legal since the pinned 3.11 floor) —
+  both reach the same catch-all class uncatalogued. Handlers whose
+  type reaches Exception/BaseException through bare/tuple/starred/
+  attribute/subscript shapes now fail unless they are the lone
+  catalogued `except Exception` Name under `Try`. Narrow `except*
+  OSError` and `except (ValueError, OSError)` stay allowed — same
+  policy as narrow except clauses. Probed both directions: tuple and
+  except* injections flagged at file:line, clean tree green.
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin

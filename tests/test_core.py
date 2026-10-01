@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.474")
+        self.assertEqual(VERSION, "0.2.480")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13361,7 +13361,31 @@ class TestResidualGuards(unittest.TestCase):
         the catalogued class), `except BaseException` (same reach), and
         `contextlib.suppress(Exception/BaseException)` (the identical
         silent-swallow under a context manager; the one existing
-        `suppress(OSError)` site is narrow and stays allowed)."""
+        `suppress(OSError)` site is narrow and stays allowed). A line-level
+        regex cannot see two further forms that still reach the same class:
+        `except (Exception, OSError)` (tuple — matches `except Exception`
+        literally nowhere) and `except* Exception` (ExceptionGroup syntax,
+        legal since the pinned 3.11 floor). The AST pass below flags every
+        handler whose type is not a lone `Exception` Name — bare, tuple,
+        except*, or any other shape that reaches the class — is a bypass of
+        the curated catalog."""
+        import ast
+
+        def _reaches(t: "ast.expr | None") -> bool:
+            if t is None:
+                return True
+            if isinstance(t, ast.Name):
+                return t.id in ("Exception", "BaseException")
+            if isinstance(t, ast.Attribute):
+                return t.attr in ("Exception", "BaseException")
+            if isinstance(t, ast.Starred):
+                return _reaches(t.value)
+            if isinstance(t, ast.Tuple):
+                return any(_reaches(elt) for elt in t.elts)
+            if isinstance(t, ast.Subscript):
+                return _reaches(t.value)
+            return False
+
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         expected = {
             "ingest.py": 2,
@@ -13378,6 +13402,25 @@ class TestResidualGuards(unittest.TestCase):
         )
         for path in sorted(shoin_dir.glob("*.py")):
             n = 0
+            tree = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Try, ast.TryStar)):
+                    for handler in node.handlers:
+                        t = handler.type
+                        catalogued_shape = (
+                            isinstance(node, ast.Try)
+                            and isinstance(t, ast.Name)
+                            and t.id == "Exception"
+                        )
+                        if _reaches(t) and not catalogued_shape:
+                            problems.append(
+                                f"{path.name}:{handler.lineno}: "
+                                "catch-all handler bypasses the "
+                                "except-Exception catalog "
+                                "(bare/tuple/except*/BaseException)"
+                            )
             for i, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), 1
             ):
