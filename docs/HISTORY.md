@@ -29,16 +29,61 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.475
+## Version History: v0.1.37 → v0.2.479
+
+### v0.2.479
+- Widened the ruff gate from the minimal `E4/E7/E9/F` baseline to every rule
+  family that passes clean on the codebase, folding hand-maintained audit
+  pins into automatic lint coverage: `W`, `I` (import order), `UP`
+  (pyupgrade on the declared 3.11 floor), `B` (bugbear), `A` (builtin
+  shadowing), `RUF`, `DTZ`, `PGH`, `PERF`, `C4`, `RET`, `TID`, `FA`. The
+  expansion already earned its keep — bugbear caught classes no manual pin
+  covered: loop-variable closures (`B023`: `numeric_mismatches`'s inner
+  `_num_missing` now takes `n`/`conv`/`rate` as parameters instead of
+  closing over the `for n` loop), raise-without-from (`B904`: 11
+  IntegrityError→StoreError translations now chain `from e`, matching the
+  file's own convention), zip-without-strict (`B905`: 11 sites now assert
+  their length invariant via `strict=True`; the pairwise `zip(roles,
+  roles[1:])` explicitly stays `strict=False`), a useless-expression read
+  (`B018`: the deliberate lazy `.port` validation access is now `_ =`), and
+  mutable class defaults (`RUF012`). E501 stays ignored (220 pre-existing
+  >100-col lines, mostly embedded JS harnesses); N/S/TRY/FBT/EM/COM/SIM/
+  T20/PL/ANN are omitted for documented codebase conventions or existing
+  manual pins (see `[tool.ruff.lint]` in pyproject.toml).
+
+### v0.2.478
+- Pinned route arity in `test_route_arity_matches_capture_groups`: every
+  `_ROUTES` entry's capture-group count must equal its handler's parameter
+  count, and every capture must be `(\d+)` — a non-numeric group makes
+  `int(g)` in `_dispatch` raise ValueError (500), and an arity mismatch
+  raises TypeError (500), both only at request time; the v0.2.353
+  route-table pin checked handler-name existence, not call signature fit.
+
+### v0.2.477
+- Pinned full anchoring in `test_route_patterns_are_fully_anchored`: every
+  `_ROUTES` pattern must start `^` and end `$` — `re.match` anchors only
+  the head, so a pattern missing `$` would still match its intended path
+  (all tests green) while prefix-matching arbitrarily longer paths
+  (`GET /api/sources/5/text/extra`) into the wrong handler. Both the
+  lexical check and a behavioral probe (constructed path, `/extra` suffix,
+  `/x` prefix) are asserted.
+
+### v0.2.476
+- Stopped the SSE `error` frame from leaking `str(exc)`: the
+  `build_context` failure path in `_h_ask` now mirrors `_dispatch`'s
+  policy — coded errors (StoreError/IngestError/LLMError) pass their
+  curated `(code, message)`, everything else sends `SYSTEM_INTERNAL_ERROR`
+  with only `type(exc).__name__` (a RuntimeError carrying a file path or
+  SQL text previously reached the client verbatim). Pinned by
+  `test_build_context_error_frame_leaks_type_name_only` and
+  `test_build_context_error_frame_passes_coded_errors`.
 
 ### v0.2.475
-- Release-checkpoint doc sync — `docs/product-review.md` gains the
-  `v0.2.472-474 の要約` block (stdout twin-route closure + the first
-  release tag `v0.2.474` on main) and `docs/spec.md` folds the
-  v0.2.474 pin into the invariants paragraph. Headers → v0.2.474,
-  tests 1114→1116 (two tests arrived via merged main work:
-  `test_decode_content_encoding_bounds_inflated_size`,
-  `test_add_passes_url_target_through_unchanged`).
+- Documentation checkpoint at the v0.2.474 release tag: synced
+  `docs/product-review.md` (v0.2.467–474 summary — stdout twin-route
+  closure + the repo's first release tag) and `docs/spec.md` invariants
+  (v0.2.474 pin), header/quality lines updated to v0.2.474 / 1116 tests
+  (two tests arrived with main's landing: inflate bounds, URL-safe tilde).
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin
