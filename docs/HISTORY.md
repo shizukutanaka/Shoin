@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.514
+## Version History: v0.1.37 → v0.2.515
+
+### v0.2.515
+
+- New pin `test_dunder_traversal_is_banned`: the import-free escape —
+  object-model traversal reaches arbitrary capability without a
+  single watched-module name (`f.__globals__["os"].chmod`,
+  `().__class__.__base__.__subclasses__()`, `__code__`/`__closure__`
+  internals, `__reduce__` pickle-gadget protocol, raw
+  `__get__`/`__set__`/`__delete__`, `mod.__builtins__`,
+  `__loader__`/`__spec__`). Live surface is only benign
+  `.__name__`/`.__init__`; the dangerous set is banned outright
+  while data dunders (`__doc__`, `__file__`, `__cause__`, ...) stay
+  legal.
+- Capability-import pin extended: dynamic module loading
+  (`importlib`/`runpy`/`zipimport`/`modulefinder` — a module that
+  materializes other modules sidesteps the inventory itself),
+  non-http protocols (`smtplib`/`ftplib`/`telnetlib`/`poplib`/
+  `imaplib`/`nntplib`/`xmlrpc` — bypass the SSRF guard wholesale),
+  `concurrent`/`asyncio` (new concurrency capability), and dotted
+  `http.client` (direct fetch skipping the pinned connection; the
+  existing exception-type imports are cataloged as live grants).
+- Fail-direction probed: `f.__globals__`, `import smtplib`, and an
+  `http.client` grant in a new file each caught at their line.
 
 ### v0.2.514
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.514")
+        self.assertEqual(VERSION, "0.2.515")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16464,16 +16464,29 @@ class TestResidualGuards(unittest.TestCase):
         capability = {
             # process spawn / native code / deserialization
             "subprocess", "multiprocessing", "pty", "ctypes", "_ctypes",
-            "pickle", "_pickle", "marshal", "shelve",
+            "pickle", "_pickle", "marshal", "shelve", "concurrent",
             # raw memory / fd & signal plumbing / interpreter hooks
             "mmap", "signal", "fcntl", "termios", "resource", "gc",
             "code", "codeop", "ptyprocess", "winreg", "msvcrt",
-            "select", "selectors",
+            "select", "selectors", "asyncio",
             # raw network (http.server/urllib live outside this list —
             # they are the sanctioned surfaces)
             "socket", "ssl",
+            # dynamic module loading — a module that materializes other
+            # modules sidesteps this very inventory
+            "importlib", "runpy", "zipimport", "modulefinder",
+            # non-http network protocols — bypass the SSRF guard
+            # wholesale
+            "smtplib", "ftplib", "telnetlib", "poplib", "imaplib",
+            "nntplib", "xmlrpc",
         }
-        baseline = {"ingest.py": ["socket", "ssl"]}
+        # Dotted grants: `http.client` (direct fetch, skips the pinned
+        # connection) — `http.server` stays sanctioned.
+        capability_dotted = {"http.client"}
+        baseline = {
+            "ingest.py": ["http.client", "socket", "ssl"],
+            "llm.py": ["http.client"],
+        }
         actual: dict[str, list[str]] = {}
         grants: list[str] = []
         for path in sorted(
@@ -16489,7 +16502,7 @@ class TestResidualGuards(unittest.TestCase):
                     continue
                 for name in names:
                     top = name.split(".")[0]
-                    if top in capability:
+                    if top in capability or name in capability_dotted:
                         actual.setdefault(path.name, []).append(name)
                         grants.append(
                             f"{path.name}:{node.lineno} {name}"
@@ -16499,6 +16512,49 @@ class TestResidualGuards(unittest.TestCase):
             "capability-import inventory drifted at "
             f"{grants} — a new subprocess/ctypes/pickle/raw-socket "
             "grant must be cataloged (and justified)",
+        )
+
+    def test_dunder_traversal_is_banned(self) -> None:
+        """The last import-free escape: object-model traversal reaches
+        arbitrary capability without a single watched-module name —
+        `f.__globals__[\"os\"].chmod`, `().__class__.__base__
+        .__subclasses__()` (the classic sandbox walk to a class that
+        holds os), `fn.__code__`/`__closure__` (bytecode and cell
+        internals), `obj.__reduce__` (the pickle-gadget protocol
+        returning callable+args), `x.__get__`/`__set__`/`__delete__`
+        (raw descriptor invocation), `mod.__builtins__` (the builtins
+        dict on every module) and `mod.__loader__`/`__spec__` (dynamic
+        loading internals). Live surface is just benign
+        `.__name__`/`.__init__`, so the dangerous set is banned
+        outright — data dunders (`__doc__`, `__file__`, `__cause__`,
+        `__version__`, ...) stay legal."""
+        import ast as _ast
+
+        banned = {
+            "__globals__", "__builtins__", "__class__", "__base__",
+            "__bases__", "__subclasses__", "__mro__", "__code__",
+            "__closure__", "__func__", "__get__", "__set__",
+            "__delete__", "__reduce__", "__reduce_ex__",
+            "__getstate__", "__setstate__", "__loader__",
+            "__spec__",
+        }
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Attribute)
+                    and node.attr in banned
+                ):
+                    hits.append(
+                        f"{path.name}:{node.lineno} .{node.attr}"
+                    )
+        self.assertEqual(
+            hits, [],
+            "dunder traversal reaches capability with no import at "
+            "all:\n" + "\n".join(hits),
         )
 
 if __name__ == "__main__":
