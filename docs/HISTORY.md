@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.523
+## Version History: v0.1.37 → v0.2.524
+
+### v0.2.524
+
+- Real defect: `color:var(--ink)` in `.src .src-rename` referenced a
+  custom property never defined in `:root` — the input silently fell
+  back to `initial` (browser default) instead of `--sumi`. Fixed to
+  `var(--sumi)`.
+- New pin `test_css_var_refs_are_defined`: every `var(--x)` in
+  index.html must resolve to a `--x:` definition — undefined custom
+  properties degrade silently to initial/inherit with no signal.
 
 ### v0.2.523
 

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.523")
+        self.assertEqual(VERSION, "0.2.524")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16962,6 +16962,30 @@ class TestResidualGuards(unittest.TestCase):
             "querySelector literals drifted — a selector rename "
             "silently kills its feature (null on every call):\n"
             + "\n".join(sorted((found - {"s"}) ^ baseline)),
+        )
+
+    def test_css_var_refs_are_defined(self) -> None:
+        """Every `var(--x)` reference in index.html must resolve to a
+        `--x:` definition — an undefined custom property silently
+        falls back to `initial`/inherit, degrading the style with no
+        signal (the v0.2.523 `--ink` defect: the source-rename input
+        showed default text color instead of --sumi)."""
+        import re as _re
+
+        html = (
+            Path(__file__).resolve().parent.parent
+            / "shoin" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", html))
+        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", html))
+        missing = sorted(refs - defs)
+        self.assertGreater(len(defs), 5)
+        self.assertGreater(len(refs), 5)
+        self.assertEqual(
+            missing, [],
+            "var(--x) references must resolve to --x: definitions — "
+            "undefined custom properties silently fall back to "
+            "initial/inherit:\n" + "\n".join(missing),
         )
 
 if __name__ == "__main__":
