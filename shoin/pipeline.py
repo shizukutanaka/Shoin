@@ -119,7 +119,9 @@ def _embed_chunks(
             batch_ids = chunk_ids[i : i + batch_size]
             vectors = embed(texts[i : i + batch_size])
             count = 0
-            for cid, vec in zip(batch_ids, vectors):
+            # strict=False: a short vector list is supported input — `done`
+            # must count the pairs actually stored, not the batch size.
+            for cid, vec in zip(batch_ids, vectors, strict=False):
                 # Establish expected dimension from the first vector and validate all
                 # subsequent vectors against it.  A mismatched dimension (e.g. from a
                 # restarting endpoint momentarily returning truncated vectors) would
@@ -209,7 +211,7 @@ def index_source(
     )
     full_contexts = [_chunk_context(source.title, c) for c in contexts]
     chunk_ids = store.add_chunks(source.id, texts, full_contexts)
-    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
+    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     return IndexResult(
         source, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
@@ -338,7 +340,7 @@ def refresh_source(
     chunk_ids = store.replace_chunks_for_source(
         source_id, texts, sha256=extracted.sha256, contexts=full_contexts
     )
-    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts)]
+    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     updated_src = store.get_source(source_id)
     return IndexResult(

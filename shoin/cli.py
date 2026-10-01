@@ -32,7 +32,7 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, reindex_notebook, refresh_source, rename_source
+from .pipeline import index_source, refresh_source, reindex_notebook, rename_source
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions

@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from .citation import CitationReport, looks_like_question, make_report
 from .config import MAX_QUESTION_LEN, ui_lang
 from .llm import LLMError
-from .qa import _LIST_PREFIX_RE, _t as _qa_t, ChatBackend, build_context
+from .qa import _LIST_PREFIX_RE, ChatBackend, build_context
+from .qa import _t as _qa_t
 from .search import Hit
 from .store import STUDIO_KINDS, Store, StoreError
 
