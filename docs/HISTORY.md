@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.500
+## Version History: v0.1.37 → v0.2.501
+
+### v0.2.501
+- **Real fix (chmod-through-symlink)**: the DB-permission repair loop
+  globs `db_name*` and `os.chmod` follows symlinks — inside a shared
+  `--db` parent directory a planted `shoin.sqlite3-evil` symlink would
+  tighten whatever file it pointed at (integrity tamper via our own
+  repair pass). The glob now skips symlinks; real DB/sidecars still
+  tighten. Pinned by `test_db_chmod_repair_never_follows_symlinks`
+  (planted link → victim file keeps its mode).
+- **New pin**: `test_decorators_are_cataloged` — every decorator on a
+  production function must come from the allowed set
+  (staticmethod/classmethod/property/wraps): a decorator silently wraps
+  its function, and the dangerous members (`@lru_cache`, a swallowing
+  custom retry, `@contextmanager` on a writer) are invisible to the
+  name-based scans.
+- Audited this cycle, clean: HTTP response bodies are all bounded
+  (`resp.read(MAX_UPLOAD_BYTES+1)` in ingest, `_MAX_RESPONSE+1` = 32MB
+  in llm, `exc.read(300)` on error bodies); `sqlite3.connect` lives
+  only in store.py; prod has exactly one decorator (a `@staticmethod`);
+  `os.open`/`sqlite3.connect` on the DB path is the only file-open
+  that can follow a link, and the residual write-through-symlink
+  window requires an attacker-writable `--db` parent — where content
+  privacy is already moot.
 
 ### v0.2.500
 - **New pin**: `test_raise_inventory_is_cataloged` — every `raise` in

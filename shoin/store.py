@@ -376,6 +376,10 @@ class Store:
             if db_file.parent == data_dir():
                 os.chmod(db_file.parent, 0o700)
             for f in db_file.parent.glob(db_file.name + "*"):
+                # Never chmod through a symlink: inside a shared --db parent a
+                # planted link would tighten an arbitrary file it points to.
+                if f.is_symlink():
+                    continue
                 with contextlib.suppress(OSError):
                     os.chmod(f, 0o600)
 

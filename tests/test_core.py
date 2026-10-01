@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.500")
+        self.assertEqual(VERSION, "0.2.501")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12504,6 +12504,33 @@ class TestResidualGuards(unittest.TestCase):
                     self.assertEqual(mode(fdb), 0o600)
                     self.assertEqual(mode(foreign), 0o755)
 
+    def test_db_chmod_repair_never_follows_symlinks(self) -> None:
+        """v0.2.501: the chmod repair glob matches `db_name*`, and
+        `os.chmod` follows symlinks — so in a shared `--db` parent a
+        planted `other.db-evil` symlink would tighten whatever file it
+        pointed at. The glob must skip symlinks: a planted link keeps
+        its target untouched while the real DB and sidecars are still
+        tightened."""
+        import os
+        import stat
+
+        from shoin.store import Store
+
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            shared.mkdir(mode=0o755)
+            db = shared / "shoin.sqlite3"
+            victim = Path(tmp) / "victim.txt"
+            victim.write_text("keep me readable")
+            os.chmod(victim, 0o644)
+            link = shared / "shoin.sqlite3-evil"
+            link.symlink_to(victim)
+            with Store(db):
+                self.assertEqual(mode(db), 0o600)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(mode(victim), 0o644)
+
     def test_ci_yml_and_verify_sh_run_the_same_gates(self) -> None:
         """v0.2.298: the repo defines the verification gate twice — ci/ci.yml
         for GitHub Actions and scripts/verify.sh for local runs and the
@@ -15254,6 +15281,46 @@ class TestResidualGuards(unittest.TestCase):
             sum(len(v) for v in actual.values()),
             sum(len(v) for v in baseline.values()),
             "non-vacuous: raise totals drifted from the catalog",
+        )
+
+    def test_decorators_are_cataloged(self) -> None:
+        """Every decorator applied to a production function is pinned to the
+        allowed set — a decorator silently WRAPS its function, and the
+        dangerous members are invisible to the name-based scans: `@lru_cache`
+        (already banned by the primitives pin for unbounded growth), a custom
+        `@retry`/`@timed` that swallows exceptions before the except-handler
+        catalog ever sees them, `@contextmanager` turning a writer's body into
+        a generator whose cleanup runs at a different time. Today's inventory
+        is exactly one `@staticmethod` (store.py's lock-retry helper); the
+        stdlib-trio (staticmethod/classmethod/property) plus `functools.wraps`
+        are pre-justified — anything else must be added to the allowed set
+        with a rationale."""
+        import ast
+
+        allowed = {"staticmethod", "classmethod", "property", "wraps"}
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_seen = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for dec in node.decorator_list:
+                        n_seen += 1
+                        name = ast.unparse(dec)
+                        if name not in allowed:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: "
+                                f"uncataloged decorator @{name}"
+                            )
+        self.assertEqual(
+            problems, [],
+            f"production decorators must come from the allowed set "
+            f"{sorted(allowed)}: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_seen, 1,
+            "non-vacuous: the store.py @staticmethod must be seen",
         )
 
 if __name__ == "__main__":
