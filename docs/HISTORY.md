@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.474
+## Version History: v0.1.37 → v0.2.476
+
+### v0.2.476
+- SSE error-frame information-disclosure fix — `POST .../ask`'s
+  `build_context` failure path emitted `str(exc)` verbatim to the
+  client while `_dispatch`'s catch-all deliberately sends only
+  `type(exc).__name__`; raw messages can carry internals (SQL text,
+  filesystem paths). The frame now mirrors the envelope policy:
+  coded errors (StoreError/IngestError/LLMError) pass their curated
+  (code, message) through; anything else emits SYSTEM_INTERNAL_ERROR
+  + the type name. Pinned by two behavioral tests (type-name-only
+  leak check, coded-error pass-through).
+
+### v0.2.475
+- Release-checkpoint doc sync — `docs/product-review.md` gains the
+  `v0.2.472-474 の要約` block (stdout twin-route closure + the first
+  release tag `v0.2.474` on main) and `docs/spec.md` folds the
+  v0.2.474 pin into the invariants paragraph. Headers → v0.2.474,
+  tests 1114→1116 (two tests arrived via merged main work:
+  `test_decode_content_encoding_bounds_inflated_size`,
+  `test_add_passes_url_target_through_unchanged`).
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin
