@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.496
+## Version History: v0.1.37 → v0.2.497
+
+### v0.2.497
+- **New pin**: `test_gate_suppressions_are_cataloged` — every
+  gate-silencing marker (`noqa` / `type: ignore` / `pragma: no cover`
+  / pyright/pylint/flake8/fmt/isort/ruff cousins) in `shoin/` is pinned
+  to a per-file catalog (cli 2, ingest 2, pipeline 1, server 5); a
+  waiver smuggled inside an unrelated change is invisible to lint,
+  typecheck, and coverage, so the inventory itself is now gated.
+  `pyproject.toml` may not carry `per-file-ignores`, `exclude`,
+  `overrides`, or any `ignore_errors`-class key — file-wide gate
+  narrowing is forbidden at config level too.
+- Audited this cycle, clean: `threading.*` usage is the three
+  declared `Lock()`s only; JS `setTimeout`/`setInterval` sites are
+  already guarded; no `outerHTML`/`insertAdjacentHTML`/`document.write`
+  sinks exist.
 
 ### v0.2.496
 - **Ledger sync**: `docs/product-review.md` brought to v0.2.496 — new

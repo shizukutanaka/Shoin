@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.496")
+        self.assertEqual(VERSION, "0.2.497")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14823,6 +14823,65 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(
             sum(actual.values()), sum(baseline.values()),
             "baseline drifted — update the catalog to the current count",
+        )
+
+    def test_gate_suppressions_are_cataloged(self) -> None:
+        """A suppression marker (``noqa``, ``type: ignore``, ``pragma: no
+        cover``, and tool cousins) switches a gate off for its own line:
+        lint, typecheck and coverage all keep passing while the line
+        opts out of the very check meant to catch its defect — so a
+        waiver smuggled inside an unrelated change is invisible to every
+        gate. The catalog below is the full inventory in production
+        code; every entry is deliberate (http.server's do_* verb names,
+        the optional-dependency ImportError guard, the single embed
+        lambda, the blocking entrypoint lines). Any new suppression
+        drifts the per-file count and fails here until it is cataloged.
+        The same check guards pyproject.toml: per-file-ignores or an
+        exclude/override key would shrink every file's gates at once,
+        so the config may contain none of those keys."""
+        markers = re.compile(
+            r"#\s*(?:noqa\b|type:\s*ignore|pragma:\s*no\s*cover|"
+            r"pyright:\s*ignore|mypy:\s*ignore|pylint:\s*disable|"
+            r"flake8\b|fmt:\s*(?:off|skip)|isort:\s*skip|ruff:\s*noqa)"
+        )
+        root = Path(__file__).resolve().parent.parent
+        baseline = {
+            "cli.py": 2,      # noqa: BLE001 broad CLI catch + pragma on __main__
+            "ingest.py": 2,   # type: ignore[misc] HTMLParser attr + pragma ImportError
+            "pipeline.py": 1,  # noqa: E731 embed lambda
+            "server.py": 5,   # noqa: N802 x4 (do_* verbs) + pragma serve loop
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        for path in sorted(root.glob("shoin/*.py")):
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                hits = markers.findall(line)
+                if hits:
+                    actual[path.name] = actual.get(path.name, 0) + len(hits)
+                    sites.append(f"{path.name}:{i}")
+        self.assertEqual(
+            actual, baseline,
+            f"suppression-marker inventory drifted at {sites} — a new "
+            "waiver must be added to the catalog (and justified), a "
+            "removed waiver subtracted",
+        )
+        gate_narrowing = re.compile(
+            r"^\s*(?:per-file-ignores|extend-exclude|exclude|"
+            r"ignore_errors|disable_error_code|overrides)\s*="
+        )
+        config_hits = [
+            f"pyproject.toml:{i}"
+            for i, line in enumerate(
+                (root / "pyproject.toml").read_text(encoding="utf-8").splitlines(), 1
+            )
+            if gate_narrowing.search(line)
+        ]
+        self.assertEqual(
+            config_hits, [],
+            "pyproject.toml gained a gate-narrowing key — suppressions "
+            "belong inline at the line they waive, cataloged here",
         )
 
 if __name__ == "__main__":
