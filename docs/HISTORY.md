@@ -29,7 +29,28 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.506
+## Version History: v0.1.37 → v0.2.507
+
+### v0.2.507
+
+- New pin `test_lookup_sentinels_are_cataloged`: `.find()`/`.rfind()`/
+  `.index()` call sites are cataloged per file ({ingest:2, search:1}) —
+  find's -1 sentinel is silent (``s[:s.find(x)]`` on absence truncates
+  the last char) and index's ValueError escapes as a 500; new sites
+  must justify their guard, same convention as the file-mutations pin.
+- Same pin bans `f"{expr=}"` debug-`=` markers in production strings —
+  they render `x=42` verbatim into user-facing text/LLM prompts.
+  Detection matches the AST Constant before each FormattedValue to the
+  expression's own source (`label={q}` output stays unflagged:
+  "label" != "q"), and `type(x) == T` compares (subclass-blind;
+  `isinstance` is the convention).
+- Sweep context: every `pop(` site is while/if-guarded or defaulted;
+  `suppress(OSError)` is the single narrow catch in the chmod loop;
+  every `sorted()`/`heapq` call keys or sorts scalars; `type()` calls
+  are `__name__` diagnostics plus one legitimate metaclass
+  construction; the one `for...else` correctly uses
+  else-on-full-completion semantics; no `%`-printf formatting, no
+  platform/sys.version_info branches, no `.partition` uses.
 
 ### v0.2.506
 

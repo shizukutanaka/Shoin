@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.506")
+        self.assertEqual(VERSION, "0.2.507")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15829,6 +15829,87 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertGreaterEqual(n_funcs, 200, "non-vacuous: functions seen")
         self.assertGreaterEqual(n_fors, 50, "non-vacuous: for-loops seen")
+
+    def test_lookup_sentinels_are_cataloged(self) -> None:
+        """v0.2.507: sentinel-and-identity defect classes pinned:
+
+        1. `.find()`/`.rfind()`/`.index()` calls cataloged per file —
+           find's -1 sentinel is silent (used as a slice bound it quietly
+           truncates the last char: ``s[:s.find(x)]`` on absence gives
+           ``s[:-1]``), and index's ValueError escapes as a 500 on
+           attacker-shaped input. Every site today guards the sentinel
+           (`count()` precondition, `p < 0` return, `!= -1` check) or is a
+           deliberately-bounded call — a new site lands in this catalog
+           only by an edit that must justify its guard, same convention as
+           the file-mutations pin.
+        2. f-string debug-`=` leftovers — `f"{x=}"` renders `x=42` into
+           user-facing text (and LLM prompt strings, where a stray
+           ``foo=`` marker corrupts the framing); zero today. Detected
+           via the AST Constant that precedes each FormattedValue inside
+           a JoinedStr: the `=` marker is baked into that literal.
+        3. `type(x) == T` compares — identity compare is blind to
+           subclasses (a NamedTuple-arg is not `type(...) is tuple`);
+           `isinstance` is the codebase convention, zero sites today.
+        """
+        import ast as _ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline = {"ingest.py": 2, "search.py": 1}
+        found: dict[str, int] = {}
+        problems: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr in ("find", "rfind", "index")
+                ):
+                    found[path.name] = found.get(path.name, 0) + 1
+                elif isinstance(node, _ast.JoinedStr):
+                    # `f"{expr=}"` bakes `expr=` into the Constant before
+                    # the FormattedValue; the debug marker is exactly the
+                    # case where that literal equals the formatted
+                    # expression's own source. `f"query={q}"` (label=value
+                    # output) differs — "query" != "q".
+                    vals = node.values
+                    for i in range(len(vals) - 1):
+                        c, nxt = vals[i], vals[i + 1]
+                        if (
+                            isinstance(c, _ast.Constant)
+                            and isinstance(c.value, str)
+                            and c.value.endswith("=")
+                            and isinstance(nxt, _ast.FormattedValue)
+                            and _ast.unparse(nxt.value) == c.value[:-1]
+                        ):
+                            problems.append(
+                                f"{path.name}:{c.lineno}: f-string debug "
+                                f"`=` marker renders {c.value!r} verbatim "
+                                "into output"
+                            )
+                elif isinstance(node, _ast.Compare):
+                    for e in [node.left] + list(node.comparators):
+                        if (
+                            isinstance(e, _ast.Call)
+                            and isinstance(e.func, _ast.Name)
+                            and e.func.id == "type"
+                        ):
+                            problems.append(
+                                f"{path.name}:{e.lineno}: `type()` inside "
+                                "a comparison is subclass-blind"
+                            )
+        self.assertEqual(
+            found, baseline,
+            "find/index call-site catalog drifted — new sites must guard "
+            "the -1 sentinel (or justify the bare call) like the existing "
+            "entries do",
+        )
+        self.assertFalse(
+            problems, "sentinel/identity defect(s):\n" + "\n".join(problems)
+        )
+        self.assertGreater(
+            sum(found.values()), 0, "non-vacuous: the scan must see sites"
+        )
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
