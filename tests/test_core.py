@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.499")
+        self.assertEqual(VERSION, "0.2.500")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15139,6 +15139,121 @@ class TestResidualGuards(unittest.TestCase):
             sum(len(v) for v in actual.values()),
             sum(len(v) for v in baseline.values()),
             "non-vacuous: handler totals drifted from the catalog",
+        )
+
+    def test_raise_inventory_is_cataloged(self) -> None:
+        """Every `raise` in production code is pinned to a per-file
+        type-signature inventory — the mirror of the except-handler pin.
+        The error-code pin curates the CODES inside coded domain errors
+        (StoreError/IngestError/LLMError), but the TYPE raised is a
+        separate surface: a new `raise Exception("generic")` or an uncoded
+        `raise ValueError` on the request path escapes the coded-error
+        mapping and surfaces as an unclassified 500 — while looking
+        perfectly ordinary in review. Today's inventory is fully curated:
+        coded domain errors everywhere the client can see them, builtin
+        guards only where a programmer error is the right signal
+        (ValueError in the internal validators/case-file parser, the
+        loopback-pin guard in build_server, AssertionError on a proven-
+        unreachable line, ArgumentTypeError for argparse), bare
+        re-raises in retry loops, and variable re-raises (`raise
+        last_exc`) carrying the captured exception. A generic
+        `raise Exception`/`raise RuntimeError` anywhere — or one extra
+        ValueError that escapes onto the request path — fails here."""
+        import ast
+
+        def dotted(node: ast.AST) -> str:
+            parts: list[str] = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value  # type: ignore[assignment]
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+            return ".".join(reversed(parts))
+
+        def raise_sig(node: ast.Raise) -> str:
+            if node.exc is None:
+                return "RE-RAISE"
+            exc = node.exc
+            if isinstance(exc, ast.Call):
+                return dotted(exc.func)
+            if isinstance(exc, ast.Name):
+                return f"{exc.id}(ref)"
+            return ast.dump(exc)
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline: dict[str, list[str]] = {
+            "citation.py": [
+                "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError",
+            ],
+            "cli.py": [
+                "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+            ],
+            "evaluate.py": [
+                "ValueError", "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError",
+            ],
+            "export.py": ["ValueError"],
+            "ingest.py": ["IngestError"] * 24 + ["zlib.error"],
+            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
+            "pipeline.py": [
+                "IngestError", "IngestError", "IngestError",
+                "IngestError", "IngestError",
+                "LLMError", "LLMError", "LLMError",
+                "StoreError",
+            ],
+            "qa.py": ["StoreError"],
+            "server.py": [
+                "IngestError", "IngestError", "IngestError",
+                "IngestError", "IngestError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
+                "ValueError",
+            ],
+            "store.py": [
+                "AssertionError", "last_exc(ref)",
+                "RE-RAISE", "RE-RAISE", "RE-RAISE",
+            ] + ["StoreError"] * 47,
+            "studio.py": [
+                "LLMError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
+            ],
+        }
+        actual: dict[str, list[str]] = {}
+        drift: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            sigs: list[str] = []
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise):
+                    sigs.append(raise_sig(node))
+                    drift.append(f"{path.name}:{node.lineno}")
+            if sigs:
+                actual[path.name] = sorted(sigs)
+        for name, sigs in actual.items():
+            expected = baseline.get(name)
+            if expected is None or sorted(expected) != sigs:
+                self.fail(
+                    f"raise inventory drifted at {drift} — new raises "
+                    "must be added to the catalog (and justified): "
+                    "uncoded/generic exception types escaping onto a "
+                    "request path are exactly what this pin exists to "
+                    "catch"
+                )
+        for name in baseline:
+            if name not in actual:
+                self.fail(
+                    f"{name}: cataloged raises vanished — removed "
+                    "raises must be subtracted from the catalog"
+                )
+        self.assertEqual(
+            sum(len(v) for v in actual.values()),
+            sum(len(v) for v in baseline.values()),
+            "non-vacuous: raise totals drifted from the catalog",
         )
 
 if __name__ == "__main__":

@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.499
+## Version History: v0.1.37 → v0.2.500
+
+### v0.2.500
+- **New pin**: `test_raise_inventory_is_cataloged` — every `raise` in
+  `shoin/` is pinned to a per-file type-signature inventory (the mirror
+  of the except-handler pin). The error-code pin curates the CODES
+  inside coded domain errors, but the TYPE raised is a separate
+  surface: a generic `raise Exception("...")` or an uncoded
+  `raise ValueError` on the request path escapes the coded-error
+  mapping and surfaces as an unclassified 500 while looking perfectly
+  ordinary in review. Today's inventory is fully curated: coded domain
+  errors wherever the client can see them; builtin guards only where a
+  programmer error is the right signal (`ValueError` in internal
+  validators, the loopback pin in `build_server`, `AssertionError` on a
+  proven-unreachable line, `argparse.ArgumentTypeError`); bare
+  re-raises and variable re-raises (`raise last_exc`) in retry loops.
+- Audited this cycle, clean: both `while True` loops are bounded by
+  invariant (decompressor output capped by `_check_size`, `str.find`
+  start strictly increases); all `yield` sites are streaming
+  generators; no `global`/`nonlocal`/`del`/`assert` statements in prod;
+  every dynamic `getattr` uses a literal name + default.
 
 ### v0.2.499
 - **New pin**: `test_except_handler_inventory_is_cataloged` — every
