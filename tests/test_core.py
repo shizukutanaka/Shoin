@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.520")
+        self.assertEqual(VERSION, "0.2.521")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16800,6 +16800,80 @@ class TestResidualGuards(unittest.TestCase):
             "args.<attr> reads must resolve to a declared argparse "
             "destination (declared: " + ",".join(sorted(declared)) +
             "):\n" + "\n".join(unknown),
+        )
+
+    def test_interpolated_regexes_are_cataloged(self) -> None:
+        """A `re.*` call whose pattern argument interpolates a
+        NON-constant value injects the caller's string into regex
+        syntax — an unescaped user term can rewrite match semantics
+        or raise re.error at runtime (and ReDoS hygiene can't be
+        verified statically). Today's 9 interpolated sites all
+        interpolate module-level constants only (character classes,
+        numeric fragments); the one runtime-term path wraps it in
+        `re.escape` (search.py). Any NEW interpolated regex is a
+        drift event: it must be justified here — either static
+        constants like today or an explicitly escaped term."""
+        import ast as _ast
+
+        baseline: dict[str, list[int]] = {
+            "chunk.py": [100],
+            "citation.py": [513, 517, 567, 872, 1252, 1457],
+            "search.py": [55, 754],
+        }
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        actual: dict[str, list[int]] = {}
+        escaped_interps: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                f = node.func
+                if not (
+                    isinstance(f, _ast.Attribute)
+                    and isinstance(f.value, _ast.Name)
+                    and f.value.id == "re"
+                ):
+                    continue
+                for a in node.args:
+                    interp = any(
+                        isinstance(s, _ast.JoinedStr)
+                        or (
+                            isinstance(s, _ast.BinOp)
+                            and isinstance(s.op, _ast.Mod)
+                        )
+                        or (
+                            isinstance(s, _ast.Call)
+                            and isinstance(s.func, _ast.Attribute)
+                            and s.func.attr == "format"
+                        )
+                        for s in _ast.walk(a)
+                    )
+                    if interp:
+                        esc = any(
+                            isinstance(s, _ast.Call)
+                            and isinstance(s.func, _ast.Attribute)
+                            and s.func.attr == "escape"
+                            and isinstance(s.func.value, _ast.Name)
+                            and s.func.value.id == "re"
+                            for s in _ast.walk(a)
+                        )
+                        actual.setdefault(path.name, []).append(
+                            node.lineno
+                        )
+                        if esc:
+                            escaped_interps.append(
+                                f"{path.name}:{node.lineno}"
+                            )
+        self.assertEqual(
+            escaped_interps, ["search.py:754"],
+            "the runtime-term regex path must keep its re.escape",
+        )
+        self.assertEqual(
+            actual, baseline,
+            "interpolated re.* call sites drifted — a new interpolated "
+            "pattern must be justified (constants only, or the term "
+            "wrapped in re.escape)",
         )
 
 if __name__ == "__main__":

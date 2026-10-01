@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.520
+## Version History: v0.1.37 → v0.2.521
+
+### v0.2.521
+
+- New pin `test_interpolated_regexes_are_cataloged`: an interpolated
+  regex pattern injects its value into regex syntax — an unescaped
+  runtime term can rewrite match semantics or raise re.error (and
+  defeats static ReDoS review). The 9 live interpolated sites all
+  interpolate module-level constants; the one runtime-term path
+  keeps its `re.escape` (search.py) pinned as a separate assertion.
+  Any new interpolated re.* call is a drift event requiring
+  justification.
+- Fail-direction probed: an f-string `re.compile` injection in
+  studio.py surfaces at its line; restore green.
 
 ### v0.2.520
 
