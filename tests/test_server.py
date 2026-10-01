@@ -2689,6 +2689,10 @@ class SSEConnectionErrorTest(unittest.TestCase):
         self.assertNotIn("done", kinds)
         err_payload = [d for e, d in events if e == "error"][0]
         self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        # v0.2.508: the client sees only the exception type name — the raw
+        # str(exc) ("ctx boom" here, but DB paths/LLM internals in general)
+        # stays on stderr, matching the _dispatch 500 path's policy.
+        self.assertEqual(err_payload["message"], "RuntimeError")
         # The dangling-turn guard: an empty assistant turn was persisted.
         with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
             msgs = store.list_messages(nb_id)

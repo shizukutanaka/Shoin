@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.507
+## Version History: v0.1.37 → v0.2.508
+
+### v0.2.508
+
+- SSE mid-stream error frame leaked the raw `str(exc)` to the client
+  (DB paths, query fragments, LLM internals) while the `_dispatch` 500
+  path already sent only `type(exc).__name__` (v0.2.476). The
+  build_context-failure path now sends the type name and logs the full
+  exception to stderr instead — same leak class, same fix.
+  `test_build_context_error_frame_and_no_dangling_turn` now pins the
+  client-visible `message` to the type name.
 
 ### v0.2.507
 
