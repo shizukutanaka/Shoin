@@ -12,8 +12,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,7 +27,13 @@ from shoin.ingest import (
     html_to_text,
     validate_public_url,
 )
+from shoin.llm import LLMError
+from shoin.pipeline import _embed_chunks, _embed_input, rename_source
 from shoin.search import (
+    Hit,
+    _char_bigrams,
+    _fallback_needles,
+    _kanji_skeleton,
     bm25_search,
     fts_query,
     lexical_overlap,
@@ -38,10 +44,8 @@ from shoin.search import (
     rrf_fuse,
     strip_neg_terms,
     term_variants,
+    vector_search,
 )
-from shoin.llm import LLMError
-from shoin.pipeline import _embed_chunks, _embed_input, rename_source
-from shoin.search import Hit, _char_bigrams, _fallback_needles, _kanji_skeleton, vector_search
 from shoin.store import MIGRATIONS, Store, StoreError, _retry_on_lock, pack_vector, unpack_vector
 
 JA = "書院は知の書斎である。引用付きで文書と対話する。"
@@ -83,7 +87,7 @@ class _RacyConn:
     def __getattr__(self, name: str):  # delegate commit/execute-free members
         return getattr(self._inner, name)
 
-    def __enter__(self) -> "_RacyConn":
+    def __enter__(self) -> _RacyConn:
         self._inner.__enter__()
         return self
 
@@ -644,7 +648,7 @@ class TestStore(unittest.TestCase):
     def test_vector_roundtrip(self) -> None:
         vec = [0.1, -0.5, 3.25]
         out = unpack_vector(pack_vector(vec))
-        for a, b in zip(vec, out):
+        for a, b in zip(vec, out, strict=True):
             self.assertAlmostEqual(a, b, places=5)
 
     def test_embedding_persist(self) -> None:
@@ -1418,9 +1422,9 @@ class TestStore(unittest.TestCase):
         'CREATE VIRTUAL TABLE chunks_fts' raised OperationalError: table already exists
         because virtual tables did not support IF NOT EXISTS in the migration string.
         """
+        import os
         import tempfile
         import threading
-        import os
         errors: list[Exception] = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2273,7 +2277,7 @@ class TestIngest(unittest.TestCase):
         """UTF-8 BOM (EF BB BF) from Windows Notepad must be stripped, not left as U+FEFF."""
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "bom.txt"
-            p.write_bytes(b"\xef\xbb\xbf" + "BOM付きテキスト。".encode("utf-8"))
+            p.write_bytes(b"\xef\xbb\xbf" + "BOM付きテキスト。".encode())
             text = extract_file(p).text
             self.assertNotIn("﻿", text, "BOM character must not appear in extracted text")
             self.assertIn("BOM付きテキスト", text)
@@ -3181,6 +3185,7 @@ class TestIngest(unittest.TestCase):
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
         import socket
+
         import shoin.ingest as ing
 
         with patch.object(ing.socket, "getaddrinfo", side_effect=socket.gaierror("NXDOMAIN")):
@@ -3444,6 +3449,7 @@ class TestIngest(unittest.TestCase):
     def test_pinned_https_connection_connect(self) -> None:
         """_PinnedHTTPSConnection.connect() must use the pinned IP and wrap with SSL (lines 217-218)."""
         import ssl
+
         import shoin.ingest as ing
 
         ctx = ssl.create_default_context()
@@ -3893,7 +3899,7 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb_id = seed(s)
             chunks = s.chunks_for_notebook(nb_id)
-            for i, c in enumerate(chunks):
+            for c in chunks:
                 vec = [1.0, 0.0] if "書斎" in c.text else [0.0, 1.0]
                 s.set_embedding(c.id, vec)
             hits = retrieve(s, nb_id, "知の書斎", query_vec=[1.0, 0.0], k=3)
@@ -3970,6 +3976,7 @@ class TestSearch(unittest.TestCase):
     def test_prf_skips_when_pool_already_filled(self) -> None:
         """A first pass at capacity has no recall head-room: no second pass."""
         from unittest.mock import patch
+
         from shoin import search as search_mod
 
         with make_store() as s:
@@ -4017,7 +4024,7 @@ class TestSearch(unittest.TestCase):
     def test_proximity_single_term_returns_zero(self) -> None:
         """One-term queries have no pair to be near: prox must be 0.0 and the
         score path byte-identical to before the signal existed."""
-        from shoin.search import _proximity_from_norm, _norm_query_terms
+        from shoin.search import _norm_query_terms, _proximity_from_norm
 
         self.assertEqual(
             _proximity_from_norm(_norm_query_terms("免疫"), "免疫は免疫である。"), 0.0
@@ -4026,7 +4033,7 @@ class TestSearch(unittest.TestCase):
     def test_proximity_tight_window_scores_above_scattered(self) -> None:
         """Terms co-occurring in one phrase must outscore the same terms
         scattered far apart in the text."""
-        from shoin.search import _proximity_from_norm, _norm_query_terms
+        from shoin.search import _norm_query_terms, _proximity_from_norm
 
         terms = _norm_query_terms("気候変動 影響")
         tight = "気候変動の影響について述べる。"
@@ -4038,7 +4045,7 @@ class TestSearch(unittest.TestCase):
 
     def test_proximity_zero_when_fewer_than_two_terms_present(self) -> None:
         """A chunk containing only one of the query terms has no co-occurrence."""
-        from shoin.search import _proximity_from_norm, _norm_query_terms
+        from shoin.search import _norm_query_terms, _proximity_from_norm
 
         self.assertEqual(
             _proximity_from_norm(_norm_query_terms("気候変動 影響"), "気候変動について。"),
@@ -4399,7 +4406,7 @@ class TestSearch(unittest.TestCase):
         _kana_alt() returns the original string unchanged for pure kanji, so no
         duplicate OR branches should appear.
         """
-        from shoin.search import fts_query, _kana_alt
+        from shoin.search import _kana_alt, fts_query
         # Pure kanji term — no kana characters → unchanged
         self.assertEqual(_kana_alt("書院"), "書院")
         # fts_query for 3-char pure kanji: one trigram (itself), no alternate.
@@ -6754,7 +6761,8 @@ class TestLLMClient(unittest.TestCase):
         until context exhaustion — minutes of garbage on local hardware."""
         import json as _json
         from unittest.mock import MagicMock, patch
-        from shoin.llm import LLMClient, MAX_TOKENS
+
+        from shoin.llm import MAX_TOKENS, LLMClient
 
         sent: list[bytes] = []
         mock_resp = MagicMock()
@@ -6779,7 +6787,8 @@ class TestLLMClient(unittest.TestCase):
         one a parrot loop actually hits in the UI."""
         import json as _json
         from unittest.mock import MagicMock, patch
-        from shoin.llm import LLMClient, MAX_TOKENS
+
+        from shoin.llm import MAX_TOKENS, LLMClient
 
         sent: list[bytes] = []
         mock_resp = MagicMock()
@@ -6811,7 +6820,7 @@ class TestLLMClient(unittest.TestCase):
 
         from shoin.llm import LLMClient
 
-        def _chat_with(finish: str | None) -> "LLMClient":
+        def _chat_with(finish: str | None) -> LLMClient:
             mock_resp = MagicMock()
             mock_resp.__enter__ = lambda s: s
             mock_resp.__exit__ = MagicMock(return_value=False)
@@ -6857,6 +6866,7 @@ class TestLLMClient(unittest.TestCase):
         the answer; _message_text must join the text parts instead (v0.2.259)."""
         import json as _json
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         mock_resp = MagicMock()
@@ -6882,6 +6892,7 @@ class TestLLMClient(unittest.TestCase):
         into repr text that citation badges then decorate as a real answer."""
         import json as _json
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient, LLMError
 
         mock_resp = MagicMock()
@@ -6902,6 +6913,7 @@ class TestLLMClient(unittest.TestCase):
         """Stream deltas carry the same parts-list shape; malformed non-text
         deltas are dropped rather than str()-coerced into the answer."""
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         mock_resp = MagicMock()
@@ -6939,6 +6951,7 @@ class TestLLMClient(unittest.TestCase):
         """
         import http.client
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient, LLMError
 
         exc = http.client.IncompleteRead(b"partial", 100)
@@ -6962,12 +6975,13 @@ class TestLLMClient(unittest.TestCase):
         """
         import http.client
         from unittest.mock import patch
+
         from shoin.llm import LLMClient, LLMError
 
         exc = http.client.IncompleteRead(b"data: {", 50)
 
         class _TruncatedResp:
-            def __enter__(self) -> "_TruncatedResp":
+            def __enter__(self) -> _TruncatedResp:
                 return self
 
             def __exit__(self, *a: object) -> bool:
@@ -6996,7 +7010,7 @@ class TestLLMClient(unittest.TestCase):
         exact 4-8GB RAM systems this project targets."""
         from unittest.mock import patch
 
-        from shoin.llm import LLMClient, LLMError, _MAX_RESPONSE
+        from shoin.llm import _MAX_RESPONSE, LLMClient, LLMError
 
         # Each line is ~1KB; enough lines to exceed the 32 MB cap partway through.
         line = (
@@ -7005,7 +7019,7 @@ class TestLLMClient(unittest.TestCase):
         n_lines = (_MAX_RESPONSE // len(line)) + 100  # deliberately past the cap
 
         class _HugeStreamResp:
-            def __enter__(self) -> "_HugeStreamResp":
+            def __enter__(self) -> _HugeStreamResp:
                 return self
 
             def __exit__(self, *a: object) -> bool:
@@ -7035,6 +7049,7 @@ class TestLLMClient(unittest.TestCase):
         """
         import io
         from unittest.mock import patch
+
         from shoin.llm import LLMClient, LLMError
 
         # Build a fake HTTPError whose read() raises if called without a limit
@@ -7053,7 +7068,7 @@ class TestLLMClient(unittest.TestCase):
 
         fake_body = _LimitedBytesIO(body_bytes)
         import urllib.error
-        err = urllib.error.HTTPError("http://x", 500, "Internal Server Error", {}, fake_body)  # type: ignore
+        err = urllib.error.HTTPError("http://x", 500, "Internal Server Error", {}, fake_body)
 
         with patch("urllib.request.urlopen", side_effect=err):
             client = LLMClient(base_url="http://localhost:11434/v1")
@@ -7074,6 +7089,7 @@ class TestLLMClient(unittest.TestCase):
         bypassing the BM25-only degradation path and raising HTTP 500 instead.
         """
         from unittest.mock import patch
+
         from shoin.llm import LLMClient, LLMError
 
         bad_response = {"data": ["not", "a", "dict"], "model": "test", "object": "list"}
@@ -7095,6 +7111,7 @@ class TestLLMClient(unittest.TestCase):
         """
         import http.client
         from unittest.mock import patch
+
         from shoin.llm import LLMClient
 
         with patch(
@@ -7115,6 +7132,7 @@ class TestLLMClient(unittest.TestCase):
         Fix: check the Content-Type header; return True only when it contains "json".
         """
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         mock_resp = MagicMock()
@@ -7129,6 +7147,7 @@ class TestLLMClient(unittest.TestCase):
     def test_available_returns_true_for_json_content_type(self) -> None:
         """available() returns True when the server responds with application/json."""
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         mock_resp = MagicMock()
@@ -7150,6 +7169,7 @@ class TestLLMClient(unittest.TestCase):
         Fix: add AttributeError to the except clause.
         """
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         mock_resp = MagicMock()
@@ -7174,6 +7194,7 @@ class TestLLMClient(unittest.TestCase):
         the limit.
         """
         from unittest.mock import MagicMock, patch
+
         from shoin.llm import LLMClient
 
         _MAX_RESPONSE = 32 * 1024 * 1024
@@ -7415,6 +7436,7 @@ class TestPipelineTitle(unittest.TestCase):
         """
         import os
         import tempfile
+
         from shoin.pipeline import index_source
 
         with tempfile.NamedTemporaryFile(
@@ -7865,8 +7887,8 @@ class TestPipeline(unittest.TestCase):
 
     def test_refresh_source_missing_raises(self) -> None:
         """refresh_source on a non-existent source must raise SOURCE_NOT_FOUND."""
-        from shoin.store import StoreError
         from shoin.pipeline import refresh_source
+        from shoin.store import StoreError
 
         with make_store() as s:
             with self.assertRaises(StoreError) as cm:
@@ -8908,6 +8930,7 @@ class TestConfigXDG(unittest.TestCase):
     def test_data_dir_uses_shoin_data_dir_env(self) -> None:
         """When SHOIN_DATA_DIR is set, data_dir() must return that path directly."""
         import os
+
         from shoin.config import data_dir
 
         with patch.dict(os.environ, {"SHOIN_DATA_DIR": "/tmp/shoin_custom"}):
@@ -8917,6 +8940,7 @@ class TestConfigXDG(unittest.TestCase):
     def test_data_dir_uses_xdg_data_home(self) -> None:
         """SHOIN_DATA_DIR not set and XDG_DATA_HOME set: data_dir() uses XDG path."""
         import os
+
         from shoin.config import data_dir
 
         env = {"XDG_DATA_HOME": "/tmp/xdgtest"}
@@ -8929,6 +8953,7 @@ class TestConfigXDG(unittest.TestCase):
     def test_port_invalid_env_falls_back_to_default(self) -> None:
         """Non-numeric SHOIN_PORT must fall back to DEFAULT_PORT, not raise ValueError."""
         import os
+
         from shoin.config import DEFAULT_PORT, port
 
         with patch.dict(os.environ, {"SHOIN_PORT": "notanumber"}):
@@ -8940,6 +8965,7 @@ class TestConfigXDG(unittest.TestCase):
         value reaches HTTPServer and raises OverflowError (an ArithmeticError,
         not the OSError cli.main() catches) = raw traceback at startup."""
         import os
+
         from shoin.config import DEFAULT_PORT, port
 
         for bad in ("-1", "65536", "99999"):
@@ -8951,6 +8977,7 @@ class TestConfigXDG(unittest.TestCase):
     def test_port_empty_env_falls_back_to_default(self) -> None:
         """Empty SHOIN_PORT must fall back to DEFAULT_PORT."""
         import os
+
         from shoin.config import DEFAULT_PORT, port
 
         with patch.dict(os.environ, {"SHOIN_PORT": ""}):
@@ -8960,6 +8987,7 @@ class TestConfigXDG(unittest.TestCase):
     def test_port_valid_env_is_used(self) -> None:
         """Valid SHOIN_PORT must be returned as-is."""
         import os
+
         from shoin.config import port
 
         with patch.dict(os.environ, {"SHOIN_PORT": "9999"}):
@@ -9403,6 +9431,7 @@ class TestCLI(unittest.TestCase):
         by pytest/unittest; merged into the single TestCLI class here (v0.2.64).
         """
         from unittest.mock import patch
+
         from shoin.cli import main
 
         # serve is imported locally inside main() so patch it at the source module.
@@ -9653,6 +9682,7 @@ class TestCLI(unittest.TestCase):
         special-cased above the Store() construction in main(), matching `serve`."""
         import io
         from unittest.mock import patch
+
         from shoin.cli import main
 
         class FakeAvailLLM:
@@ -9706,6 +9736,7 @@ class TestCLI(unittest.TestCase):
         import io
         import os
         from unittest.mock import patch
+
         from shoin.cli import main
         from shoin.llm import LLMError
 
@@ -9743,6 +9774,7 @@ class TestCLI(unittest.TestCase):
         rather than falling through to that shared try block."""
         import io
         from unittest.mock import patch
+
         from shoin.cli import main
 
         class ExplodingLLM:
@@ -9774,6 +9806,7 @@ class TestCLI(unittest.TestCase):
         exactly the scenario --db exists for (a custom database location)."""
         import io
         from unittest.mock import patch
+
         from shoin.cli import main
 
         class FakeAvailLLM:
@@ -9805,9 +9838,10 @@ class TestCLI(unittest.TestCase):
         """
         import io
         from unittest.mock import patch
+
+        from shoin.citation import CitationReport
         from shoin.cli import main
         from shoin.studio import StudioResult
-        from shoin.citation import CitationReport
 
         report: CitationReport = CitationReport(
             cited=[], invalid=[], coverage=0.0, n_sources=1,
@@ -9820,8 +9854,8 @@ class TestCLI(unittest.TestCase):
             s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
 
         # Run via temp DB file so main() can open it
-        import tempfile
         import os
+        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
             db_file = f.name
         try:
@@ -9861,8 +9895,8 @@ class TestCLI(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        from shoin.cli import main
         from shoin.citation import CitationReport
+        from shoin.cli import main
         from shoin.qa import Answer
         from shoin.search import Hit
         from shoin.store import Store
@@ -9906,10 +9940,10 @@ class TestCLI(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        from shoin.cli import main
         from shoin.citation import CitationReport
-        from shoin.studio import StudioResult
+        from shoin.cli import main
         from shoin.store import Store
+        from shoin.studio import StudioResult
 
         report: CitationReport = CitationReport(
             cited=[], invalid=[99], coverage=0.0, n_sources=1,
@@ -9944,9 +9978,10 @@ class TestCLI(unittest.TestCase):
         LLMError/OverflowError/KeyboardInterrupt) as a raw traceback.
         Fix: add sqlite3.OperationalError to the outer handler in main().
         """
-        import sqlite3 as _sqlite3
         import io
+        import sqlite3 as _sqlite3
         from unittest.mock import patch
+
         from shoin.cli import main
 
         with patch("shoin.cli.Store.__enter__", side_effect=_sqlite3.OperationalError("database is locked")):
@@ -9968,6 +10003,7 @@ class TestCLI(unittest.TestCase):
         """
         import io
         from unittest.mock import patch
+
         from shoin.cli import main
 
         with patch("shoin.cli.Store", side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'")):
@@ -9985,11 +10021,12 @@ class TestCLI(unittest.TestCase):
         propagated to main(), printing a raw traceback and skipping remaining targets.
         Fix: add sqlite3.OperationalError to the inner except in _cmd_add.
         """
-        import sqlite3 as _sqlite3
         import io
-        import tempfile
         import os
+        import sqlite3 as _sqlite3
+        import tempfile
         from unittest.mock import patch
+
         from shoin.cli import main
         from shoin.store import Store
 
@@ -11179,7 +11216,7 @@ class TestRenameReembed(unittest.TestCase):
             )
             fresh = self._vec(_embed_input("免疫レポート", "ワクチンの話題についての本文"))
             stale = self._vec(_embed_input("旧題", "ワクチンの話題についての本文"))
-            for got, want in zip(stored, fresh):
+            for got, want in zip(stored, fresh, strict=True):
                 self.assertAlmostEqual(got, want, places=6)
             self.assertNotEqual(
                 [round(x, 6) for x in stored],
@@ -12437,7 +12474,7 @@ class TestResidualGuards(unittest.TestCase):
 
         cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
         declared = {
-            re.split(r"[<>=!~\[;\s]", dep, 1)[0].strip().lower()
+            re.split(r"[<>=!~\[;\s]", dep, maxsplit=1)[0].strip().lower()
             for dep in cfg["project"]["dependencies"]
         }
         self.assertEqual(
@@ -13707,8 +13744,8 @@ class TestResidualGuards(unittest.TestCase):
         expected_dyn = {
             "chunk.py:100",
             "citation.py:513", "citation.py:517", "citation.py:554",
-            "citation.py:567", "citation.py:867", "citation.py:1231",
-            "citation.py:1436",
+            "citation.py:567", "citation.py:874", "citation.py:1238",
+            "citation.py:1443",
             "search.py:53", "search.py:752",
         }
         for loc in sorted(set(dyn) - expected_dyn):

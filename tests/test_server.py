@@ -294,7 +294,7 @@ class ServerTest(unittest.TestCase):
                    origin="broken.pdf", sha256="x", added_at="now"),
             n_chunks=3, n_embedded=0, pages_failed=2,
         )
-        body = "なんとか本文".encode("utf-8")
+        body = "なんとか本文".encode()
         with patch.object(srv, "index_source", return_value=fake):
             status, _, raw = self._req(
                 "POST",
@@ -346,6 +346,7 @@ class ServerTest(unittest.TestCase):
         """
         import sqlite3
         from unittest.mock import patch
+
         import shoin.store as store_mod
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "crash-test"})
@@ -364,6 +365,7 @@ class ServerTest(unittest.TestCase):
         HTTP 500, not the client-error 400 fallback — a 400 tells the caller
         their request was malformed when the server actually failed."""
         from unittest.mock import patch
+
         import shoin.store as store_mod
         from shoin.store import StoreError
 
@@ -828,6 +830,7 @@ class ServerTest(unittest.TestCase):
         (clients that stall mid-request are expected traffic)."""
         import io
         import socket
+
         import shoin.server as srv_mod
 
         with patch.object(srv_mod, "REQUEST_SOCKET_SEC", 0.2):
@@ -975,7 +978,7 @@ class ServerTest(unittest.TestCase):
         conn.putrequest("POST", f"/api/notebooks/{nb['id']}/upload")
         body = ("生の UTF-8 ヘッダーのテスト文書。" * 20).encode("utf-8")
         conn.putheader("Content-Length", str(len(body)))
-        conn.putheader("X-Filename", "日本語.txt".encode("utf-8"))
+        conn.putheader("X-Filename", "日本語.txt".encode())
         conn.endheaders(body)
         resp = conn.getresponse()
         data = json.loads(resp.read())
@@ -1027,7 +1030,7 @@ class ServerTest(unittest.TestCase):
             def write(self, data: bytes) -> None:
                 raise OSError("simulated disk full")
 
-            def __enter__(self) -> "BrokenWriteNTF":
+            def __enter__(self) -> BrokenWriteNTF:
                 return self
 
             def __exit__(self, *args: object) -> None:
@@ -1530,6 +1533,7 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         """StoreError from add_message(assistant) after 200 SSE headers are committed must be
         swallowed — the stream stays clean and the server remains responsive."""
         from unittest.mock import patch
+
         from shoin.store import Store, StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "persist-fail"})
@@ -1562,6 +1566,7 @@ class PostStreamStoreErrorTest(unittest.TestCase):
     def test_no_hit_store_error_on_assistant_persist_does_not_corrupt_sse(self) -> None:
         """Same guard applies to the no-hit branch (notebook with no sources)."""
         from unittest.mock import patch
+
         from shoin.store import Store, StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "no-hit-persist-fail"})
@@ -1588,6 +1593,7 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         swallowed just like StoreError — the server thread must survive."""
         import sqlite3
         from unittest.mock import patch
+
         from shoin.store import Store
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "op-err-persist"})
@@ -2137,9 +2143,8 @@ class NotebookMessagesCapTest(unittest.TestCase):
             return exc.code, json.loads(exc.read())
 
     def test_notebook_payload_caps_messages_and_reports_omitted(self) -> None:
-        from shoin.store import Store
-
         import shoin.server as srv
+        from shoin.store import Store
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
         nb_id = nb["id"]
@@ -2169,9 +2174,8 @@ class NotebookMessagesCapTest(unittest.TestCase):
         made each click heavier forever. The payload stays honest:
         notes_omitted reports the real hidden count for the UI's disclosure
         line; the full record remains in the DB and in export()."""
-        from shoin.store import Store
-
         import shoin.server as srv
+        from shoin.store import Store
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
         nb_id = nb["id"]
@@ -2415,6 +2419,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
     def test_nohit_sse_connection_error_handled(self) -> None:
         """ConnectionError during no-hit SSE must be silenced (server.py 486-487)."""
         from unittest.mock import patch
+
         from shoin.server import _Handler
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "nohit-ce"})
@@ -2437,6 +2442,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
     def test_meta_sse_connection_error_handled(self) -> None:
         """ConnectionError on meta SSE must cause early return (server.py 507-508)."""
         from unittest.mock import patch
+
         from shoin.server import _Handler
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "meta-ce"})
@@ -2465,6 +2471,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
     def test_done_sse_connection_error_handled(self) -> None:
         """ConnectionError on done SSE must be silenced (server.py 534-535)."""
         from unittest.mock import patch
+
         from shoin.server import _Handler
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "done-ce"})
@@ -2494,8 +2501,9 @@ class SSEConnectionErrorTest(unittest.TestCase):
 
     def test_degraded_sse_connection_error_handled(self) -> None:
         """ConnectionError on degraded text delta must set client_gone (server.py 523-524)."""
-        from shoin.llm import LLMError as _LLMError
         from unittest.mock import patch
+
+        from shoin.llm import LLMError as _LLMError
         from shoin.server import _Handler
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "degraded-ce"})
@@ -2544,6 +2552,7 @@ class SSEConnectionErrorTest(unittest.TestCase):
         exception handler instead.
         """
         from unittest.mock import patch
+
         from shoin.server import _Handler
         from shoin.store import Store
 
