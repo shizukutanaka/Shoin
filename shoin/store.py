@@ -15,9 +15,9 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar, TypedDict
+from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
 from .config import MAX_NAME_LEN, MAX_TITLE_LEN, data_dir
@@ -288,7 +288,7 @@ MIGRATIONS: list[tuple[int, str]] = [
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def pack_vector(vec: list[float]) -> bytes:
@@ -551,12 +551,12 @@ class Store:
                 raise StoreError(
                     "SOURCE_ALREADY_EXISTS",
                     "identical source already in notebook (concurrent upload)",
-                )
+                ) from e
             if "FOREIGN KEY" in str(e):
                 raise StoreError(
                     "NOTEBOOK_NOT_FOUND",
                     f"notebook {notebook_id} was deleted during source addition",
-                )
+                ) from e
             # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate
             # as a generic internal error rather than a misleading NOTEBOOK_NOT_FOUND.
             raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
@@ -714,14 +714,14 @@ class Store:
                 self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
-                raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source")
+                raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source") from e
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) ON DELETE CASCADE — this is
                 # the genuine concurrent-deletion case: the source row was removed
                 # between get_source() above and this INSERT.
                 raise StoreError(
                     "SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk replacement"
-                )
+                ) from e
             # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate as a
             # generic internal error rather than a misleading SOURCE_NOT_FOUND (mirrors
             # the same v0.2.53 fix already applied to add_source(), never ported here).
@@ -762,7 +762,7 @@ class Store:
             if "UNIQUE" in str(e):
                 raise StoreError(
                     "SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source"
-                )
+                ) from e
             # This is an UPDATE that never touches notebook_id, so no FOREIGN KEY
             # violation is possible here — anything else (e.g. a NOT NULL on the
             # sha256 column) is a genuine unexpected constraint violation, not a
@@ -797,7 +797,7 @@ class Store:
                 # concurrent-deletion case: the source row was removed mid-insert.
                 raise StoreError(
                     "SOURCE_NOT_FOUND", f"source {source_id} was deleted during chunk insertion"
-                )
+                ) from e
             # Unexpected constraint violation (e.g. future CHECK, NOT NULL) — propagate
             # as a generic internal error rather than a misleading SOURCE_NOT_FOUND.
             # Mirrors the same v0.2.53 fix already applied to add_source() and
@@ -955,7 +955,7 @@ class Store:
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during note insertion",
-            )
+            ) from e
         return int(cur.lastrowid or 0)
 
     def list_notes(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -1013,7 +1013,7 @@ class Store:
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during studio output insertion",
-            )
+            ) from e
         return int(cur.lastrowid or 0)
 
     def latest_studio_outputs(self, notebook_id: int) -> list[sqlite3.Row]:
@@ -1057,7 +1057,7 @@ class Store:
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during message insertion",
-            )
+            ) from e
         return int(cur.lastrowid or 0)
 
     def count_messages(self, notebook_id: int) -> int:
