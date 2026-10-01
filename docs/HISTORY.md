@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.511
+## Version History: v0.1.37 → v0.2.512
+
+### v0.2.512
+
+- New pin `test_watched_module_bindings_are_cataloged`: the alias ban
+  (v0.2.511) closed `import os as o`, but three sibling routes still
+  rebound a watched module's verbs under a bare name invisible to
+  every `func.value.id == "<module>"` pin — all now sealed:
+  1. `from os import chmod` / `import *`: the from-import inventory
+     of watched modules is cataloged (Path x4, io.BytesIO,
+     datetime/timezone); any new bare-name binding drifts loudly.
+  2. `getattr(os, "chmod")` / `__import__` / `importlib.import_module`
+     / `.__dict__` dynamic dispatch is banned (duck-typed
+     `getattr(llm, ...)` reads stay legal).
+  3. `f = os.chmod` rebinding into a plain Name is banned
+     (`self.conn.row_factory = sqlite3.Row` is an attribute target,
+     exempt).
+- Fail-direction probed: `from os import chmod`, `getattr(os, "chmod")`,
+  and `_f = os.chmod` injections each caught at their line.
 
 ### v0.2.511
 

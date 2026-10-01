@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.511")
+        self.assertEqual(VERSION, "0.2.512")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16121,6 +16121,151 @@ class TestResidualGuards(unittest.TestCase):
             alias_violations, [],
             "aliased import of a watched module bypasses every "
             "module-attribute pin:\n" + "\n".join(alias_violations),
+        )
+
+    def test_watched_module_bindings_are_cataloged(self) -> None:
+        """The alias ban (v0.2.511) closed `import os as o`, but three
+        sibling routes still rebind a watched module's verbs under a
+        bare name that no `func.value.id == "<module>"` check can see:
+
+        1. `from os import chmod` — the call site becomes `chmod(p)`,
+           a bare Name; it evades every module-attribute inventory
+           (file-mutation pin, sqlite3.connect pin, env pin...).
+           `import *` is the unlimited version of the same route.
+           The only legitimate from-imports are the ones already in
+           the tree: `pathlib.Path` and store.py's `datetime`/`timezone`
+           — cataloged here so any addition drifts loudly.
+        2. `getattr(os, "chmod")(p)` / `__import__("os")` /
+           `importlib.import_module` / `os.__dict__["chmod"]` —
+           dynamic dispatch past the same literal match. Flagged when
+           the first argument is a watched-module name; the duck-typed
+           `getattr(llm, ...)`/`getattr(exc, ...)` reads stay legal.
+        3. `f = os.chmod` — rebound into a plain name. Flagged when a
+           watched-module attribute is assigned to a Name target.
+           (`self.conn.row_factory = sqlite3.Row` binds a class into
+           an attribute, not a bare name — exempt.)"""
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        from_baseline = {
+            "cli.py": ["pathlib.Path"],
+            "config.py": ["pathlib.Path"],
+            "ingest.py": ["io.BytesIO", "pathlib.Path"],
+            "server.py": ["pathlib.Path"],
+            "store.py": ["datetime.datetime", "datetime.timezone",
+                         "pathlib.Path"],
+        }
+        from_actual: dict[str, list[str]] = {}
+        dynamic: list[str] = []
+        rebinds: list[str] = []
+        star: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.ImportFrom):
+                    if node.level != 0:
+                        continue
+                    mod = (node.module or "").split(".")[0]
+                    for a in node.names:
+                        if a.name == "*":
+                            star.append(f"{path.name}:{node.lineno}")
+                        elif mod in watched:
+                            from_actual.setdefault(path.name, []).append(
+                                f"{node.module}.{a.name}"
+                            )
+                elif isinstance(node, _ast.Attribute) and node.attr == "__dict__":
+                    dynamic.append(
+                        f"{path.name}:{node.lineno} .__dict__"
+                    )
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    if (
+                        isinstance(f, _ast.Name)
+                        and f.id in {
+                            "getattr", "vars", "dir", "__import__",
+                        }
+                        and node.args
+                        and isinstance(node.args[0], _ast.Name)
+                        and node.args[0].id in watched
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{f.id}({node.args[0].id}, ...)"
+                        )
+                    if (
+                        isinstance(f, _ast.Name) and f.id == "__import__"
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} __import__()"
+                        )
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and f.attr == "import_module"
+                        and isinstance(f.value, _ast.Name)
+                        and f.value.id == "importlib"
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} "
+                            "importlib.import_module()"
+                        )
+                elif isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+                    value = (
+                        node.value
+                        if isinstance(node, _ast.AnnAssign)
+                        else node.value
+                    )
+                    targets = (
+                        [node.target]
+                        if isinstance(node, _ast.AnnAssign)
+                        else node.targets
+                    )
+                    if not (
+                        isinstance(value, _ast.Attribute)
+                        and isinstance(value.value, _ast.Name)
+                        and value.value.id in watched
+                    ):
+                        continue
+                    for tgt in targets:
+                        if isinstance(tgt, _ast.Name):
+                            rebinds.append(
+                                f"{path.name}:{node.lineno} {tgt.id} = "
+                                f"{value.value.id}.{value.attr}"
+                            )
+                        elif isinstance(tgt, _ast.Tuple):
+                            for elt in tgt.elts:
+                                if isinstance(elt, _ast.Name):
+                                    rebinds.append(
+                                        f"{path.name}:{node.lineno} "
+                                        f"{elt.id} = {value.value.id}."
+                                        f"{value.attr}"
+                                    )
+        self.assertEqual(
+            {k: sorted(v) for k, v in from_actual.items()}, from_baseline,
+            "from-import inventory of watched modules drifted — a bare "
+            "`chmod(p)`-style call site is invisible to every "
+            "module-attribute pin",
+        )
+        self.assertEqual(
+            dynamic, [],
+            "dynamic dispatch on a watched module bypasses every "
+            "module-attribute pin:\n" + "\n".join(dynamic),
+        )
+        self.assertEqual(
+            rebinds, [],
+            "watched-module attribute rebound to a bare name bypasses "
+            "every module-attribute pin:\n" + "\n".join(rebinds),
+        )
+        self.assertEqual(
+            star, [],
+            "star imports bypass every module-attribute pin:\n"
+            + "\n".join(star),
         )
 
 if __name__ == "__main__":
