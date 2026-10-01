@@ -559,14 +559,14 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             " ORDER BY rank, c.id LIMIT ?",
             (expr, notebook_id, k),
         ).fetchall()
-        for r in rows:
-            fts_hits.append(
-                Hit(
-                    r["id"], r["source_id"], r["text"], 0.0,
-                    bm25=-float(r["rank"]), context=str(r["context"] or ""),
-                    seq=int(r["seq"]),
-                )
+        fts_hits.extend(
+            Hit(
+                r["id"], r["source_id"], r["text"], 0.0,
+                bm25=-float(r["rank"]), context=str(r["context"] or ""),
+                seq=int(r["seq"]),
             )
+            for r in rows
+        )
         # Return early only when fts_query covered every query term (no terms with
         # len < 3 were silently skipped).  Short terms still need the LIKE path.
         #

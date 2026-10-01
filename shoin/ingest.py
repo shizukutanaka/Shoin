@@ -275,14 +275,14 @@ def _validate_resolved(host: str) -> str:
         raw_addr = info[4][0]
         try:
             ip = ipaddress.ip_address(raw_addr)
-        except ValueError:
+        except ValueError as exc:
             # Zone-scoped link-local addresses (e.g. "fe80::1%eth0") are not
             # accepted by ip_address(). They are inherently non-public, so
             # reject them with the same error as other blocked addresses.
             raise IngestError(
                 "INGEST_URL_BLOCKED",
                 f"host resolves to non-public address: {raw_addr!r}",
-            )
+            ) from exc
         if (
             ip.is_private
             or ip.is_loopback
@@ -316,7 +316,7 @@ def validate_public_url(url: str) -> tuple[urllib.parse.ParseResult, str]:
         # here rather than mid-request (fetch_url reads .port outside its
         # IngestError handling — this is the same 400-vs-500 defect class as
         # the zone-scoped IPv6 fix, v0.2.45).
-        parsed.port
+        _ = parsed.port
     except ValueError as exc:
         raise IngestError("INGEST_URL_BLOCKED", f"invalid port: {exc}") from exc
     pinned = _validate_resolved(parsed.hostname)

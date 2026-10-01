@@ -836,20 +836,27 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             # claim only bridges to a RATE-marked source value (claim "0.5" vs
             # source "50個" keeps flagging — 50 was not asserted as a rate).
             claim_rate = _rate_values(claim_n)
-            def _num_missing(num: str) -> bool:
+
+            def _num_missing(
+                num: str, n: int, conv: dict[str, set[tuple[int, float]]], rate: set[str]
+            ) -> bool:
                 if (
                     num in src_nums[n]
                     or num in src_norm[n]
-                    or not conv_by_num.get(num, set()).isdisjoint(src_conv[n])
+                    or not conv.get(num, set()).isdisjoint(src_conv[n])
                 ):
                     return False
                 f = float(num)
-                if num in claim_rate and _canon(f / 100) in src_nums[n]:
+                if num in rate and _canon(f / 100) in src_nums[n]:
                     return False
                 if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
                     return False
                 return True
-            if any(_num_missing(num) for num in _numbers_expanded(claim_n)):
+
+            if any(
+                _num_missing(num, n, conv_by_num, claim_rate)
+                for num in _numbers_expanded(claim_n)
+            ):
                 out.add(n)
     return sorted(out)
 
@@ -1181,73 +1188,60 @@ _NEG_OVERLAP_MIN = 0.5
 # inflected forms, longest first so 低下 (rise/fall) never feeds the 高/低
 # adjective class.
 _ANT: dict[str, tuple[str, int]] = {
-    **{s: ("rise", 1) for s in ("上昇", "上が", "向上", "高ま")},
-    **{s: ("rise", -1) for s in ("低下", "下降", "下が", "下落")},
-    **{s: ("inc", 1) for s in ("増加", "増大", "増幅", "拡大", "増え")},
-    **{s: ("inc", -1) for s in ("減少", "縮小", "減量", "減っ", "減り")},
-    **{s: ("better", 1) for s in ("改善", "改良", "好転")},
-    **{s: ("better", -1) for s in ("悪化",)},
-    **{s: ("win", 1) for s in ("勝利", "勝ち", "勝つ", "勝った")},
-    **{s: ("win", -1) for s in ("敗北", "負け", "負けた")},
-    **{s: ("succeed", 1) for s in ("成功",)},
-    **{s: ("succeed", -1) for s in ("失敗",)},
-    **{s: ("safe", 1) for s in ("安全",)},
-    **{s: ("safe", -1) for s in ("危険",)},
-    **{s: ("easy", 1) for s in ("簡単", "容易", "易しい")},
-    **{s: ("easy", -1) for s in ("困難", "難しい", "難しく", "難しかっ")},
-    **{s: ("high", 1) for s in ("高い", "高く", "高さ", "最高", "高かっ")},
-    **{s: ("high", -1) for s in ("低い", "低く", "低さ", "最低", "低かっ")},
-    **{s: ("big", 1) for s in ("大きい", "大きく", "大きさ", "大きかっ")},
-    **{s: ("big", -1) for s in ("小さい", "小さく", "小ささ", "小さかっ")},
-    **{s: ("many", 1) for s in ("多い", "多く", "多さ", "多かっ")},
-    **{s: ("many", -1) for s in ("少ない", "少なく", "少なさ", "少なかっ")},
-    **{s: ("strong", 1) for s in ("強い", "強く", "強かっ")},
-    **{s: ("strong", -1) for s in ("弱い", "弱く", "弱かっ")},
-    **{s: ("long", 1) for s in ("長い", "長く", "長かっ")},
-    **{s: ("long", -1) for s in ("短い", "短く", "短かっ")},
-    **{s: ("wide", 1) for s in ("広い", "広く", "広かっ")},
-    **{s: ("wide", -1) for s in ("狭い", "狭く", "狭かっ")},
-    **{s: ("fast", 1) for s in ("早い", "早く", "速い", "速く", "早かっ", "速かっ")},
-    **{s: ("fast", -1) for s in ("遅い", "遅く", "遅かっ")},
-    **{s: ("new", 1) for s in ("新しい", "新しく", "新しかっ")},
-    **{s: ("new", -1) for s in ("古い", "古く", "古かっ")},
-    **{s: ("deep", 1) for s in ("深い", "深く", "深かっ")},
-    **{s: ("deep", -1) for s in ("浅い", "浅く", "浅かっ")},
-    **{s: ("heavy", 1) for s in ("重い", "重く", "重かっ")},
-    **{s: ("heavy", -1) for s in ("軽い", "軽く", "軽かっ")},
-    **{s: ("thick", 1) for s in ("厚い", "厚く", "厚かっ")},
-    **{s: ("thick", -1) for s in ("薄い", "薄く", "薄かっ")},
-    **{
-        s: ("en_inc", 1)
-        for s in (
-            "increase", "increased", "increases", "increasing", "rose",
-            "risen", "rises", "higher", "growth", "grew",
-        )
-    },
-    **{
-        s: ("en_inc", -1)
-        for s in (
-            "decrease", "decreased", "decreases", "decreasing", "decline",
-            "declined", "declines", "dropped", "fell", "fallen", "falls",
-            "lower", "shrank",
-        )
-    },
-    **{s: ("en_bet", 1) for s in ("better", "improved", "improves", "improvement")},
-    **{s: ("en_bet", -1) for s in ("worse", "worsened", "deteriorated")},
-    **{s: ("en_amt", 1) for s in ("more", "greater")},
-    **{s: ("en_amt", -1) for s in ("less", "fewer")},
-    **{s: ("en_spd", 1) for s in ("faster", "quicker")},
-    **{s: ("en_spd", -1) for s in ("slower",)},
-    **{s: ("en_str", 1) for s in ("stronger",)},
-    **{s: ("en_str", -1) for s in ("weaker",)},
-    **{s: ("en_siz", 1) for s in ("larger", "bigger")},
-    **{s: ("en_siz", -1) for s in ("smaller",)},
-    **{s: ("en_len", 1) for s in ("longer",)},
-    **{s: ("en_len", -1) for s in ("shorter",)},
-    **{s: ("en_eas", 1) for s in ("easier",)},
-    **{s: ("en_eas", -1) for s in ("harder",)},
-    **{s: ("en_win", 1) for s in ("success", "succeeded", "successful")},
-    **{s: ("en_win", -1) for s in ("failed", "failure", "fails")},
+    **dict.fromkeys(("上昇", "上が", "向上", "高ま"), ("rise", 1)),
+    **dict.fromkeys(("低下", "下降", "下が", "下落"), ("rise", -1)),
+    **dict.fromkeys(("増加", "増大", "増幅", "拡大", "増え"), ("inc", 1)),
+    **dict.fromkeys(("減少", "縮小", "減量", "減っ", "減り"), ("inc", -1)),
+    **dict.fromkeys(("改善", "改良", "好転"), ("better", 1)),
+    **dict.fromkeys(("悪化",), ("better", -1)),
+    **dict.fromkeys(("勝利", "勝ち", "勝つ", "勝った"), ("win", 1)),
+    **dict.fromkeys(("敗北", "負け", "負けた"), ("win", -1)),
+    **dict.fromkeys(("成功",), ("succeed", 1)),
+    **dict.fromkeys(("失敗",), ("succeed", -1)),
+    **dict.fromkeys(("安全",), ("safe", 1)),
+    **dict.fromkeys(("危険",), ("safe", -1)),
+    **dict.fromkeys(("簡単", "容易", "易しい"), ("easy", 1)),
+    **dict.fromkeys(("困難", "難しい", "難しく", "難しかっ"), ("easy", -1)),
+    **dict.fromkeys(("高い", "高く", "高さ", "最高", "高かっ"), ("high", 1)),
+    **dict.fromkeys(("低い", "低く", "低さ", "最低", "低かっ"), ("high", -1)),
+    **dict.fromkeys(("大きい", "大きく", "大きさ", "大きかっ"), ("big", 1)),
+    **dict.fromkeys(("小さい", "小さく", "小ささ", "小さかっ"), ("big", -1)),
+    **dict.fromkeys(("多い", "多く", "多さ", "多かっ"), ("many", 1)),
+    **dict.fromkeys(("少ない", "少なく", "少なさ", "少なかっ"), ("many", -1)),
+    **dict.fromkeys(("強い", "強く", "強かっ"), ("strong", 1)),
+    **dict.fromkeys(("弱い", "弱く", "弱かっ"), ("strong", -1)),
+    **dict.fromkeys(("長い", "長く", "長かっ"), ("long", 1)),
+    **dict.fromkeys(("短い", "短く", "短かっ"), ("long", -1)),
+    **dict.fromkeys(("広い", "広く", "広かっ"), ("wide", 1)),
+    **dict.fromkeys(("狭い", "狭く", "狭かっ"), ("wide", -1)),
+    **dict.fromkeys(("早い", "早く", "速い", "速く", "早かっ", "速かっ"), ("fast", 1)),
+    **dict.fromkeys(("遅い", "遅く", "遅かっ"), ("fast", -1)),
+    **dict.fromkeys(("新しい", "新しく", "新しかっ"), ("new", 1)),
+    **dict.fromkeys(("古い", "古く", "古かっ"), ("new", -1)),
+    **dict.fromkeys(("深い", "深く", "深かっ"), ("deep", 1)),
+    **dict.fromkeys(("浅い", "浅く", "浅かっ"), ("deep", -1)),
+    **dict.fromkeys(("重い", "重く", "重かっ"), ("heavy", 1)),
+    **dict.fromkeys(("軽い", "軽く", "軽かっ"), ("heavy", -1)),
+    **dict.fromkeys(("厚い", "厚く", "厚かっ"), ("thick", 1)),
+    **dict.fromkeys(("薄い", "薄く", "薄かっ"), ("thick", -1)),
+    **dict.fromkeys(("increase", "increased", "increases", "increasing", "rose", "risen", "rises", "higher", "growth", "grew"), ("en_inc", 1)),
+    **dict.fromkeys(("decrease", "decreased", "decreases", "decreasing", "decline", "declined", "declines", "dropped", "fell", "fallen", "falls", "lower", "shrank"), ("en_inc", -1)),
+    **dict.fromkeys(("better", "improved", "improves", "improvement"), ("en_bet", 1)),
+    **dict.fromkeys(("worse", "worsened", "deteriorated"), ("en_bet", -1)),
+    **dict.fromkeys(("more", "greater"), ("en_amt", 1)),
+    **dict.fromkeys(("less", "fewer"), ("en_amt", -1)),
+    **dict.fromkeys(("faster", "quicker"), ("en_spd", 1)),
+    **dict.fromkeys(("slower",), ("en_spd", -1)),
+    **dict.fromkeys(("stronger",), ("en_str", 1)),
+    **dict.fromkeys(("weaker",), ("en_str", -1)),
+    **dict.fromkeys(("larger", "bigger"), ("en_siz", 1)),
+    **dict.fromkeys(("smaller",), ("en_siz", -1)),
+    **dict.fromkeys(("longer",), ("en_len", 1)),
+    **dict.fromkeys(("shorter",), ("en_len", -1)),
+    **dict.fromkeys(("easier",), ("en_eas", 1)),
+    **dict.fromkeys(("harder",), ("en_eas", -1)),
+    **dict.fromkeys(("success", "succeeded", "successful"), ("en_win", 1)),
+    **dict.fromkeys(("failed", "failure", "fails"), ("en_win", -1)),
 }
 _ANT_RE = re.compile(
     "|".join(

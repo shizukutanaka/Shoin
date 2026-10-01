@@ -466,7 +466,7 @@ class TestMultiTurn(unittest.TestCase):
 
         s, nb = seeded_store()
         with s:
-            for i in range(3):
+            for _ in range(3):
                 s.add_message(nb, "user", "質問についての詳細な説明を含む長めの文章です。" * 10)
                 s.add_message(
                     nb, "assistant",
@@ -543,7 +543,7 @@ class TestMultiTurn(unittest.TestCase):
             ctx = build_context(s, [])
             msgs = build_messages("問3", ctx, hist)
             roles = [m["role"] for m in msgs]
-            for a, b in zip(roles, roles[1:]):
+            for a, b in zip(roles, roles[1:], strict=False):
                 self.assertNotEqual(a, b, f"consecutive same-role turns in {roles}")
             # The trailing user turn itself is dropped from the prompt (its
             # content already reached retrieval via expand_query(), called by
