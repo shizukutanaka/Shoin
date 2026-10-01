@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.489
+## Version History: v0.1.37 → v0.2.490
+
+### v0.2.490
+- **Ratchet pin**: E501 sits outside the ruff select set because 220
+  pre-existing over-long lines are grandfathered — but nothing stopped
+  the backlog from growing. `test_e501_violations_never_grow` pins each
+  file's violation count to today's baseline: shrink-only, never grow.
+  The measure replicates ruff's E501 semantics exactly (East-Asian
+  display width W/F = 2 columns, `# type: ignore`/`# noqa` pragmas
+  stripped, trailing unbreakable URL exempt — verified count-for-count
+  against ruff: 220). Fail-direction: an injected 110-char line in
+  studio.py fails with the file's budget in the message.
+- **Audit (clean)**: flag-set-before-success sweep — every `disabled=`
+  site restores in catch/finally, `_nbSeq`/`_sealSeq` stale guards are
+  monotonic by construction, `refreshQuestions` captures `nbId` before
+  awaiting, `questions_cache` writes only after full compute under the
+  lock, SSE failure tails are all bounded, every `href` write is a
+  server-id path with `removeAttribute` cleanup.
 
 ### v0.2.489
 - **Fix + pin**: the source viewer's lazy `<details>` full-text load set

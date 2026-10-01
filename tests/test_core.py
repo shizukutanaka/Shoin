@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.489")
+        self.assertEqual(VERSION, "0.2.490")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14386,6 +14386,75 @@ class TestResidualGuards(unittest.TestCase):
                         )
         self.assertEqual(problems, [], f"deprecated stdlib imports: {problems}")
         self.assertGreaterEqual(n_files, 20, n_files)
+
+    def test_e501_violations_never_grow(self) -> None:
+        """E501 (line > 100 display columns) is outside the ruff select set
+        only because 220 pre-existing long lines are grandfathered. This is
+        a RATCHET: each file's violation count is pinned to today's
+        baseline and may only shrink — a new over-long line anywhere fails
+        the suite, so the backlog can't silently grow while it is being
+        paid down. The measure replicates ruff's own E501: East-Asian
+        display width (W/F = 2 columns), trailing `# type: ignore`/`# noqa`
+        pragmas stripped first, and a trailing unbreakable URL token
+        exempted (counts match ruff exactly: 220)."""
+        import re
+        from unicodedata import east_asian_width
+
+        def width(s: str) -> int:
+            return sum(2 if east_asian_width(c) in "WF" else 1 for c in s)
+
+        pragma = re.compile(
+            r"\s*#\s*(?:type:\s*ignore(?:\[[^\]]*\])?|noqa(?::\s*\S+)?)\s*$"
+        )
+
+        def over(line: str) -> bool:
+            if pragma.search(line):
+                line = pragma.sub("", line)
+            if width(line) <= 100:
+                return False
+            tail = line.rsplit(None, 1)[-1]
+            return "://" not in tail or width(line[: line.rfind(tail)]) > 100
+
+        baseline = {
+            "shoin/citation.py": 5,
+            "shoin/cli.py": 8,
+            "shoin/config.py": 1,
+            "shoin/export.py": 4,
+            "shoin/ingest.py": 2,
+            "shoin/pipeline.py": 1,
+            "shoin/qa.py": 4,
+            "shoin/search.py": 5,
+            "shoin/server.py": 5,
+            "shoin/store.py": 17,
+            "shoin/studio.py": 4,
+            "tests/test_core.py": 114,
+            "tests/test_qa.py": 9,
+            "tests/test_server.py": 6,
+            "tests/test_studio.py": 10,
+            "tests/test_ui_contract.py": 25,
+        }
+        root = Path(__file__).resolve().parent.parent
+        actual: dict[str, int] = {}
+        for path in sorted(root.glob("shoin/*.py")) + sorted(
+            root.glob("tests/*.py")
+        ):
+            rel = path.relative_to(root).as_posix()
+            n = sum(
+                1 for line in path.read_text(encoding="utf-8").splitlines()
+                if over(line)
+            )
+            if n:
+                actual[rel] = n
+        for rel, n in actual.items():
+            limit = baseline.get(rel, 0)
+            self.assertLessEqual(
+                n, limit,
+                f"{rel}: {n} over-long lines, ratchet allows at most {limit} "
+                "(new E501 violation — wrap the line or pay down the file's "
+                "baseline by shortening an existing one)",
+            )
+        # Non-vacuousness: the catalog reflects the real backlog today.
+        self.assertEqual(sum(actual.values()), 220, sum(actual.values()))
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
