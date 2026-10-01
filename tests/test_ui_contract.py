@@ -1627,7 +1627,9 @@ console.log("ok")
         resolver = src[i1:i2]
         harness = i18n + """
 function resolveLang(lsv, metaContent, nav){
-  const localStorage = { getItem(k){ return lsv; } };
+  const localStorage = { getItem(k){ return lsv; }, setItem(){} };
+  const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
+  const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
   const document = { querySelector(s){ return metaContent === null ? null : {content: metaContent} } };
   const navigator = { language: nav };
 """ + resolver + """
@@ -2988,6 +2990,56 @@ const api = async () => { throw new Error("[500] down"); };
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_localStorage_access_is_failure_tolerant(self) -> None:
+        """v0.2.484: `localStorage.getItem("shoin.lang")` ran at script top
+        level — in a browser where storage is disabled (private-mode
+        restrictions, sandboxed iframe, cookies blocked) the SecurityError
+        killed the ENTIRE boot: markup renders, every control inert. Accesses
+        now funnel through `_lsGet`/`_lsSet`, which degrade to no-ops. Pin
+        both directions under node (throwing store vs. real passthrough) and
+        lexical containment: `localStorage.` must appear only inside the two
+        helper bodies — any new bare call site is the same boot-killer."""
+        src = _script_body(_html())
+        helpers = []
+        for name in ("_lsGet", "_lsSet"):
+            m = re.search(rf"const {name}[^\n]*", src)
+            if not m:
+                self.fail(f"{name} not found in index.html")
+            helpers.append(m.group(0))
+        # Containment: outside the two helper bodies, `localStorage.` must not
+        # appear at all — a bare call site re-opens the boot-killer.
+        outside = src
+        for h in helpers:
+            outside = outside.replace(h, "", 1)
+        self.assertEqual(
+            outside.count("localStorage."), 0,
+            "bare localStorage access outside _lsGet/_lsSet — "
+            "an unguarded call at top level kills the whole app boot",
+        )
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        harness = (
+            "let localStorage = {"
+            "  getItem(){ throw new Error('SecurityError') },"
+            "  setItem(){ throw new Error('SecurityError') } };\n"
+            + "\n".join(helpers)
+            + """
+if (_lsGet("shoin.lang") !== null)
+  { console.error("throwing store not degraded to null"); process.exit(1) }
+_lsSet("shoin.lang", "en");  // must not throw
+const real = { v: "x", getItem(k){ return this.v }, setItem(k,v){ this.v = v } };
+localStorage = real;
+if (_lsGet("shoin.lang") !== "x")
+  { console.error("passthrough broke"); process.exit(1) }
+_lsSet("shoin.lang", "ja");
+if (real.v !== "ja")
+  { console.error("set passthrough broke"); process.exit(1) }
+console.log("ok");
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file
@@ -3133,6 +3185,8 @@ const I18N = {ja: {"tabs.chat": "対話", "a11y.lang": "言語", "f.ph": "問い
 let lang = "ja";
 const stored = [];
 const localStorage = {setItem(k, v){ stored.push([k, v]) }};
+const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
+const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
 const texts = [{dataset: {i18n: "tabs.chat"}, textContent: "?"},
                {dataset: {i18n: "a11y.lang"}, textContent: "?"}];
 const phs = [{dataset: {i18nPh: "f.ph"}, placeholder: "?"}];

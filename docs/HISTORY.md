@@ -29,7 +29,31 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.483
+## Version History: v0.1.37 → v0.2.484
+
+### v0.2.484
+- **Fix (UI)**: `localStorage.getItem("shoin.lang")` ran unguarded at
+  script top level (and `setItem` in the toggle handler) — where
+  storage is disabled (private-mode restrictions, sandboxed iframe,
+  blocked cookies) the SecurityError aborts script evaluation entirely:
+  markup renders, every control inert, zero console-diagnosable hint
+  for users. All access now funnels through `_lsGet`/`_lsSet`, which
+  degrade to in-memory no-ops (language falls back through the
+  documented precedence; the toggle simply doesn't persist).
+- **Pin**: `test_localStorage_access_is_failure_tolerant`
+  (tests/test_ui_contract.py) — lexical containment: outside the two
+  helper bodies `localStorage.` may not appear (any new bare site is
+  the same boot-killer; a raw `count == 2` would NOT discriminate
+  because pre-fix code also had two sites) + node-run both-directions
+  check (throwing store degrades to null/no-throw, real store
+  passthrough). Fail-direction proven by reverting the read site —
+  containment catches it.
+- **Adjacent audit (clean)**: every `async` function/handler in the
+  file self-guards — `openNotebook`/`health`/`refreshQuestions`/
+  `openSeal`/`showSource`/`commit` and all ~20 onclick/onsubmit/
+  onchange/toggle async bodies carry `try`/`catch` (the two remaining
+  unguarded fire-and-forget rejections were `loadNotebooks`, fixed in
+  v0.2.483, and the boot `.catch`). No `sessionStorage` use.
 
 ### v0.2.483
 - **Fix (UI)**: `loadNotebooks()` was the only async function in index.html
