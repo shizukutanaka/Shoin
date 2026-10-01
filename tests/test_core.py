@@ -13408,7 +13408,7 @@ class TestResidualGuards(unittest.TestCase):
         the curated catalog."""
         import ast
 
-        def _reaches(t: "ast.expr | None") -> bool:
+        def _reaches(t: ast.expr | None) -> bool:
             if t is None:
                 return True
             if isinstance(t, ast.Name):
