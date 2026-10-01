@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.518
+## Version History: v0.1.37 → v0.2.519
+
+### v0.2.519
+
+- Except-inventory pin extended to `contextlib.suppress(...)`: a
+  suppress context is an except-handler spelled differently — the
+  ExceptHandler walk never saw it, so `with contextlib.suppress(X):`
+  could land anywhere in prod silently swallowing a defect class.
+  Suppress calls are folded into the same signature list prefixed
+  `suppress(...)` (args sorted like tuple handlers); the one real
+  site — `suppress(OSError)` in store.py's best-effort chmod repair —
+  is cataloged. Both spellings covered: `contextlib.suppress` and a
+  from-imported bare `suppress`.
+- Fail-direction probed: a `suppress(ValueError)` injection in
+  studio.py surfaced in the drift listing at its line; restore green.
 
 ### v0.2.518
 

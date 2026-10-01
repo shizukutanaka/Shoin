@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.518")
+        self.assertEqual(VERSION, "0.2.519")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15103,9 +15103,14 @@ class TestResidualGuards(unittest.TestCase):
         fallback (pass/continue/return of a constant, name, or empty
         literal) are counted per file — flipping a real error path to a
         quiet default at an existing signature site changes that count.
-        Today's inventory: bare `except` 0, BaseException 0, every swallow
-        is a documented fallback (optional config file -> {}, degraded
-        LLM answer -> None/[], write attempt on a gone client -> pass)."""
+        `contextlib.suppress(...)` calls are cataloged in the same
+        signature list (prefixed `suppress(...)`) — a suppress context is
+        an except-handler spelled differently and invisible to
+        ExceptHandler scanning. Today's inventory: bare `except` 0,
+        BaseException 0, one `suppress(OSError)` (best-effort chmod
+        repair), every swallow is a documented fallback (optional config
+        file -> {}, degraded LLM answer -> None/[], write attempt on a
+        gone client -> pass)."""
         import ast
 
         def type_name(node: ast.AST) -> str:
@@ -15209,6 +15214,7 @@ class TestResidualGuards(unittest.TestCase):
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
+                "suppress(OSError)",
             ],
             "studio.py": [
                 "LLMError",
@@ -15233,6 +15239,26 @@ class TestResidualGuards(unittest.TestCase):
                     drift.append(f"{path.name}:{node.lineno}:{s}")
                     if trivial_body(node):
                         n_trivial += 1
+                elif (
+                    isinstance(node, ast.Call)
+                    and (
+                        (
+                            isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "suppress"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == "contextlib"
+                        )
+                        or (
+                            isinstance(node.func, ast.Name)
+                            and node.func.id == "suppress"
+                        )
+                    )
+                ):
+                    s = "suppress(" + ",".join(
+                        sorted(type_name(a) for a in node.args)
+                    ) + ")"
+                    sigs.append(s)
+                    drift.append(f"{path.name}:{node.lineno}:{s}")
             if sigs:
                 actual[path.name] = sorted(sigs)
             if n_trivial:
