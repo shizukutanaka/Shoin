@@ -184,7 +184,8 @@ class TestUIContract(unittest.TestCase):
         self.assertEqual(
             locales["ja"] - locales["en"],
             set(),
-            f"I18N.ja-only keys (en falls back to ja text): {sorted(locales['ja'] - locales['en'])}",
+            f"I18N.ja-only keys (en falls back to ja text): "
+            f"{sorted(locales['ja'] - locales['en'])}",
         )
         self.assertEqual(
             locales["en"] - locales["ja"],
@@ -627,7 +628,10 @@ const fetch = async (path, opts) => {
                                 inner_end = match_brace(obj, inner_brace)
                                 body_keys = top_level_keys(obj[inner_brace + 1:inner_end - 1])
             concrete = re.sub(r"\$\{[^}]*\}", "1", raw).rstrip("/")
-            calls.append((verb, concrete, body_keys, f"line {script[:m.start()].count(chr(10)) + 1}"))
+            calls.append(
+                (verb, concrete, body_keys,
+                 f"line {script[:m.start()].count(chr(10)) + 1}")
+            )
 
         # Per handler: fields it reads from the JSON body.
         import ast
@@ -1630,7 +1634,8 @@ function resolveLang(lsv, metaContent, nav){
   const localStorage = { getItem(k){ return lsv; }, setItem(){} };
   const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
   const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
-  const document = { querySelector(s){ return metaContent === null ? null : {content: metaContent} } };
+  const document = { querySelector(s){
+      return metaContent === null ? null : {content: metaContent} } };
   const navigator = { language: nav };
 """ + resolver + """
   return {lang, t};
@@ -1724,10 +1729,12 @@ const want = ["badge dim","badge err","badge err","badge err","badge err",
               "badge warn","badge warn"];
 if (JSON.stringify(classes) !== JSON.stringify(want))
   { console.error("badges: " + JSON.stringify(classes)); process.exit(1) }
-const cbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("coverage"));
+const cbadges = c.children.filter(
+    b => b.cls === "badge warn" && String(b.text).includes("coverage"));
 if (cbadges.length !== 1) { console.error("coverage badge missing"); process.exit(1) }
 // v0.2.245: a finish_reason "length" answer must carry a visible warning chip.
-const tbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("truncated"));
+const tbadges = c.children.filter(
+    b => b.cls === "badge warn" && String(b.text).includes("truncated"));
 if (tbadges.length !== 1) { console.error("truncated badge missing"); process.exit(1) }
 const c2 = mkc();
 reportBadges(c2, {cited: [1], coverage: null});
@@ -2132,7 +2139,8 @@ function addMsg(role, body, report){ calls.added.push(role + ":" + body) }
             + """
 renderChatHistory();
 if (calls.prepended.length !== 1 || !String(calls.prepended[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended)); process.exit(1) }
+  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended));
+    process.exit(1) }
 if (calls.added.length !== 2)
   { console.error("messages not rendered: " + calls.added.length); process.exit(1) }
 cur.messages_omitted = 0;
@@ -2184,7 +2192,8 @@ renderNotes();
 if (noteList.kids.length !== 3)
   { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
 if (!String(noteList.kids[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0])); process.exit(1) }
+  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0]));
+    process.exit(1) }
 cur.notes_omitted = 0;
 renderNotes();
 if (noteList.kids.length !== 2)
@@ -2244,7 +2253,10 @@ if (studioOut.kids.length !== 1)
   { console.error("card count: " + studioOut.kids.length); process.exit(1) }
 const card = studioOut.kids[0];
 const btn = card.kids.find(k => k.tag === "button" && k.text === "studio.savenote");
-if (!btn) { console.error("save-as-note button missing: " + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text))); process.exit(1) }
+if (!btn) {
+  console.error("save-as-note button missing: "
+    + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text)));
+  process.exit(1) }
 btn.onclick();  // async — awaits jpost; wait a tick
 await new Promise(r => setTimeout(r, 10));
 if (posts.length !== 1) { console.error("no note POST: " + posts.length); process.exit(1) }
@@ -2288,18 +2300,25 @@ async function api(path){ return apiImpl(path); }
 """ + fn + """
 await health();                                    // initial on (fires first refetch)
 if (!reg["#lamp"].classList.contains("on")) { console.error("lamp not on"); process.exit(1) }
-if (refetches !== 1) { console.error("first off->on did not refetch: " + refetches); process.exit(1) }
+if (refetches !== 1) {
+  console.error("first off->on did not refetch: " + refetches);
+  process.exit(1) }
 apiImpl = async () => { throw new Error("net down") };
 await health();                                    // fetch failure
 if (window._llmOn !== false) { console.error("_llmOn not false after failure"); process.exit(1) }
-if (reg["#lamp"].classList.contains("on")) { console.error("lamp stayed green on failure"); process.exit(1) }
-if (reg["#banner"].style.display !== "block") { console.error("banner hidden on failure"); process.exit(1) }
+if (reg["#lamp"].classList.contains("on")) {
+  console.error("lamp stayed green on failure"); process.exit(1) }
+if (reg["#banner"].style.display !== "block") {
+  console.error("banner hidden on failure"); process.exit(1) }
 if (refetches !== 1) { console.error("failure refetched questions"); process.exit(1) }
 apiImpl = async () => ({ json: async () => ({ llm: true }) });
 await health();                                    // off->on recovery
 if (!window._llmOn) { console.error("_llmOn not restored"); process.exit(1) }
-if (reg["#banner"].style.display !== "none") { console.error("banner still shown after recovery"); process.exit(1) }
-if (refetches !== 2) { console.error("questions not refetched on off->on: " + refetches); process.exit(1) }
+if (reg["#banner"].style.display !== "none") {
+  console.error("banner still shown after recovery"); process.exit(1) }
+if (refetches !== 2) {
+  console.error("questions not refetched on off->on: " + refetches);
+  process.exit(1) }
 console.log("ok")
 """
         rc, out = _run_node(harness)
@@ -2331,10 +2350,14 @@ let cur = { id: 1, sources: [{id: 5}] };
 """ + fn + """
 await refreshQuestions();
 if (calls.length !== 1) { console.error("no fetch for live nb: " + calls); process.exit(1) }
-if (reg["#qs"].children.length !== 2) { console.error("chips not rendered: " + reg["#qs"].children.length); process.exit(1) }
+if (reg["#qs"].children.length !== 2) {
+  console.error("chips not rendered: " + reg["#qs"].children.length);
+  process.exit(1) }
 const chip = reg["#qs"].children[0];
 if (chip.tag !== "button" || chip.type !== "button" || chip.cls !== "q-chip")
-  { console.error("chip shape wrong: " + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls})); process.exit(1) }
+  { console.error("chip shape wrong: "
+      + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls}));
+    process.exit(1) }
 chip.onclick();
 if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
   { console.error("chip click did not fill+focus input"); process.exit(1) }
@@ -2347,7 +2370,8 @@ await refreshQuestions();
 cur = null;
 await refreshQuestions();
 if (calls.length !== 1 || reg["#qs"].children.length !== 0)
-  { console.error("guards fetched or kept chips: calls=" + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+  { console.error("guards fetched or kept chips: calls=" + calls.length
+      + " chips=" + reg["#qs"].children.length); process.exit(1) }
 
 // Race: notebook switches while the fetch is in flight -> chips dropped.
 window._llmOn = true; cur = { id: 9, sources: [{id: 5}] };
@@ -2407,7 +2431,8 @@ function startSourceRename(s, tt, row, initial){
 const document = { activeElement: null };
 """ + fn + """
 // Path 1: focused rename input inside #srcList survives the rebuild.
-cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}], messages:[], studio:[], notes:[] };
+cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}],
+    messages:[], studio:[], notes:[] };
 const rin = mkEl();
 rin.classList = { contains: c => c === "src-rename" };
 rin.dataset = { srcId: "5" };
@@ -2417,7 +2442,8 @@ $("#srcList").children = [rin]; rin.parent = $("#srcList");
 document.activeElement = rin;
 renderNotebook();
 if (renameCalls.length !== 1 || renameCalls[0].srcId !== 5 || renameCalls[0].initial !== "mid-edit")
-  { console.error("activeElement path did not restore: " + JSON.stringify(renameCalls)); process.exit(1) }
+  { console.error("activeElement path did not restore: "
+      + JSON.stringify(renameCalls)); process.exit(1) }
 if (rin.onblur !== null || rin.onkeydown !== null)
   { console.error("old rename handlers not detached — phantom commit risk"); process.exit(1) }
 if (srcIndex.get(5).s !== 1) { console.error("srcIndex not repopulated"); process.exit(1) }
@@ -2873,7 +2899,8 @@ function mkEl(){ return {children:[], value:"", type:"", className:"", dataset:{
   append(x){ this.children.push(x); x.parent = this }, parent:null,
   contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
   setAttribute(){}, focus(){ this.focused = true }, select(){}, blur(){},
-  onclick:null, onblur:null, onkeydown:null, click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
+  onclick:null, onblur:null, onkeydown:null,
+  click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
 function t(k){ return k }
 function toast(){}
@@ -2958,7 +2985,8 @@ const reg = {};
 function mkEl(){ return {children:[], parent:null, className:"", value:"",
   textContent:"", title:"", disabled:false, tabIndex:0,
   append(...xs){ xs.forEach(x => { this.children.push(x); x.parent=this }) },
-  replaceChildren(...xs){ this.children=[]; xs.forEach(x => { this.children.push(x); x.parent=this }) },
+  replaceChildren(...xs){ this.children=[];
+    xs.forEach(x => { this.children.push(x); x.parent=this }) },
   setAttribute(n,v){ this["attr_"+n]=v },
   onclick:null, onkeydown:null,
   click(){ if(this.onclick) this.onclick({stopPropagation(){}}) },
@@ -2987,7 +3015,8 @@ await loadNotebooks();
 const lis = $("#nbList").children;
 if (lis.length !== 2) { console.error("row count " + lis.length); process.exit(1) }
 if (lis[0].className !== "" || lis[1].className !== "cur")
-  { console.error("highlight wrong: " + lis[0].className + "/" + lis[1].className); process.exit(1) }
+  { console.error("highlight wrong: " + lis[0].className + "/"
+      + lis[1].className); process.exit(1) }
 if (lis[0].children[1].text !== "2册")
   { console.error("count label: " + lis[0].children[1].text); process.exit(1) }
 
@@ -3248,7 +3277,9 @@ const nbBtn = {disabled: false};
       || calls.posts[0][2].name !== "new nb")
     { console.error("nbForm POST wrong: " + JSON.stringify(calls.posts[0])); process.exit(1) }
   if (nbName.value !== "" || calls.opens[0] !== 9 || nbBtn.disabled)
-    { console.error("nbForm cleanup wrong: " + JSON.stringify({v: nbName.value, opens: calls.opens, d: nbBtn.disabled})); process.exit(1) }
+    { console.error("nbForm cleanup wrong: "
+        + JSON.stringify({v: nbName.value, opens: calls.opens,
+            d: nbBtn.disabled})); process.exit(1) }
   // urlBtn: POST sources, input cleared, opened, button label restored
   const label = urlBtnEl.textContent;
   await events.urlBtn();
@@ -3410,9 +3441,12 @@ function reportBadges(){}
 const KINDS = ["briefing","study_guide","faq","timeline","mindmap"];
 const events = {};
 """
-            + f"events.noteForm = async e=>\n{blocks['noteForm'].split('onsubmit = async e=>',1)[1]}\n"
-            + f"events.reindex = async ()=>\n{blocks['reindex'].split('onclick = async ()=>',1)[1]}\n"
-            + f"events.clearChat = async ()=>\n{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
+            + "events.noteForm = async e=>\n"
+            + f"{blocks['noteForm'].split('onsubmit = async e=>',1)[1]}\n"
+            + "events.reindex = async ()=>\n"
+            + f"{blocks['reindex'].split('onclick = async ()=>',1)[1]}\n"
+            + "events.clearChat = async ()=>\n"
+            + f"{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
             + f"{blocks['buildKinds']}\n"
             + f"{blocks['renderNotes']}\n"
             + """\

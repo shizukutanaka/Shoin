@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.493
+## Version History: v0.1.37 → v0.2.494
+
+### v0.2.494
+- **Backlog paydown (fourth installment)**: all over-long lines in
+  `test_ui_contract.py` wrapped (25 sites — JS-inside-Python-string
+  harness lines split at block/comma boundaries where a newline is
+  semantics-neutral in JS; Python call/assert sites to continuation
+  style). The file leaves the ratchet catalog. Backlog: 139 → 114;
+  only `test_core.py` remains.
 
 ### v0.2.493
 - **Backlog paydown (third installment)**: all over-long lines in
