@@ -29,7 +29,28 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.505
+## Version History: v0.1.37 → v0.2.506
+
+### v0.2.506
+
+- Extended the dangerous-primitives pin: builtin `hash()` is now banned
+  in production code — it is salted per process (PYTHONHASHSEED), so
+  any cache key/ordering/digest built on it silently differs between
+  invocations; content hashing already goes through hashlib.sha256.
+- New pin `test_no_iteration_mutation_or_builtin_shadow` covering three
+  silent-semantics defect classes: (a) mutating the collection a `for`
+  loop iterates (the classic skip-an-element bug), (b) builtin-name
+  shadowing inside function scope (a `list`/`type`/`id` local that
+  hijacks later builtin calls in the same scope — class-scope field
+  names like a dataclass `id:` are attributes, exempt), (c) `is`/
+  `is not` against non-singleton literals (identity-vs-equality that
+  works by accident under CPython interning). Nested function bodies
+  are never descended into — a closure does not run during iteration.
+- Sweep context: `re.match` sites already anchored `^..$` by the route
+  pin; multi-char `strip()` args all intentional char-set uses; every
+  Content-Length parse ValueError-guarded; dynamic regex needles either
+  static tables or `re.escape()`d; zero mutation-during-iteration,
+  zero `is`-literal compares, zero `hash(` call sites today.
 
 ### v0.2.505
 

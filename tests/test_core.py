@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.505")
+        self.assertEqual(VERSION, "0.2.506")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13960,6 +13960,11 @@ class TestResidualGuards(unittest.TestCase):
             # SystemExit — BaseException, invisible to every
             # `except Exception` guard — from wherever they're left behind.
             "breakpoint", "exit", "quit",
+            # Builtin hash() on str/bytes is salted per process (PYTHONHASHSEED):
+            # values change every run, so any cache key, ordering, or stored
+            # digest built on it is silently nondeterministic across
+            # invocations — content hashing goes through hashlib.sha256.
+            "hash",
         }
         banned_attrs = {"loads", "load"}  # only when receiver is pickle/marshal
         # pdb/bdb are breakpoint()'s import route; warnings/traceback are the
@@ -15615,6 +15620,215 @@ class TestResidualGuards(unittest.TestCase):
                     "2 vectors for 3 texts", buf.getvalue(),
                     "the under-delivery must be surfaced, not silent",
                 )
+
+    def test_no_iteration_mutation_or_builtin_shadow(self) -> None:
+        """v0.2.506: three silent-semantics defect classes, all zero today:
+
+        1. Mutating the collection a `for` loop is iterating — the classic
+           skip-an-element bug: `for x in xs: xs.remove(x)` silently skips
+           the element after each removed one, and every test passes until
+           the input order hits the bad case. Scans for `.append/.remove/
+           .pop/...` calls, `del coll[k]` and `coll[k] = v` on the iterated
+           name inside the loop body (nested function bodies excluded —
+           a closure runs later, not during iteration).
+        2. Builtin-name shadowing inside function scope — `def f(list)`,
+           `type = ...`, `for id in ...`: later `list(x)`/`type(x)` calls
+           in the same scope now hit the local, not the builtin, and the
+           failure shows up far from the shadow site. (Class-scope field
+           names like a dataclass `id:` are attributes, not shadows — the
+           scan only descends into function bodies.)
+        3. `is`/`is not` against a non-singleton literal — `x is 5`,
+           `s is "tag"`: compares object identity, not equality; works by
+           accident under CPython interning until it doesn't. `None`/
+           `True`/`False`/`...` are the correct identity targets and are
+           exempt.
+        """
+        import ast as _ast
+        import builtins
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        mutate_methods = {
+            "append", "remove", "pop", "insert", "extend", "clear",
+            "discard", "add", "update", "popitem", "setdefault",
+        }
+        builtin_names = set(dir(builtins)) - {"self", "cls"}
+        singletons = {"None", "True", "False", "Ellipsis"}
+        problems: list[str] = []
+        n_funcs = n_fors = 0
+
+        def descend(body: list[_ast.stmt]) -> list[_ast.AST]:
+            """All nodes under `body`, never entering a nested function."""
+            out: list[_ast.AST] = []
+            stack: list[_ast.AST] = list(body)
+            while stack:
+                st = stack.pop()
+                if isinstance(
+                    st, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)
+                ):
+                    continue
+                out.append(st)
+                stack.extend(_ast.iter_child_nodes(st))
+            return out
+
+        def target_names(t: _ast.expr) -> list[str]:
+            if isinstance(t, _ast.Name):
+                return [t.id]
+            if isinstance(t, (_ast.Tuple, _ast.List)):
+                names: list[str] = []
+                for e in t.elts:
+                    names.extend(target_names(e))
+                return names
+            if isinstance(t, _ast.Starred):
+                return target_names(t.value)
+            return []
+
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    n_funcs += 1
+                    arg_names = (
+                        [a.arg for a in node.args.posonlyargs]
+                        + [a.arg for a in node.args.args]
+                        + [a.arg for a in node.args.kwonlyargs]
+                    )
+                    for spec, a in (
+                        ("vararg", node.args.vararg),
+                        ("kwarg", node.args.kwarg),
+                    ):
+                        if a is not None:
+                            arg_names.append(a.arg)
+                    for name in arg_names:
+                        if name in builtin_names:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: param {name!r} "
+                                "shadows a builtin"
+                            )
+                    for st in descend(node.body):
+                        if isinstance(st, _ast.Assign):
+                            for t in st.targets:
+                                for name in target_names(t):
+                                    if name in builtin_names:
+                                        problems.append(
+                                            f"{path.name}:{st.lineno}: "
+                                            f"assignment {name!r} shadows "
+                                            "a builtin"
+                                        )
+                        elif isinstance(st, _ast.AnnAssign):
+                            for name in target_names(st.target):
+                                if name in builtin_names:
+                                    problems.append(
+                                        f"{path.name}:{st.lineno}: "
+                                        f"annotation {name!r} shadows "
+                                        "a builtin"
+                                    )
+                        elif isinstance(st, _ast.AugAssign):
+                            for name in target_names(st.target):
+                                if name in builtin_names:
+                                    problems.append(
+                                        f"{path.name}:{st.lineno}: "
+                                        f"aug-assign {name!r} shadows "
+                                        "a builtin"
+                                    )
+                        elif isinstance(st, _ast.ExceptHandler):
+                            if st.name and st.name in builtin_names:
+                                problems.append(
+                                    f"{path.name}:{st.lineno}: "
+                                    f"except-as {st.name!r} shadows "
+                                    "a builtin"
+                                )
+                        elif isinstance(st, (_ast.For, _ast.With)):
+                            targets: list[_ast.expr] = []
+                            if isinstance(st, _ast.For):
+                                targets = [st.target]
+                            else:
+                                targets = [
+                                    i.optional_vars for i in st.items
+                                    if i.optional_vars is not None
+                                ]
+                            for t in targets:
+                                for name in target_names(t):
+                                    if name in builtin_names:
+                                        problems.append(
+                                            f"{path.name}:{st.lineno}: "
+                                            f"loop/with var {name!r} "
+                                            "shadows a builtin"
+                                        )
+                elif isinstance(node, _ast.Compare):
+                    for op in node.ops:
+                        if not isinstance(op, (_ast.Is, _ast.IsNot)):
+                            continue
+                        sides = [node.left] + list(node.comparators)
+                        for e in sides:
+                            if (
+                                isinstance(e, _ast.Constant)
+                                and repr(e.value) not in singletons
+                                and str(e.value) not in singletons
+                            ):
+                                problems.append(
+                                    f"{path.name}:{e.lineno}: `is`/`is not` "
+                                    f"against literal {e.value!r}"
+                                )
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.For):
+                    continue
+                n_fors += 1
+                iter_names = {
+                    n.id
+                    for n in _ast.walk(node.iter)
+                    if isinstance(n, _ast.Name)
+                }
+                if not iter_names:
+                    continue
+                for sub in descend(node.body):
+                    if (
+                        isinstance(sub, _ast.Call)
+                        and isinstance(sub.func, _ast.Attribute)
+                        and sub.func.attr in mutate_methods
+                        and isinstance(sub.func.value, _ast.Name)
+                        and sub.func.value.id in iter_names
+                    ):
+                        problems.append(
+                            f"{path.name}:{sub.lineno}: mutates iterated "
+                            f"{sub.func.value.id}.{sub.func.attr}()"
+                        )
+                    elif isinstance(sub, _ast.Delete):
+                        for t in sub.targets:
+                            if (
+                                isinstance(t, _ast.Subscript)
+                                and isinstance(t.value, _ast.Name)
+                                and t.value.id in iter_names
+                            ):
+                                problems.append(
+                                    f"{path.name}:{sub.lineno}: deletes "
+                                    "from iterated "
+                                    f"{t.value.id}"
+                                )
+                    elif isinstance(sub, (_ast.Assign, _ast.AnnAssign)):
+                        targets = (
+                            sub.targets
+                            if isinstance(sub, _ast.Assign)
+                            else [sub.target]
+                        )
+                        for t in targets:
+                            if (
+                                isinstance(t, _ast.Subscript)
+                                and isinstance(t.value, _ast.Name)
+                                and t.value.id in iter_names
+                            ):
+                                problems.append(
+                                    f"{path.name}:{sub.lineno}: writes "
+                                    "into iterated "
+                                    f"{t.value.id}[...]"
+                                )
+        self.assertFalse(
+            problems,
+            "silent-semantics defect(s) found:\n" + "\n".join(problems),
+        )
+        self.assertGreaterEqual(n_funcs, 200, "non-vacuous: functions seen")
+        self.assertGreaterEqual(n_fors, 50, "non-vacuous: for-loops seen")
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
