@@ -44,9 +44,11 @@ _CJK_NEG_CLASS = "".join(f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES)
 # what CAN be negated) to cover every _CJK_RANGES script, but never extended
 # this lookbehind (what precedes a hyphen that DISQUALIFIES it from being
 # negation) to match \u2014 so a hyphen tightly glued to a preceding CJK word
-# character (e.g. "\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0\u306E-\u6700\u9069\u5316", hiragana \u306E directly before the
-# hyphen) was misparsed as `-\u6700\u9069\u5316` negation syntax instead of an ordinary
-# in-sentence hyphen, silently discarding real query content.
+# character (e.g.
+# "\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0\u306E-\u6700\u9069\u5316",
+# hiragana \u306E directly before the hyphen) was misparsed as
+# `-\u6700\u9069\u5316` negation syntax instead of an ordinary in-sentence
+# hyphen, silently discarding real query content.
 _CJK_WORD_NEG_CLASS = "".join(
     f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES if (lo, hi) != (0x3000, 0x303F)
 )
@@ -818,7 +820,10 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
         g
         for g, c in counts.items()
         if c >= PRF_MIN_DOCS
-        and all(v.casefold() not in query_vocab and v.casefold() not in norm_q for v in term_variants(g))
+        and all(
+            v.casefold() not in query_vocab and v.casefold() not in norm_q
+            for v in term_variants(g)
+        )
     ]
     # df desc, longer grams first (more specific), then text — deterministic.
     cands.sort(key=lambda g: (-counts[g], -len(g), g))
@@ -903,7 +908,9 @@ def cosine(a: list[float], b: list[float]) -> float:
     return _cosine_prepared(a, _vec_norm(a), b)
 
 
-def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None, k: int) -> list[Hit]:
+def vector_search(
+    store: Store, notebook_id: int, query_vec: list[float] | None, k: int
+) -> list[Hit]:
     if not query_vec:
         return []
     # Streamed, not fetchall(): only the top k survive, so there is no reason to
@@ -1282,7 +1289,10 @@ def _debug_enabled() -> bool:
     return os.environ.get("SHOIN_DEBUG", "").strip().lower() not in ("", "0", "false")
 
 
-def _debug_print(label: str, query: str, negs: list[str], bm25_n: int, vec_n: int, final: list[Hit]) -> None:
+def _debug_print(
+    label: str, query: str, negs: list[str], bm25_n: int, vec_n: int,
+    final: list[Hit],
+) -> None:
     print(
         f"[DEBUG {label}] query={query!r} negs={negs} bm25_hits={bm25_n}"
         f" vec_hits={vec_n} final={len(final)}",
@@ -1412,5 +1422,8 @@ def retrieve_multi(
     # so the tail is longer and the clip more valuable.
     result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
-        _debug_print(f"retrieve_multi({len(queries)} queries)", primary, negs, total_bm25, total_vec, result)
+        _debug_print(
+            f"retrieve_multi({len(queries)} queries)",
+            primary, negs, total_bm25, total_vec, result,
+        )
     return result

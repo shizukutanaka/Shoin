@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.491")
+        self.assertEqual(VERSION, "0.2.492")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13759,9 +13759,9 @@ class TestResidualGuards(unittest.TestCase):
         expected_dyn = {
             "chunk.py:100",
             "citation.py:513", "citation.py:517", "citation.py:554",
-            "citation.py:567", "citation.py:867", "citation.py:1231",
-            "citation.py:1436",
-            "search.py:53", "search.py:752",
+            "citation.py:567", "citation.py:872", "citation.py:1252",
+            "citation.py:1457",
+            "search.py:55", "search.py:754",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14191,7 +14191,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:556"],
+            sites, ["search.py:558"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -14417,13 +14417,6 @@ class TestResidualGuards(unittest.TestCase):
             return "://" not in tail or width(line[: line.rfind(tail)]) > 100
 
         baseline = {
-            "shoin/citation.py": 5,
-            "shoin/cli.py": 8,
-            "shoin/qa.py": 4,
-            "shoin/search.py": 5,
-            "shoin/server.py": 5,
-            "shoin/store.py": 17,
-            "shoin/studio.py": 4,
             "tests/test_core.py": 114,
             "tests/test_qa.py": 9,
             "tests/test_server.py": 6,

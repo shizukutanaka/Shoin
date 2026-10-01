@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.491
+## Version History: v0.1.37 → v0.2.492
+
+### v0.2.492
+- **Backlog paydown (second installment — production tree complete)**:
+  all remaining over-long lines in `shoin/` wrapped (48 sites across
+  citation/cli/qa/search/server/store/studio). String literals split at
+  content-preserving boundaries via adjacent-literal concatenation;
+  raise/call/dict-comprehension sites wrapped with standard continuation
+  indent. The entire production tree is now out of the ratchet catalog —
+  every `shoin/*.py` file is at budget 0 permanently. Backlog: 220 → 164,
+  all of it in `tests/`.
 
 ### v0.2.491
 - **Backlog paydown (first installment)**: all over-long lines in

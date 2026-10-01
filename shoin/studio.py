@@ -47,7 +47,10 @@ _INSTRUCTIONS: dict[str, dict[str, str]] = {
     },
     "faq": {
         "ja": "想定FAQをMarkdownで作成。Q&A形式で5〜8問。各回答に根拠引用。",
-        "en": "Create an FAQ in Markdown in Q&A format, 5–8 questions. Each answer must cite its source.",
+        "en": (
+            "Create an FAQ in Markdown in Q&A format, 5–8 questions. "
+            "Each answer must cite its source."
+        ),
     },
     "timeline": {
         "ja": (
@@ -80,7 +83,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "question_prompt": {
         "ja": "このソース群に対して読者が尋ねそうな質問を{n}個、1行1問・装飾なしで列挙。",
-        "en": "List {n} questions a reader might ask about these sources, one per line, no decoration.",
+        "en": (
+            "List {n} questions a reader might ask about these sources, "
+            "one per line, no decoration."
+        ),
     },
 }
 
@@ -174,7 +180,10 @@ def generate(
     try:
         context = build_context(store, hits, budget_tokens=STUDIO_BUDGET_TOKENS)
     except sqlite3.OperationalError as exc:
-        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
+        raise StoreError(
+            "SYSTEM_DB_LOCKED",
+            f"database locked during context build: {exc}",
+        ) from exc
     sh = _t("sources_header")
     ih = _t("instructions_header")
     cn = _t("citation_note")
@@ -215,7 +224,10 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     try:
         context = build_context(store, hits, budget_tokens=1600)
     except sqlite3.OperationalError as exc:
-        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
+        raise StoreError(
+            "SYSTEM_DB_LOCKED",
+            f"database locked during context build: {exc}",
+        ) from exc
     sh = _t("sources_header")
     prompt = _t("question_prompt").format(n=n)
     user = f"## {sh}\n{context.block}\n\n{prompt}"

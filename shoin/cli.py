@@ -75,7 +75,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.degenerate": "⚠ 繰り返し生成の疑い({n}件):",
         "cite.truncated": "⚠ 出力が途中で打ち切られた可能性(トークン上限)",
         "cite.contradict": "⚠ 前後の記述が矛盾({n}件):",
-        "cite.coverage_low": "⚠ 引用被覆 低: {n}/{total} ソースのみ引用(取得済みの根拠を使い切っていない可能性)",
+        "cite.coverage_low": (
+            "⚠ 引用被覆 低: {n}/{total} ソースのみ引用"
+            "(取得済みの根拠を使い切っていない可能性)"
+        ),
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
         "eval.mrr": "  MRR     : {v}  (最初に当たった期待ソースの順位の逆数)",
@@ -90,7 +93,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.diff_matched": "  (差分は共通 {n} 件で計算)",
         "eval.diff_new": "  新規ケース {n}件 (ベースライン無し)",
         "eval.diff_dropped": "  削除ケース {n}件 (現実行に無し)",
-        "eval.diff_k_warn": "  注意: ベースラインは k={bk} で計測 (現実行 k={k}) — 同条件での比較ではありません",
+        "eval.diff_k_warn": (
+            "  注意: ベースラインは k={bk} で計測 (現実行 k={k})"
+            " — 同条件での比較ではありません"
+        ),
         "err.prefix": "エラー[{code}] {msg}",
         "reindex.done": "✓ {n}/{total} チャンクを再埋め込みしました",
         "reindex.no_embed": "埋め込みモデル未設定 (SHOIN_EMBED_MODEL)。スキップ。",
@@ -110,7 +116,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_model_off": "(無効 — BM25のみ)",
         "health.multi_query": "マルチクエリ検索(SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "埋め込みバッチサイズ(SHOIN_EMBED_BATCH): {v}",
-        "health.chunking": "チャンク設定(SHOIN_CHUNK_TOKENS/OVERLAP): {tokens}トークン/オーバーラップ{overlap}",
+        "health.chunking": (
+            "チャンク設定(SHOIN_CHUNK_TOKENS/OVERLAP): "
+            "{tokens}トークン/オーバーラップ{overlap}"
+        ),
         "health.embed_batch_default": "{n} (既定)",
         "health.data_dir": "データベースファイル: {v}",
         "health.llm_url": "LLMエンドポイント: {v}",
@@ -137,7 +146,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cite.degenerate": "⚠ Possible generation loop ({n}):",
         "cite.contradict": "⚠ Contradictory statements ({n}):",
         "cite.truncated": "⚠ Output may be truncated (token limit reached)",
-        "cite.coverage_low": "⚠ Low citation coverage: only {n}/{total} sources cited (the answer may not use all retrieved evidence)",
+        "cite.coverage_low": (
+            "⚠ Low citation coverage: only {n}/{total} sources cited "
+            "(the answer may not use all retrieved evidence)"
+        ),
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
         "eval.mrr": "  MRR     : {v}  (reciprocal rank of the first expected source)",
@@ -152,7 +164,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.diff_matched": "  (deltas computed over {n} shared questions)",
         "eval.diff_new": "  {n} new case(s) (no baseline entry)",
         "eval.diff_dropped": "  {n} case(s) dropped (absent in this run)",
-        "eval.diff_k_warn": "  note: baseline was measured at k={bk} (current k={k}) — not a like-for-like comparison",
+        "eval.diff_k_warn": (
+            "  note: baseline was measured at k={bk} (current k={k})"
+            " — not a like-for-like comparison"
+        ),
         "err.prefix": "Error[{code}] {msg}",
         "reindex.done": "✓ Re-embedded {n}/{total} chunks",
         "reindex.no_embed": "No embedding model set (SHOIN_EMBED_MODEL). Skipped.",
@@ -172,7 +187,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_model_off": "(disabled — BM25 only)",
         "health.multi_query": "Multi-query retrieval (SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "Embed batch size (SHOIN_EMBED_BATCH): {v}",
-        "health.chunking": "Chunking (SHOIN_CHUNK_TOKENS/OVERLAP): {tokens} tokens / overlap {overlap}",
+        "health.chunking": (
+            "Chunking (SHOIN_CHUNK_TOKENS/OVERLAP): "
+            "{tokens} tokens / overlap {overlap}"
+        ),
         "health.embed_batch_default": "{n} (default)",
         "health.data_dir": "Database file: {v}",
         "health.llm_url": "LLM endpoint: {v}",
@@ -438,7 +456,10 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
     except _json.JSONDecodeError as exc:
-        raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"cases file is not valid JSON: {exc}") from exc
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"cases file is not valid JSON: {exc}",
+        ) from exc
     try:
         cases = parse_cases(raw)
     except ValueError as exc:
@@ -758,7 +779,11 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         return 1
     except OverflowError:
         print(
-            _t("err.prefix", code="VALIDATION_INTEGER_OVERFLOW", msg="ID value too large for SQLite"),
+            _t(
+                "err.prefix",
+                code="VALIDATION_INTEGER_OVERFLOW",
+                msg="ID value too large for SQLite",
+            ),
             file=sys.stderr,
         )
         return 1

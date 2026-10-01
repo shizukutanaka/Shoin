@@ -825,7 +825,9 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             for m in _CONV_NUM_RE.finditer(claim_n):
                 ent = _UNIT_SCALE.get(m.group(2))
                 if ent is not None:
-                    conv_by_num.setdefault(m.group(1), set()).add((ent[0], float(m.group(1)) * ent[1]))
+                    conv_by_num.setdefault(m.group(1), set()).add(
+                        (ent[0], float(m.group(1)) * ent[1])
+                    )
             # Rate restatements (v0.2.214): a claim asserting "50%" matches a
             # source writing the same rate as the bare fraction "0.5", and a
             # bare-fraction claim "0.5" matches a source asserting "50%" — but
@@ -863,7 +865,10 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
 #   so checking it would be noise, not signal.
 _UNIT_ASCII = r"[a-zA-Zμµ°%]+"
 _UNIT_KANA = r"[ァ-ヶー]+"
-_UNIT_KANJI = "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千"
+_UNIT_KANJI = (
+    "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸"
+    "席便着足組粒錠滴羽匹杯両円倍億万千"
+)
 _UNIT_NUM_RE = re.compile(rf"(\d+(?:\.\d+)?)({_UNIT_ASCII}|{_UNIT_KANA}|[{_UNIT_KANJI}]+)")
 
 # Same-unit spellings across scripts (v0.2.191). NFKC already folds the
@@ -1155,7 +1160,10 @@ def quote_mismatches(
 # "有料" is a real polarity flip worth flagging. English: word-bounded
 # not/never/no/neither/nor/without + the n't contraction.
 _NEG_JP_RUN = re.compile(r"ない|なかっ|なく|ません|未|不|無")
-_NEG_EN_RE = re.compile(r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b", re.IGNORECASE)
+_NEG_EN_RE = re.compile(
+    r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b",
+    re.IGNORECASE,
+)
 # Contrastive-negation constructions are agreement, not contradiction:
 # "AではなくB" explicitly asserts the same B the source asserts — exempt.
 _NEG_SAFE_RE = re.compile(r"ではな|のではな|じゃな")
@@ -1209,8 +1217,21 @@ _ANT: dict[str, tuple[str, int]] = {
     **{s: ("heavy", -1) for s in ("軽い", "軽く", "軽かっ")},
     **{s: ("thick", 1) for s in ("厚い", "厚く", "厚かっ")},
     **{s: ("thick", -1) for s in ("薄い", "薄く", "薄かっ")},
-    **{s: ("en_inc", 1) for s in ("increase", "increased", "increases", "increasing", "rose", "risen", "rises", "higher", "growth", "grew")},
-    **{s: ("en_inc", -1) for s in ("decrease", "decreased", "decreases", "decreasing", "decline", "declined", "declines", "dropped", "fell", "fallen", "falls", "lower", "shrank")},
+    **{
+        s: ("en_inc", 1)
+        for s in (
+            "increase", "increased", "increases", "increasing", "rose",
+            "risen", "rises", "higher", "growth", "grew",
+        )
+    },
+    **{
+        s: ("en_inc", -1)
+        for s in (
+            "decrease", "decreased", "decreases", "decreasing", "decline",
+            "declined", "declines", "dropped", "fell", "fallen", "falls",
+            "lower", "shrank",
+        )
+    },
     **{s: ("en_bet", 1) for s in ("better", "improved", "improves", "improvement")},
     **{s: ("en_bet", -1) for s in ("worse", "worsened", "deteriorated")},
     **{s: ("en_amt", 1) for s in ("more", "greater")},
