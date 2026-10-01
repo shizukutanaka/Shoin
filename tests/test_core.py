@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.494")
+        self.assertEqual(VERSION, "0.2.495")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -189,7 +189,10 @@ class TestStore(unittest.TestCase):
         from shoin.store import MIGRATIONS
 
         for version, sql in MIGRATIONS:
-            script = f"BEGIN;\n{sql.strip()}\nINSERT INTO schema_migrations(version) VALUES ({int(version)});\nCOMMIT;"
+            script = (
+                f"BEGIN;\n{sql.strip()}\n"
+                f"INSERT INTO schema_migrations(version) VALUES ({int(version)});\nCOMMIT;"
+            )
             stripped = script.strip()
             self.assertTrue(stripped.startswith("BEGIN;"), f"v{version}: missing BEGIN")
             self.assertTrue(stripped.endswith("COMMIT;"), f"v{version}: missing COMMIT")
@@ -2221,7 +2224,11 @@ class TestChunk(unittest.TestCase):
         parts = _hard_split(block, 50)
         # Old code (50-char window) → ~20 parts; new code (~300-char window) → ~4 parts.
         # Allow up to 8 to give slack for off-by-one at chunk boundaries.
-        self.assertLessEqual(len(parts), 8, msg="too many chunks indicates window was in chars not tokens")
+        self.assertLessEqual(
+            len(parts),
+            8,
+            msg="too many chunks indicates window was in chars not tokens",
+        )
         # All non-tail chunks must be substantially sized (>20 tokens), proving the window
         # is token-proportional. The last chunk may be a small word fragment so skip it.
         for p in parts[:-1]:
@@ -2247,7 +2254,11 @@ class TestChunk(unittest.TestCase):
         self.assertEqual(estimate_tokens(block), 0, "pre-condition: block must be zero-token")
         parts = _hard_split(block, 50)
         # Should have been split — not emitted as one 4000-char chunk
-        self.assertGreater(len(parts), 1, "zero-token oversized block must be split into multiple chunks")
+        self.assertGreater(
+            len(parts),
+            1,
+            "zero-token oversized block must be split into multiple chunks",
+        )
         # Each part must fit within limit * 5 chars (≈ 5 chars/token ASCII upper bound)
         for p in parts:
             self.assertLessEqual(len(p), 50 * 5 + 10, msg=f"part too large: len={len(p)}")
@@ -2363,7 +2374,8 @@ class TestIngest(unittest.TestCase):
         self.assertIn("Real content here", text)
 
     def test_html_unclosed_title_via_head_close_does_not_swallow_body(self) -> None:
-        """</head> seen while _in_title must implicitly close the title so body text is extracted."""
+        """</head> seen while _in_title must implicitly close the title
+        so body text is extracted."""
         html = "<html><head><title>My Page</head><body><p>Content here.</p></body></html>"
         title, text = html_to_text(html)
         self.assertEqual(title, "My Page")
@@ -2464,7 +2476,10 @@ class TestIngest(unittest.TestCase):
         that (unlike <script>/<style>) is not a real CDATA content element
         and has no browser-spec reason to swallow to end-of-document when
         genuinely unclosed."""
-        html = "<html><body><p>Before template.</p><template><p>After unclosed template.</p></body></html>"
+        html = (
+            "<html><body><p>Before template.</p><template>"
+            "<p>After unclosed template.</p></body></html>"
+        )
         _, text = html_to_text(html)
         self.assertIn("Before template", text)
         self.assertIn(
@@ -3385,7 +3400,11 @@ class TestIngest(unittest.TestCase):
         """HTML files must use the <title> tag as their title (lines 293-294)."""
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "page.html"
-            p.write_text("<html><head><title>My Title</title></head><body><p>Content here.</p></body></html>", encoding="utf-8")
+            p.write_text(
+                "<html><head><title>My Title</title></head><body><p>Content here.</p></body></html>"
+                "",
+                encoding="utf-8",
+            )
             result = extract_file(p)
         self.assertEqual(result.title, "My Title")
         self.assertIn("Content here", result.text)
@@ -3394,7 +3413,10 @@ class TestIngest(unittest.TestCase):
         """HTML response in extract_url must use <title> as the source title (lines 310-311)."""
         import shoin.ingest as ing
 
-        html_body = b"<html><head><title>Article Title</title></head><body><p>Article text here.</p></body></html>"
+        html_body = (
+            b"<html><head><title>Article Title</title></head>"
+            b"<body><p>Article text here.</p></body></html>"
+        )
         with patch.object(
             ing, "fetch_url",
             return_value=(html_body, "text/html; charset=utf-8", "http://example.com/article")
@@ -3442,7 +3464,8 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_pinned_https_connection_connect(self) -> None:
-        """_PinnedHTTPSConnection.connect() must use the pinned IP and wrap with SSL (lines 217-218)."""
+        """_PinnedHTTPSConnection.connect() must use the pinned IP and
+        wrap with SSL (lines 217-218)."""
         import ssl
         import shoin.ingest as ing
 
@@ -3512,7 +3535,11 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb = s.create_notebook("nb").id
             src = s.add_source(nb, "txt", "doc", "o", "sha")
-            s.add_chunks(src.id, ["光合成の詳細な説明がここに続く長い記述の文章。"], ["生物 > 光合成"])
+            s.add_chunks(
+                src.id,
+                ["光合成の詳細な説明がここに続く長い記述の文章。"],
+                ["生物 > 光合成"],
+            )
             bm = bm25_search(s, nb, "光合成", k=5)
             self.assertTrue(bm)
             self.assertEqual(bm[0].context, "生物 > 光合成")
@@ -4354,8 +4381,11 @@ class TestSearch(unittest.TestCase):
             texts = [h.text for h in hits]
             self.assertTrue(any("local" in t for t in texts),
                             "FTS5 result for 'local' must be present")
-            self.assertTrue(any("猫" in t for t in texts),
-                            "LIKE result for short CJK '猫' must not be suppressed by FTS5 early return")
+            self.assertTrue(
+                any("猫" in t for t in texts),
+                "LIKE result for short CJK '猫' must not be suppressed "
+                "by FTS5 early return",
+            )
 
     def test_bm25_mixed_query_no_duplicate_chunks(self) -> None:
         """When FTS5 and LIKE both match the same chunk, it must appear only once."""
@@ -4365,7 +4395,11 @@ class TestSearch(unittest.TestCase):
             s.add_chunks(src.id, ["local 猫 knowledge"])  # matches both FTS5 and LIKE
             hits = bm25_search(s, nb_id, "local 猫", k=10)
             chunk_ids = [h.chunk_id for h in hits]
-            self.assertEqual(len(chunk_ids), len(set(chunk_ids)), "duplicate chunk IDs in bm25_search result")
+            self.assertEqual(
+                len(chunk_ids),
+                len(set(chunk_ids)),
+                "duplicate chunk IDs in bm25_search result",
+            )
 
     def test_fts_query_katakana_query_includes_hiragana_trigrams(self) -> None:
         """fts_query() for a katakana term must also include hiragana-script trigrams.
@@ -4723,7 +4757,8 @@ class TestQA(unittest.TestCase):
         self.assertEqual(msgs[0]["content"], "q3")
 
     def test_history_messages_drops_multiple_leading_assistants(self) -> None:
-        """Citation stripping may produce consecutive leading assistant turns; all must be removed."""
+        """Citation stripping may produce consecutive leading assistant
+        turns; all must be removed."""
         from shoin.qa import history_messages
 
         with make_store() as s:
@@ -5045,7 +5080,11 @@ class TestQA(unittest.TestCase):
 
         # Pure ellipsis/punctuation — estimate_tokens() returns 0 for these
         zero_tok_char = "…"  # U+2026, not CJK, not ASCII word → 0 tokens
-        self.assertEqual(estimate_tokens(zero_tok_char), 0, "pre-condition: char must be zero-token")
+        self.assertEqual(
+            estimate_tokens(zero_tok_char),
+            0,
+            "pre-condition: char must be zero-token",
+        )
         # 2000-char block of zero-token text → effective cost ≈ 400 tokens (2000 // 5)
         big_zero_tok = zero_tok_char * 2000
 
@@ -5245,14 +5284,19 @@ class TestCitation(unittest.TestCase):
         # Short sentence where bracket inflation would push 2-bigram claim below threshold
         # "AIが重要。" — bare bigrams without brackets: {"ai", "i重", "重要"} (3 bigrams)
         # With FW brackets in bare: would add ~4 bracket bigrams → 7 total → 3/7 = 0.43 (still ok)
-        # But for even shorter text: "AI ［Ｓ１］。" → 1 real bigram + 4 bracket = 5 → 1/5 = 0.20 < CONFIRM_MIN
+        # But for even shorter text: "AI ［Ｓ１］。" → 1 real bigram + 4 bracket
+        # = 5 → 1/5 = 0.20 < CONFIRM_MIN
         text = "AI ［Ｓ１］。"
         # Source contains the claim content — should confirm despite the short sentence
         source_texts = {1: "AIは次世代の基盤技術。AIの応用が広がる。"}
         confirmed, _ = verify_grounding(text, source_texts)
         # With the fix, bracket bigrams are stripped → bare = "ai" (1 bigram) → normalized correctly
         # Overlap: {"ai"} ∩ source bigrams containing "ai" / 1 = ≥1/1 = 1.0 → confirmed
-        self.assertIn(1, confirmed, "short sentence with FW brackets must be confirmed after bracket stripping")
+        self.assertIn(
+            1,
+            confirmed,
+            "short sentence with FW brackets must be confirmed after bracket stripping",
+        )
 
     def test_make_report_source_bodies_length_mismatch_raises(self) -> None:
         """source_bodies length != source_titles length must raise ValueError (defensive check)."""
@@ -5518,76 +5562,169 @@ class TestNumericMismatches(unittest.TestCase):
         must not flag a correct restatement in either direction (v0.2.192)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}),
+            [],
+        )
 
     def test_magnitude_expansion_oku_and_sen(self) -> None:
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}), [])
-        self.assertEqual(numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}),
+            [],
+        )
 
     def test_real_value_swap_still_flags(self) -> None:
         """Expansion must not mask a genuine error: 3.2万 ≠ 3.4万."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}), [1])
-        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}),
+            [1],
+        )
 
     def test_rounding_tolerance_preserved(self) -> None:
         """"63" inside "63.5%" stays silent — substring tolerance is kept so
         a rounded restatement does not flag (v0.2.184 behaviour)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}),
+            [],
+        )
 
     def test_kanji_numeral_shorthand_matches(self) -> None:
         """"一万" and "10000" assert the same value — single-kanji shorthand
         expands like digit shorthand (v0.2.193)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}),
+            [],
+        )
 
     def test_multi_kanji_numerals_parsed(self) -> None:
         """Multi-kanji numerals parse positionally (v0.2.195): "二十億" = 20億,
         "百三万" = 103万 — equal values stay silent, differing values flag."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
-        self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}),
+            [1],
+        )
 
     def test_kanji_and_mixed_chains(self) -> None:
         """"一億二千万" and mixed "一億2000万" both = 120,000,000 (v0.2.195)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}),
+            [1],
+        )
 
     def test_bare_kanji_numerals(self) -> None:
         """"十二人" ↔ "12人" — a bare multi-char kanji numeral expands too;
         "二三" ("a few") is a counting sequence, not a numeral (v0.2.195)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}), [])
-        self.assertEqual(numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}), [])
-        self.assertEqual(numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}),
+            [1],
+        )
 
     def test_spelled_english_numerals(self) -> None:
         """"three million" ↔ "3000000", "twenty-one" ↔ "21" — English numeral
         words expand like kanji and digit shorthand (v0.2.196)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("The city has 3000000 people. [S1]", {1: "The city has three million people."}), [])
-        self.assertEqual(numeric_mismatches("The city has three million people. [S1]", {1: "The city has 3000000 people."}), [])
-        self.assertEqual(numeric_mismatches("21 participants joined. [S1]", {1: "Twenty-one participants joined."}), [])
-        self.assertEqual(numeric_mismatches("Sales hit 325000 yen. [S1]", {1: "Sales hit three hundred twenty five thousand yen."}), [])
-        self.assertEqual(numeric_mismatches("The city has 4000000 people. [S1]", {1: "The city has three million people."}), [1])
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has 3000000 people. [S1]",
+                {1: "The city has three million people."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has three million people. [S1]",
+                {1: "The city has 3000000 people."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "21 participants joined. [S1]",
+                {1: "Twenty-one participants joined."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "Sales hit 325000 yen. [S1]",
+                {1: "Sales hit three hundred twenty five thousand yen."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has 4000000 people. [S1]",
+                {1: "The city has three million people."},
+            ),
+            [1],
+        )
 
     def test_wari_percentage_notation(self) -> None:
         """"6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8% — 歩合 notation
@@ -5595,12 +5732,27 @@ class TestNumericMismatches(unittest.TestCase):
         not a percentage, and stays unchecked."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}),
+            [],
+        )
         self.assertEqual(numeric_mismatches("確率は50%だった。[S1]", {1: "確率は五割だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}), [1])
-        self.assertEqual(numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}),
+            [1],
+        )
 
     def test_unit_conversion_equivalence(self) -> None:
         """"180分" ↔ "3時間", "1.5km" ↔ "1500m" — deterministic same-family
@@ -5608,28 +5760,58 @@ class TestNumericMismatches(unittest.TestCase):
         still flags (v0.2.198)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}), [])
-        self.assertEqual(numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}), [])
-        self.assertEqual(numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}), [])
-        self.assertEqual(numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}),
+            [],
+        )
         # Cross-dimension: 300円 is not 300 minutes — must still flag.
-        self.assertEqual(numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}), [1])
-        self.assertEqual(numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}),
+            [1],
+        )
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
         value, so a claim spelling it out no longer false-flags (v0.2.194)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}), [])
-        self.assertEqual(numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}), [])
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}),
+            [],
+        )
 
     def test_chained_magnitudes_wrong_value_still_flags(self) -> None:
         """A claim chain whose sum differs from the source's still flags."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}),
+            [1],
+        )
 
     def test_rate_notation_equivalence(self) -> None:
         """v0.2.214: percent ↔ fraction ↔ wari restatements of one rate stay
@@ -5638,23 +5820,53 @@ class TestNumericMismatches(unittest.TestCase):
         from shoin.citation import numeric_mismatches
 
         # Claim fraction <-> source rate-marked value.
-        self.assertEqual(numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}), [])
-        self.assertEqual(numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}),
+            [],
+        )
         # Claim rate-marked <-> source bare fraction.
-        self.assertEqual(numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("成長率は50パーセントであった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+        self.assertEqual(
+            numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "成長率は50パーセントであった。[S1]",
+                {1: "成長率は0.5を記録した。"},
+            ),
+            [],
+        )
 
     def test_rate_notation_asymmetry_still_flags(self) -> None:
         """The bridge is directional: unmarked "50" does not match a bare "0.5",
         and a fraction claim only reaches a RATE-marked source value."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}), [1])
-        self.assertEqual(numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}),
+            [1],
+        )
         # "percentile" is not a rate marker.
-        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}), [1])
+        self.assertEqual(
+            numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}),
+            [1],
+        )
 
 
 class TestUnitMismatches(unittest.TestCase):
@@ -5702,7 +5914,10 @@ class TestUnitMismatches(unittest.TestCase):
         from shoin.citation import unit_mismatches
 
         self.assertEqual(unit_mismatches("資産は12億円あった。[S1]", {1: "資産は12億あった。"}), [])
-        self.assertEqual(unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}), [])
+        self.assertEqual(
+            unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}),
+            [],
+        )
 
     def test_katakana_unit_swap_flagged(self) -> None:
         from shoin.citation import unit_mismatches
@@ -5743,16 +5958,31 @@ class TestUnitMismatches(unittest.TestCase):
         """km↔キロメートル, m↔メートル, %↔パーセント: same unit, other script."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}), [])
-        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}), [])
-        self.assertEqual(unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}), [])
-        self.assertEqual(unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}), [])
+        self.assertEqual(
+            unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}),
+            [],
+        )
 
     def test_counter_kanji_aliases_silent(self) -> None:
         """歳↔才, 名↔人, 棟↔軒: same count in another spelling."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}), [])
+        self.assertEqual(
+            unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}),
+            [],
+        )
         self.assertEqual(unit_mismatches("委員は12名だった。[S1]", {1: "委員は12人だった。"}), [])
         self.assertEqual(unit_mismatches("被害は25棟だった。[S1]", {1: "被害は25軒だった。"}), [])
 
@@ -5768,14 +5998,23 @@ class TestUnitMismatches(unittest.TestCase):
         share the ambiguous alias キロ but are not aliases of each other."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}), [1])
-        self.assertEqual(unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}), [1])
+        self.assertEqual(
+            unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}),
+            [1],
+        )
+        self.assertEqual(
+            unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}),
+            [1],
+        )
 
     def test_ascii_case_preserved(self) -> None:
         """MW vs mW differ by 9 orders of magnitude — case is meaning."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}), [1])
+        self.assertEqual(
+            unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}),
+            [1],
+        )
 
     def test_non_alias_counter_pairs_still_flag(self) -> None:
         """本/冊 and 番/位 are deliberately excluded — they can differ."""
@@ -6233,7 +6472,10 @@ class TestDegenerateSpans(unittest.TestCase):
         from shoin.citation import degenerate_spans
 
         self.assertEqual(
-            degenerate_spans("例：\n\n    result=compute(x)\n    result=compute(x)\n    result=compute(x)"),
+            degenerate_spans(
+                "例：\n\n    result=compute(x)\n"
+                "    result=compute(x)\n    result=compute(x)"
+            ),
             [],
         )
 
@@ -6908,7 +7150,8 @@ class TestLLMClient(unittest.TestCase):
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.__iter__ = lambda s: iter([
-            b'data: {"choices":[{"delta":{"content":[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
+            b'data: {"choices":[{"delta":{"content":'
+            b'[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
             b'data: {"choices":[{"delta":{"content":{"text":"junk"}}}]}',
             b'data: {"choices":[{"delta":{"content":"!"}}]}',
             b"data: [DONE]",
@@ -7192,7 +7435,8 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(
             read_arg,
             _MAX_RESPONSE + 1,
-            "_post() must read _MAX_RESPONSE + 1 bytes to avoid off-by-one on exact-limit responses",
+            "_post() must read _MAX_RESPONSE + 1 bytes to avoid "
+            "off-by-one on exact-limit responses",
         )
 
 
@@ -7262,7 +7506,11 @@ class TestServerSSE(unittest.TestCase):
                 msgs = s.list_messages(nb_id)
 
             # Must have two messages: user + empty assistant (not just the orphaned user)
-            self.assertEqual(len(msgs), 2, "user message + empty assistant message must both be saved")
+            self.assertEqual(
+                len(msgs),
+                2,
+                "user message + empty assistant message must both be saved",
+            )
             self.assertEqual(msgs[0]["role"], "user")
             self.assertEqual(msgs[1]["role"], "assistant")
             self.assertEqual(msgs[1]["body"], "")
@@ -7670,7 +7918,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted
         from shoin.pipeline import index_source
 
-        fake = Extracted(kind="url", title="Mock Page", origin="http://x.test", sha256="abc", text="page content")
+        fake = Extracted(
+            kind="url",
+            title="Mock Page",
+            origin="http://x.test",
+            sha256="abc",
+            text="page content",
+        )
         with patch("shoin.pipeline.extract_url", return_value=fake) as mock_eu:
             with make_store() as s:
                 nb_id = s.create_notebook("url-test").id
@@ -7691,8 +7945,20 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted
         from shoin.pipeline import refresh_source
 
-        original = Extracted(kind="url", title="Page v1", origin="http://refresh.test", sha256="sha-v1", text="old content")
-        updated = Extracted(kind="url", title="Page v2", origin="http://refresh.test", sha256="sha-v2", text="new content refreshed")
+        original = Extracted(
+            kind="url",
+            title="Page v1",
+            origin="http://refresh.test",
+            sha256="sha-v1",
+            text="old content",
+        )
+        updated = Extracted(
+            kind="url",
+            title="Page v2",
+            origin="http://refresh.test",
+            sha256="sha-v2",
+            text="new content refreshed",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("refresh-nb").id
             with patch("shoin.pipeline.extract_url", return_value=original):
@@ -7886,7 +8152,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.pipeline import index_source
 
         # Extracted text that collapses to no chunks (whitespace-only after processing)
-        fake = Extracted(kind="txt", title="Empty Doc", origin="/dev/null", sha256="sha-empty", text="")
+        fake = Extracted(
+            kind="txt",
+            title="Empty Doc",
+            origin="/dev/null",
+            sha256="sha-empty",
+            text="",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("empty-src-test").id
             with patch("shoin.pipeline.extract_file", return_value=fake):
@@ -7895,7 +8167,11 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(cm.exception.code, "INGEST_EMPTY")
             # No source row must have been committed
             sources = s.sources_for_notebook(nb_id)
-            self.assertEqual(len(sources), 0, "source row must not be committed when chunks are empty")
+            self.assertEqual(
+                len(sources),
+                0,
+                "source row must not be committed when chunks are empty",
+            )
 
     def test_add_chunks_empty_list_raises_store_error(self) -> None:
         """add_chunks([]) must raise StoreError, not silently create a zero-chunk source.
@@ -7956,7 +8232,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted, IngestError
         from shoin.pipeline import refresh_source
 
-        blank = Extracted(text="", kind="html", title="empty page", origin="http://x.com/", sha256="abc123")
+        blank = Extracted(
+            text="",
+            kind="html",
+            title="empty page",
+            origin="http://x.com/",
+            sha256="abc123",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("refresh-empty").id
             src = s.add_source(nb_id, "html", "original", "http://x.com/", "sha-orig")
@@ -8204,7 +8486,11 @@ class TestExport(unittest.TestCase):
             ris = export_ris(s, nb.id)
         da_lines = [ln for ln in ris.splitlines() if ln.startswith("DA  -")]
         self.assertEqual(len(da_lines), 1)
-        self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
+        self.assertEqual(
+            da_lines[0],
+            "DA  - unknown",
+            f"empty added_at must produce 'unknown', got {da_lines[0]!r}",
+        )
         # No structured PY (year) line for a malformed/empty added_at (v0.2.136).
         self.assertNotIn("PY  -", ris)
 
@@ -8371,7 +8657,12 @@ class TestExport(unittest.TestCase):
                 ["書院はローカルツールである。"],
             )
             s.add_message(nb.id, "user", "書院とは何か", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1", md)
         self.assertTrue(
@@ -8421,7 +8712,12 @@ class TestExport(unittest.TestCase):
                 ["書院はローカルツールである。"],
             )
             s.add_message(nb.id, "user", "書院とは", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc", md)
         self.assertNotIn("§", md)
@@ -8451,7 +8747,12 @@ class TestExport(unittest.TestCase):
                 ],
             )
             s.add_message(nb.id, "user", "書院とは", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc-a [検出: 全文 #2 + 意味 #5]", md)
         self.assertIn("S2=doc-b [検出: 意味 #3]", md)
@@ -8542,9 +8843,17 @@ class TestExport(unittest.TestCase):
             src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
             s.add_chunks(src.id, ["書院はローカルツールである。"])
             report = make_report(
-                "書院はローカルツールである[S1]。", ["doc"], [src.id], ["書院はローカルツールである。"]
+                "書院はローカルツールである[S1]。",
+                ["doc"],
+                [src.id],
+                ["書院はローカルツールである。"],
             )
-            s.add_studio_output(nb.id, "briefing", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_studio_output(
+                nb.id,
+                "briefing",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertTrue(
             any("根拠確認済み" in ln for ln in md.splitlines()),
@@ -8611,7 +8920,8 @@ class TestExport(unittest.TestCase):
                     s.set_embedding(cid, v)
             s.conn.commit()
             n_null = s.conn.execute(
-                "SELECT COUNT(*) c FROM chunks WHERE embedding IS NOT NULL AND embedding_norm IS NULL"
+                "SELECT COUNT(*) c FROM chunks "
+                "WHERE embedding IS NOT NULL AND embedding_norm IS NULL"
             ).fetchone()["c"]
             self.assertEqual(n_null, 15, "half the rows must exercise the fallback path")
 
@@ -8741,7 +9051,9 @@ class TestExport(unittest.TestCase):
             import sqlite3 as _sq
 
             conn = _sq.connect(path)
-            conn.executescript("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)",
+            )
             for version, sql in MIGRATIONS:
                 if version > 6:
                     break
@@ -8879,7 +9191,10 @@ class TestExport(unittest.TestCase):
         from shoin import server as srv
 
         with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
-            self.assertEqual(srv._t("serve.no_egress"), "No data leaves this machine. Ctrl+C to stop.")
+            self.assertEqual(
+                srv._t("serve.no_egress"),
+                "No data leaves this machine. Ctrl+C to stop.",
+            )
             self.assertEqual(srv._t("serve.stopped"), "Stopped.")
         with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
             self.assertEqual(srv._t("serve.no_egress"), "外部送信なし。Ctrl+C で終了。")
@@ -8894,7 +9209,9 @@ class TestExport(unittest.TestCase):
 
         with make_store() as s:
             nb = s.create_notebook("export-degraded-test")
-            report: dict[str, object] = {"degraded": True, "cited": [], "invalid": [], "coverage": 0.0}
+            report: dict[str, object] = {
+                "degraded": True, "cited": [], "invalid": [], "coverage": 0.0
+            }
             s.add_message(nb.id, "user", "書院とは何か", "{}")
             s.add_message(nb.id, "assistant", "検索のみの結果", json.dumps(report))
             md = export_markdown(s, nb.id)
@@ -9070,7 +9387,9 @@ class TestConfigXDG(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             cfg_path = Path(d) / "config.json"
-            cfg_path.write_text(json.dumps({"SHOIN_EMBED_MODEL": None, "SHOIN_LLM_MODEL": "real-model"}))
+            cfg_path.write_text(
+                json.dumps({"SHOIN_EMBED_MODEL": None, "SHOIN_LLM_MODEL": "real-model"}),
+            )
             env = dict(os.environ)
             env.pop("SHOIN_EMBED_MODEL", None)
             env.pop("SHOIN_LLM_MODEL", None)
@@ -9114,10 +9433,18 @@ class TestConfigXDG(unittest.TestCase):
                 env.pop(k, None)
             with patch.object(config_mod, "config_file", return_value=cfg_path):
                 with patch.dict(os.environ, env, clear=True):
-                    self.assertEqual(config_mod.llm_model(), "qwen3:4b", "list value must be ignored")
+                    self.assertEqual(
+                        config_mod.llm_model(),
+                        "qwen3:4b",
+                        "list value must be ignored",
+                    )
                     self.assertEqual(config_mod.ui_lang(), "ja", "bool value must be ignored")
                     self.assertEqual(config_mod.port(), 8080, "a plain int value must still work")
-                    self.assertNotIn("{'a': 1}", str(config_mod.data_dir()), "dict value must be ignored")
+                    self.assertNotIn(
+                        "{'a': 1}",
+                        str(config_mod.data_dir()),
+                        "dict value must be ignored",
+                    )
 
 
 class TestNegTerms(unittest.TestCase):
@@ -9171,7 +9498,10 @@ class TestNegTerms(unittest.TestCase):
         query content instead of treating it as ordinary prose punctuation.
         """
         self.assertEqual(neg_terms("アルゴリズムの-最適化について"), [])
-        self.assertEqual(strip_neg_terms("アルゴリズムの-最適化について"), "アルゴリズムの-最適化について")
+        self.assertEqual(
+            strip_neg_terms("アルゴリズムの-最適化について"),
+            "アルゴリズムの-最適化について",
+        )
         # A hyphen preceded by CJK PUNCTUATION (a word boundary, not a word
         # character) must still correctly introduce negation.
         self.assertEqual(neg_terms("書院。-legacy"), ["legacy"])
@@ -9342,7 +9672,8 @@ class TestBM25MergePathCap(unittest.TestCase):
             hits = bm25_search(s, nb_id, "quantum 猫", k=k)
             self.assertLessEqual(
                 len(hits), k,
-                f"bm25_search must return at most {k} hits on FTS5+LIKE merge path, got {len(hits)}",
+                f"bm25_search must return at most {k} hits on FTS5+LIKE "
+                f"merge path, got {len(hits)}",
             )
 
     def test_bm25_merge_path_globally_sorted(self) -> None:
@@ -9872,7 +10203,12 @@ class TestCLI(unittest.TestCase):
             source_map={"S1": "doc"}, confirmed=[], misattributed=[],
         )
         fake_hit = Hit(chunk_id=1, source_id=1, text="body", score=1.0)
-        fake_answer = Answer(text="ソースに記載なし。", hits=[fake_hit], report=report, degraded=False)
+        fake_answer = Answer(
+            text="ソースに記載なし。",
+            hits=[fake_hit],
+            report=report,
+            degraded=False,
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
             db_file = f.name
@@ -9949,7 +10285,10 @@ class TestCLI(unittest.TestCase):
         from unittest.mock import patch
         from shoin.cli import main
 
-        with patch("shoin.cli.Store.__enter__", side_effect=_sqlite3.OperationalError("database is locked")):
+        with patch(
+            "shoin.cli.Store.__enter__",
+            side_effect=_sqlite3.OperationalError("database is locked"),
+        ):
             err_out = io.StringIO()
             with patch("sys.stderr", err_out):
                 rc = main(["notebook", "list"])
@@ -9970,7 +10309,10 @@ class TestCLI(unittest.TestCase):
         from unittest.mock import patch
         from shoin.cli import main
 
-        with patch("shoin.cli.Store", side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'")):
+        with patch(
+            "shoin.cli.Store",
+            side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'"),
+        ):
             err_out = io.StringIO()
             with patch("sys.stderr", err_out):
                 rc = main(["notebook", "list"])
@@ -10301,7 +10643,15 @@ class TestCLINoteSourceParity(unittest.TestCase):
                 nb_id = s.create_notebook("src-refresh-test").id
                 src_id = s.add_source(nb_id, "url", "old", "http://example.test", "sha1").id
 
-            fake_source = Source(src_id, nb_id, "url", "refreshed", "http://example.test", "sha2", "2026-01-01")
+            fake_source = Source(
+                src_id,
+                nb_id,
+                "url",
+                "refreshed",
+                "http://example.test",
+                "sha2",
+                "2026-01-01",
+            )
             fake_result = IndexResult(source=fake_source, n_chunks=3, n_embedded=0)
             out = io.StringIO()
             with patch("shoin.cli.refresh_source", return_value=fake_result):
@@ -10659,13 +11009,19 @@ class TestChunkContext(unittest.TestCase):
                 return config.chunk_tokens(), config.chunk_overlap()
 
         self.assertEqual(probe({}), (512, 64))  # unset → defaults
-        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}), (256, 32))
+        self.assertEqual(
+            probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}),
+            (256, 32),
+        )
         self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "abc"}), (512, 64))  # invalid → default
         self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "0"}), (512, 64))  # non-positive → default
         self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "-5"}), (512, 64))  # negative → default
         self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "999"}), (512, 64))  # >= size → default
         # overlap == effective chunk size is rejected (would overlap wholly/stall)
-        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}), (128, 64))
+        self.assertEqual(
+            probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}),
+            (128, 64),
+        )
 
     def test_chunk_env_changes_index_chunk_count(self) -> None:
         """The knob actually reaches the ingest path: with a smaller chunk size,
@@ -10830,7 +11186,13 @@ class TestRerankContext(unittest.TestCase):
     def test_lex_reads_context_breadcrumb(self) -> None:
         from shoin.search import rerank
 
-        hit = Hit(1, 1, "体内の防御機構が働く仕組みを説明する。", 1.0, context="免疫レポート > 概要")
+        hit = Hit(
+            1,
+            1,
+            "体内の防御機構が働く仕組みを説明する。",
+            1.0,
+            context="免疫レポート > 概要",
+        )
         rerank("免疫", [hit])
         self.assertGreater(hit.detail["lex"], 0.0)
 
@@ -10890,15 +11252,21 @@ class TestRerankContext(unittest.TestCase):
             nb = st.create_notebook("N")
             a = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
             st.add_chunks(
-                a.id, ["体内の防御機構が働く仕組みを説明する。"], contexts=["免疫レポート > 免疫の基礎"]
+                a.id,
+                ["体内の防御機構が働く仕組みを説明する。"],
+                contexts=["免疫レポート > 免疫の基礎"],
             )
             b = st.add_source(nb.id, "md", "研究総括", "b.md", "hb")
             st.add_chunks(
-                b.id, ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"], contexts=["研究総括 > 本文"]
+                b.id,
+                ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"],
+                contexts=["研究総括 > 本文"],
             )
             c = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
             st.add_chunks(
-                c.id, ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"], contexts=["経営会議メモ > 議事"]
+                c.id,
+                ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"],
+                contexts=["経営会議メモ > 議事"],
             )
             ranking = [h.source_id for h in retrieve(st, nb.id, "免疫", k=5)]
             self.assertEqual(ranking, [b.id, a.id, c.id])
@@ -11163,7 +11531,9 @@ class TestRenameReembed(unittest.TestCase):
         st.add_chunks(a.id, ["ワクチンの話題についての本文"], contexts=["旧題"])
         b = st.add_source(nb.id, "md", "議事録", "mem://b", "sha-b")
         st.add_chunks(b.id, ["議事録: 免疫の話題が出た"], contexts=["議事録"])
-        rows = st.id_context_text_chunks_for_source(a.id) + st.id_context_text_chunks_for_source(b.id)
+        rows = st.id_context_text_chunks_for_source(
+            a.id,
+        ) + st.id_context_text_chunks_for_source(b.id)
         _embed_chunks(st, llm, [r[0] for r in rows], [_embed_input(r[1], r[2]) for r in rows])
         return st, nb.id, a.id, b.id
 
@@ -11173,9 +11543,10 @@ class TestRenameReembed(unittest.TestCase):
         try:
             rename_source(st, a_id, "免疫レポート", "mem://a", llm)
             stored = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             fresh = self._vec(_embed_input("免疫レポート", "ワクチンの話題についての本文"))
             stale = self._vec(_embed_input("旧題", "ワクチンの話題についての本文"))
@@ -11251,15 +11622,17 @@ class TestRenameReembed(unittest.TestCase):
         try:
             st.set_setting("embed_model", "some-other-model")
             before = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             n = rename_source(st, a_id, "免疫レポート", "mem://a", llm)
             after = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             self.assertEqual(n, 0)
             self.assertEqual(before, after)
@@ -13925,7 +14298,11 @@ class TestResidualGuards(unittest.TestCase):
                 and len(v.args) == 1
             ):
                 inner = v.args[0]
-                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "len":
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "len"
+                ):
                     return True  # str(len(body)) — byte count
                 if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
                     return True  # route-regex ints
@@ -14390,11 +14767,12 @@ class TestResidualGuards(unittest.TestCase):
     def test_e501_violations_never_grow(self) -> None:
         """E501 (line > 100 display columns) is outside the ruff select set
         only because a pre-existing backlog of long lines is grandfathered
-        (220 at pin creation). This is a RATCHET: each file's violation
-        count is pinned to the baseline below and may only shrink — a new
-        over-long line anywhere fails the suite, so the backlog can't
-        silently grow while it is being paid down. The measure replicates
-        ruff's own E501: East-Asian display width (W/F = 2 columns),
+        (220 at pin creation, fully paid down by v0.2.495). This is a
+        RATCHET: each file's violation count is pinned to the baseline
+        below and may only shrink — a new over-long line anywhere fails
+        the suite, so the backlog can't silently regrow. The measure
+        replicates ruff's own E501: East-Asian display width (W/F = 2
+        columns),
         trailing `# type: ignore`/`# noqa` pragmas stripped first, and a
         trailing unbreakable URL token exempted (count-for-count identical
         to `ruff check --select E501`)."""
@@ -14416,9 +14794,9 @@ class TestResidualGuards(unittest.TestCase):
             tail = line.rsplit(None, 1)[-1]
             return "://" not in tail or width(line[: line.rfind(tail)]) > 100
 
-        baseline = {
-            "tests/test_core.py": 114,
-        }
+        # Empty since v0.2.495 — the whole backlog is paid; every file
+        # sits at budget 0, so any new over-long line fails here.
+        baseline: dict[str, int] = {}
         root = Path(__file__).resolve().parent.parent
         actual: dict[str, int] = {}
         for path in sorted(root.glob("shoin/*.py")) + sorted(

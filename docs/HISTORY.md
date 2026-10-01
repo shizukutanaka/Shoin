@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.494
+## Version History: v0.1.37 → v0.2.495
+
+### v0.2.495
+- **Backlog paydown (final installment)**: all over-long lines in
+  `test_core.py` wrapped (114 sites — assert/call sites to
+  continuation style with recursive argument explosion, long
+  literals split via content-preserving adjacent concatenation,
+  docstrings/comments reflowed). The ratchet baseline is now empty:
+  every file in the tree sits at E501 budget 0, so any new over-long
+  line anywhere fails the suite. Backlog: 220 → 0; the E501 debt is
+  fully repaid and permanently prevented from regrowing.
 
 ### v0.2.494
 - **Backlog paydown (fourth installment)**: all over-long lines in
