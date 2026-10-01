@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.509
+## Version History: v0.1.37 → v0.2.510
+
+### v0.2.510
+
+- Hardened the gate-suppression pin (v0.2.497): the marker regex missed
+  `pragma: allowlist` (detect-secrets' own suppression — a literal
+  `# pragma: allowlist secret` already lived unmonitored at
+  tests/test_qa.py:1283), `pragma: no branch` (coverage partial-branch
+  waivers), `coverage: ignore`, `nosec`, and `yapf:`/`isort:` variants.
+- Same pin now scans the test tree for secret-evasion markers only
+  (`type: ignore` is noise in test stubs; a suppressed secret in a
+  fixture is still a leaked secret), and bans `.coveragerc`/`setup.cfg`/
+  `tox.ini` outright — coverage merges them before pyproject, so an
+  `omit`/`exclude_lines` there would shrink the 90% floor invisibly.
+- Fail-direction probed: `# nosec` injected into a test file caught at
+  its line; prod baseline {cli:2, ingest:2, pipeline:1, server:5}
+  unchanged, test baseline {test_qa.py:1} cataloged.
 
 ### v0.2.509
 

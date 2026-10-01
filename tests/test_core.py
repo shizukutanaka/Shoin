@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.509")
+        self.assertEqual(VERSION, "0.2.510")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14873,9 +14873,11 @@ class TestResidualGuards(unittest.TestCase):
         exclude/override key would shrink every file's gates at once,
         so the config may contain none of those keys."""
         markers = re.compile(
-            r"#\s*(?:noqa\b|type:\s*ignore|pragma:\s*no\s*cover|"
+            r"#\s*(?:noqa\b|type:\s*ignore|pragma:\s*(?:no\s*cover|"
+            r"no\s*branch|allowlist\b)|coverage:\s*ignore|nosec\b|"
             r"pyright:\s*ignore|mypy:\s*ignore|pylint:\s*disable|"
-            r"flake8\b|fmt:\s*(?:off|skip)|isort:\s*skip|ruff:\s*noqa)"
+            r"flake8\b|fmt:\s*(?:off|skip)|isort:\s*\w+|ruff:\s*noqa|"
+            r"yapf:\s*disable)"
         )
         root = Path(__file__).resolve().parent.parent
         baseline = {
@@ -14900,9 +14902,37 @@ class TestResidualGuards(unittest.TestCase):
             "waiver must be added to the catalog (and justified), a "
             "removed waiver subtracted",
         )
+        # The test tree gets a narrower check: `# type: ignore` is noise
+        # there (stub helpers need it), but secret-evasion markers are
+        # not — allowlist pragmas and nosec comments suppress the secret
+        # scan and bandit respectively, and a key smuggled into a test
+        # fixture is the classic real-world leak path.
+        test_markers = re.compile(r"#\s*(?:pragma:\s*allowlist|nosec\b)")
+        test_baseline = {
+            "test_qa.py": 1,  # 50k-char fake entropy blob is not a secret
+        }
+        test_actual: dict[str, int] = {}
+        test_sites: list[str] = []
+        for path in sorted(root.glob("tests/*.py")):
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                hits = test_markers.findall(line)
+                if hits:
+                    test_actual[path.name] = (
+                        test_actual.get(path.name, 0) + len(hits)
+                    )
+                    test_sites.append(f"{path.name}:{i}")
+        self.assertEqual(
+            test_actual, test_baseline,
+            f"test-tree secret-evasion marker inventory drifted at "
+            f"{test_sites} — a secret suppressed from detection in a "
+            "test file is still a leaked secret",
+        )
         gate_narrowing = re.compile(
             r"^\s*(?:per-file-ignores|extend-exclude|exclude|"
-            r"ignore_errors|disable_error_code|overrides)\s*="
+            r"ignore_errors|disable_error_code|overrides|"
+            r"exclude_lines|omit)\s*="
         )
         config_hits = [
             f"pyproject.toml:{i}"
@@ -14915,6 +14945,20 @@ class TestResidualGuards(unittest.TestCase):
             config_hits, [],
             "pyproject.toml gained a gate-narrowing key — suppressions "
             "belong inline at the line they waive, cataloged here",
+        )
+        # coverage also merges .coveragerc/setup.cfg/tox.ini before
+        # pyproject — a `[run] omit` or `[report] exclude_lines` there
+        # would shrink the 90% floor invisibly even though the CLI
+        # --fail-under flag keeps passing.
+        alt_configs = [
+            f.name
+            for f in (root / n for n in (".coveragerc", "setup.cfg", "tox.ini"))
+            if f.exists()
+        ]
+        self.assertEqual(
+            alt_configs, [],
+            "a coverage-readable config file appeared outside "
+            "pyproject.toml — gate narrowing there is invisible to this pin",
         )
 
     def test_file_writes_are_cataloged(self) -> None:
