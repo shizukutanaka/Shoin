@@ -210,7 +210,7 @@ def looks_like_question(text: str) -> bool:
         return True
     # Strip a trailing contraction ("What's", "Who'd", "What'll") before the
     # lookup — the bare frozenset entries would otherwise never match "what's".
-    first_word = norm.split()[0].lower().split("'")[0] if norm.split() else ""
+    first_word = norm.split()[0].casefold().split("'")[0] if norm.split() else ""
     return first_word in _EN_QUESTION_STARTERS
 
 
@@ -322,7 +322,7 @@ def validate_citations(text: str, n_sources: int) -> tuple[list[int], list[int]]
 
 def _bigrams(text: str) -> set[str]:
     """Character bigrams of NFKC-normalised, whitespace-stripped text."""
-    t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).lower())
+    t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).casefold())
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
@@ -622,7 +622,7 @@ def _en_value(run: str) -> int | None:
     total = 0
     local = 0
     used = False
-    for tok in re.split(r"[ -]+", run.lower()):
+    for tok in re.split(r"[ -]+", run.casefold()):
         if tok in _EN_SMALL:
             local += _EN_SMALL[tok]
         elif tok == "hundred":
@@ -1060,7 +1060,7 @@ def _quote_spans(text: str) -> list[str]:
     out: list[str] = []
     for m in _QUOTE_RE.finditer(text):
         q = m.group(1) or m.group(2)
-        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).lower()
+        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).casefold()
         if len(q) >= _QUOTE_MIN:
             out.append(q)
     return out
@@ -1097,7 +1097,7 @@ def quote_mismatches(
     the shared _segment_claims.
     """
     src_norm = {
-        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).lower()
+        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).casefold()
         for n, t in source_texts.items()
     }
     src_bg = {n: _bigrams(t) for n, t in src_norm.items()}
@@ -1295,7 +1295,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     """
     src_sents = {
         n: [
-            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).lower().strip()
+            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).casefold().strip()
             for s in _SENTENCE_SPLIT_RE.split(t)
             if s.strip()
         ]
@@ -1327,7 +1327,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         for n in nums:
             claim_norm = re.sub(
                 r"\s+", " ", unicodedata.normalize("NFKC", segments.get(n, claim_text))
-            ).lower().strip()
+            ).casefold().strip()
             cb = _bigrams(claim_norm)
             if not cb:
                 continue
@@ -1369,7 +1369,7 @@ def _claim_sents(text: str) -> list[tuple[str, str]]:
         bare = _LIST_PREFIX_RE.sub(
             "", _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence))
         )
-        norm = re.sub(r"\s+", " ", bare).lower().strip()
+        norm = re.sub(r"\s+", " ", bare).casefold().strip()
         if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
             continue
         sents.append((norm, sentence))
@@ -1477,15 +1477,15 @@ def degenerate_spans(text: str, *, history: str = "") -> list[str]:
     emphasis repeat *differently*, never verbatim-normed ≥3 times.
     """
     text = _strip_fences(text)  # repeated statements inside code aren't degeneration
-    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).lower()
+    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).casefold()
     out: set[str] = set()
     counts: dict[str, int] = {}
     for raw in _SENTENCE_SPLIT_RE.split(text):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).casefold()
         if len(s) >= _DEGEN_SENT_MIN:
             counts[s] = counts.get(s, 0) + 1
     for raw in _SENTENCE_SPLIT_RE.split(history):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).casefold()
         if s in counts:
             counts[s] += 1
     for s, c in counts.items():

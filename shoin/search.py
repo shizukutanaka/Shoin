@@ -70,7 +70,7 @@ def neg_terms(query: str) -> list[str]:
     Example: "Python -2.7 -legacy" → ["2.7", "legacy"] (note: "2.7" contains
     a dot that _NEG_RE does not capture across; the caller strips the raw hit).
     """
-    return [m.group(1).lower() for m in _NEG_RE.finditer(query)]
+    return [m.group(1).casefold() for m in _NEG_RE.finditer(query)]
 
 
 def strip_neg_terms(query: str) -> str:
@@ -706,12 +706,12 @@ def _needle_score(text: str, context: str, needles: list[str]) -> float:
     that section's chunks, so a context match lifts the whole section
     uniformly and never reorders chunks within it.
     """
-    low_text = text.lower()
-    low_ctx = context.lower()
+    low_text = text.casefold()
+    low_ctx = context.casefold()
     return float(
         sum(
-            low_text.count(n.lower())
-            + (_CTX_BM25_WEIGHT if n.lower() in low_ctx else 0.0)
+            low_text.count(n.casefold())
+            + (_CTX_BM25_WEIGHT if n.casefold() in low_ctx else 0.0)
             for n in needles
         )
     )
@@ -746,7 +746,7 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     tokenization so the exclusion boundary is the same boundary that produced
     the term.
     """
-    folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
+    folded_negs = [unicodedata.normalize("NFKC", n).casefold() for n in negs]
     checks: list[tuple[str | None, re.Pattern[str] | None]] = []
     for n in folded_negs:
         if re.fullmatch(r"[0-9A-Za-z_]+", n):
@@ -757,8 +757,8 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
             checks.append((n, None))
     out: list[Hit] = []
     for h in hits:
-        folded_text = unicodedata.normalize("NFKC", h.text).lower()
-        folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
+        folded_text = unicodedata.normalize("NFKC", h.text).casefold()
+        folded_ctx = unicodedata.normalize("NFKC", h.context).casefold()
         drop = False
         for s, w in checks:
             if w is not None:
@@ -1033,7 +1033,7 @@ def rrf_fuse_lists(
 
 
 def _char_bigrams(text: str) -> set[str]:
-    t = text.lower()
+    t = text.casefold()
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
@@ -1041,7 +1041,7 @@ def _char_bigrams(text: str) -> set[str]:
 
 def _norm_query_terms(query: str) -> list[str]:
     """Query terms, NFKC-folded and lower-cased — the form the scorers compare in."""
-    return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
+    return [unicodedata.normalize("NFKC", t).casefold() for t in query_terms(query)]
 
 
 def _overlap_from_norm(
@@ -1057,7 +1057,7 @@ def _overlap_from_norm(
     """
     if not norm_terms:
         return 0.0
-    low = unicodedata.normalize("NFKC", text).lower()
+    low = unicodedata.normalize("NFKC", text).casefold()
     if idf is None:
         score = 0.0
         for t in norm_terms:
@@ -1085,7 +1085,7 @@ def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
     everywhere then, so the large weight is multiplied by zero.
     """
     n = len(texts)
-    lows = [unicodedata.normalize("NFKC", t).lower() for t in texts]
+    lows = [unicodedata.normalize("NFKC", t).casefold() for t in texts]
     out: dict[str, float] = {}
     for t in dict.fromkeys(norm_terms):
         df = sum(1 for s in lows if t in s)
@@ -1129,7 +1129,7 @@ def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
     terms = list(dict.fromkeys(norm_terms))
     if len(terms) < 2:
         return 0.0
-    low = unicodedata.normalize("NFKC", text).lower()
+    low = unicodedata.normalize("NFKC", text).casefold()
     pts = sorted((p, t) for t in terms for p in _occurrences(low, t))
     if len({t for _, t in pts}) < 2:
         return 0.0

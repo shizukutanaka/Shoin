@@ -29,7 +29,28 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.501
+## Version History: v0.1.37 → v0.2.502
+
+### v0.2.502
+- **Real fix (Unicode recall hole)**: every lexical-matching path folded
+  text via `.lower()`, which for fold-differing characters ('ß'→'ss',
+  'ﬁ'→'fi', ligatures, dotted-i) silently misses matches — 'STRASSE'
+  vs 'straße' scored 0.0. All double-sided Python comparisons now fold
+  via NFKC + `.casefold()` (24 sites across citation.py and
+  search.py): strictly widens recall, identical results for ASCII/CJK.
+- **Deliberately NOT converted**: the SQL LIKE path (`LOWER(c.text)`
+  vs `LOWER(?)` needle) folds ASCII only — a casefolded needle would
+  *miss* content the folded form can't reproduce ('ß' content vs 'ss'
+  needle), so single-sided `.lower()` symmetry is kept there by
+  contract. ASCII-token compares (env flags, extensions, ASCII
+  stopwords, hostname literals, charset/content-type tokens, sqlite
+  error probes) also stay `.lower()`.
+- **New pin**: `test_text_folds_use_casefold_for_matching` — catalogs
+  the remaining `.lower()` sites per file (config 1, ingest 4,
+  search 3, server 3, store 2 — all ASCII-token compares) plus a
+  behavioural assert that `lexical_overlap("STRASSE", "…straße…")`
+  now scores > 0. Fail-direction verified: reverting
+  `_norm_query_terms` to `.lower()` is caught at `search.py:1044`.
 
 ### v0.2.501
 - **Real fix (chmod-through-symlink)**: the DB-permission repair loop

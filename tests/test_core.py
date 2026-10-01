@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.501")
+        self.assertEqual(VERSION, "0.2.502")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15321,6 +15321,68 @@ class TestResidualGuards(unittest.TestCase):
         self.assertGreaterEqual(
             n_seen, 1,
             "non-vacuous: the store.py @staticmethod must be seen",
+        )
+
+    def test_text_folds_use_casefold_for_matching(self) -> None:
+        """v0.2.502: lexical matching folds must be `.casefold()`, not
+        `.lower()` — the Unicode fold difference ('ß'→'ss', 'ﬁ'→'fi',
+        ligatures, dotted-i) decides whether 'STRASSE' matches 'straße',
+        and `.lower()` silently misses those rows. Both sides of every
+        Python-side comparison now fold via NFKC + `.casefold()`, which
+        strictly widens recall (identical results for ASCII/CJK, extra
+        matches only where Unicode case-folding differs). The SQL LIKE
+        path is deliberately left alone: `LOWER(c.text)` and `LOWER(?)`
+        fold ASCII only, and a casefolded needle would MISS content the
+        folded form can't reproduce ('ß' content vs 'ss' needle) — the
+        one-sided fold keeps `.lower()` semantics by contract.
+        The remaining `.lower()` sites are ASCII-token compares where
+        the fold alphabet is ASCII by design: env flags, file
+        extensions, the ASCII stopword table, hostname literals,
+        charset/content-type tokens, sqlite error-message probes. They
+        are cataloged per file — any NEW `.lower()` must be justified
+        here (is the compared alphabet really ASCII-only?)."""
+        import ast
+
+        from shoin.search import lexical_overlap
+
+        # Behavioural proof the fold widens recall: fold-differing
+        # spellings match where .lower() scored 0.0.
+        self.assertGreater(
+            lexical_overlap("STRASSE", "die straße heißt"), 0.0,
+            "casefold recall: 'STRASSE' must match 'straße'",
+        )
+        self.assertGreater(
+            lexical_overlap("database", "the database is fast"), 0.0,
+            "non-vacuous: ASCII overlap still scores",
+        )
+        baseline = {
+            "config.py": 1, "ingest.py": 4, "search.py": 3,
+            "server.py": 3, "store.py": 2,
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "lower"
+                ):
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f".lower() inventory drifted at {sites} — matching folds "
+            "use .casefold(); only ASCII-token compares may keep "
+            ".lower(), cataloged here",
+        )
+        # Non-vacuous: the matching helpers must actually use casefold.
+        src = (shoin_dir / "search.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '.casefold()', src,
+            "non-vacuous: _norm_query_terms must fold via .casefold()",
         )
 
 if __name__ == "__main__":
