@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.519")
+        self.assertEqual(VERSION, "0.2.520")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16728,6 +16728,78 @@ class TestResidualGuards(unittest.TestCase):
             "statement-level surface must stay empty — global/nonlocal"
             "/del mutate binding state and TYPE_CHECKING blocks can "
             "never execute:\n" + "\n".join(hits),
+        )
+
+    def test_argparse_reads_stay_declared(self) -> None:
+        """Every `args.<attr>` read in cli.py must resolve to a declared
+        argparse destination — a misspelled read (`args.noteboook_id`)
+        raises AttributeError only when that subcommand runs, and the
+        subcommand-dispatch tests may not exercise every flag-bearing
+        path. Declared dests come from three sources:
+        `add_argument` (long-option-derived + explicit dest=),
+        `add_subparsers(dest=...)`, and `set_defaults(...)`."""
+        import ast as _ast
+
+        cli = Path(__file__).resolve().parent.parent / "shoin" / "cli.py"
+        tree = _ast.parse(cli.read_text(encoding="utf-8"))
+        declared: set[str] = set()
+        reads: list[str] = []
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                if (
+                    isinstance(node, _ast.Attribute)
+                    and isinstance(node.value, _ast.Name)
+                    and node.value.id == "args"
+                ):
+                    reads.append(f"{node.lineno}:{node.attr}")
+                continue
+            f = node.func
+            if not isinstance(f, _ast.Attribute):
+                continue
+            names = [
+                a.value
+                for a in node.args
+                if isinstance(a, _ast.Constant) and isinstance(a.value, str)
+            ]
+            if f.attr == "add_argument":
+                destd = next(
+                    (
+                        k.value.value
+                        for k in node.keywords
+                        if k.arg == "dest"
+                        and isinstance(k.value, _ast.Constant)
+                    ),
+                    None,
+                )
+                if isinstance(destd, str):
+                    declared.add(destd)
+                for n in names:
+                    if n.startswith("--"):
+                        declared.add(n.lstrip("-").replace("-", "_"))
+                    elif n.startswith("-"):
+                        declared.add(n.lstrip("-"))
+                    else:
+                        declared.add(n)
+            elif f.attr == "add_subparsers":
+                for k in node.keywords:
+                    if k.arg == "dest" and isinstance(
+                        k.value, _ast.Constant
+                    ):
+                        declared.add(str(k.value.value))
+            elif f.attr == "set_defaults":
+                for k in node.keywords:
+                    if k.arg is not None:
+                        declared.add(k.arg)
+        unknown = sorted(
+            r for r in set(reads) if r.split(":")[1] not in declared
+        )
+        self.assertGreater(len(declared), 5)
+        self.assertGreater(len(reads), 5)
+        self.assertEqual(
+            unknown, [],
+            "args.<attr> reads must resolve to a declared argparse "
+            "destination (declared: " + ",".join(sorted(declared)) +
+            "):\n" + "\n".join(unknown),
         )
 
 if __name__ == "__main__":

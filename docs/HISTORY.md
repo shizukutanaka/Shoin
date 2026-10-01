@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.519
+## Version History: v0.1.37 → v0.2.520
+
+### v0.2.520
+
+- New pin `test_argparse_reads_stay_declared`: every `args.<attr>`
+  read in cli.py must resolve to a declared argparse destination —
+  a misspelled read (`args.noteboook_id`) raises AttributeError
+  only when that subcommand runs, and dispatch tests may not touch
+  every flag path. Declared dests come from `add_argument`
+  (long-option-derived + explicit dest=), `add_subparsers(dest=)`,
+  and `set_defaults(...)` keyword names.
+- Fail-direction probed: `args.actoin` surfaces in the unknown-read
+  listing at its line; restore green.
 
 ### v0.2.519
 
