@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.498")
+        self.assertEqual(VERSION, "0.2.499")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14966,6 +14966,179 @@ class TestResidualGuards(unittest.TestCase):
             f"file-mutation inventory drifted at {sites} — new writers "
             "must be added to the catalog (and justified), removed "
             "writers subtracted",
+        )
+
+    def test_except_handler_inventory_is_cataloged(self) -> None:
+        """Every `except` handler in production code is pinned to a per-file
+        signature inventory — the catch-all pin curates `except Exception`
+        and the broad forms (bare, BaseException, suppress), but a new
+        SPECIFIC-TYPED handler is invisible to it: `except TypeError:
+        return None` is neither bare nor Exception-wide, so it would slide
+        through lint and every gate while silently swallowing a defect
+        class. Signatures are canonical (tuple members sorted — `except
+        (A,B)` ≡ `except (B,A)`); handler bodies that silently substitute a
+        fallback (pass/continue/return of a constant, name, or empty
+        literal) are counted per file — flipping a real error path to a
+        quiet default at an existing signature site changes that count.
+        Today's inventory: bare `except` 0, BaseException 0, every swallow
+        is a documented fallback (optional config file -> {}, degraded
+        LLM answer -> None/[], write attempt on a gone client -> pass)."""
+        import ast
+
+        def type_name(node: ast.AST) -> str:
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                parts: list[str] = []
+                while isinstance(node, ast.Attribute):
+                    parts.append(node.attr)
+                    node = node.value  # type: ignore[assignment]
+                if isinstance(node, ast.Name):
+                    parts.append(node.id)
+                return ".".join(reversed(parts))
+            if isinstance(node, ast.Starred):
+                return "*" + type_name(node.value)
+            return ast.dump(node)
+
+        def signature(handler: ast.ExceptHandler) -> str:
+            if handler.type is None:
+                return "BARE"
+            if isinstance(handler.type, ast.Tuple):
+                return "(" + ",".join(
+                    sorted(type_name(e) for e in handler.type.elts)
+                ) + ")"
+            return type_name(handler.type)
+
+        def trivial_body(handler: ast.ExceptHandler) -> bool:
+            if len(handler.body) != 1:
+                return False
+            stmt = handler.body[0]
+            if isinstance(stmt, (ast.Pass, ast.Continue)):
+                return True
+            if isinstance(stmt, ast.Return):
+                v = stmt.value
+                if v is None or isinstance(v, (ast.Constant, ast.Name)):
+                    return True
+                if isinstance(v, ast.Dict):
+                    return not any(v.keys)
+                if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+                    return not v.elts
+            return False
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline: dict[str, list[str]] = {
+            "cli.py": [
+                "(IngestError,StoreError)",
+                "(IngestError,LLMError,StoreError)",
+                "Exception", "KeyboardInterrupt",
+                "OSError", "OSError", "OSError", "OSError",
+                "OverflowError", "ValueError", "ValueError",
+                "_json.JSONDecodeError", "_json.JSONDecodeError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+            ],
+            "config.py": [
+                "(TypeError,ValueError)", "(TypeError,ValueError)",
+                "(TypeError,ValueError)", "(TypeError,ValueError)",
+                "OSError", "json.JSONDecodeError",
+            ],
+            "export.py": ["(ValueError,json.JSONDecodeError)"],
+            "ingest.py": [
+                "(OSError,http.client.HTTPException)",
+                "(LookupError,UnicodeDecodeError)",
+                "Exception", "Exception", "ImportError", "OSError",
+                "ValueError", "ValueError",
+                "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
+            ],
+            "llm.py": [
+                "(IndexError,KeyError,TypeError)",
+                "(AttributeError,KeyError,OverflowError,TypeError,ValueError)",
+                "(OSError,ValueError,http.client.HTTPException)",
+                "(OSError,ValueError,http.client.HTTPException)",
+                "(AttributeError,OSError,ValueError,http.client.HTTPException)",
+                "(IndexError,KeyError,TypeError,json.JSONDecodeError)",
+                "LLMError", "json.JSONDecodeError",
+                "urllib.error.HTTPError", "urllib.error.HTTPError",
+            ],
+            "pipeline.py": ["Exception", "Exception", "LLMError"],
+            "qa.py": [
+                "LLMError", "LLMError", "LLMError",
+                "StoreError", "sqlite3.OperationalError",
+            ],
+            "server.py": [
+                "(BrokenPipeError,ConnectionResetError,OSError)",
+                "(BrokenPipeError,ConnectionResetError,OSError)",
+                "(UnicodeDecodeError,UnicodeEncodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
+                "(ValueError,json.JSONDecodeError)",
+                "ConnectionError", "ConnectionError", "ConnectionError",
+                "ConnectionError", "ConnectionError", "ConnectionError",
+                "ConnectionError",
+                "Exception", "Exception", "Exception", "Exception",
+                "Exception", "Exception", "Exception",
+                "IngestError", "KeyboardInterrupt",
+                "LLMError", "LLMError", "StoreError",
+                "UnicodeEncodeError",
+                "ValueError", "ValueError", "ValueError",
+            ],
+            "store.py": [
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+            ],
+            "studio.py": [
+                "LLMError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+            ],
+        }
+        trivial_baseline = {
+            "config.py": 6, "export.py": 1, "ingest.py": 1, "llm.py": 2,
+            "pipeline.py": 2, "qa.py": 2, "server.py": 11, "studio.py": 1,
+        }
+        actual: dict[str, list[str]] = {}
+        trivial: dict[str, int] = {}
+        drift: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            sigs: list[str] = []
+            n_trivial = 0
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ExceptHandler):
+                    s = signature(node)
+                    sigs.append(s)
+                    drift.append(f"{path.name}:{node.lineno}:{s}")
+                    if trivial_body(node):
+                        n_trivial += 1
+            if sigs:
+                actual[path.name] = sorted(sigs)
+            if n_trivial:
+                trivial[path.name] = n_trivial
+        for name, sigs in actual.items():
+            expected = baseline.get(name)
+            if expected is None or sorted(expected) != sigs:
+                self.fail(
+                    f"except-handler inventory drifted at {drift} — "
+                    "new handlers must be added to the catalog (and "
+                    "justified); broadened or silent-swallowing handlers "
+                    "are exactly what this pin exists to catch"
+                )
+        for name in baseline:
+            if name not in actual:
+                self.fail(
+                    f"{name}: cataloged except handlers vanished — "
+                    "removed handlers must be subtracted from the catalog"
+                )
+        self.assertEqual(
+            trivial, trivial_baseline,
+            f"trivial-body (silent fallback) handler count drifted at "
+            f"{drift} — a return-error path quietly becoming a default "
+            "is the exact defect this ratchet guards",
+        )
+        self.assertEqual(
+            sum(len(v) for v in actual.values()),
+            sum(len(v) for v in baseline.values()),
+            "non-vacuous: handler totals drifted from the catalog",
         )
 
 if __name__ == "__main__":

@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.498
+## Version History: v0.1.37 → v0.2.499
+
+### v0.2.499
+- **New pin**: `test_except_handler_inventory_is_cataloged` — every
+  `except` handler in `shoin/` is pinned to a per-file signature
+  inventory (canonical: tuple members sorted). The earlier catch-all
+  pin curates `except Exception` and broad forms, but a new
+  specific-typed handler (`except TypeError: return None`) was
+  invisible to it — neither bare nor Exception-wide, sliding through
+  lint and every gate while silently swallowing a defect class.
+  Silent-fallback bodies (pass/continue/return of a constant, name, or
+  empty literal) are counted per file too, so flipping a real error
+  path to a quiet default at an existing signature site is caught.
+- Audited this cycle, clean: no `asyncio`/`async`/`await` in prod
+  (llm.py is synchronous urllib); every dynamic-`getattr` site uses a
+  literal attribute name with a default (duck-typing); zero bare
+  `except`/`BaseException`; the two `KeyboardInterrupt` catches are the
+  legitimate top-level sites; every silent-fallback body is a
+  documented default (optional config file -> {}, degraded LLM answer
+  -> None/[], write attempt on a gone client -> pass).
 
 ### v0.2.498
 - **New pin**: `test_file_writes_are_cataloged` — every
