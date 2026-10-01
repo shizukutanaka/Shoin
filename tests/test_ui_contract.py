@@ -419,7 +419,7 @@ const fetch = async (path, opts) => {
         not that the call signature fits the groups the pattern yields."""
         import inspect
 
-        for verb, pattern, name in _Handler._ROUTES:
+        for _verb, pattern, name in _Handler._ROUTES:
             fn = getattr(_Handler, f"_h_{name}")
             n_params = len(inspect.signature(fn).parameters) - 1  # self
             n_groups = re.compile(pattern).groups
