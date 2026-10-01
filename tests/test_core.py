@@ -14202,9 +14202,9 @@ class TestResidualGuards(unittest.TestCase):
         expected_dyn = {
             "chunk.py:100",
             "citation.py:513", "citation.py:517", "citation.py:554",
-            "citation.py:567", "citation.py:874", "citation.py:1238",
-            "citation.py:1443",
-            "search.py:53", "search.py:752",
+            "citation.py:567", "citation.py:879", "citation.py:1255",
+            "citation.py:1460",
+            "search.py:55", "search.py:754",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -16196,7 +16196,7 @@ class TestResidualGuards(unittest.TestCase):
            (file-mutation pin, sqlite3.connect pin, env pin...).
            `import *` is the unlimited version of the same route.
            The only legitimate from-imports are the ones already in
-           the tree: `pathlib.Path` and store.py's `datetime`/`timezone`
+           the tree: `pathlib.Path` and store.py's `datetime`/`UTC`
            — cataloged here so any addition drifts loudly.
         2. `getattr(os, "chmod")(p)` / `__import__("os")` /
            `importlib.import_module` / `os.__dict__["chmod"]` —
@@ -16220,7 +16220,7 @@ class TestResidualGuards(unittest.TestCase):
             "config.py": ["pathlib.Path"],
             "ingest.py": ["io.BytesIO", "pathlib.Path"],
             "server.py": ["pathlib.Path"],
-            "store.py": ["datetime.datetime", "datetime.timezone",
+            "store.py": ["datetime.UTC", "datetime.datetime",
                          "pathlib.Path"],
         }
         from_actual: dict[str, list[str]] = {}
@@ -16854,7 +16854,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [100],
-            "citation.py": [513, 517, 567, 872, 1252, 1457],
+            "citation.py": [513, 517, 567, 879, 1255, 1460],
             "search.py": [55, 754],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
