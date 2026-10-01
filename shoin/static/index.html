@@ -430,7 +430,7 @@ let externalPendingRename = null;
 async function loadNotebooks(){
   try{
   const j = await (await api("/api/notebooks")).json();
-  notebooks = j.notebooks;
+  notebooks = j.notebooks || [];
   const ul = $("#nbList"); ul.replaceChildren();
   for (const nb of notebooks){
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
@@ -483,7 +483,10 @@ async function openNotebook(id){
   try{
     const j = await (await api(`/api/notebooks/${id}`)).json();
     if (seq !== _nbSeq) return;
-    cur = j; renderNotebook(); loadNotebooks();
+    // Boundary normalization: inside render* every collection field exists,
+    // so raw .forEach/.length reads and ?./||[] guards stay interchangeable.
+    cur = {sources:[], messages:[], notes:[], studio:[], ...j};
+    renderNotebook(); loadNotebooks();
   }catch(e){ if (seq === _nbSeq) toast(e.message); }
 }
 // Enters inline-rename mode for a source row. Factored out of the dblclick
@@ -767,7 +770,7 @@ function renderFullSource(container, chunks, citedIds, excerpt){
   // there is nothing to verify against, so the old id-only behavior stays.
   const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
-  chunks.forEach((c, i) => {
+  (chunks || []).forEach((c, i) => {
     if (i) container.append(el("div","chunk-sep","⋯"));
     const isCited = marked.has(c.id) &&
       (!provable || excerpt.includes(String(c.text).slice(0, 24)));
@@ -959,7 +962,7 @@ async function refreshQuestions(){
   try{
     const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();
     if (!cur || cur.id !== nbId) return;  // notebook changed while waiting
-    j.questions.forEach(q=>{
+    (j.questions || []).forEach(q=>{
       const b = el("button","q-chip", q); b.type="button";
       b.onclick = ()=>{ $("#askInput").value=q; $("#askInput").focus(); };
       $("#qs").append(b);

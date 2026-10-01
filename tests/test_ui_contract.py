@@ -3040,6 +3040,44 @@ console.log("ok");
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_collection_reads_are_boundary_normalized(self) -> None:
+        """v0.2.486: response-shape reads were defensively INCONSISTENT —
+        `cur.sources.forEach` raw on one line, `cur.sources?.length` two
+        functions later; `(j.chunks || [])` in one fetch, bare `j.chunks`
+        passed to `renderFullSource` in the next. A malformed/truncated
+        response then produced a TypeError toast instead of an empty render
+        — same input class, different user-visible outcome depending on
+        which call site got it. Collections are now normalized at the trust
+        boundary (openNotebook's `cur = {...defaults, ...j}`) or defaulted
+        at the consumer, so inside render* every collection always exists.
+        Pin the boundary spreads lexically and `renderFullSource`'s
+        tolerance under node."""
+        src = _script_body(_html())
+        self.assertIn("notebooks = j.notebooks || [];", src)
+        m = re.search(r"cur = \{[^}]*\.\.\.j[^}]*\};", src)
+        self.assertIsNotNone(m, "cur boundary normalization missing")
+        for field in ("sources", "messages", "notes", "studio"):
+            self.assertIn(f"{field}:[],", m.group(0))
+        self.assertIn("(chunks || []).forEach", src)
+        self.assertIn("(j.questions || []).forEach", src)
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        fn = _js_block(src, "function renderFullSource")
+        harness = (
+            "let replaced = 0;\n"
+            "const container = { replaceChildren(){replaced++}, append(){} };\n"
+            + fn
+            + """
+renderFullSource(container);            // chunks entirely absent
+renderFullSource(container, undefined); // explicitly undefined
+if (replaced !== 2) throw "replaceChildren count " + replaced;
+console.log("ok");
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.486
+## Version History: v0.1.37 → v0.2.487
+
+### v0.2.487
+- **Fix + pin**: response-shape collection reads were defensively
+  inconsistent — `cur.sources.forEach` raw while `cur.sources?.length`
+  guarded elsewhere, `(j.chunks || [])` in one fetch vs bare `j.chunks`
+  into `renderFullSource` in the next, `j.questions.forEach` raw. A
+  malformed/truncated envelope then produced a TypeError toast or an
+  empty render depending on which call site received it. Collections
+  are now normalized at the trust boundary — `openNotebook` assigns
+  `cur = {sources:[], messages:[], notes:[], studio:[], ...j}` so
+  every collection exists inside render*, `loadNotebooks` defaults
+  `j.notebooks || []`, `renderFullSource`/`refreshQuestions` default
+  at the consumer. Pin `test_collection_reads_are_boundary_normalized`
+  (node-run lexical + behavioral: undefined chunks → clean empty
+  render, replaceChildren observed).
 
 ### v0.2.486
 - **Pin extension**: `test_no_dangerous_primitives_or_mutable_defaults`
