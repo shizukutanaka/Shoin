@@ -631,6 +631,7 @@ const fetch = async (path, opts) => {
 
         # Per handler: fields it reads from the JSON body.
         import ast
+
         import shoin.server
         server_src = Path(shoin.server.__file__).read_text(encoding="utf-8")
         handlers: dict[str, ast.AST] = {
@@ -939,7 +940,7 @@ const fetch = async (path, opts) => {
             if isinstance(node, ast.Dict):
                 return {
                     k.value: shape_of(v, seen)
-                    for k, v in zip(node.keys, node.values)
+                    for k, v in zip(node.keys, node.values, strict=True)
                     if isinstance(k, ast.Constant) and isinstance(k.value, str)
                 }
             if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
@@ -1268,9 +1269,9 @@ const fetch = async (path, opts) => {
         self.assertEqual(
             skipped, [], f"heading levels must not skip: {skipped}"
         )
-        bad = re.findall(r'tabindex="(\d+)"', html) + [
-            v for v in re.findall(r"tabIndex\s*=\s*(\d+)", html)
-        ]
+        bad = re.findall(r'tabindex="(\d+)"', html) + list(
+            re.findall(r"tabIndex\s*=\s*(\d+)", html)
+        )
         positive = [v for v in bad if int(v) > 0]
         self.assertEqual(
             positive, [], f"positive tabindex found: {positive}"
