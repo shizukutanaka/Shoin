@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.516")
+        self.assertEqual(VERSION, "0.2.517")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16650,6 +16650,58 @@ class TestResidualGuards(unittest.TestCase):
             "writes into a watched module's namespace mutate shared "
             "interpreter state invisibly to every pin:\n"
             + "\n".join(hits),
+        )
+
+    def test_dangerous_statements_are_banned(self) -> None:
+        """Statement-level surface (the assert ban, v0.2.281, is the
+        sibling pin — this one completes the family):
+
+        - `global x`/`nonlocal x`: lets a function mutate state owned
+          by an outer scope without appearing as a module-level
+          Assign — module-level mutation is already cataloged
+          (v0.2.451), but a `global` declaration is the *other* half
+          of that contract and was unpinned.
+        - `del x`/`del obj.attr`/`del lst[i]`: makes a name or slot
+          disappear — every reader-side pin assumes declared names
+          stay bound.
+        - `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:`: a block
+          that can never execute at runtime — dead code that still
+          counts toward the coverage denominator and hides paths no
+          test can reach. Prod ships none; keep it that way.
+        """
+        import ast as _ast
+
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                    hits.append(
+                        f"{path.name}:{node.lineno} "
+                        f"{type(node).__name__}"
+                    )
+                elif isinstance(node, _ast.Delete):
+                    hits.append(f"{path.name}:{node.lineno} del")
+                elif isinstance(node, _ast.If):
+                    t = node.test
+                    if (
+                        isinstance(t, _ast.Name)
+                        and t.id == "TYPE_CHECKING"
+                    ) or (
+                        isinstance(t, _ast.Attribute)
+                        and t.attr == "TYPE_CHECKING"
+                    ):
+                        hits.append(
+                            f"{path.name}:{node.lineno} "
+                            "if TYPE_CHECKING"
+                        )
+        self.assertEqual(
+            hits, [],
+            "statement-level surface must stay empty — global/nonlocal"
+            "/del mutate binding state and TYPE_CHECKING blocks can "
+            "never execute:\n" + "\n".join(hits),
         )
 
 if __name__ == "__main__":

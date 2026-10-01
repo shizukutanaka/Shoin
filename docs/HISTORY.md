@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.516
+## Version History: v0.1.37 → v0.2.517
+
+### v0.2.517
+
+- New pin `test_dangerous_statements_are_banned`: the assert ban
+  (v0.2.281) gets its sibling — the rest of the statement-level
+  surface pinned to zero:
+  - `global`/`nonlocal`: lets a function mutate outer-scope state
+    without appearing as a module-level Assign — the module-mutable
+    catalog (v0.2.451) sees declarations, not this other half.
+  - `del x`/`del obj.attr`/`del lst[i]`: makes a name or slot
+    disappear; every reader-side pin assumes declared names stay
+    bound.
+  - `if TYPE_CHECKING:` / `typing.TYPE_CHECKING`: a block that can
+    never execute — dead code still counted in the coverage
+    denominator and hiding untestable paths.
+- Fail-direction probed: `global` and `del` injections in studio.py
+  each caught at their line; restore green.
 
 ### v0.2.516
 
