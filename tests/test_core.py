@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.508")
+        self.assertEqual(VERSION, "0.2.509")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14938,7 +14938,9 @@ class TestResidualGuards(unittest.TestCase):
         OS_VERBS = {
             "remove", "unlink", "rmdir", "rename", "replace",
             "makedirs", "mkdir", "chmod", "truncate", "link",
-            "symlink", "open", "fdopen",
+            "symlink", "open", "fdopen", "utime", "chown", "lchown",
+            "removedirs", "renames", "mkfifo", "mknod", "lchmod",
+            "chflags", "lchflags", "setxattr", "removexattr", "ftruncate",
         }
         TEMP_VERBS = {
             "NamedTemporaryFile", "mkstemp", "mkdtemp",
@@ -14965,6 +14967,42 @@ class TestResidualGuards(unittest.TestCase):
         sites: list[str] = []
         for path in sorted(shoin_dir.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Path.replace is the rename-with-overwrite mutation — as
+            # dangerous as unlink — but the verb name collides with
+            # str.replace, which is everywhere. Flag it only on
+            # Path-call receivers: `Path(x).replace(y)` chained, or a
+            # name bound to `Path(...)` in the same file.
+            path_names: set[str] = set()
+
+            def is_path_call(n: ast.AST) -> bool:
+                return (
+                    isinstance(n, ast.Call)
+                    and (
+                        (isinstance(n.func, ast.Name) and n.func.id == "Path")
+                        or (
+                            isinstance(n.func, ast.Attribute)
+                            and n.func.attr == "Path"
+                            and isinstance(n.func.value, ast.Name)
+                            and n.func.value.id == "pathlib"
+                        )
+                    )
+                )
+
+            for node in ast.walk(tree):
+                tgt: list[ast.AST] = []
+                if isinstance(node, ast.Assign):
+                    tgt = node.targets
+                    val = node.value
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    tgt = [node.target]
+                    val = node.value
+                else:
+                    continue
+                if is_path_call(val):
+                    for t in tgt:
+                        for x in ast.walk(t):
+                            if isinstance(x, ast.Name):
+                                path_names.add(x.id)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
@@ -14972,6 +15010,14 @@ class TestResidualGuards(unittest.TestCase):
                 func = node.func
                 if isinstance(func, ast.Attribute):
                     if func.attr in PATH_VERBS:
+                        hit = True
+                    elif func.attr == "replace" and (
+                        is_path_call(func.value)
+                        or (
+                            isinstance(func.value, ast.Name)
+                            and func.value.id in path_names
+                        )
+                    ):
                         hit = True
                     elif func.attr == "open" and writey_mode(node):
                         hit = True

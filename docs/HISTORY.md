@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.508
+## Version History: v0.1.37 → v0.2.509
+
+### v0.2.509
+
+- Extended the file-mutation pin (v0.2.498): `OS_VERBS` was missing
+  the less-common mutators — `os.utime`/`chown`/`lchown`/`removedirs`/
+  `renames`/`mkfifo`/`mknod`/`lchmod`/`chflags`/`lchflags`/`setxattr`/
+  `removexattr`/`ftruncate` all slip through `os.*`-only inventories.
+- `Path.replace` (rename-with-overwrite) was unmonitored but can't
+  join PATH_VERBS — the verb collides with `str.replace`, which is
+  everywhere. The pin now flags it on Path receivers only:
+  `Path(x).replace(y)` chained-call form, or a name bound to
+  `Path(...)` anywhere in the same file.
+- Fail-direction probed: name-bound `p.replace()`, chained
+  `Path().replace()`, and `os.utime` injections each caught at their
+  line; str.replace sites stay unflagged; baseline {cli:1, server:2,
+  store:4} unchanged.
 
 ### v0.2.508
 
