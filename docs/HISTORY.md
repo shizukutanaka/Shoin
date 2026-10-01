@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.485
+## Version History: v0.1.37 → v0.2.486
+
+### v0.2.486
+- **Pin extension**: `test_no_dangerous_primitives_or_mutable_defaults`
+  gains the process-exit / debugger primitive class — `breakpoint()`
+  (request-thread hang on stdin), `exit()`/`quit()`/`sys.exit()`/
+  `os._exit()`/`raise SystemExit` (BaseException — sails past every
+  `except Exception` guard and kills the handler thread silently),
+  `pdb`/`bdb` imports, and the uncurated `warnings`/`traceback`
+  diagnostic channels (same class the logging ban covers). `sys.exit`
+  stays legitimate only at the two CLI entry tails
+  (`cli.py: sys.exit(main())`, `__main__.py`), catalogued by
+  (file, count). Also audited clean this cycle: the
+  `isinstance(True, int)` type-confusion surface — every JSON body
+  field routes through `_require`/`_optional_str` which REJECT
+  non-strings outright, so no numeric/bool field exists to confuse;
+  `int(Content-Length)` sites are ValueError-guarded at both call
+  sites (`_read_json` → 400-path, `_h_src_upload` → INGEST_EMPTY);
+  `format=` validated against `FORMATS`; `_drain` bounded.
 
 ### v0.2.485
 - **Pin**: `test_timestamps_come_only_from_store_now`

@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.485")
+        self.assertEqual(VERSION, "0.2.486")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -13539,13 +13539,40 @@ class TestResidualGuards(unittest.TestCase):
            dict shared across every call; the classic aliasing bug that
            passes every test that only calls once. Today there are zero;
            the pin keeps it zero.
+
+        3. Process-exit / debugger primitives — breakpoint() (thread
+           hang on stdin under the server), exit()/quit()/sys.exit()/
+           os._exit()/raise SystemExit (BaseException — sails past every
+           `except Exception` guard and kills the handler thread
+           silently), pdb/bdb imports, and the warnings/traceback
+           diagnostic channels (the logging ban covers the same class).
+           sys.exit is legitimate ONLY at the two CLI entry tails —
+           catalogued by (file, count).
         """
         import ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        banned_calls = {"eval", "exec", "compile", "__import__", "globals", "locals"}
+        banned_calls = {
+            "eval", "exec", "compile", "__import__", "globals", "locals",
+            # Process-exit/debugger builtins: breakpoint() hangs the request
+            # thread on a stdin read under the server; exit()/quit() raise
+            # SystemExit — BaseException, invisible to every
+            # `except Exception` guard — from wherever they're left behind.
+            "breakpoint", "exit", "quit",
+        }
         banned_attrs = {"loads", "load"}  # only when receiver is pickle/marshal
-        banned_mods = {"pickle", "marshal", "subprocess", "ctypes", "code", "pty"}
+        # pdb/bdb are breakpoint()'s import route; warnings/traceback are the
+        # uncurated diagnostic channels the logging-ban class already covers.
+        banned_mods = {
+            "pickle", "marshal", "subprocess", "ctypes", "code", "pty",
+            "pdb", "bdb", "warnings", "traceback",
+        }
+        # sys.exit/os._exit are legitimate ONLY at the CLI entry boundary —
+        # sys.exit(main()) in cli.py's `if __name__` tail and __main__.py.
+        # Anywhere else (a request handler, a library helper) SystemExit kills
+        # the handler thread silently. Catalog by file -> site count.
+        expected_exit_sites = {"cli.py": 1, "__main__.py": 1}
+        exit_sites: dict[str, int] = {}
         problems: list[str] = []
         n_funcs = 0
         for path in sorted(shoin_dir.glob("*.py")):
@@ -13604,7 +13631,32 @@ class TestResidualGuards(unittest.TestCase):
                             problems.append(
                                 f"{path.name}:{node.lineno}: os.{f.attr}()"
                             )
+                        if root_name in ("sys", "os") and f.attr in (
+                            "exit", "_exit"
+                        ):
+                            exit_sites[path.name] = (
+                                exit_sites.get(path.name, 0) + 1
+                            )
+                elif isinstance(node, ast.Raise) and (
+                    (
+                        isinstance(node.exc, ast.Name)
+                        and node.exc.id == "SystemExit"
+                    )
+                    or (
+                        isinstance(node.exc, ast.Call)
+                        and isinstance(node.exc.func, ast.Name)
+                        and node.exc.func.id == "SystemExit"
+                    )
+                ):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: raise SystemExit"
+                    )
         self.assertEqual(problems, [], f"dangerous constructs: {problems}")
+        self.assertEqual(
+            exit_sites,
+            expected_exit_sites,
+            f"sys/os exit call sites drifted from the curated boundary: {exit_sites}",
+        )
         self.assertGreaterEqual(
             n_funcs, 100, f"non-vacuous: expected >=100 functions scanned (got {n_funcs})"
         )
