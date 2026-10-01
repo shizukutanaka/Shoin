@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.474
+## Version History: v0.1.37 → v0.2.482
+
+### v0.2.482
+- `test_text_io_always_names_an_encoding` — `Path.read_text()`/
+  `write_text()`/`open()` without `encoding=` decode through
+  `locale.getpreferredencoding()`: locale-dependent. Under LANG=C the
+  default is ASCII and Shoin's CJK-heavy corpus turns into mojibake or
+  UnicodeDecodeError — invisible to CI, which always runs UTF-8. (The
+  `.encode()`/`.decode()`/`json.loads` defaults are UTF-8, NOT
+  locale-dependent, so they're out of scope.) AST pin over shoin/:
+  every `open`/`io.open`/`os.fdopen`/`codecs.open`/`.open(`/
+  `.read_text`/`.write_text`/`.open_text` call site must pass
+  `encoding=` or prove binary mode via a literal 'b'-mode; `os.open`
+  stays exempt (fd-level, no codec). Audit: zero violations — all four
+  existing sites already pass utf-8. Probed: bare read_text/
+  write_text/open flagged, "rb" mode and os.open allowed.
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin
