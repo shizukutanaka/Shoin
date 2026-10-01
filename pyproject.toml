@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoin"
-version = "0.2.476"
+version = "0.2.479"
 description = "Local, citation-verified NotebookLM alternative for lightweight LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,8 +43,43 @@ target-version = "py311"
 # and fail on another purely by ruff version — a non-deterministic gate is not a
 # gate. These are ruff's documented defaults (pycodestyle errors + pyflakes),
 # stated here so the contract is the project's, not the installed binary's.
+#
+# v0.2.479 widened the gate from the E4/E7/E9/F baseline to every family that
+# passes clean on this codebase, folding hand-maintained audit pins into
+# automatic lint coverage: W (whitespace), I (import order), UP (pyupgrade —
+# keeps the declared 3.11 floor modern), B (bugbear: mutable defaults B006,
+# zip-without-strict B905, raise-without-from B904, loop-var closures B023),
+# A (builtin shadowing), RUF (incl. RUF012 mutable class defaults), DTZ
+# (timezone-naive datetimes), PGH (blanket type-ignores), PERF (allocation
+# anti-patterns), C4 (comprehension), RET (return style), TID/FA (import
+# hygiene). Omitted deliberately — each maps to a deliberate codebase
+# convention or an existing manual pin: E501 (220 pre-existing >100-col lines,
+# mostly embedded JS harnesses), N (camelCase test names intentionally mirror
+# the JS functions they pin; do_GET/do_POST are fixed by the stdlib API),
+# S (bandit — try/except-pass, pinned-IP urllib, and sqlite-parameterized
+# strings are already hand-pinned), TRY/FBT/EM/COM/SIM (stylistic churn —
+# SIM105/117 conflict with the curated except-site catalog pin), T20
+# (the stdout-purity pin already scans print() and permits cli.py/serve
+# banners + explicit file=sys.stderr), PL/ANN (mypy --strict already enforces
+# annotation presence; deliberate Any on stdlib callback signatures), RUF001/
+# RUF002/RUF003 (ambiguous-unicode: ×, 々, and fullwidth glyphs in a bilingual
+# codebase are intentional), RUF100 (existing noqa comments document
+# deliberate exceptions to families this gate does not enable).
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = [
+    "E", "W", "F",
+    "I", "UP", "B", "A", "RUF", "DTZ",
+    "PGH", "PERF", "C4", "RET", "TID", "FA",
+]
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "RUF100"]
+
+[tool.ruff.lint.per-file-ignores]
+# PERF gates hot-path allocation patterns in production code; in AST-scanner
+# pin tests an explicit append loop is more readable than an extend
+# comprehension. RUF's value is production-side (mutable class defaults,
+# unused tuple elements in tests are self-documenting shapes) — and tests
+# legitimately carry noqa markers for families the gate does not enable.
+"tests/*" = ["PERF", "RUF"]
 
 [tool.mypy]
 strict = true

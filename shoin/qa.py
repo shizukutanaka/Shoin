@@ -649,11 +649,10 @@ def retrieve_for_question(
         return retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
     queries = [retrieval_q, *rewrites]
     vecs: list[list[float] | None] = [qvec]
-    for rq in rewrites:
-        # Only embed rewrites when the original query itself embedded — a None
-        # qvec means embeddings are disabled/mismatched/unreachable and each
-        # per-rewrite embed_one would just repeat the same failure.
-        vecs.append(_query_vector(llm, rq) if qvec is not None else None)
+    # Only embed rewrites when the original query itself embedded — a None
+    # qvec means embeddings are disabled/mismatched/unreachable and each
+    # per-rewrite embed_one would just repeat the same failure.
+    vecs.extend(_query_vector(llm, rq) if qvec is not None else None for rq in rewrites)
     return retrieve_multi(store, notebook_id, queries, vecs, k=k)
 
 

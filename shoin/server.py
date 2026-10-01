@@ -20,7 +20,6 @@ from typing import Any
 
 from .citation import make_report
 from .config import (
-    ui_lang,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
@@ -30,6 +29,7 @@ from .config import (
     VERSION,
     db_path,
     multi_query_enabled,
+    ui_lang,
 )
 from .export import FORMATS, export
 from .ingest import IngestError
@@ -40,12 +40,14 @@ from .qa import (
     _check_embed_model_ok,
     _degraded_text,
     _query_vector,
-    _t as _qa_t,
     build_context,
     build_messages,
     expand_query,
     history_messages,
     retrieve_for_question,
+)
+from .qa import (
+    _t as _qa_t,
 )
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
@@ -566,8 +568,8 @@ class _Handler(BaseHTTPRequestHandler):
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            raise IngestError("INGEST_EMPTY", "invalid Content-Length header")
+        except ValueError as exc:
+            raise IngestError("INGEST_EMPTY", "invalid Content-Length header") from exc
         if n <= 0:
             raise IngestError("INGEST_EMPTY", "empty upload")
         if n > MAX_UPLOAD_BYTES:
@@ -855,7 +857,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "sources": [
                             {"s": i + 1, "title": t, "source_id": sid}
                             for i, (t, sid) in enumerate(
-                                zip(context.source_titles, context.source_ids)
+                                zip(context.source_titles, context.source_ids, strict=True)
                             )
                         ]
                     },
