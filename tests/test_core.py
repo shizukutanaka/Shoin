@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.513")
+        self.assertEqual(VERSION, "0.2.514")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16445,6 +16445,60 @@ class TestResidualGuards(unittest.TestCase):
             dyn, [],
             "indirect module access bypasses every module-attribute "
             "pin:\n" + "\n".join(dyn),
+        )
+
+    def test_capability_imports_are_cataloged(self) -> None:
+        """Call-site pins watch *usage*; this watches the *grant*. A
+        module acquires a capability the moment it imports
+        subprocess/ctypes/pickle/mmap/signal/multiprocessing/raw-socket
+        — the import itself is the smallest, most reviewable event,
+        and none of it passes through a call-site pattern. The whole
+        capability-import surface is pinned per-file: the only live
+        grants today are ingest.py's `socket`+`ssl` for the
+        SSRF-pinned TLS connection (ADR-001). Any new grant — a new
+        `import subprocess` anywhere, or socket/ssl spreading beyond
+        ingest.py — drifts this catalog loudly instead of arriving
+        silently in a diff."""
+        import ast as _ast
+
+        capability = {
+            # process spawn / native code / deserialization
+            "subprocess", "multiprocessing", "pty", "ctypes", "_ctypes",
+            "pickle", "_pickle", "marshal", "shelve",
+            # raw memory / fd & signal plumbing / interpreter hooks
+            "mmap", "signal", "fcntl", "termios", "resource", "gc",
+            "code", "codeop", "ptyprocess", "winreg", "msvcrt",
+            "select", "selectors",
+            # raw network (http.server/urllib live outside this list —
+            # they are the sanctioned surfaces)
+            "socket", "ssl",
+        }
+        baseline = {"ingest.py": ["socket", "ssl"]}
+        actual: dict[str, list[str]] = {}
+        grants: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, _ast.ImportFrom) and node.level == 0:
+                    names = [node.module or ""]
+                else:
+                    continue
+                for name in names:
+                    top = name.split(".")[0]
+                    if top in capability:
+                        actual.setdefault(path.name, []).append(name)
+                        grants.append(
+                            f"{path.name}:{node.lineno} {name}"
+                        )
+        self.assertEqual(
+            {k: sorted(v) for k, v in actual.items()}, baseline,
+            "capability-import inventory drifted at "
+            f"{grants} — a new subprocess/ctypes/pickle/raw-socket "
+            "grant must be cataloged (and justified)",
         )
 
 if __name__ == "__main__":

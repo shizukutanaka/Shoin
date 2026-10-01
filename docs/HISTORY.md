@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.513
+## Version History: v0.1.37 → v0.2.514
+
+### v0.2.514
+
+- New pin `test_capability_imports_are_cataloged`: call-site pins
+  watch *usage*; this watches the *grant*. A module acquires a
+  capability the moment it imports subprocess/ctypes/pickle/mmap/
+  signal/multiprocessing/raw-socket — the import itself is the
+  smallest reviewable event and passes through no call-site pattern.
+  The per-file inventory is pinned: only ingest.py's `socket`+`ssl`
+  (the SSRF-pinned TLS connection, ADR-001) are live grants. A new
+  `import subprocess` anywhere — or socket/ssl spreading beyond
+  ingest.py — drifts loudly instead of arriving silently in a diff.
+- http.server/urllib stay outside the list: they are the sanctioned
+  network surfaces already covered by the timeout/SSRF pins.
+- Fail-direction probed: `import subprocess` injection in studio.py
+  caught at its line; restore green.
 
 ### v0.2.513
 
