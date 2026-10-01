@@ -420,6 +420,7 @@ let externalPendingRename = null;
 
 /* ---------- notebooks & sources ---------- */
 async function loadNotebooks(){
+  try{
   const j = await (await api("/api/notebooks")).json();
   notebooks = j.notebooks;
   const ul = $("#nbList"); ul.replaceChildren();
@@ -462,6 +463,7 @@ async function loadNotebooks(){
     const e0 = el("div","empty"); e0.append(el("b",null,t("nb.empty.title")), el("span",null,t("nb.empty.body")));
     ul.append(e0);
   } else if (!cur){ openNotebook(notebooks[0].id); }
+  }catch(e){ toast(e.message); }
 }
 // Requests can resolve out of order (click notebook A, then B; B's response
 // arrives first) — last-write-wins would then leave the user looking at the

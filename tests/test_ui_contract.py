@@ -2956,6 +2956,38 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_loadNotebooks_toasts_instead_of_rejecting(self) -> None:
+        """loadNotebooks() is called fire-and-forget from ~15 sites (post-
+        mutation refresh, row clicks, openNotebook's own rebuild, the boot
+        call). Until the guard its siblings always had, its fetch+json lived
+        outside any try — a malformed body or envelope error produced an
+        `unhandledrejection` at every one of those sites: no toast, stale
+        list, console-only evidence. The fix follows the file's own
+        convention (openNotebook/health/refreshQuestions each self-guard):
+        loadNotebooks catches and toasts. Pin both directions under node —
+        the promise resolves AND the message reaches toast."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function loadNotebooks")
+        harness = """\
+let toasted = null;
+const toast = m => { toasted = m; };
+const t = k => k;
+const api = async () => { throw new Error("[500] down"); };
+""" + fn + """
+(async () => {
+  await loadNotebooks();   // must resolve, not reject
+  if (toasted !== "[500] down") {
+    console.error("api failure did not toast: " + JSON.stringify(toasted));
+    process.exit(1);
+  }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
         safe only because the token appears exactly once in the shipped file

@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.474
+## Version History: v0.1.37 → v0.2.483
+
+### v0.2.483
+- **Fix (UI)**: `loadNotebooks()` was the only async function in index.html
+  whose fetch+`.json()` lived outside any `try` — `openNotebook`,
+  `health`, `refreshQuestions`, and `api()`'s envelope parse all
+  self-guard, but the one function called fire-and-forget from ~15
+  sites (post-mutation refresh inside PATCH/DELETE/openNotebook
+  handlers, row click/keyboard open, the boot call's `.catch` being the
+  only guarded one) let an envelope error or malformed JSON escape as an
+  `unhandledrejection`: no toast, silently stale notebook list, evidence
+  in the console only. Wrapped the body in the file's own
+  `catch(e){ toast(e.message); }` convention so every call site is safe
+  by construction; the boot `.catch` becomes redundant but harmless.
+- **Pin**: `test_loadNotebooks_toasts_instead_of_rejecting`
+  (tests/test_ui_contract.py) extracts the real function under node,
+  makes `api()` throw `[500] down`, and asserts the promise *resolves*
+  and the message reaches `toast`. Fail-direction proven by stripping
+  the guard — the rejection crashed the harness (exit ≠ 0).
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin
