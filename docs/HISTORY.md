@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.504
+## Version History: v0.1.37 → v0.2.505
+
+### v0.2.505
+
+- Require `strict=` on every `zip()` call site (AST pin): positional
+  pairing was silently truncating at the shorter side — fused/scored
+  lists in search.py, context titles/ids in server.py, context/text
+  pairs and embed batches in pipeline.py (8 sites total).
+- Surface embed count mismatches instead of truncating silently: when a
+  backend returns fewer/more vectors than requested, `_embed_chunks`
+  now warns on stderr (stdout purity is pinned) and embeds only the
+  correctly paired prefix via an explicit slice; positional pairing was
+  already correct for a short list, so under-delivery — the real defect
+  — is now visible instead of silent.
+- New pins: `test_zip_calls_require_strict` (AST: no `zip(` Name-call
+  may lack the `strict` keyword) and
+  `test_embed_count_mismatch_warns_and_keeps_prefix` (behavioral:
+  short batch → stderr warning + leading-ids-only embeddings).
 
 ### v0.2.504
 - **New pin**: `test_finally_blocks_never_swallow_exceptions` —

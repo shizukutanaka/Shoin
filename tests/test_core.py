@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.504")
+        self.assertEqual(VERSION, "0.2.505")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15527,6 +15527,94 @@ class TestResidualGuards(unittest.TestCase):
             sum(actual.values()), 2,
             "non-vacuous: the _minmax pair must be seen",
         )
+
+    def test_zip_calls_require_strict(self) -> None:
+        """v0.2.505: `zip(a, b)` without `strict=` silently truncates at
+        the shorter input — a pairing corruption (chunk ids with
+        someone else's embedding, titles with the wrong source ids)
+        invisible to every test whose fixtures happen to be
+        equal-length. All production zips pair parallel lists that must
+        be equal by construction, so every call passes `strict=True` —
+        a mismatch then raises ValueError loudly instead of shipping
+        misaligned data. A new zip without strict= fails this test."""
+        import ast
+
+        problems: list[str] = []
+        n_zip = 0
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "zip"
+                ):
+                    n_zip += 1
+                    kws = {kw.arg for kw in node.keywords if kw.arg}
+                    if "strict" not in kws:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: zip() without "
+                            "strict= — silently truncates on length "
+                            "mismatch"
+                        )
+        self.assertEqual(
+            problems, [], f"zip() calls missing strict=: {problems}"
+        )
+        self.assertGreaterEqual(
+            n_zip, 8,
+            "non-vacuous: the scan must see the existing zip sites",
+        )
+
+    def test_embed_count_mismatch_warns_and_keeps_prefix(self) -> None:
+        """v0.2.505: an embed batch returning fewer vectors than texts used
+        to pair silently — zip truncation assigned the first N vectors to N
+        chunk ids with no signal. Positional pairing is still correct for a
+        short list, so the fix keeps the prefix but surfaces the
+        under-delivery on stderr (stdout purity is pinned); the pairing
+        slice is strict so a longer-than-expected list still raises."""
+        import io
+        import tempfile
+        from contextlib import redirect_stderr
+
+        import shoin.pipeline as pipeline_mod
+        from shoin.store import Store
+
+        class _ShortEmbed:
+            embedding_model = "m"
+
+            def embed(self, batch: list[str]) -> list[list[float]]:
+                return [[0.1]] * (len(batch) - 1)
+
+        with tempfile.TemporaryDirectory() as d:
+            with Store(str(Path(d) / "s.db")) as store:
+                nb = store.create_notebook("nb")
+                src = store.add_source(nb.id, "txt", "t", "o", "sha")
+                cids = store.add_chunks(
+                    src.id, ["a", "b", "c"], ["a", "b", "c"]
+                )
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    done = pipeline_mod._embed_chunks(
+                        store, _ShortEmbed(), cids, ["a", "b", "c"],  # type: ignore[arg-type]
+                    )
+                self.assertEqual(
+                    done, 2,
+                    "the correctly paired prefix must still be embedded",
+                )
+                rows = store.conn.execute(
+                    "SELECT id FROM chunks WHERE embedding IS NOT NULL"
+                    " ORDER BY id"
+                ).fetchall()
+                self.assertEqual(
+                    [r[0] for r in rows], cids[:2],
+                    "embeddings must pair with the leading chunk ids "
+                    "positionally, never shifted",
+                )
+                self.assertIn(
+                    "2 vectors for 3 texts", buf.getvalue(),
+                    "the under-delivery must be surfaced, not silent",
+                )
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

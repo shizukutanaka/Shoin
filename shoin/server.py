@@ -857,7 +857,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "sources": [
                             {"s": i + 1, "title": t, "source_id": sid}
                             for i, (t, sid) in enumerate(
-                                zip(context.source_titles, context.source_ids)
+                                zip(context.source_titles, context.source_ids, strict=True)
                             )
                         ]
                     },

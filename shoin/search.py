@@ -1204,7 +1204,7 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     multi = len(set(norm_terms)) >= 2
     scored_texts = [f"{h.text}\n{h.context}" if h.context else h.text for h in hits]
     idf = _pool_idf(norm_terms, scored_texts) if multi else None
-    for h, scored in zip(hits, scored_texts):
+    for h, scored in zip(hits, scored_texts, strict=True):
         lex = _overlap_from_norm(norm_terms, scored)
         h.detail["lex"] = lex
         lexw = _overlap_from_norm(norm_terms, scored, idf) if multi else lex
@@ -1353,7 +1353,7 @@ def retrieve(
     # rescales them to [0,1] before the lexical blend.
     if fused:
         normed = _minmax([h.score for h in fused])
-        for h, n in zip(fused, normed):
+        for h, n in zip(fused, normed, strict=True):
             h.score = n
     # _tail_cut between rerank and MMR: the reranked, blended-score list is
     # where the relevance cliff is measurable.  Cutting the pool before MMR
@@ -1395,7 +1395,7 @@ def retrieve_multi(
     lists: list[list[Hit]] = []
     total_bm25 = 0
     total_vec = 0
-    for i, (q, qv) in enumerate(zip(queries, vecs)):
+    for i, (q, qv) in enumerate(zip(queries, vecs, strict=True)):
         q_search = q if i == 0 else strip_neg_terms(q)
         # Same PRF-wrapped search as retrieve(): every phrasing expands on its
         # own feedback evidence — original and rewrite queries alike.
@@ -1416,7 +1416,7 @@ def retrieve_multi(
     fused = rrf_fuse_lists(lists)
     if fused:
         normed = _minmax([h.score for h in fused])
-        for h, n in zip(fused, normed):
+        for h, n in zip(fused, normed, strict=True):
             h.score = n
     # Same pool cut as retrieve(): multi-query fusion produces a deeper pool,
     # so the tail is longer and the clip more valuable.
