@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.497
+## Version History: v0.1.37 → v0.2.498
+
+### v0.2.498
+- **New pin**: `test_file_writes_are_cataloged` — every
+  filesystem-mutating call (delete/rename/mkdir/chmod/write/tempfile
+  creation/`os.*`/`shutil.*`/`open` in a write mode) in `shoin/` is
+  pinned to a per-file inventory: `cli.py` 1 (eval `--save`),
+  `server.py` 2 (upload staging temp + cleanup), `store.py` 4
+  (private-permission DB setup). An unlisted mutation could silently
+  create, rewrite, or delete user files — e.g. a new "cleanup" path
+  reaching a document folder — invisible to every test until data was
+  gone.
+- Audited this cycle, clean: DNS-rebinding defense already exists
+  (`_reject_cross_site` pins Host and non-GET Origin to loopback);
+  `hashlib` is sha256-only; no `eval`/`exec`/`compile`/`importlib`,
+  `random`/`uuid`, `lru_cache`, or `input()`; `re.sub` replacements all
+  static; upload filenames are basename-sanitized; export writes to
+  stdout only; JS dynamic selectors use static `data-*` values.
 
 ### v0.2.497
 - **New pin**: `test_gate_suppressions_are_cataloged` — every

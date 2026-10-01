@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.497")
+        self.assertEqual(VERSION, "0.2.498")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14882,6 +14882,90 @@ class TestResidualGuards(unittest.TestCase):
             config_hits, [],
             "pyproject.toml gained a gate-narrowing key — suppressions "
             "belong inline at the line they waive, cataloged here",
+        )
+
+    def test_file_writes_are_cataloged(self) -> None:
+        """Filesystem-mutating calls may appear only at the curated
+        sites below: the eval ``--save`` baseline writer (cli.py), the
+        upload staging temp file and its cleanup (server.py), and
+        store.py's private-permission DB dir/file setup. An unlisted
+        mutation means Shoin would silently create, rewrite, truncate,
+        or delete a user file outside those contracts — e.g. a new
+        "cleanup" path reaching into someone's document folder, which
+        no test would notice until real data was gone. sqlite3.connect
+        is file-writing too but is single-sited in store.py and pinned
+        separately."""
+        import ast
+
+        PATH_VERBS = {
+            "unlink", "rmdir", "rename", "mkdir", "touch", "chmod",
+            "lchmod", "symlink_to", "hardlink_to", "link_to",
+            "write_text", "write_bytes", "truncate", "writelines",
+        }
+        OS_VERBS = {
+            "remove", "unlink", "rmdir", "rename", "replace",
+            "makedirs", "mkdir", "chmod", "truncate", "link",
+            "symlink", "open", "fdopen",
+        }
+        TEMP_VERBS = {
+            "NamedTemporaryFile", "mkstemp", "mkdtemp",
+            "TemporaryFile", "TemporaryDirectory",
+        }
+        WRITEY_MODE = re.compile(r"[wax+]")
+
+        def writey_mode(node: ast.Call) -> bool:
+            mode: object = None
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                mode = node.args[1].value
+            for kw in node.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                    mode = kw.value.value
+            return isinstance(mode, str) and bool(WRITEY_MODE.search(mode))
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline = {
+            "cli.py": 1,     # Path(args.save).write_text — eval baseline export
+            "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
+            "store.py": 4,   # mkdir + os.open(O_CREAT,0600) + os.chmod x2
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                hit = False
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    if func.attr in PATH_VERBS:
+                        hit = True
+                    elif func.attr == "open" and writey_mode(node):
+                        hit = True
+                    elif (
+                        func.attr in OS_VERBS
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "os"
+                    ):
+                        hit = True
+                    elif (
+                        func.attr in TEMP_VERBS
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "tempfile"
+                    ):
+                        hit = True
+                    elif isinstance(func.value, ast.Name) and func.value.id == "shutil":
+                        hit = True
+                elif isinstance(func, ast.Name) and func.id == "open" and writey_mode(node):
+                    hit = True
+                if hit:
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f"file-mutation inventory drifted at {sites} — new writers "
+            "must be added to the catalog (and justified), removed "
+            "writers subtracted",
         )
 
 if __name__ == "__main__":
