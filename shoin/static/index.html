@@ -822,13 +822,20 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
     det.addEventListener("toggle", async () => {
       if (!det.open || det.dataset.loaded) return;
       det.dataset.loaded = "1";
-      const body = el("div","full-body", "…");
-      det.append(body);
+      // One body element per <details>: reused on retry so a failed fetch
+      // can never leave a stale second placeholder behind.
+      let body = det.querySelector(".full-body");
+      if (!body){ body = el("div","full-body", "…"); det.append(body); }
+      body.textContent = "…";
       try{
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
         renderFullSource(body, j.chunks, citedIds, excerpt);
-      }catch(e){ if (!sig.aborted) body.textContent = e.message; }
+      }catch(e){
+        // Failure must clear `loaded` — collapse→reopen is the retry gesture,
+        // and keeping the flag set would pin the error text on permanently.
+        if (!sig.aborted){ delete det.dataset.loaded; body.textContent = e.message; }
+      }
     });
     vt.append(det);
     $("#viewer").classList.add("open");

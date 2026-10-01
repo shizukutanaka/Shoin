@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.488
+## Version History: v0.1.37 → v0.2.489
+
+### v0.2.489
+- **Fix + pin**: the source viewer's lazy `<details>` full-text load set
+  `dataset.loaded` BEFORE the fetch and never cleared it on failure —
+  collapse→reopen could not retry, so a transient fetch error pinned the
+  error text on permanently for that viewer session. The catch now
+  deletes the flag (reopen = retry gesture) and the handler reuses one
+  `.full-body` element (`querySelector` then create) so a retry can
+  never stack a second placeholder. Pin
+  `test_lazy_details_retries_after_failure` (node-run): failure clears
+  the flag + writes the error, reopen refetches into the same body with
+  the placeholder back, successful retry renders and re-arms the flag.
+  Fail-direction: removing `delete det.dataset.loaded` fails the pin.
 
 ### v0.2.488
 - **Fix + pin**: `import sre_parse` (inside the ReDoS-geometry pin)

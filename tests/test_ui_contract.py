@@ -2777,6 +2777,85 @@ const closeViewer = () => {};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_lazy_details_retries_after_failure(self) -> None:
+        """v0.2.489: a failed lazy full-source fetch must clear
+        `dataset.loaded` so the collapse→reopen gesture retries — before
+        this fix the flag stayed set and the error text was pinned on
+        forever within that viewer session. The retry must also reuse the
+        SAME body element (a second placeholder must never appear)."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        show = _js_block(src, "async function showSource")
+        harness = (
+            """\
+const calls = {renders: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, open: false, _cbs: {}, className: "", tag: "",
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ n.children.unshift(x); n.kids.unshift(x); },
+    classList: {add(){}, remove(){}, contains: () => false},
+    focus(){}, addEventListener(ev, cb){ n._cbs[ev] = cb; },
+    querySelector(sel){ return n.kids.find(k => k.className === sel.slice(1)) || null },
+    querySelectorAll(){ return [] },
+    setAttribute(){}, scrollIntoView(){},
+  };
+  return n;
+};
+const els = {};
+const $ = s => els[s] || (els[s] = mk());
+const document = {activeElement: null,
+  createElement: tag => { const n = mk(); n.tag = tag; return n; }};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+let _srcAbort = null, _viewerOpener = null;
+const deferred = [];
+const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
+  deferred.push(rec);
+  return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
+const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const toast = () => {};
+const closeViewer = () => {};
+"""
+            + show
+            + """
+(async () => {
+  showSource(9, "T", "excerpt text", "sec1", [1], null);
+  const det = els["#viewerText"].kids.find(c => c.className === "full-src");
+  det.open = true;
+  det._cbs.toggle();
+  // First fetch fails: the flag MUST clear so reopening retries, the
+  // error text lands in the one body element, and no toast is used.
+  deferred[0].rej(new Error("fetch boom"));
+  await new Promise(r => setTimeout(r, 0));
+  if (det.dataset.loaded)
+    { console.error("loaded still set after failure — retry impossible"); process.exit(1) }
+  const bodies = () => det.kids.filter(k => k.className === "full-body");
+  if (bodies().length !== 1 || bodies()[0].textContent !== "fetch boom")
+    { console.error("error body wrong"); process.exit(1) }
+  // Reopen gesture retries: a second fetch is issued into the SAME body,
+  // which flips back to the loading placeholder in flight.
+  det._cbs.toggle();
+  if (deferred.length !== 2)
+    { console.error("reopen did not retry the fetch"); process.exit(1) }
+  if (bodies().length !== 1 || bodies()[0].textContent !== "…")
+    { console.error("retry must reuse the same body with placeholder"); process.exit(1) }
+  deferred[1].res({json: async () => ({chunks: [{id: 1, seq: 0, text: "c"}]})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== 1 || bodies().length !== 1)
+    { console.error("successful retry did not render into the one body"); process.exit(1) }
+  if (!det.dataset.loaded)
+    { console.error("loaded must be set after a successful load"); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_startSourceRename_commit_and_cancel_paths(self) -> None:
         """v0.2.267: pin startSourceRename's five exit paths under node —
         Enter commits via PATCH + reload, blur to a sibling row control skips
