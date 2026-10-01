@@ -135,7 +135,10 @@ class StudioTest(unittest.TestCase):
     def test_suggest_questions_parses_lines(self) -> None:
         # NFKC normalization converts full-width ？ → ASCII ? in output questions.
         llm = FakeLLM(
-            reply="1. 目的は何か？\n- 仕組みはどう動きますか?\n* 装飾のみのノイズ行\n結論として要約\n2. 制約は何か"
+            reply=(
+                "1. 目的は何か？\n- 仕組みはどう動きますか?\n"
+                "* 装飾のみのノイズ行\n結論として要約\n2. 制約は何か"
+            )
         )
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["目的は何か?", "仕組みはどう動きますか?", "制約は何か"])
@@ -208,7 +211,10 @@ class StudioTest(unittest.TestCase):
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertIn("目的は何か?", qs)
         self.assertIn("仕組みはどう動きますか?", qs)
-        self.assertFalse(any(q.startswith("(") for q in qs), "parenthesized prefix must be stripped")
+        self.assertFalse(
+            any(q.startswith("(") for q in qs),
+            "parenthesized prefix must be stripped",
+        )
 
     def test_suggest_questions_strips_fullwidth_list_prefixes(self) -> None:
         """CJK-first LLMs often emit １. or ２） prefixes — NFKC normalization must strip them."""
@@ -398,7 +404,10 @@ class ExportTest(unittest.TestCase):
         import re as _re
         # Every DA field must use slashes, not dashes.
         for da_val in _re.findall(r"DA  - (\S+)", ris):
-            self.assertRegex(da_val, r"^\d{4}/\d{2}/\d{2}$", f"DA field {da_val!r} must use YYYY/MM/DD")
+            self.assertRegex(
+                da_val, r"^\d{4}/\d{2}/\d{2}$",
+                f"DA field {da_val!r} must use YYYY/MM/DD",
+            )
 
     def test_bibtex_note_uses_date_only(self) -> None:
         """BibTeX note field must use just the date (YYYY-MM-DD), not a full timestamp."""
@@ -524,9 +533,15 @@ class ExportTest(unittest.TestCase):
         md = export(self.store, self.nb, "md")
         # Extract the legend line
         legend_line = next(ln for ln in md.splitlines() if "S1=" in ln and "S10=" in ln)
-        keys_in_order = [part.split("=")[0] for part in legend_line.split("(引用元: ")[-1].rstrip("):").split(", ")]
+        keys_in_order = [
+            part.split("=")[0]
+            for part in legend_line.split("(引用元: ")[-1].rstrip("):").split(", ")
+        ]
         expected = [f"S{i}" for i in range(1, 12)]
-        self.assertEqual(keys_in_order, expected, "source_map legend must be in numeric order S1, S2, ..., S10, S11")
+        self.assertEqual(
+            keys_in_order, expected,
+            "source_map legend must be in numeric order S1, S2, ..., S10, S11",
+        )
 
 
 class StudioHitsEdgeCaseTest(unittest.TestCase):
@@ -601,7 +616,8 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(done, 2)  # first batch persisted, second failed
 
     def test_embed_partial_failure_records_model(self) -> None:
-        """embed_model is recorded even on partial LLM failure so future model-change warnings fire."""
+        """embed_model is recorded even on partial LLM failure so future
+        model-change warnings fire."""
         src = self.store.add_source(self.nb, "txt", "tp", "/tmp/tp", "xp")
         texts = ["a", "b", "c", "d"]
         ids = self.store.add_chunks(src.id, texts)
@@ -772,7 +788,12 @@ class CliTest(unittest.TestCase):
         only report — uncited filters questions, so cited/invalid/uncited are
         all empty and the old "---" guard silently dropped the loop warning
         that the Web badge shows."""
-        llm = FakeLLM(reply="それは本当に有効であると言えますか？それは本当に有効であると言えますか？それは本当に有効であると言えますか？")
+        llm = FakeLLM(
+            reply=(
+                "それは本当に有効であると言えますか？それは本当に有効であると言えますか？"
+                "それは本当に有効であると言えますか？"
+            )
+        )
         with tempfile.TemporaryDirectory() as td:
             db = str(Path(td) / "shoin.db")
             doc = Path(td) / "memo.txt"
@@ -880,7 +901,8 @@ class CliTest(unittest.TestCase):
         self.assertTrue(out.strip())  # not silent when empty
 
     def test_reindex_no_embed_model_returns_error(self) -> None:
-        """shoin reindex exits with rc=1 and stderr message when no embedding model is configured."""
+        """shoin reindex exits with rc=1 and stderr message when no embedding
+        model is configured."""
         llm = FakeLLM(embedding_model="")  # no embed model
         with tempfile.TemporaryDirectory() as td:
             db = str(Path(td) / "shoin.db")
@@ -993,7 +1015,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("Created:", out)
 
     def test_cli_t_fallback_is_english_not_japanese(self) -> None:
-        """_t must fall back to English (not Japanese) when a key is absent from the active lang dict.
+        """_t must fall back to English (not Japanese) when a key is absent
+        from the active lang dict.
 
         The old implementation used _STRINGS['ja'][key] as fallback, which would silently
         return Japanese text to English users if a key were ever added to 'ja' but not 'en'.
@@ -1068,7 +1091,10 @@ class EvalTest(unittest.TestCase):
         nb = s.create_notebook("研究")
         for name, body in [
             ("和紙", "和紙は楮の繊維を漉いて作られる伝統的な紙である。産地により特徴が異なる。"),
-            ("活版印刷", "活版印刷は金属活字を組んで版を作る複製技術である。書物の大量生産を可能にした。"),
+            (
+                "活版印刷",
+                "活版印刷は金属活字を組んで版を作る複製技術である。書物の大量生産を可能にした。",
+            ),
         ]:
             p = Path(d) / f"{name}.md"
             p.write_text(f"# {name}\n{body}\n", encoding="utf-8")

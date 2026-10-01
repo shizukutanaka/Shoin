@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.492
+## Version History: v0.1.37 → v0.2.493
+
+### v0.2.493
+- **Backlog paydown (third installment)**: all over-long lines in
+  `test_qa.py`, `test_server.py`, and `test_studio.py` wrapped (25 sites
+  — assert calls to continuation style, docstrings reflowed, fake-LLM
+  `reply=` literals split via content-preserving adjacent concatenation).
+  Those files leave the ratchet catalog entirely. Backlog: 164 → 139
+  (only `test_core.py` 114 and `test_ui_contract.py` 25 remain).
 
 ### v0.2.492
 - **Backlog paydown (second installment — production tree complete)**:

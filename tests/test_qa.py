@@ -249,7 +249,10 @@ class TestContext(unittest.TestCase):
             hits = []
             for i in range(200):
                 src = s.add_source(nb.id, "txt", f"doc{i}", f"mem://{i}", f"sha{i}")
-                hits.append(Hit(chunk_id=i, source_id=src.id, text=f"文書{i}の内容。" * 10, score=1.0))
+                hits.append(
+                    Hit(chunk_id=i, source_id=src.id,
+                        text=f"文書{i}の内容。" * 10, score=1.0)
+                )
             budget = 2800  # matches studio.STUDIO_BUDGET_TOKENS
             ctx = build_context(s, hits, budget_tokens=budget)
         self.assertLess(
@@ -373,8 +376,14 @@ class TestAsk(unittest.TestCase):
             cited = ans.report.get("cited", [])
             self.assertGreater(len(cited), 0, "degraded response must cite sources")
             # Check that cited numbers match [S1], [S2], [S3] pattern — i.e., sequential from 1
-            self.assertEqual(cited, list(range(1, len(cited) + 1)), "cited sources must be sequential from 1")
-            self.assertGreater(ans.report.get("coverage", 0.0), 0.0, "coverage must reflect cited sources")
+            self.assertEqual(
+                cited, list(range(1, len(cited) + 1)),
+                "cited sources must be sequential from 1",
+            )
+            self.assertGreater(
+                ans.report.get("coverage", 0.0), 0.0,
+                "coverage must reflect cited sources",
+            )
 
     def test_embed_failure_falls_back_to_bm25(self) -> None:
         s, nb = seeded_store()
@@ -459,7 +468,10 @@ class TestMultiTurn(unittest.TestCase):
         with s:
             for i in range(3):
                 s.add_message(nb, "user", "質問についての詳細な説明を含む長めの文章です。" * 10)
-                s.add_message(nb, "assistant", "回答についての詳細な説明を含む長めの文章です。" * 10)
+                s.add_message(
+                    nb, "assistant",
+                    "回答についての詳細な説明を含む長めの文章です。" * 10,
+                )
             msgs = history_messages(s, nb)
             total = sum(estimate_tokens(m["content"]) for m in msgs)
             self.assertLessEqual(total, HISTORY_TOKENS_TOTAL)
@@ -915,7 +927,8 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
 
     def test_embed_inconsistent_dimensions_raises_bad_response(self) -> None:
-        """Embeddings with mismatched dimensions must raise LLMError, not silently corrupt search."""
+        """Embeddings with mismatched dimensions must raise LLMError, not
+        silently corrupt search."""
         from unittest.mock import patch
 
         from shoin.llm import LLMClient, LLMError
@@ -1036,7 +1049,10 @@ class TestLLMClient(unittest.TestCase):
         from shoin.llm import LLMClient, LLMError
 
         client = LLMClient()
-        http_err = HTTPError("http://url", 429, "Too Many Requests", {}, io.BytesIO(b"rate limited"))
+        http_err = HTTPError(
+            "http://url", 429, "Too Many Requests", {},
+            io.BytesIO(b"rate limited"),
+        )
         with patch("urllib.request.urlopen", side_effect=http_err):
             with self.assertRaises(LLMError) as cm:
                 client.chat([{"role": "user", "content": "hi"}])
@@ -1425,7 +1441,11 @@ class TestI18n(unittest.TestCase):
             embedding_model = ""
             def chat(self, messages, temperature=0.2):
                 # Return English questions without trailing '?'
-                return "What is the main thesis\nHow does the author support the claim\nWhy does this matter"
+                return (
+                    "What is the main thesis\n"
+                    "How does the author support the claim\n"
+                    "Why does this matter"
+                )
             def embed_one(self, text):
                 raise Exception("no embed")
 
@@ -1435,7 +1455,10 @@ class TestI18n(unittest.TestCase):
             s.add_chunks(src.id, ["The thesis is clear. The author argues X."])
             with mpatch.dict(os.environ, {"SHOIN_LANG": "en"}):
                 questions = suggest_questions(s, _FakeLLM(), nb.id)
-        self.assertGreater(len(questions), 0, "English questions without '?' must not all be dropped")
+        self.assertGreater(
+            len(questions), 0,
+            "English questions without '?' must not all be dropped",
+        )
 
     def test_llm_response_too_large_raises_bad_response(self) -> None:
         """_post() must raise SYSTEM_LLM_BAD_RESPONSE when response exceeds 32 MB.
@@ -1590,7 +1613,10 @@ class TestMultiQuery(unittest.TestCase):
         from shoin.qa import rewrite_queries
 
         llm = FakeLLM(
-            reply="1. 検索の言い換えA\n- 検索の言い換えB\n書斎とは？\n検索の言い換えA\n(4) 検索の言い換えC"
+            reply=(
+                "1. 検索の言い換えA\n- 検索の言い換えB\n書斎とは？\n"
+                "検索の言い換えA\n(4) 検索の言い換えC"
+            )
         )
         out = rewrite_queries(llm, "書斎とは？", n=2)
         self.assertEqual(out, ["検索の言い換えA", "検索の言い換えB"])

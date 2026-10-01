@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.492")
+        self.assertEqual(VERSION, "0.2.493")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14418,9 +14418,6 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline = {
             "tests/test_core.py": 114,
-            "tests/test_qa.py": 9,
-            "tests/test_server.py": 6,
-            "tests/test_studio.py": 10,
             "tests/test_ui_contract.py": 25,
         }
         root = Path(__file__).resolve().parent.parent

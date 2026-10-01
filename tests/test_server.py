@@ -465,7 +465,10 @@ class ServerTest(unittest.TestCase):
                 f"/api/notebooks/{nb['id']}/sources",
                 {"target": bad_target},
             )
-            self.assertEqual(status, 400, msg=f"file path target should be rejected: {bad_target!r}")
+            self.assertEqual(
+                status, 400,
+                msg=f"file path target should be rejected: {bad_target!r}",
+            )
             self.assertEqual(err["error"]["code"], "INGEST_UNSUPPORTED_FORMAT")  # type: ignore[index]
 
     def test_upload_duplicate_content_returns_409(self) -> None:
@@ -499,7 +502,10 @@ class ServerTest(unittest.TestCase):
         """Adding a note to a deleted notebook must return 404."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "delnb"})
         self._json("DELETE", f"/api/notebooks/{nb['id']}")
-        status, err = self._json("POST", f"/api/notebooks/{nb['id']}/notes", {"title": "T", "body": "B"})
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb['id']}/notes",
+            {"title": "T", "body": "B"},
+        )
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
@@ -1059,7 +1065,10 @@ class ServerTest(unittest.TestCase):
         handles both client-disconnect scenarios without data loss.
         """
         for exc_class in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            with self.assertRaises(ConnectionError, msg=f"{exc_class.__name__} must be ConnectionError"):
+            with self.assertRaises(
+                ConnectionError,
+                msg=f"{exc_class.__name__} must be ConnectionError",
+            ):
                 raise exc_class("test")
 
     def test_reindex_endpoint_returns_embedded_and_total_counts(self) -> None:
@@ -1180,7 +1189,10 @@ class NonStreamingLLMTest(unittest.TestCase):
     def _url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"
 
-    def _json(self, method: str, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object]]:
+    def _json(
+        self, method: str, path: str,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, dict[str, object]]:
         body = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(
             self._url(path), data=body, method=method,
@@ -1485,7 +1497,8 @@ class CacheControlTest(unittest.TestCase):
 
 
 class PostStreamStoreErrorTest(unittest.TestCase):
-    """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
+    """StoreError from assistant message persistence after SSE headers must
+    not corrupt the stream."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -2256,7 +2269,9 @@ class LLMErrorDispatchTest(unittest.TestCase):
             def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
                 raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
 
-            def chat_stream(self, messages: list[dict[str, str]], temperature: float = 0.2) -> Iterator[str]:
+            def chat_stream(
+                self, messages: list[dict[str, str]], temperature: float = 0.2
+            ) -> Iterator[str]:
                 raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
                 yield  # unreachable; keeps the mock a generator like real chat_stream
 
