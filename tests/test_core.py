@@ -15845,7 +15845,7 @@ class TestResidualGuards(unittest.TestCase):
                         + [a.arg for a in node.args.args]
                         + [a.arg for a in node.args.kwonlyargs]
                     )
-                    for spec, a in (
+                    for _spec, a in (
                         ("vararg", node.args.vararg),
                         ("kwarg", node.args.kwarg),
                     ):

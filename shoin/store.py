@@ -794,7 +794,6 @@ class Store:
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
-                raise StoreError(
                     "SOURCE_ALREADY_EXISTS",
                     "refreshed content hash matches another existing source",
                 ) from e
