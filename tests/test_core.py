@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.522")
+        self.assertEqual(VERSION, "0.2.523")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -16919,6 +16919,49 @@ class TestResidualGuards(unittest.TestCase):
             "unicode-wide predicate call sites drifted — a new "
             "isdigit/isnumeric/isalpha-family call must be justified "
             "(isascii-guarded or post-NFKC):\n" + "\n".join(hits),
+        )
+
+    def test_ui_selectors_are_cataloged(self) -> None:
+        """`querySelector`/`querySelectorAll` literals in index.html:
+        renaming a class/attribute without updating the selector makes
+        it silently return null — the feature goes dead with no test
+        or console signal. The full literal set is cataloged; a new
+        selector or a renamed token is a drift event. Multi-line
+        literals are whitespace-normalized for stability."""
+        import re as _re
+
+        html = (
+            Path(__file__).resolve().parent.parent
+            / "shoin" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        found: set[str] = set()
+        for m in _re.finditer(
+            r"querySelector(?:All)?\s*\(\s*([\'\"`])(.+?)\1",
+            html,
+            _re.DOTALL,
+        ):
+            sel = " ".join(m.group(2).split())
+            found.add(sel)
+        baseline = {
+            ".full-body",
+            ".pane",
+            ".tabs button",
+            "[data-i18n]",
+            "[data-i18n-aria]",
+            "[data-i18n-ph]",
+            "[data-i18n-title]",
+            'button[type="submit"]',
+            'button:not([disabled]),input:not([disabled]),'
+            'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+            "input.src-rename",
+            'meta[name="shoin-lang"]',
+        }
+        # `s` is the `$` alias definition site — not a real selector
+        self.assertEqual(
+            found - {"s"}, baseline,
+            "querySelector literals drifted — a selector rename "
+            "silently kills its feature (null on every call):\n"
+            + "\n".join(sorted((found - {"s"}) ^ baseline)),
         )
 
 if __name__ == "__main__":

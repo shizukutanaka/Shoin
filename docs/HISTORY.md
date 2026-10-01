@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.522
+## Version History: v0.1.37 → v0.2.523
+
+### v0.2.523
+
+- New pin `test_ui_selectors_are_cataloged`: every
+  `querySelector`/`querySelectorAll` literal in index.html is
+  cataloged — renaming a class/attribute token without updating the
+  selector silently returns null forever, killing the feature with
+  no test or console signal (a silent-death class no check saw).
+  Multi-line literals are whitespace-normalized; the `$` alias
+  definition site (`s`) is excluded.
+- Fail-direction: the initial baseline mismatch surfaced the full
+  selector diff listing; corrected baseline is green.
 
 ### v0.2.522
 
