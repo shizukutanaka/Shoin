@@ -196,16 +196,14 @@ def _hard_split(block: str, limit: int) -> list[str]:
             # that were ~5× too small for ASCII text.
             chars_per_token = len(p) / tok
             window = max(int(limit * chars_per_token), 1)
-            for i in range(0, len(p), window):
-                out.append(p[i : i + window])
+            out.extend(p[i : i + window] for i in range(0, len(p), window))
         elif tok == 0 and len(p) > limit * 5:
             # Zero-token text (Arabic, Hebrew, Cyrillic, pure punctuation) escapes
             # estimate_tokens(); a pathologically long block (> limit*5 chars) must
             # still be split.  Use limit*5 chars as a conservative character budget
             # (matches ~5 chars/token ASCII density as an upper bound).
             window = max(limit * 5, 1)
-            for i in range(0, len(p), window):
-                out.append(p[i : i + window])
+            out.extend(p[i : i + window] for i in range(0, len(p), window))
         else:
             out.append(p)
     return [p.strip() for p in out if p.strip()]
