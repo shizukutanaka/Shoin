@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.474")
+        self.assertEqual(VERSION, "0.2.481")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14219,6 +14219,95 @@ class TestResidualGuards(unittest.TestCase):
         # Floor: the invariant must bind to real code — at least one bound body
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
+
+    def test_env_and_process_globals_stay_centralized(self) -> None:
+        """Environment reads are configuration — they belong in config.py's
+        `_get` (which merges env over ~/.config/shoin/config.json and is where
+        every documented SHOIN_* name's range/format validation lives, pinned
+        since v0.2.344). An `os.environ.get` sprinkled through a handler or
+        module silently bypasses that merge — the setting exists nowhere in
+        config.json, carries no validation, and no test asserts it. One
+        documented exception stands: `search._debug`'s SHOIN_DEBUG read, which
+        deliberately skips `_get` because a debug knob must not be settable
+        from a config file. Writes are worse: `os.environ[...] =`/putenv/
+        setdefault mutate process-global state mid-flight, invisible to tests
+        and hostile to `_get`'s precedence semantics — banned outright. The
+        same class pins the remaining process-global verbs: `sys.path`
+        mutation (import-order landmines), `os.chdir`/`umask` (cwd/permissions
+        are global), `signal.*` handler changes, and `sys.setrecursionlimit/
+        settrace/setprofile/setswitchinterval` (interpreter-global behavior).
+        Zero violations in production today; the scan makes the convention
+        non-regressable."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_env = 0
+        global_verbs = {
+            ("os", "chdir"), ("os", "putenv"), ("os", "unsetenv"),
+            ("os", "umask"),
+            ("sys", "setrecursionlimit"), ("sys", "settrace"),
+            ("sys", "setprofile"), ("sys", "setswitchinterval"),
+            ("signal", "signal"), ("signal", "pthread_sigmask"),
+            ("signal", "siginterrupt"),
+        }
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    child.parent_call = node  # type: ignore[attr-defined]
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in (
+                    "environ", "environb", "getenv",
+                ):
+                    n_env += 1
+                    call = getattr(node, "parent_call", None)
+                    while isinstance(call, ast.Attribute):
+                        call = getattr(call, "parent_call", None)
+                    ok = path.name == "config.py" or (
+                        path.name == "search.py"
+                        and isinstance(call, ast.Call)
+                        and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                        and call.args[0].value == "SHOIN_DEBUG"
+                    )
+                    if not ok:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: env access outside "
+                            "config.py (only search.py's SHOIN_DEBUG read is "
+                            "curated)"
+                        )
+                if isinstance(node, ast.Call) and isinstance(
+                    node.func, ast.Attribute
+                ):
+                    base = node.func.value
+                    if isinstance(base, ast.Name) and (
+                        base.id, node.func.attr
+                    ) in global_verbs:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: "
+                            f"{base.id}.{node.func.attr}() mutates "
+                            "process-global state"
+                        )
+                    # sys.path mutation via list verbs or item assignment
+                    if (
+                        isinstance(base, ast.Attribute)
+                        and base.attr == "path"
+                        and isinstance(base.value, ast.Name)
+                        and base.value.id == "sys"
+                    ):
+                        problems.append(
+                            f"{path.name}:{node.lineno}: sys.path."
+                            f"{node.func.attr}() mutates the import path"
+                        )
+        self.assertEqual(problems, [], f"process-global violations: {problems}")
+        self.assertGreaterEqual(
+            n_env, 3,
+            "non-vacuous: env accesses drifted — config.py's _get/XDG reads "
+            "and search.py's SHOIN_DEBUG site must still be visible",
+        )
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
