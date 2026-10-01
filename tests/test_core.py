@@ -102,7 +102,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.490")
+        self.assertEqual(VERSION, "0.2.491")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -14389,14 +14389,15 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_e501_violations_never_grow(self) -> None:
         """E501 (line > 100 display columns) is outside the ruff select set
-        only because 220 pre-existing long lines are grandfathered. This is
-        a RATCHET: each file's violation count is pinned to today's
-        baseline and may only shrink — a new over-long line anywhere fails
-        the suite, so the backlog can't silently grow while it is being
-        paid down. The measure replicates ruff's own E501: East-Asian
-        display width (W/F = 2 columns), trailing `# type: ignore`/`# noqa`
-        pragmas stripped first, and a trailing unbreakable URL token
-        exempted (counts match ruff exactly: 220)."""
+        only because a pre-existing backlog of long lines is grandfathered
+        (220 at pin creation). This is a RATCHET: each file's violation
+        count is pinned to the baseline below and may only shrink — a new
+        over-long line anywhere fails the suite, so the backlog can't
+        silently grow while it is being paid down. The measure replicates
+        ruff's own E501: East-Asian display width (W/F = 2 columns),
+        trailing `# type: ignore`/`# noqa` pragmas stripped first, and a
+        trailing unbreakable URL token exempted (count-for-count identical
+        to `ruff check --select E501`)."""
         import re
         from unicodedata import east_asian_width
 
@@ -14418,10 +14419,6 @@ class TestResidualGuards(unittest.TestCase):
         baseline = {
             "shoin/citation.py": 5,
             "shoin/cli.py": 8,
-            "shoin/config.py": 1,
-            "shoin/export.py": 4,
-            "shoin/ingest.py": 2,
-            "shoin/pipeline.py": 1,
             "shoin/qa.py": 4,
             "shoin/search.py": 5,
             "shoin/server.py": 5,
@@ -14453,8 +14450,13 @@ class TestResidualGuards(unittest.TestCase):
                 "(new E501 violation — wrap the line or pay down the file's "
                 "baseline by shortening an existing one)",
             )
-        # Non-vacuousness: the catalog reflects the real backlog today.
-        self.assertEqual(sum(actual.values()), 220, sum(actual.values()))
+        # Non-vacuousness: the catalog must stay honest — paying a file or
+        # line down REQUIRES updating the baseline to match, which is the
+        # ratchet bookkeeping working as intended.
+        self.assertEqual(
+            sum(actual.values()), sum(baseline.values()),
+            "baseline drifted — update the catalog to the current count",
+        )
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

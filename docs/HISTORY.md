@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.490
+## Version History: v0.1.37 → v0.2.491
+
+### v0.2.491
+- **Backlog paydown (first installment)**: all over-long lines in
+  `config.py`, `pipeline.py`, `ingest.py`, and `export.py` wrapped
+  (8 sites) — those files leave the ratchet catalog entirely, so their
+  budget is now 0: they can never acquire a new long line. Baseline
+  drift assert is now computed from the catalog itself, so paying a
+  line down REQUIRES updating the baseline — the bookkeeping that keeps
+  the ratchet honest. Backlog: 220 → 212 across 12 remaining files.
 
 ### v0.2.490
 - **Ratchet pin**: E501 sits outside the ruff select set because 220

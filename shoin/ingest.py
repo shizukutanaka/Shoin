@@ -400,7 +400,9 @@ def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
                 try:
                     body = _inflate(body, -zlib.MAX_WBITS)
                 except zlib.error as exc:
-                    raise IngestError("INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}") from exc
+                    raise IngestError(
+                        "INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}"
+                    ) from exc
         else:
             raise IngestError("INGEST_UNSUPPORTED_FORMAT", f"unsupported Content-Encoding: {enc}")
     if encodings:
@@ -437,7 +439,11 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         else:
             conn = _PinnedHTTPConnection(host, port, pinned, URL_TIMEOUT_SEC)
         try:
-            conn.request("GET", path, headers={"User-Agent": f"shoin/{VERSION}", "Host": host_header})
+            conn.request(
+                "GET",
+                path,
+                headers={"User-Agent": f"shoin/{VERSION}", "Host": host_header},
+            )
             resp = conn.getresponse()
             if resp.status in _REDIRECT_CODES:
                 location = resp.getheader("Location")

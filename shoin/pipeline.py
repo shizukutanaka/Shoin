@@ -294,7 +294,10 @@ def refresh_source(
     contexts = [c for c, _ in pairs]
     texts = [t for _, t in pairs]
     if not texts:
-        raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
+        raise IngestError(
+            "INGEST_EMPTY",
+            "no text content could be extracted from refreshed source",
+        )
     # spec.md STRIDE DoS control (same guard as index_source): cap total chunks
     # per notebook. Subtract this source's own current chunk count first — a
     # refresh REPLACES this source's chunks, it doesn't add a new source, so the
