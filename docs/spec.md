@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.472 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.474 時点に同期)
 
 ## プロダクト定義
 
@@ -88,7 +88,10 @@ yieldを持つfor本体や`list()`/`tuple()`/`join()`消費はプロセス毎に
 構造化出力)——cli.py以外の全`print()`に`file=sys.stderr`を強制し
 `server.serve()`の起動バナーのみ例外許可、ライブラリ層のstdout混入は
 どのテストもストリームをアサートしないため不可視だった(v0.2.470)。
-FTS5 `MATCH`は独自クエリ言語(`AND`/`OR`/`NEAR`/`:`/`*`/`"`は演算子)
+同契約の双子バイパス経路も同一走査で閉塞——cli.py外の
+`sys.stdout`属性アクセス(write/再代入)とshoin/内の`import logging`
+(未設定loggerはlastResort stderrまたは沈黙、stdout配線ハンドラは
+汚染クラスを再開)を禁止(v0.2.474)。FTS5 `MATCH`は独自クエリ言語(`AND`/`OR`/`NEAR`/`:`/`*`/`"`は演算子)
 ——`fts_query`出力の全アトムが二重引用(内部引用は`""`にdoubling)
 であることを行動検証し、`MATCH ?`サイトをsearch.py:556の唯一1件に
 カタログ固定(v0.2.471)。
@@ -141,7 +144,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.472時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1114件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.474時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1116件)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)

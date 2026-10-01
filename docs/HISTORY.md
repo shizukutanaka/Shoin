@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.474
+## Version History: v0.1.37 → v0.2.475
+
+### v0.2.475
+- Release-checkpoint doc sync — `docs/product-review.md` gains the
+  `v0.2.472-474 の要約` block (stdout twin-route closure + the first
+  release tag `v0.2.474` on main) and `docs/spec.md` folds the
+  v0.2.474 pin into the invariants paragraph. Headers → v0.2.474,
+  tests 1114→1116 (two tests arrived via merged main work:
+  `test_decode_content_encoding_bounds_inflated_size`,
+  `test_add_passes_url_target_through_unchanged`).
 
 ### v0.2.474
 - Extended `test_library_prints_never_pollute_stdout` to the twin
