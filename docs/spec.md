@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.472 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.496 時点に同期)
 
 ## プロダクト定義
 
@@ -141,7 +141,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.472時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1114件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.496時点の実測: shoin/ 99%、未カバー3行は到達不能証明済み、テスト1123件)
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
 - ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)

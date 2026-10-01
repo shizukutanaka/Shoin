@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.495
+## Version History: v0.1.37 → v0.2.496
+
+### v0.2.496
+- **Ledger sync**: `docs/product-review.md` brought to v0.2.496 — new
+  summary block covering v0.2.472-495 (the failure-surfacing pins, the
+  three real UI defects, and the completed E501 paydown), plus stale
+  header/test-count markers refreshed. `docs/spec.md`'s quality
+  snapshot updated to the v0.2.496 measurement (1123 tests).
 
 ### v0.2.495
 - **Backlog paydown (final installment)**: all over-long lines in
