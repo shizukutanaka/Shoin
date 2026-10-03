@@ -631,7 +631,15 @@ def _conv_values(text: str) -> set[tuple[int, float]]:
         for j in range(i + 1, len(ms)):
             nxt = ms[j]
             ent2 = _UNIT_SCALE.get(nxt.group(2))
-            if ent2 is None or ent2[0] != fam or len(t[ms[j - 1].end():nxt.start()]) > 2:
+            # Only whitespace or the additive conjunction 'と' may join a
+            # same-family chain — '、', ',', '・', '/' enumerate separate
+            # values: '1時間、30分' asserts 60 and 30, never 90.
+            gap = t[ms[j - 1].end():nxt.start()]
+            if (
+                ent2 is None
+                or ent2[0] != fam
+                or not set(gap) <= {" ", "\t", "\n", "\r", "　", "と"}
+            ):
                 break
             acc += float(nxt.group(1)) * ent2[1]
             vals.add((fam, acc))

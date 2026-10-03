@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.569
+## Version History: v0.1.37 → v0.2.570
+
+### v0.2.570
+- _conv_values requires an additive gap for same-family chains: the
+  previous rule (any gap ≤ 2 chars joins the sum) let enumeration
+  separators merge separate values — '1時間、30分' registered
+  (time, 90), '2時間目、30分休憩' registered (time, 150), and
+  '1km、500m' registered (dist, 1500), suppressing flags for claims
+  whose value the source listed but never summed.  Now only
+  whitespace or the additive conjunction 'と' may join a chain;
+  '、', ',', '・', '/' all break it.  Pinned by
+  test_conv_values_gap_must_be_additive and
+  test_enumerated_durations_do_not_sum (e2e flag fires again).
 
 ### v0.2.569
 - _numbers_expanded suppresses suffix-pair members inside bare kanji

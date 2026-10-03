@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.569")
+        self.assertEqual(VERSION, "0.2.570")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6491,6 +6491,28 @@ class TestNumericMismatches(unittest.TestCase):
         self.assertEqual(
             numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}),
             [1],
+        )
+
+    def test_enumerated_durations_do_not_sum(self) -> None:
+        """v0.2.570: '1時間、30分' lists two durations — the enumeration
+        separator must break the same-family chain.  Summing it registered
+        (time, 90) the source never asserted, so a claim saying '90分' was
+        suppressed instead of flagged.  Only whitespace and the additive
+        conjunction 'と' may join a chain."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches("合計は90分だった。[S1]", {1: "所要は1時間、30分だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("合計は105分だった。[S1]", {1: "所要は1時間、45分だった。"}),
+            [1],
+        )
+        # additive join still sums
+        self.assertEqual(
+            numeric_mismatches("合計は90分だった。[S1]", {1: "所要は1時間と30分だった。"}),
+            [],
         )
 
     def test_chained_magnitudes_sum(self) -> None:
@@ -12896,6 +12918,20 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertIn((1, 1000.0), vals)
         self.assertNotIn((1, 1500.0), vals)
 
+    def test_conv_values_gap_must_be_additive(self) -> None:
+        """v0.2.570: enumeration separators break the same-family chain —
+        '1km、500m' asserts 1000 and 500, not 1500.  The previous gap rule
+        (any ≤2 chars) let '、', ',', '・', '/' join a sum, registering
+        canonical values the text never asserted."""
+        from shoin.citation import _conv_values
+
+        for gap in ("、", ",", "・", "/"):
+            vals = _conv_values(f"1時間{gap}30分")
+            self.assertEqual(vals, {(0, 60.0), (0, 30.0)})
+        for gap in ("", " ", "　", "と", " と ", "\n"):
+            vals = _conv_values(f"1時間{gap}30分")
+            self.assertIn((0, 90.0), vals)
+
     def test_quote_mismatch_suggested_names_right_source(self) -> None:
         """When a doctored quote is flagged, `suggested` must name the source
         it actually matches — the fix is 'say [S2]', not 're-read'."""
@@ -12932,7 +12968,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
     "citation.py:526", "citation.py:530", "citation.py:542",
     "citation.py:543", "citation.py:580", "citation.py:593",
-    "citation.py:952", "citation.py:1331", "citation.py:1545",
+    "citation.py:960", "citation.py:1339", "citation.py:1553",
     "search.py:72", "search.py:907",
 }
 _ERROR_CODE_CATALOG = {
@@ -18093,7 +18129,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 542, 543, 593, 952, 1331, 1545],
+            "citation.py": [526, 530, 542, 543, 593, 960, 1339, 1553],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
