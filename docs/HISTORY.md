@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.585
+## Version History: v0.1.37 → v0.2.586
+
+### v0.2.586
+- product-review ledger synced to v0.2.585 (v0.2.575-585 summary block: citation-marker attribution unified at fragment granularity — backward/forward binding, per-occurrence clauses, tail claims, disclaimer coverage — plus the export [S#] namespace fix). Header date/test-count refreshed.
 
 ### v0.2.585
 - export_markdown sources-listing namespace collision: the `## ソース` section enumerated sources as `- [S1] title …` while an answer's `[S1]` names that query's top retrieval hit — one exported document carrying the same marker for two different indices. A reader resolving a citation against the listing could land on a source the answer never cited (e.g. listing S1=第一の資料 vs answer S1=第二の資料). The listing is now a plain numbered list (`1. title (kind) — origin`), so citation syntax appears only inside each message's own source_map legend. Fail-direction verified (new pin + updated newline pin both fail on the old format).
