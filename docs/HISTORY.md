@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.562
+## Version History: v0.1.37 → v0.2.563
+
+### v0.2.563
+- spec.md's hardcoded except-Exception catalog count corrected 12 → 13
+  (the catalog gained its 13th site at v0.2.503 — the raw-socket close
+  on TLS handshake failure — and the prose count was not bumped
+  alongside; it was accurate at the v0.2.474 tag — the
+  other two measured counts in the same paragraph, 10 dynamic
+  re.compile sites and 32 declared error codes, re-verified accurate).
+  Same file-sweep cycle audited every remaining tracked file at least
+  once: dependabot.yml, ci/README.md, .githooks/pre-push, LICENSE,
+  export.py's `_BIB_ESC`/`_ris_escape` (brace-safe, already pinned),
+  `_h_export` (MIME/EXT maps, format validation, safe fixed filename),
+  UI export link wiring, and the embed partial-failure clip.
 
 ### v0.2.562
 - `report_from_dict` validates `expected`/`retrieved` id elements as ints
