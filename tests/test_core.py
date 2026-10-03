@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.566")
+        self.assertEqual(VERSION, "0.2.567")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2182,6 +2182,30 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(
             _overlap(_bigrams("\u3067\u30fc\u305f"), _bigrams("\u30c7\u30fc\u30bf")),
             0.9)
+
+
+    def test_match_fold_drops_stray_marks_and_stays_idempotent(self) -> None:
+        """v0.2.567: a combining mark that cannot compose into a base char
+        survived _match_fold verbatim — \u00e9+\u0301 folded to 'e'+\u0301,
+        not 'e'. Every folded comparison is two-sided, but a mark-carrying
+        fragment (NFD text, double accents, marks glued to non-letters) split
+        the fold of its neighbours: MMR counted it as diverse, PRF
+        doc-frequency split the term, dedup keys diverged, and the fold
+        itself was not even idempotent. Stray marks now drop like format
+        chars; spacing marks (Devanagari matra, combining class 0) are real
+        letters and stay."""
+        from shoin.chunk import _match_fold
+
+        self.assertEqual(_match_fold("\u00e9\u0301"), "e")
+        self.assertEqual(_match_fold("caf\u00e9"), _match_fold("cafe\u0301"))
+        self.assertEqual(_match_fold("\u30fb\u0301x"), "\u30fbx")
+        self.assertEqual(_match_fold("\u0915\u093f"), "\u0915\u093f")
+        for s in (
+            "\u30fb\u00b3\u00e9\u0301",
+            "\u0665Z \u5143\u5e74\uff70)\u00e9\u0301\u2010b",
+            "\u30c8\u3099\u30fb\u031b",
+        ):
+            self.assertEqual(_match_fold(_match_fold(s)), _match_fold(s))
 
 
     def test_numeric_check_folds_digit_rows(self) -> None:

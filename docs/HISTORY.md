@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.566
+## Version History: v0.1.37 → v0.2.567
+
+### v0.2.567
+- _match_fold drops stray combining marks: a mark that survived NFKC
+  could not compose into any base char (marks that can are consumed by
+  the composition pass; precomposed accents lose theirs in the decomp
+  branch). What reached the append verbatim was a stray diacritic —
+  'é'+◌́ folded to 'e'+◌́ instead of 'e' — making the fold
+  non-idempotent and splitting NFD fragments (double accents, marks
+  glued to non-letters) from their NFC spellings in every two-sided
+  comparison: MMR bigrams (false diversity), PRF doc-frequency (term
+  split below PRF_MIN_DOCS), dedup keys, and the citation checks'
+  folded overlap. Stray marks now skip like format chars; spacing
+  marks (Devanagari matra, combining class 0) are real letters and
+  stay. Pinned by test_match_fold_drops_stray_marks_and_stays_idempotent.
+- Deep audit sweep this cycle: qa.py (context assembly, expand_query,
+  history control), evaluate.py (parse/report/diff), search.py
+  (negation classes, term_variants, PRF, RRF, rerank, tail cut),
+  studio.py (overview sampling, generation guards), ingest.py
+  (decode/BOM, HTML balance, SSRF pinning, content-encoding bounds) —
+  ~3,600 lines re-read, all invariants verified.
 
 ### v0.2.566
 - product-review.md ledger sync to v0.2.565: the "**v0.2.559-565 の要約**"
