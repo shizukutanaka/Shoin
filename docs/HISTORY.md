@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.571
+## Version History: v0.1.37 → v0.2.572
+
+### v0.2.572
+- _stem_variants no longer stems invariant mass nouns: 'news' is not a
+  plural, but the -s rule emitted 'new' — a live, extremely frequent
+  unrelated word injected as an OR'd retrieval variant into every
+  "news" query (the contract tolerates only dead spellings that cost
+  one pattern and can never hide a hit).  Added _STEM_INVARIANT;
+  real plurals ('views'->'view', 'means'->'mean') still bridge.
+  Pinned by test_stem_variants_invariant_mass_nouns.
 
 ### v0.2.571
 - _en_value now requires real numeral grammar inside a small-cluster:

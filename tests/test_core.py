@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.571")
+        self.assertEqual(VERSION, "0.2.572")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2073,6 +2073,20 @@ class TestChunk(unittest.TestCase):
             self.assertEqual(term_variants(t),
                              [t, term_variants(t)[1]], t)
             self.assertEqual(len(term_variants(t)), 2, t)
+
+    def test_stem_variants_invariant_mass_nouns(self) -> None:
+        """v0.2.572: 'news' is not a plural — dropping -s emitted 'new', a
+        live unrelated word that would inject high-frequency noise into
+        every "news" query's OR'd variant set. Invariant mass nouns keep
+        their spelling (unlike lookalikes 'views'->'view' which are real
+        plurals and must still bridge)."""
+        from shoin.search import _stem_variants
+
+        self.assertEqual(_stem_variants("news"), [])
+        self.assertEqual(_stem_variants("News"), [])
+        for t, want in (("views", "view"), ("shows", "show"),
+                        ("laws", "law"), ("means", "mean")):
+            self.assertIn(want, _stem_variants(t), t)
 
     def test_inflected_query_retrieves_base_doc(self) -> None:
         """e2e: every inflected query reaches its base-form doc."""
@@ -13002,7 +13016,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:526", "citation.py:530", "citation.py:542",
     "citation.py:543", "citation.py:580", "citation.py:593",
     "citation.py:978", "citation.py:1357", "citation.py:1571",
-    "search.py:72", "search.py:907",
+    "search.py:72", "search.py:913",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -15778,7 +15792,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:670"],
+            sites, ["search.py:676"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -18163,7 +18177,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
             "citation.py": [526, 530, 542, 543, 593, 978, 1357, 1571],
-            "search.py": [72, 907],
+            "search.py": [72, 913],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -18211,7 +18225,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:907"],
+            escaped_interps, ["search.py:913"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

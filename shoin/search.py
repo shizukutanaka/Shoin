@@ -363,6 +363,12 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
 )
 
 
+# Mass nouns whose final -s is not a plural: the -s drop would emit a live
+# unrelated word ('news' -> 'new') that injects high-frequency noise into
+# the OR'd variant set — not a cheap dead spelling.
+_STEM_INVARIANT = frozenset({"news"})
+
+
 def _stem_variants(term: str) -> list[str]:
     """Singular/base spellings of an English ASCII term (v0.2.536).
 
@@ -390,7 +396,7 @@ def _stem_variants(term: str) -> list[str]:
         add(low[:-3] + "y")                    # queries -> query
     if low.endswith(("sses", "shes", "ches", "xes", "zes")):
         add(low[:-2])                          # classes/wishes/watches/boxes
-    if low.endswith("s") and not low.endswith(("ss", "us", "is")):
+    if low.endswith("s") and not low.endswith(("ss", "us", "is")) and low not in _STEM_INVARIANT:
         add(low[:-1])                          # documents -> document
     if low.endswith("ing"):
         add(low[:-3])                          # hunting -> hunt
