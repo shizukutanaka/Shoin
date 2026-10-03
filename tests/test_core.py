@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.538")
+        self.assertEqual(VERSION, "0.2.539")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2112,6 +2112,26 @@ class TestChunk(unittest.TestCase):
                          ["only cats here", "nothing matches"])
         hits = bm25_search(s, nb.id, "-xyz", 10)
         self.assertEqual(len(hits), 3)
+
+
+    def test_scoring_sees_variant_spellings(self) -> None:
+        """v0.2.539: bridged hits must not read lex=0 — a chunk retrieved via
+        a stem/accent/kana variant was scored term-free, demoted by rerank
+        and clip-eligible for _tail_cut.  _norm_query_terms now emits
+        variant groups; overlap sums occurrences across the group."""
+        self.assertGreater(
+            lexical_overlap("documents", "the document store"), 0.0)
+        self.assertGreater(lexical_overlap("caf\u00e9", "a cafe note"), 0.0)
+        self.assertGreater(
+            lexical_overlap("\u30c7\u30fc\u30bf", "\u3067\u30fc\u305f"), 0.0)
+        # Literal spelling still outscores the bridged one.
+        self.assertGreater(
+            lexical_overlap("documents", "the documents store"),
+            lexical_overlap("documents", "the document store"))
+        from shoin.search import _norm_query_terms, _proximity_from_norm
+        terms = _norm_query_terms("documents engine")
+        self.assertGreater(
+            _proximity_from_norm(terms, "the document engine runs"), 0.0)
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -12382,7 +12402,7 @@ class TestSearchCoverageTail(unittest.TestCase):
         is 3 (the tight cover), not 6 — the left-pointer shrink path."""
         from shoin.search import PROX_SPAN, _proximity_from_norm
 
-        got = _proximity_from_norm(["a", "b"], "a x a b")
+        got = _proximity_from_norm([["a"], ["b"]], "a x a b")
         self.assertAlmostEqual(got, (2 / 2) * (PROX_SPAN / (3 + PROX_SPAN)))
 
     def test_rrf_fuse_lists_merges_bm25_onto_vec_hit(self) -> None:

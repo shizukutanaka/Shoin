@@ -71,7 +71,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   k-caps — "everything except X" over a bounded corpus.  One pin +
   fail-direction verified.
 
-## Version History: v0.1.37 → v0.2.538
+### v0.2.539
+- Scoring sees variant spellings: _norm_query_terms emits variant groups,
+  so a chunk bridged by a stem/accent/digit/kana spelling no longer reads
+  lex=0 — it was demoted by rerank's blend and eligible for _tail_cut as
+  "term-free".  Overlap sums occurrences across the group (literal > bridged
+  still holds), pool-IDF counts a doc once per group, proximity occurrences
+  carry group identity + the variant's own length.  One pin + fail-direction.
+
+## Version History: v0.1.37 → v0.2.539
 
 ### v0.2.534
 

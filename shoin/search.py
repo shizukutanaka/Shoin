@@ -1274,13 +1274,30 @@ def _char_bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def _norm_query_terms(query: str) -> list[str]:
-    """Query terms, NFKC-folded and lower-cased — the form the scorers compare in."""
-    return [unicodedata.normalize("NFKC", t).casefold() for t in query_terms(query)]
+def _norm_query_terms(query: str) -> list[list[str]]:
+    """Query terms as variant GROUPS, NFKC-folded and lower-cased.
+
+    Every spelling a term is retrieved by must also count as that term when
+    the hit is scored (v0.2.539): without the group a stem/accent/digit/
+    kana-bridged chunk read lex=0.0 — demoted by rerank() and eligible for
+    _tail_cut clipping as "term-free", the same retrieval-vs-scoring
+    blindness the width fold fixed one dimension earlier.
+    """
+    groups: list[tuple[str, ...]] = []
+    for t in query_terms(query):
+        variants = tuple(
+            dict.fromkeys(
+                unicodedata.normalize("NFKC", v).casefold()
+                for v in term_variants(t)
+            )
+        )
+        if variants and variants not in groups:
+            groups.append(variants)
+    return [list(g) for g in groups]
 
 
 def _overlap_from_norm(
-    norm_terms: list[str], text: str, idf: dict[str, float] | None = None
+    norm_terms: list[list[str]], text: str, idf: dict[str, float] | None = None
 ) -> float:
     """lexical_overlap's core, given already-normalised terms (see rerank()).
 
@@ -1295,20 +1312,20 @@ def _overlap_from_norm(
     low = unicodedata.normalize("NFKC", text).casefold()
     if idf is None:
         score = 0.0
-        for t in norm_terms:
-            tf = low.count(t)
+        for group in norm_terms:
+            tf = sum(low.count(v) for v in group)
             score += tf / (tf + 1.0)  # saturate repeated occurrences
         return score / len(norm_terms)
     num = den = 0.0
-    for t in norm_terms:
-        w = idf.get(t, 0.0)
-        tf = low.count(t)
+    for group in norm_terms:
+        w = idf.get(group[0], 0.0)
+        tf = sum(low.count(v) for v in group)
         num += w * (tf / (tf + 1.0))
         den += w
     return num / den if den else 0.0
 
 
-def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
+def _pool_idf(norm_terms: list[list[str]], texts: list[str]) -> dict[str, float]:
     """BM25-style IDF of each query term over the candidate pool itself.
 
     A term present in every candidate got them all retrieved in the first
@@ -1322,9 +1339,9 @@ def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
     n = len(texts)
     lows = [unicodedata.normalize("NFKC", t).casefold() for t in texts]
     out: dict[str, float] = {}
-    for t in dict.fromkeys(norm_terms):
-        df = sum(1 for s in lows if t in s)
-        out[t] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+    for group in dict.fromkeys(tuple(g) for g in norm_terms):
+        df = sum(1 for s in lows if any(v in s for v in group))
+        out[group[0]] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
     return out
 
 
@@ -1345,7 +1362,7 @@ def _occurrences(low: str, term: str) -> Iterator[int]:
         start = p + 1
 
 
-def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
+def _proximity_from_norm(norm_terms: list[list[str]], text: str) -> float:
     """0..1 unordered-window term-dependency score (Metzler & Croft, SIGIR 2005).
 
     BM25 and lexical_overlap both treat the query as a bag of words: a chunk
@@ -1361,26 +1378,34 @@ def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
     there is no pair to be near — which keeps every single-term scoring path
     byte-identical to before this signal existed.
     """
-    terms = list(dict.fromkeys(norm_terms))
+    terms = list(dict.fromkeys(tuple(g) for g in norm_terms))
     if len(terms) < 2:
         return 0.0
     low = unicodedata.normalize("NFKC", text).casefold()
-    pts = sorted((p, t) for t in terms for p in _occurrences(low, t))
-    if len({t for _, t in pts}) < 2:
+    # Occurrences carry (offset, group index, variant length): every spelling
+    # in a group counts as that term, and the span closes on the variant's
+    # own end, not a representative's.
+    pts = sorted(
+        (p, gi, len(v))
+        for gi, g in enumerate(terms)
+        for v in g
+        for p in _occurrences(low, v)
+    )
+    if len({gi for _, gi, _ in pts}) < 2:
         return 0.0
     # Sliding window over the sorted occurrence list: contract left while the
     # leftmost term still occurs again inside the window, so each residual
     # window is the tightest covering of its distinct set for that right edge.
-    counts: dict[str, int] = {}
+    counts: dict[int, int] = {}
     best_cover, best_span = 0, len(low) + 1
     left = 0
     for right in range(len(pts)):
-        pos, term = pts[right]
-        counts[term] = counts.get(term, 0) + 1
+        pos, gi, vlen = pts[right]
+        counts[gi] = counts.get(gi, 0) + 1
         while counts[pts[left][1]] > 1:
             counts[pts[left][1]] -= 1
             left += 1
-        span = pos + len(term) - pts[left][0]
+        span = pos + vlen - pts[left][0]
         cover = len(counts)
         if cover > best_cover or (cover == best_cover and span < best_span):
             best_cover, best_span = cover, span
@@ -1436,7 +1461,7 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     the machinery entirely — every such scoring path is identical to before.
     """
     norm_terms = _norm_query_terms(query)
-    multi = len(set(norm_terms)) >= 2
+    multi = len(norm_terms) >= 2
     scored_texts = [f"{h.text}\n{h.context}" if h.context else h.text for h in hits]
     idf = _pool_idf(norm_terms, scored_texts) if multi else None
     for h, scored in zip(hits, scored_texts, strict=True):
