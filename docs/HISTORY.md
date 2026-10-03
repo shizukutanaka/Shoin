@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.568
+## Version History: v0.1.37 → v0.2.569
+
+### v0.2.569
+- _numbers_expanded suppresses suffix-pair members inside bare kanji
+  runs: v0.2.568 closed the component leak for token/chain spans, but
+  the no-big-magnitude span family still leaked — '二千一' registered
+  both 2000 (the '二千' pair) and 2001 (the run's positional value),
+  so a claim asserting the component value matched a source spelling
+  the whole numeral.  Round-trip fuzz over the full _int_to_kanji
+  domain (60k+ values) found ~8,000 instances of this shape — every
+  non-round v in [2000, 9999].  Bare-run spans now join the single-
+  pair suppression set; '二千一三'-class unparsable runs also gained
+  silence (the inner pair asserted 2000 before).  Pinned by
+  test_pairs_inside_bare_kanji_runs_are_components.
 
 ### v0.2.568
 - _numbers_expanded parses big-magnitude numerals as positional tokens:

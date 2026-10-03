@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.568")
+        self.assertEqual(VERSION, "0.2.569")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12853,6 +12853,24 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertIn("500000000000", _numbers_expanded("五千億"))
         self.assertIn("10000000000", _numbers_expanded("百億"))
 
+    def test_pairs_inside_bare_kanji_runs_are_components(self) -> None:
+        """v0.2.569: a numeral+suffix pair inside a bare kanji run is a
+        component of the run's own positional value — '二千一' asserts
+        2001 via the bare path, so the '二千' pair inside it must not
+        also register 2000.  Same component-not-assertion rule as the
+        chain/token suppression, applied to the remaining span family."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("二千一"), {"2001"})
+        self.assertEqual(_numbers_expanded("二千十二"), {"2012"})
+        self.assertEqual(_numbers_expanded("三千一"), {"3001"})
+        self.assertNotIn("2000", _numbers_expanded("二千一"))
+        self.assertNotIn("3000", _numbers_expanded("三千一"))
+        # unparsable runs stay silent — the inner pair is suppressed too
+        self.assertEqual(_numbers_expanded("二千一三"), set())
+        # runs under a big-magnitude token were already covered (v0.2.568)
+        self.assertEqual(_numbers_expanded("一万二千一"), {"12001"})
+
     def test_citation_only_first_sentence_skips_claim(self) -> None:
         """'[S1]' alone carries a citation number but no text and no prior
         claim — every checker must skip it rather than fabricate a claim."""
@@ -12914,7 +12932,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
     "citation.py:526", "citation.py:530", "citation.py:542",
     "citation.py:543", "citation.py:580", "citation.py:593",
-    "citation.py:947", "citation.py:1326", "citation.py:1540",
+    "citation.py:952", "citation.py:1331", "citation.py:1545",
     "search.py:72", "search.py:907",
 }
 _ERROR_CODE_CATALOG = {
@@ -18075,7 +18093,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 542, 543, 593, 947, 1326, 1540],
+            "citation.py": [526, 530, 542, 543, 593, 952, 1331, 1545],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

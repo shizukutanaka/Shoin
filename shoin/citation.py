@@ -741,19 +741,24 @@ def _numbers_expanded(text: str) -> set[str]:
             r = round(v)
             if abs(v - r) < 1e-6:
                 nums.add(str(r))
-    # Numeral+suffix pairs INSIDE a chain are components, not asserted values:
-    # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
-    # separate members would flag a claim spelling the summed value out.
+    # Numeral+suffix pairs inside a larger positional numeral are components,
+    # not asserted values: "1億2000万" asserts 120,000,000 — keeping "1億"→1e8
+    # and "2000万"→2e7 as separate members would flag a claim spelling the
+    # summed value out — and "二千一" asserts 2001 via the bare-run path, so
+    # the '二千' pair inside it must not also register 2000.
     chain_spans = token_spans + [
         m.span()
         for m in _MAG_CHAIN_RE.finditer(t)
         if not any(ts <= m.start() < te for ts, te in token_spans)
     ]
+    bare_spans = [m.span() for m in _KANJI_BARE_RE.finditer(t)]
     for m in _MAG_NUM_RE.finditer(t):
         part, suf = m.group(1), m.group(2)
         if part[0].isdigit():
             suffixed.add(part)
-        if any(cs <= m.start() < ce for cs, ce in chain_spans):
+        if any(cs <= m.start() < ce for cs, ce in chain_spans) or any(
+            bs <= m.start() < be for bs, be in bare_spans
+        ):
             continue
         pv = _part_value(part)
         if pv is None:
@@ -775,8 +780,8 @@ def _numbers_expanded(text: str) -> set[str]:
             r = round(total)
             if abs(total - r) < 1e-6:
                 nums.add(str(r))
-    for m in _KANJI_BARE_RE.finditer(t):
-        if any(ts <= m.start() and m.end() <= te for ts, te in token_spans):
+    for m, (bs, be) in zip(_KANJI_BARE_RE.finditer(t), bare_spans, strict=True):
+        if any(ts <= bs and be <= te for ts, te in token_spans):
             continue
         kv = _kanji_value(m.group(1))
         if kv is not None and kv > 0:
