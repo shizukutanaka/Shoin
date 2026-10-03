@@ -600,3 +600,14 @@ def _match_fold(text: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+
+def _digit_fold(s: str) -> str:
+    """Every script's Nd row → ASCII digits (same mapping _match_fold applies
+    inline): '٣٤٥', '३४५', '๓๔๕' all become '345'.  int()/float() already
+    accept these digits; the fold exists for code that compares digit
+    strings verbatim."""
+    return "".join(
+        chr(ord("0") + unicodedata.decimal(c)) if c.isdecimal() else c
+        for c in s
+    )

@@ -91,7 +91,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   deliberately stays literal: exactness is its evidence.  One pin +
   fail-direction.
 
-## Version History: v0.1.37 → v0.2.540
+### v0.2.541
+- Numeric check folds digit rows: _NUM_TOKEN_RE's \d is Unicode-wide, so
+  '٣٤٥' tokenized but compared verbatim — a claim restating '345' as
+  '٣٤٥' was flagged absent from its own source.  New chunk._digit_fold
+  canonicalises every Nd row to ASCII inside _numbers(); the era-name
+  pattern also widened [0-9] -> \d so 令和٦年 expands to 2024.  Different
+  values still flag.  One pin + fail-direction.
+
+## Version History: v0.1.37 → v0.2.541
 
 ### v0.2.534
 

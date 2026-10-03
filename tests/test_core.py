@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.540")
+        self.assertEqual(VERSION, "0.2.541")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2163,6 +2163,32 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(
             _overlap(_bigrams("\u3067\u30fc\u305f"), _bigrams("\u30c7\u30fc\u30bf")),
             0.9)
+
+
+    def test_numeric_check_folds_digit_rows(self) -> None:
+        """v0.2.541: _NUM_TOKEN_RE's \\d is Unicode-wide, so '٣٤٥'
+        tokenized but compared verbatim — a claim restating '345' as
+        '٣٤٥' was flagged absent from its own source. _digit_fold
+        canonicalises every Nd row to ASCII before comparison; the
+        era-name pattern also widened [0-9] -> \\d so 令和٦年 expands."""
+        from shoin.citation import _numbers, numeric_mismatches
+
+        self.assertEqual(_numbers("\u589e\u52a0\u0663\u0664\u0665\u5186"), {"345"})
+        # Same value in a different digit row: no flag.
+        src = {1: "\u589e\u52a0345\u5186\u3060\u3063\u305f\u3002"}
+        self.assertEqual(
+            numeric_mismatches(
+                "\u589e\u52a0\u0663\u0664\u0665\u5186\u3060\u3063\u305f\u3002[S1]",
+                src), [])
+        # Different value in a different digit row: still flags.
+        self.assertEqual(
+            numeric_mismatches(
+                "\u589e\u52a0\u0663\u0664\u0666\u5186\u3060\u3063\u305f\u3002[S1]",
+                src), [1])
+        # Era-name year written with Arabic-Indic digits expands.
+        self.assertEqual(
+            numeric_mismatches("\u4ee4\u548c\u0666\u5e74\u306e\u8a18\u9332\u3002[S1]",
+                               {1: "2024\u5e74\u306e\u8a18\u9332\u3002"}), [])
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14700,9 +14726,9 @@ class TestResidualGuards(unittest.TestCase):
         # re-auditing the construction for injection geometry.
         expected_dyn = {
             "chunk.py:208",
-            "citation.py:518", "citation.py:522", "citation.py:559",
-            "citation.py:572", "citation.py:884", "citation.py:1260",
-            "citation.py:1465",
+            "citation.py:526", "citation.py:530", "citation.py:567",
+            "citation.py:580", "citation.py:892", "citation.py:1268",
+            "citation.py:1473",
             "search.py:71", "search.py:906",
         }
         for loc in sorted(set(dyn) - expected_dyn):
@@ -17353,7 +17379,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [518, 522, 572, 884, 1260, 1465],
+            "citation.py": [526, 530, 580, 892, 1268, 1473],
             "search.py": [71, 906],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
@@ -17432,7 +17458,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, int] = {
-            "chunk.py": 4,
+            "chunk.py": 5,
             "citation.py": 2,
             "export.py": 3,
             "search.py": 6,

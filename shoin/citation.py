@@ -62,7 +62,11 @@ import re
 import unicodedata
 from typing import NotRequired, TypedDict
 
-from .chunk import _SENTENCE_SPLIT_RE, _match_fold  # single source of truth for sentence boundaries
+from .chunk import (
+    _SENTENCE_SPLIT_RE,  # single source of truth for sentence boundaries
+    _digit_fold,
+    _match_fold,
+)
 
 # A citation lives inside square brackets and may combine several sources:
 # [S1] / [S1, S2] / [S1; S3] / [S1 and S2] / [S1][S2]. Full-width brackets,
@@ -484,8 +488,12 @@ def _numbers(text: str) -> set[str]:
     separators are stripped before matching so "1,234" and "1234" compare equal.
     """
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    # _NUM_TOKEN_RE's \d is Unicode-wide: '٣٤٥' or '३४५' tokenize fine but
+    # then compare verbatim — '٣٤٥' was flagged absent from a source
+    # writing '345', the same value in another digit row (v0.2.541).
+    # _digit_fold canonicalises every Nd row to ASCII before comparison.
     return {
-        m.group(0)
+        _digit_fold(m.group(0))
         for m in _NUM_TOKEN_RE.finditer(t)
         if "." in m.group(0) or len(m.group(0)) >= 2
     }
@@ -538,7 +546,7 @@ _ERAS: tuple[tuple[str, int, int], ...] = (
     ("平成", 1989, 2019),
     ("令和", 2019, 2050),  # ongoing — far-future era years aren't assertable
 )
-_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|[0-9]+|[一二三四五六七八九十百千]+)年")
+_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|\d+|[一二三四五六七八九十百千]+)年")
 _ERA_BASE_END = {name: (base, end) for name, base, end in _ERAS}
 
 # Spelled-out English numerals (v0.2.196): "three million" ↔ "3000000",
