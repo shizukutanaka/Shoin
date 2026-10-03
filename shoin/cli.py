@@ -463,7 +463,11 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # UnicodeDecodeError comes from read_text's strict UTF-8 decode — a
+        # non-UTF-8 file is definitionally not JSON, and neither it nor
+        # JSONDecodeError is an OSError, so without this both escape main()'s
+        # handler chain as a raw traceback.
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"cases file is not valid JSON: {exc}",
@@ -498,7 +502,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             base_raw = json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
             ) from exc

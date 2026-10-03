@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.592
+## Version History: v0.1.37 → v0.2.593
+
+### v0.2.593
+- `cli.py` `_cmd_eval`のUTF-8 decode失敗をコード化エラーへ写像: cases/baseline読みの`read_text(encoding="utf-8")`が投げる`UnicodeDecodeError`は`json.JSONDecodeError`でも`OSError`でもなく、main()の全ハンドラ(StoreError系/OperationalError/OSError/OverflowError/KeyboardInterrupt)を潜って生tracebackとして漏出——非UTF-8ファイルを渡したユーザーへクラッシュ画面を見せる、他の全ファイル読込パスが「コード化エラー+rc=1」契約を持つ中での唯一の例外経路。2サイト(cases/baseline)を同クラスへ統一
+- 行動ピン: `test_eval_bad_utf8_files_map_to_coded_error`——不正UTF-8のcases/baselineそれぞれでrc=1+VALIDATION_FIELD_FORMAT_INVALIDを固定（旧コードでfail確認）
+- カタログ追随: exceptハンドラ在庫cli.py更新（`json.JSONDecodeError`×2→`(UnicodeDecodeError,json.JSONDecodeError)`×2）
 
 ### v0.2.592
 - `server.py` `_h_ask_sse`のストリームブロックへ`except Exception`ガード追加: socket timeout（TimeoutErrorはConnectionError非包含）・サロゲートtokenのUTF-8 encode失敗・予期しないバックエンド例外が、SSEヘッダ確定後に`_dispatch`の500経路へ逸脱し、第二ステータス行をstream本文へ混入させる＋assistant永続化をskipしてuser turnを孤立化させる2系統の欠陥を閉塞。build_context経路と同じcoded-vs-generic方針でerror frameを送出し、frame送出自体が失敗した場合のみclient_gone化——いずれにせよpersistは必ず実行

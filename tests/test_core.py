@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.592")
+        self.assertEqual(VERSION, "0.2.593")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -11303,6 +11303,40 @@ class TestCLI(unittest.TestCase):
                     os.environ["HOME"] = home
         self.assertFalse(Path("~").exists(), "literal ~ dir must not be created in cwd")
 
+    def test_eval_bad_utf8_files_map_to_coded_error(self) -> None:
+        """A cases or baseline file that is not valid UTF-8 makes read_text()
+        raise UnicodeDecodeError — neither OSError nor JSONDecodeError — which
+        escaped every catch in main() and crashed with a raw traceback. Both
+        reads must map to VALIDATION_FIELD_FORMAT_INVALID like malformed JSON."""
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            bad = Path(td) / "bad.json"
+            bad.write_bytes(b'[{"q": "x", "sources": [\xff\xfe]')
+            good = Path(td) / "good.json"
+            good.write_text(
+                json.dumps([{"q": "q", "sources": [1]}]), encoding="utf-8"
+            )
+            for argv in (
+                ["--db", db_file, "eval", str(nb.id), str(bad)],
+                ["--db", db_file, "eval", str(nb.id), str(good), "--diff", str(bad)],
+            ):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    rc = main(argv, llm=FakeLLM())
+                self.assertEqual(rc, 1, argv)
+                self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue(), argv)
+
     def test_add_expands_quoted_tilde_target(self) -> None:
         """`add nb '~/doc.md'` (tilde inside quotes → unexpanded argv) must
         ingest the real home file, not fail INGEST_FETCH_FAILED on the
@@ -17055,10 +17089,11 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": [
                 "(IngestError,StoreError)",
                 "(IngestError,LLMError,StoreError)",
+                "(UnicodeDecodeError,json.JSONDecodeError)",
+                "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 "OSError", "OSError", "OSError", "OSError",
                 "OverflowError", "ValueError", "ValueError",
-                "json.JSONDecodeError", "json.JSONDecodeError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
             ],
             "config.py": [
