@@ -184,7 +184,8 @@ class TestUIContract(unittest.TestCase):
         self.assertEqual(
             locales["ja"] - locales["en"],
             set(),
-            f"I18N.ja-only keys (en falls back to ja text): {sorted(locales['ja'] - locales['en'])}",
+            f"I18N.ja-only keys (en falls back to ja text): "
+            f"{sorted(locales['ja'] - locales['en'])}",
         )
         self.assertEqual(
             locales["en"] - locales["ja"],
@@ -676,7 +677,10 @@ const fetch = async (path, opts) => {
                                 inner_end = match_brace(obj, inner_brace)
                                 body_keys = top_level_keys(obj[inner_brace + 1:inner_end - 1])
             concrete = re.sub(r"\$\{[^}]*\}", "1", raw).rstrip("/")
-            calls.append((verb, concrete, body_keys, f"line {script[:m.start()].count(chr(10)) + 1}"))
+            calls.append(
+                (verb, concrete, body_keys,
+                 f"line {script[:m.start()].count(chr(10)) + 1}")
+            )
 
         # Per handler: fields it reads from the JSON body.
         import ast
@@ -1677,8 +1681,11 @@ console.log("ok")
         resolver = src[i1:i2]
         harness = i18n + """
 function resolveLang(lsv, metaContent, nav){
-  const localStorage = { getItem(k){ return lsv; } };
-  const document = { querySelector(s){ return metaContent === null ? null : {content: metaContent} } };
+  const localStorage = { getItem(k){ return lsv; }, setItem(){} };
+  const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
+  const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
+  const document = { querySelector(s){
+      return metaContent === null ? null : {content: metaContent} } };
   const navigator = { language: nav };
 """ + resolver + """
   return {lang, t};
@@ -1772,10 +1779,12 @@ const want = ["badge dim","badge err","badge err","badge err","badge err",
               "badge warn","badge warn"];
 if (JSON.stringify(classes) !== JSON.stringify(want))
   { console.error("badges: " + JSON.stringify(classes)); process.exit(1) }
-const cbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("coverage"));
+const cbadges = c.children.filter(
+    b => b.cls === "badge warn" && String(b.text).includes("coverage"));
 if (cbadges.length !== 1) { console.error("coverage badge missing"); process.exit(1) }
 // v0.2.245: a finish_reason "length" answer must carry a visible warning chip.
-const tbadges = c.children.filter(b => b.cls === "badge warn" && String(b.text).includes("truncated"));
+const tbadges = c.children.filter(
+    b => b.cls === "badge warn" && String(b.text).includes("truncated"));
 if (tbadges.length !== 1) { console.error("truncated badge missing"); process.exit(1) }
 const c2 = mkc();
 reportBadges(c2, {cited: [1], coverage: null});
@@ -2180,7 +2189,8 @@ function addMsg(role, body, report){ calls.added.push(role + ":" + body) }
             + """
 renderChatHistory();
 if (calls.prepended.length !== 1 || !String(calls.prepended[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended)); process.exit(1) }
+  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended));
+    process.exit(1) }
 if (calls.added.length !== 2)
   { console.error("messages not rendered: " + calls.added.length); process.exit(1) }
 cur.messages_omitted = 0;
@@ -2232,7 +2242,8 @@ renderNotes();
 if (noteList.kids.length !== 3)
   { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
 if (!String(noteList.kids[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0])); process.exit(1) }
+  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0]));
+    process.exit(1) }
 cur.notes_omitted = 0;
 renderNotes();
 if (noteList.kids.length !== 2)
@@ -2292,7 +2303,10 @@ if (studioOut.kids.length !== 1)
   { console.error("card count: " + studioOut.kids.length); process.exit(1) }
 const card = studioOut.kids[0];
 const btn = card.kids.find(k => k.tag === "button" && k.text === "studio.savenote");
-if (!btn) { console.error("save-as-note button missing: " + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text))); process.exit(1) }
+if (!btn) {
+  console.error("save-as-note button missing: "
+    + JSON.stringify(card.kids.map(k=>k.tag+":"+k.text)));
+  process.exit(1) }
 btn.onclick();  // async — awaits jpost; wait a tick
 await new Promise(r => setTimeout(r, 10));
 if (posts.length !== 1) { console.error("no note POST: " + posts.length); process.exit(1) }
@@ -2336,18 +2350,25 @@ async function api(path){ return apiImpl(path); }
 """ + fn + """
 await health();                                    // initial on (fires first refetch)
 if (!reg["#lamp"].classList.contains("on")) { console.error("lamp not on"); process.exit(1) }
-if (refetches !== 1) { console.error("first off->on did not refetch: " + refetches); process.exit(1) }
+if (refetches !== 1) {
+  console.error("first off->on did not refetch: " + refetches);
+  process.exit(1) }
 apiImpl = async () => { throw new Error("net down") };
 await health();                                    // fetch failure
 if (window._llmOn !== false) { console.error("_llmOn not false after failure"); process.exit(1) }
-if (reg["#lamp"].classList.contains("on")) { console.error("lamp stayed green on failure"); process.exit(1) }
-if (reg["#banner"].style.display !== "block") { console.error("banner hidden on failure"); process.exit(1) }
+if (reg["#lamp"].classList.contains("on")) {
+  console.error("lamp stayed green on failure"); process.exit(1) }
+if (reg["#banner"].style.display !== "block") {
+  console.error("banner hidden on failure"); process.exit(1) }
 if (refetches !== 1) { console.error("failure refetched questions"); process.exit(1) }
 apiImpl = async () => ({ json: async () => ({ llm: true }) });
 await health();                                    // off->on recovery
 if (!window._llmOn) { console.error("_llmOn not restored"); process.exit(1) }
-if (reg["#banner"].style.display !== "none") { console.error("banner still shown after recovery"); process.exit(1) }
-if (refetches !== 2) { console.error("questions not refetched on off->on: " + refetches); process.exit(1) }
+if (reg["#banner"].style.display !== "none") {
+  console.error("banner still shown after recovery"); process.exit(1) }
+if (refetches !== 2) {
+  console.error("questions not refetched on off->on: " + refetches);
+  process.exit(1) }
 console.log("ok")
 """
         rc, out = _run_node(harness)
@@ -2379,10 +2400,14 @@ let cur = { id: 1, sources: [{id: 5}] };
 """ + fn + """
 await refreshQuestions();
 if (calls.length !== 1) { console.error("no fetch for live nb: " + calls); process.exit(1) }
-if (reg["#qs"].children.length !== 2) { console.error("chips not rendered: " + reg["#qs"].children.length); process.exit(1) }
+if (reg["#qs"].children.length !== 2) {
+  console.error("chips not rendered: " + reg["#qs"].children.length);
+  process.exit(1) }
 const chip = reg["#qs"].children[0];
 if (chip.tag !== "button" || chip.type !== "button" || chip.cls !== "q-chip")
-  { console.error("chip shape wrong: " + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls})); process.exit(1) }
+  { console.error("chip shape wrong: "
+      + JSON.stringify({t:chip.tag, ty:chip.type, c:chip.cls}));
+    process.exit(1) }
 chip.onclick();
 if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
   { console.error("chip click did not fill+focus input"); process.exit(1) }
@@ -2395,7 +2420,8 @@ await refreshQuestions();
 cur = null;
 await refreshQuestions();
 if (calls.length !== 1 || reg["#qs"].children.length !== 0)
-  { console.error("guards fetched or kept chips: calls=" + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+  { console.error("guards fetched or kept chips: calls=" + calls.length
+      + " chips=" + reg["#qs"].children.length); process.exit(1) }
 
 // Race: notebook switches while the fetch is in flight -> chips dropped.
 window._llmOn = true; cur = { id: 9, sources: [{id: 5}] };
@@ -2455,7 +2481,8 @@ function startSourceRename(s, tt, row, initial){
 const document = { activeElement: null };
 """ + fn + """
 // Path 1: focused rename input inside #srcList survives the rebuild.
-cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}], messages:[], studio:[], notes:[] };
+cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}],
+    messages:[], studio:[], notes:[] };
 const rin = mkEl();
 rin.classList = { contains: c => c === "src-rename" };
 rin.dataset = { srcId: "5" };
@@ -2465,7 +2492,8 @@ $("#srcList").children = [rin]; rin.parent = $("#srcList");
 document.activeElement = rin;
 renderNotebook();
 if (renameCalls.length !== 1 || renameCalls[0].srcId !== 5 || renameCalls[0].initial !== "mid-edit")
-  { console.error("activeElement path did not restore: " + JSON.stringify(renameCalls)); process.exit(1) }
+  { console.error("activeElement path did not restore: "
+      + JSON.stringify(renameCalls)); process.exit(1) }
 if (rin.onblur !== null || rin.onkeydown !== null)
   { console.error("old rename handlers not detached — phantom commit risk"); process.exit(1) }
 if (srcIndex.get(5).s !== 1) { console.error("srcIndex not repopulated"); process.exit(1) }
@@ -2825,6 +2853,85 @@ const closeViewer = () => {};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_lazy_details_retries_after_failure(self) -> None:
+        """v0.2.489: a failed lazy full-source fetch must clear
+        `dataset.loaded` so the collapse→reopen gesture retries — before
+        this fix the flag stayed set and the error text was pinned on
+        forever within that viewer session. The retry must also reuse the
+        SAME body element (a second placeholder must never appear)."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        show = _js_block(src, "async function showSource")
+        harness = (
+            """\
+const calls = {renders: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, open: false, _cbs: {}, className: "", tag: "",
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ n.children.unshift(x); n.kids.unshift(x); },
+    classList: {add(){}, remove(){}, contains: () => false},
+    focus(){}, addEventListener(ev, cb){ n._cbs[ev] = cb; },
+    querySelector(sel){ return n.kids.find(k => k.className === sel.slice(1)) || null },
+    querySelectorAll(){ return [] },
+    setAttribute(){}, scrollIntoView(){},
+  };
+  return n;
+};
+const els = {};
+const $ = s => els[s] || (els[s] = mk());
+const document = {activeElement: null,
+  createElement: tag => { const n = mk(); n.tag = tag; return n; }};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+let _srcAbort = null, _viewerOpener = null;
+const deferred = [];
+const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
+  deferred.push(rec);
+  return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
+const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const toast = () => {};
+const closeViewer = () => {};
+"""
+            + show
+            + """
+(async () => {
+  showSource(9, "T", "excerpt text", "sec1", [1], null);
+  const det = els["#viewerText"].kids.find(c => c.className === "full-src");
+  det.open = true;
+  det._cbs.toggle();
+  // First fetch fails: the flag MUST clear so reopening retries, the
+  // error text lands in the one body element, and no toast is used.
+  deferred[0].rej(new Error("fetch boom"));
+  await new Promise(r => setTimeout(r, 0));
+  if (det.dataset.loaded)
+    { console.error("loaded still set after failure — retry impossible"); process.exit(1) }
+  const bodies = () => det.kids.filter(k => k.className === "full-body");
+  if (bodies().length !== 1 || bodies()[0].textContent !== "fetch boom")
+    { console.error("error body wrong"); process.exit(1) }
+  // Reopen gesture retries: a second fetch is issued into the SAME body,
+  // which flips back to the loading placeholder in flight.
+  det._cbs.toggle();
+  if (deferred.length !== 2)
+    { console.error("reopen did not retry the fetch"); process.exit(1) }
+  if (bodies().length !== 1 || bodies()[0].textContent !== "…")
+    { console.error("retry must reuse the same body with placeholder"); process.exit(1) }
+  deferred[1].res({json: async () => ({chunks: [{id: 1, seq: 0, text: "c"}]})});
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.renders.length !== 1 || bodies().length !== 1)
+    { console.error("successful retry did not render into the one body"); process.exit(1) }
+  if (!det.dataset.loaded)
+    { console.error("loaded must be set after a successful load"); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_startSourceRename_commit_and_cancel_paths(self) -> None:
         """v0.2.267: pin startSourceRename's five exit paths under node —
         Enter commits via PATCH + reload, blur to a sibling row control skips
@@ -2842,7 +2949,8 @@ function mkEl(){ return {children:[], value:"", type:"", className:"", dataset:{
   append(x){ this.children.push(x); x.parent = this }, parent:null,
   contains(x){ while(x){ if(x===this) return true; x=x.parent } return false },
   setAttribute(){}, focus(){ this.focused = true }, select(){}, blur(){},
-  onclick:null, onblur:null, onkeydown:null, click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
+  onclick:null, onblur:null, onkeydown:null,
+  click(){ if(this.onclick) this.onclick({stopPropagation(){}}) } }; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
 function t(k){ return k }
 function toast(){}
@@ -2927,7 +3035,8 @@ const reg = {};
 function mkEl(){ return {children:[], parent:null, className:"", value:"",
   textContent:"", title:"", disabled:false, tabIndex:0,
   append(...xs){ xs.forEach(x => { this.children.push(x); x.parent=this }) },
-  replaceChildren(...xs){ this.children=[]; xs.forEach(x => { this.children.push(x); x.parent=this }) },
+  replaceChildren(...xs){ this.children=[];
+    xs.forEach(x => { this.children.push(x); x.parent=this }) },
   setAttribute(n,v){ this["attr_"+n]=v },
   onclick:null, onkeydown:null,
   click(){ if(this.onclick) this.onclick({stopPropagation(){}}) },
@@ -2956,7 +3065,8 @@ await loadNotebooks();
 const lis = $("#nbList").children;
 if (lis.length !== 2) { console.error("row count " + lis.length); process.exit(1) }
 if (lis[0].className !== "" || lis[1].className !== "cur")
-  { console.error("highlight wrong: " + lis[0].className + "/" + lis[1].className); process.exit(1) }
+  { console.error("highlight wrong: " + lis[0].className + "/"
+      + lis[1].className); process.exit(1) }
 if (lis[0].children[1].text !== "2册")
   { console.error("count label: " + lis[0].children[1].text); process.exit(1) }
 
@@ -3005,6 +3115,126 @@ console.log("ok")
 """
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
+
+    def test_loadNotebooks_toasts_instead_of_rejecting(self) -> None:
+        """loadNotebooks() is called fire-and-forget from ~15 sites (post-
+        mutation refresh, row clicks, openNotebook's own rebuild, the boot
+        call). Until the guard its siblings always had, its fetch+json lived
+        outside any try — a malformed body or envelope error produced an
+        `unhandledrejection` at every one of those sites: no toast, stale
+        list, console-only evidence. The fix follows the file's own
+        convention (openNotebook/health/refreshQuestions each self-guard):
+        loadNotebooks catches and toasts. Pin both directions under node —
+        the promise resolves AND the message reaches toast."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        fn = _js_block(src, "async function loadNotebooks")
+        harness = """\
+let toasted = null;
+const toast = m => { toasted = m; };
+const t = k => k;
+const api = async () => { throw new Error("[500] down"); };
+""" + fn + """
+(async () => {
+  await loadNotebooks();   // must resolve, not reject
+  if (toasted !== "[500] down") {
+    console.error("api failure did not toast: " + JSON.stringify(toasted));
+    process.exit(1);
+  }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_localStorage_access_is_failure_tolerant(self) -> None:
+        """v0.2.484: `localStorage.getItem("shoin.lang")` ran at script top
+        level — in a browser where storage is disabled (private-mode
+        restrictions, sandboxed iframe, cookies blocked) the SecurityError
+        killed the ENTIRE boot: markup renders, every control inert. Accesses
+        now funnel through `_lsGet`/`_lsSet`, which degrade to no-ops. Pin
+        both directions under node (throwing store vs. real passthrough) and
+        lexical containment: `localStorage.` must appear only inside the two
+        helper bodies — any new bare call site is the same boot-killer."""
+        src = _script_body(_html())
+        helpers = []
+        for name in ("_lsGet", "_lsSet"):
+            m = re.search(rf"const {name}[^\n]*", src)
+            if not m:
+                self.fail(f"{name} not found in index.html")
+            helpers.append(m.group(0))
+        # Containment: outside the two helper bodies, `localStorage.` must not
+        # appear at all — a bare call site re-opens the boot-killer.
+        outside = src
+        for h in helpers:
+            outside = outside.replace(h, "", 1)
+        self.assertEqual(
+            outside.count("localStorage."), 0,
+            "bare localStorage access outside _lsGet/_lsSet — "
+            "an unguarded call at top level kills the whole app boot",
+        )
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        harness = (
+            "let localStorage = {"
+            "  getItem(){ throw new Error('SecurityError') },"
+            "  setItem(){ throw new Error('SecurityError') } };\n"
+            + "\n".join(helpers)
+            + """
+if (_lsGet("shoin.lang") !== null)
+  { console.error("throwing store not degraded to null"); process.exit(1) }
+_lsSet("shoin.lang", "en");  // must not throw
+const real = { v: "x", getItem(k){ return this.v }, setItem(k,v){ this.v = v } };
+localStorage = real;
+if (_lsGet("shoin.lang") !== "x")
+  { console.error("passthrough broke"); process.exit(1) }
+_lsSet("shoin.lang", "ja");
+if (real.v !== "ja")
+  { console.error("set passthrough broke"); process.exit(1) }
+console.log("ok");
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
+    def test_collection_reads_are_boundary_normalized(self) -> None:
+        """v0.2.486: response-shape reads were defensively INCONSISTENT —
+        `cur.sources.forEach` raw on one line, `cur.sources?.length` two
+        functions later; `(j.chunks || [])` in one fetch, bare `j.chunks`
+        passed to `renderFullSource` in the next. A malformed/truncated
+        response then produced a TypeError toast instead of an empty render
+        — same input class, different user-visible outcome depending on
+        which call site got it. Collections are now normalized at the trust
+        boundary (openNotebook's `cur = {...defaults, ...j}`) or defaulted
+        at the consumer, so inside render* every collection always exists.
+        Pin the boundary spreads lexically and `renderFullSource`'s
+        tolerance under node."""
+        src = _script_body(_html())
+        self.assertIn("notebooks = j.notebooks || [];", src)
+        m = re.search(r"cur = \{[^}]*\.\.\.j[^}]*\};", src)
+        self.assertIsNotNone(m, "cur boundary normalization missing")
+        for field in ("sources", "messages", "notes", "studio"):
+            self.assertIn(f"{field}:[],", m.group(0))
+        self.assertIn("(chunks || []).forEach", src)
+        self.assertIn("(j.questions || []).forEach", src)
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        fn = _js_block(src, "function renderFullSource")
+        harness = (
+            "let replaced = 0;\n"
+            "const container = { replaceChildren(){replaced++}, append(){} };\n"
+            + fn
+            + """
+renderFullSource(container);            // chunks entirely absent
+renderFullSource(container, undefined); // explicitly undefined
+if (replaced !== 2) throw "replaceChildren count " + replaced;
+console.log("ok");
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
 
     def test_lang_placeholder_appears_exactly_once(self) -> None:
         """server.py's _h_ui() does a blind byte replace of "__SHOIN_LANG__" —
@@ -3097,7 +3327,9 @@ const nbBtn = {disabled: false};
       || calls.posts[0][2].name !== "new nb")
     { console.error("nbForm POST wrong: " + JSON.stringify(calls.posts[0])); process.exit(1) }
   if (nbName.value !== "" || calls.opens[0] !== 9 || nbBtn.disabled)
-    { console.error("nbForm cleanup wrong: " + JSON.stringify({v: nbName.value, opens: calls.opens, d: nbBtn.disabled})); process.exit(1) }
+    { console.error("nbForm cleanup wrong: "
+        + JSON.stringify({v: nbName.value, opens: calls.opens,
+            d: nbBtn.disabled})); process.exit(1) }
   // urlBtn: POST sources, input cleared, opened, button label restored
   const label = urlBtnEl.textContent;
   await events.urlBtn();
@@ -3151,6 +3383,8 @@ const I18N = {ja: {"tabs.chat": "対話", "a11y.lang": "言語", "f.ph": "問い
 let lang = "ja";
 const stored = [];
 const localStorage = {setItem(k, v){ stored.push([k, v]) }};
+const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
+const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
 const texts = [{dataset: {i18n: "tabs.chat"}, textContent: "?"},
                {dataset: {i18n: "a11y.lang"}, textContent: "?"}];
 const phs = [{dataset: {i18nPh: "f.ph"}, placeholder: "?"}];
@@ -3257,9 +3491,12 @@ function reportBadges(){}
 const KINDS = ["briefing","study_guide","faq","timeline","mindmap"];
 const events = {};
 """
-            + f"events.noteForm = async e=>\n{blocks['noteForm'].split('onsubmit = async e=>',1)[1]}\n"
-            + f"events.reindex = async ()=>\n{blocks['reindex'].split('onclick = async ()=>',1)[1]}\n"
-            + f"events.clearChat = async ()=>\n{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
+            + "events.noteForm = async e=>\n"
+            + f"{blocks['noteForm'].split('onsubmit = async e=>',1)[1]}\n"
+            + "events.reindex = async ()=>\n"
+            + f"{blocks['reindex'].split('onclick = async ()=>',1)[1]}\n"
+            + "events.clearChat = async ()=>\n"
+            + f"{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
             + f"{blocks['buildKinds']}\n"
             + f"{blocks['renderNotes']}\n"
             + """\

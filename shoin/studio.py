@@ -12,6 +12,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
+from .chunk import _match_fold
 from .citation import CitationReport, looks_like_question, make_report
 from .config import MAX_QUESTION_LEN, ui_lang
 from .llm import LLMError
@@ -48,7 +49,10 @@ _INSTRUCTIONS: dict[str, dict[str, str]] = {
     },
     "faq": {
         "ja": "想定FAQをMarkdownで作成。Q&A形式で5〜8問。各回答に根拠引用。",
-        "en": "Create an FAQ in Markdown in Q&A format, 5–8 questions. Each answer must cite its source.",
+        "en": (
+            "Create an FAQ in Markdown in Q&A format, 5–8 questions. "
+            "Each answer must cite its source."
+        ),
     },
     "timeline": {
         "ja": (
@@ -81,7 +85,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "question_prompt": {
         "ja": "このソース群に対して読者が尋ねそうな質問を{n}個、1行1問・装飾なしで列挙。",
-        "en": "List {n} questions a reader might ask about these sources, one per line, no decoration.",
+        "en": (
+            "List {n} questions a reader might ask about these sources, "
+            "one per line, no decoration."
+        ),
     },
 }
 
@@ -175,7 +182,10 @@ def generate(
     try:
         context = build_context(store, hits, budget_tokens=STUDIO_BUDGET_TOKENS)
     except sqlite3.OperationalError as exc:
-        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
+        raise StoreError(
+            "SYSTEM_DB_LOCKED",
+            f"database locked during context build: {exc}",
+        ) from exc
     sh = _t("sources_header")
     ih = _t("instructions_header")
     cn = _t("citation_note")
@@ -216,7 +226,10 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     try:
         context = build_context(store, hits, budget_tokens=1600)
     except sqlite3.OperationalError as exc:
-        raise StoreError("SYSTEM_DB_LOCKED", f"database locked during context build: {exc}") from exc
+        raise StoreError(
+            "SYSTEM_DB_LOCKED",
+            f"database locked during context build: {exc}",
+        ) from exc
     sh = _t("sources_header")
     prompt = _t("question_prompt").format(n=n)
     user = f"## {sh}\n{context.block}\n\n{prompt}"
@@ -242,12 +255,15 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     seen: set[str] = set()
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
+        # Folded dedup key (v0.2.545): データ設計は? / でーた設計は? render as
+        # two chips that would answer identically.
+        key = _match_fold(q)
         if (
             len(q) >= 2
             and len(q) <= MAX_QUESTION_LEN
             and looks_like_question(q)
-            and q not in seen
+            and key not in seen
         ):
-            seen.add(q)
+            seen.add(key)
             questions.append(q)
     return questions[:n]
