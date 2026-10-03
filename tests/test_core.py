@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.564")
+        self.assertEqual(VERSION, "0.2.565")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7842,6 +7842,31 @@ class TestLLMClient(unittest.TestCase):
         mock_resp.__iter__ = lambda s: iter([
             b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}',
             b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            b"data: [DONE]",
+        ])
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertEqual(
+                list(client.chat_stream([{"role": "user", "content": "hi"}])), ["x"]
+            )
+        self.assertEqual(client.last_finish_reason, "length")
+
+    def test_chat_stream_records_finish_reason_without_delta_key(self) -> None:
+        """A final chunk may carry finish_reason with no "delta" key at all —
+        spec-legal shorthand some compatible servers emit. The truncation
+        signal must not hinge on an unrelated field's presence: previously the
+        delta read raised KeyError→continue first and the finish_reason was
+        silently dropped, so a max_tokens-clipped answer looked complete."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"}}]}',
+            b'data: {"choices":[{"finish_reason":"length"}]}',
             b"data: [DONE]",
         ])
         client = LLMClient(base_url="http://localhost:11434/v1")

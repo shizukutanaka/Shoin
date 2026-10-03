@@ -229,9 +229,16 @@ class LLMClient:
                                 "SYSTEM_LLM_BAD_RESPONSE",
                                 f"LLM stream error: {str(msg)[:200]}",
                             )
-                        # choices[0].finish_reason arrives on the final delta
-                        # chunk (None on intermediate ones); keep the last one.
+                        # choices[0].finish_reason arrives on the final chunk
+                        # (None on intermediate ones); keep the last one. A
+                        # finish chunk may omit "delta" entirely, so capture
+                        # before the delta read — the truncation signal must
+                        # not hinge on an unrelated field being present.
                         choice = obj["choices"][0]
+                        if isinstance(choice, dict) and isinstance(
+                            choice.get("finish_reason"), str
+                        ):
+                            self.last_finish_reason = choice["finish_reason"]
                         raw_delta = choice["delta"]
                         if isinstance(raw_delta, dict):
                             delta = raw_delta.get("content")
@@ -243,8 +250,6 @@ class LLMClient:
                             delta = None
                         if isinstance(delta, list):
                             delta = _message_text(delta)
-                        if isinstance(choice.get("finish_reason"), str):
-                            self.last_finish_reason = choice["finish_reason"]
                     except LLMError:
                         raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):

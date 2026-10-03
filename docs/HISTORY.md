@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.564
+## Version History: v0.1.37 → v0.2.565
+
+### v0.2.565
+- chat_stream: capture finish_reason before the delta read. The final SSE
+  chunk may carry `finish_reason` with no `"delta"` key — spec-legal
+  shorthand — but the parser read `choice["delta"]` first, so that shape
+  raised KeyError→continue and the truncation signal was dropped: a
+  max_tokens-clipped answer was presented as complete (the same invisible
+  class v0.2.154/245 instrumented). Reordered to record
+  `last_finish_reason` under an `isinstance(choice, dict)` guard ahead of
+  the delta access, matching chat()'s own guard. New pin
+  `test_chat_stream_records_finish_reason_without_delta_key` fails on the
+  old order (signal lost) and passes after.
 
 ### v0.2.564
 - recurrence fix for the v0.2.563 drift class: the three site catalogs
