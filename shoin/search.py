@@ -406,6 +406,45 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
 )
 
 
+# Latin letters NFKC does not fold to ASCII: digraphs and letters with no
+# canonical decomposition (ICU Latin-ASCII transliterator's core closed set).
+# The mark-strip half handles the composable rest (é→e, ñ→n, ü→u).
+_LATIN_SPECIALS: dict[str, str] = {
+    "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+    "ß": "ss", "ẞ": "SS", "ø": "o", "Ø": "O",
+    "đ": "d", "Đ": "D", "þ": "th", "Þ": "TH", "ð": "d", "Ð": "D",
+    "ł": "l", "Ł": "L", "ı": "i", "ŋ": "n", "Ŋ": "N",
+    "ħ": "h", "Ħ": "H", "ə": "e", "Ə": "E",
+}
+
+
+def _ascii_fold(term: str) -> str:
+    """ASCII spelling of a Latin term: diacritics stripped, specials mapped.
+
+    The enumerable half of accent bridging (v0.2.535): a query 'café',
+    'naïve', 'œuvre', or 'Straße' should reach a document that wrote the
+    same word unaccented.  Decompose each character and drop its combining
+    marks only when the base is an ASCII letter — kana dakuten/handedakuten
+    decompose too (ド → ト + ゛) but their base is not ASCII, so 'データ'
+    stays 'データ' rather than emitting the dead 'テータ' spelling.  The
+    reverse direction (an ASCII query reaching 'café' documents) stays
+    closed: the accent spellings of 'cafe' are an open space no finite
+    variant list can enumerate — same wall the SHY position bridge hit.
+    """
+    out: list[str] = []
+    for ch in term:
+        mapped = _LATIN_SPECIALS.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        decomp = unicodedata.normalize("NFD", ch)
+        if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
+            out.append("".join(c for c in decomp if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _digit_variants(term: str) -> list[str]:
     """Script-row spellings of an all-decimal-digit term (v0.2.534).
 
@@ -531,6 +570,9 @@ def term_variants(term: str) -> list[str]:
         # shorthand family must bridge too ('٣٢٠٠٠' → '3.2万' path).
         candidates.extend(_numeric_variants(digits[0]))
     candidates.extend(_kyujitai_variants(norm))
+    ascii_folded = _ascii_fold(norm)
+    if ascii_folded != norm and ascii_folded.isascii():
+        candidates.append(ascii_folded)
     out: list[str] = []
     for v in candidates:
         if v and v not in out:

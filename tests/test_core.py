@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.534")
+        self.assertEqual(VERSION, "0.2.535")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1996,6 +1996,43 @@ class TestChunk(unittest.TestCase):
         for q in ("2025", "२०२५"):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any("२०२५" in h.text for h in hits), q)
+
+    def test_latin_accent_fold_bridges_unaccented_docs(self) -> None:
+        """v0.2.535: 'café'/'naïve'/'œuvre'/'Straße' queries gain the ASCII
+        fold so they reach docs that wrote the word unaccented. The fold is
+        one-directional by design — an ASCII query cannot enumerate the open
+        space of accent spellings ('cafe' -> 'café' docs stays closed), so
+        only the accented-QUERY direction is bridged. Guards: kana dakuten
+        decomposes too but its base is not ASCII, so 'データ' never emits the
+        dead 'テータ' spelling; Cyrillic/pure non-Latin terms are untouched."""
+        for t, want in (("caf\u00e9", "cafe"), ("na\u00efve", "naive"),
+                        ("\u0153uvre", "oeuvre"), ("Stra\u00dfe", "Strasse"),
+                        ("\u0141\u00f3d\u017a", "Lodz"),
+                        ("sm\u00f8rg\u00e5sbord", "smorgasbord"),
+                        ("\u00c5ngstr\u00f6m", "Angstrom")):
+            self.assertIn(want, term_variants(t), t)
+        # Fold only fires when the result is pure ASCII and differs —
+        # CJK, Cyrillic, plain ASCII stay exactly as before.
+        self.assertNotIn("\u30c6\u30fc\u30bf", term_variants("\u30c7\u30fc\u30bf"))
+        self.assertNotIn("\u041c\u043e\u0441\u043a\u0432\u0430\u0301",
+                         term_variants("\u041c\u043e\u0441\u043a\u0432\u0430"))
+        self.assertEqual(term_variants("cafe"), ["cafe", "\uff43\uff41\uff46\uff45"])
+
+    def test_accented_query_retrieves_unaccented_doc(self) -> None:
+        """e2e: every accented query reaches the doc that wrote it unaccented."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["cafe society and naive approaches",
+                              "the oeuvre and strasse of Lodz",
+                              "smorgasbord of ideas"])
+        for q, frag in (("caf\u00e9", "cafe"), ("na\u00efve", "naive"),
+                        ("\u0153uvre", "oeuvre"), ("Stra\u00dfe", "strasse"),
+                        ("\u0141\u00f3d\u017a", "Lodz"),
+                        ("sm\u00f8rg\u00e5sbord", "smorgasbord")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any(frag in h.text for h in hits), q)
+
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14249,7 +14286,7 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
-            "search.py": {"_SHIN_TO_KYU"},
+            "search.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
             "store.py": {"MIGRATIONS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
@@ -14536,7 +14573,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:860",
+            "search.py:65", "search.py:902",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14970,7 +15007,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:662"],
+            sites, ["search.py:704"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17187,7 +17224,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 860],
+            "search.py": [65, 902],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17235,7 +17272,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:860"],
+            escaped_interps, ["search.py:902"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17253,8 +17290,10 @@ class TestResidualGuards(unittest.TestCase):
         `isascii() && isdigit()` guarded (search.py — v0.2.529's
         `isalnum` the deliberate Unicode-wide test that makes every
         script's letters word chars, v0.2.532's `isspace` which must
-        see U+1680/U+3000 as spaces, and v0.2.534's `isdecimal` whose
-        whole job is seeing every script's digit row), downstream of
+        see U+1680/U+3000 as spaces, v0.2.534's `isdecimal` whose
+        whole job is seeing every script's digit row, and v0.2.535's
+        isascii/isalpha pair that confines the accent fold to ASCII-letter
+        bases), downstream of
         NFKC normalization that already folded width/superscripts
         (citation.py `_part_value`), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
@@ -17265,7 +17304,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py": 1,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 5,
+            "search.py": 6,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",

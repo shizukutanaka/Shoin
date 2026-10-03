@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.534
+### v0.2.535
+- term_variants gains the enumerable half of accent bridging: `_ascii_fold`
+  strips combining marks over ASCII-letter bases (café→cafe, naïve→naive,
+  Łódź→Lodz) and maps NFKC-unfolded Latin specials (œ→oe, ß→ss, æ→ae, ø→o,
+  þ→th, ŋ→n, ı→i — the ICU Latin-ASCII core set), so an accented query
+  reaches a document that wrote the word unaccented.  The fold is emitted
+  only when the result is pure ASCII and differs — kana dakuten decomposes
+  too but its base isn't ASCII ('データ' never emits dead 'テータ'), and
+  Cyrillic/pure non-Latin terms are untouched.  The reverse direction
+  (ASCII query → 'café' docs) stays closed: accent spellings are an open
+  space no finite variant list can enumerate — same structural wall as the
+  SHY bridge.  e2e: six accented queries each reach their unaccented doc;
+  fail direction verified.
+
+## Version History: v0.1.37 → v0.2.535
 
 ### v0.2.534
 
