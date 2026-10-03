@@ -63,7 +63,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   `-documents`); non-ASCII variants keep substring semantics.  One pin +
   fail-direction verified.
 
-## Version History: v0.1.37 → v0.2.537
+### v0.2.538
+- bm25_search answers negation-only queries: '-dogs' used to return []
+  (no positive term meant no FTS/LIKE needle — silently reading as
+  "every chunk contains dogs").  With no positive needle it now pools the
+  notebook's chunks under the same cap as the LIKE path, neg-filters, and
+  k-caps — "everything except X" over a bounded corpus.  One pin +
+  fail-direction verified.
+
+## Version History: v0.1.37 → v0.2.538
 
 ### v0.2.534
 

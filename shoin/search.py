@@ -796,9 +796,29 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # win was silently absent for exactly those queries.
     needles = _fallback_needles(clean_query)
     if not needles:
-        if negs:
-            fts_hits = _apply_neg_filter(fts_hits, negs)
-        return fts_hits  # return whatever FTS5 found (possibly empty)
+        if fts_hits or not negs or query_terms(clean_query):
+            # fts_hits or negs-only: same early return as before.  A positive
+            # term that produced no needle ('a -cd') is an unmatchable
+            # positive, not a negation-only query — keep the empty answer.
+            return _apply_neg_filter(fts_hits, negs) if negs else fts_hits
+        # Negation-only query ('-dogs'): no positive term to match, but the
+        # corpus is bounded — "everything except X" is a meaningful scan here
+        # even though web-scale engines refuse it.  Silently returning []
+        # read as "every chunk contains X", the opposite of the truth.
+        # Same pool cap as the LIKE path; all scores 0, ordered by c.id for
+        # determinism.
+        rows = store.conn.execute(
+            "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
+            " JOIN sources s ON s.id = c.source_id"
+            " WHERE s.notebook_id = ? ORDER BY c.id LIMIT ?",
+            (notebook_id, max(k * 10, 2000)),
+        ).fetchall()
+        pool = [
+            Hit(r["id"], r["source_id"], str(r["text"]), 0.0,
+                context=str(r["context"] or ""), seq=int(r["seq"]))
+            for r in rows
+        ]
+        return _apply_neg_filter(pool, negs)[:k]
     conditions = " OR ".join(
         "(c.text LIKE ? ESCAPE '|' OR c.context LIKE ? ESCAPE '|')" for _ in needles
     )

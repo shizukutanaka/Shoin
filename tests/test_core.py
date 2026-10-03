@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.537")
+        self.assertEqual(VERSION, "0.2.538")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2095,6 +2095,23 @@ class TestChunk(unittest.TestCase):
         # 'documentation' (the variant 'document' needs a boundary).
         hits = bm25_search(s, nb.id, "tips -documents", 10)
         self.assertTrue(any("documentation" in h.text for h in hits))
+
+
+    def test_negation_only_query_returns_complement(self) -> None:
+        """v0.2.538: a negation-only query ('-dogs') means "everything except
+        X" over a bounded corpus — silently returning [] read as the
+        opposite of the truth.  The pool is the notebook's chunks capped
+        like the LIKE path, neg-filtered, k-capped."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["cats and dogs", "only cats here",
+                              "nothing matches"])
+        hits = bm25_search(s, nb.id, "-dogs", 10)
+        self.assertEqual([h.text for h in hits],
+                         ["only cats here", "nothing matches"])
+        hits = bm25_search(s, nb.id, "-xyz", 10)
+        self.assertEqual(len(hits), 3)
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14635,7 +14652,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:969",
+            "search.py:65", "search.py:989",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -17286,7 +17303,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 969],
+            "search.py": [65, 989],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17334,7 +17351,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:969"],
+            escaped_interps, ["search.py:989"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
