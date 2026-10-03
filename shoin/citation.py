@@ -492,11 +492,15 @@ def verify_grounding(
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claims_n = (
-                [lead_claim]
-                if n in lead
-                else ([_bigrams(s) for s in segments[n]] if n in segments else [claim])
-            )
+            # Every occurrence of the number is judged independently
+            # (_segment_claims' contract): a leading backward marker claims
+            # prev_claim, and a later marker for the SAME number inside the
+            # fragment claims its own segment — "[S1] B [S1]" checks both.
+            claims_n = [lead_claim] if n in lead else []
+            if n in segments:
+                claims_n.extend(_bigrams(s) for s in segments[n])
+            if not claims_n:
+                claims_n = [claim]
             for claim_n in claims_n:
                 overlap_n = _overlap(claim_n, src_bg[n])
                 if overlap_n >= CONFIRM_MIN:
@@ -964,9 +968,10 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claims_n = (
-                [lead_claim] if n in lead else segments.get(n, [claim_text])
-            )
+            claims_n = [lead_claim] if n in lead else []
+            claims_n.extend(segments.get(n, []))
+            if not claims_n:
+                claims_n = [claim_text]
             for claim_n in claims_n:
                 # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
                 # the substring fallback preserves v0.2.184's rounding tolerance
@@ -1189,9 +1194,10 @@ def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claims_n = (
-                [lead_claim] if n in lead else segments.get(n, [claim_text])
-            )
+            claims_n = [lead_claim] if n in lead else []
+            claims_n.extend(segments.get(n, []))
+            if not claims_n:
+                claims_n = [claim_text]
             for claim_n in claims_n:
                 flagged = False
                 for num, unit in _unit_pairs(claim_n):
@@ -1296,9 +1302,10 @@ def quote_mismatches(
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claims_n = (
-                [lead_claim] if n in lead else segments.get(n, [claim_text])
-            )
+            claims_n = [lead_claim] if n in lead else []
+            claims_n.extend(segments.get(n, []))
+            if not claims_n:
+                claims_n = [claim_text]
             for claim_n in claims_n:
                 flagged = False
                 for q in _quote_spans(claim_n):
@@ -1512,9 +1519,10 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claims_n = (
-                [lead_claim] if n in lead else segments.get(n, [claim_text])
-            )
+            claims_n = [lead_claim] if n in lead else []
+            claims_n.extend(segments.get(n, []))
+            if not claims_n:
+                claims_n = [claim_text]
             for claim_n in claims_n:
                 claim_norm = re.sub(
                     r"\s+", " ", _match_fold(claim_n)

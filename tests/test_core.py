@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.600")
+        self.assertEqual(VERSION, "0.2.601")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6333,6 +6333,28 @@ class TestCitation(unittest.TestCase):
         self.assertEqual(confirmed, [1, 2])
         self.assertEqual(misattributed, [1])
 
+    def test_verify_grounding_lead_marker_keeps_later_occurrences(self) -> None:
+        """A number that is BOTH a leading backward marker and a later
+        in-fragment marker ("prev. [S1] B [S1]") is judged on EACH claim:
+        the lead occurrence cites the previous clause while the trailing
+        marker's own segment must still be evaluated — the earlier code
+        short-circuited on `n in lead` and never saw the B-occurrence,
+        so a misattribution inside it stayed invisible (false silence)."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "りんごは赤い果物であり、甘みが強い。",
+            2: "空は青く広がっており、雲が浮かぶ。",
+        }
+        # One fragment (comma-joined, no sentence boundary): S1 leads
+        # (backward-bound to the apple clause) AND trails the sky clause.
+        confirmed, misattributed = verify_grounding(
+            "りんごは赤い果物である。[S1] 空は青く広がっており雲が浮かぶとされる[S1]、",
+            sources,
+        )
+        self.assertEqual(confirmed, [1])
+        self.assertEqual(misattributed, [1])
+
     def test_forward_idiom_with_space_binds_own_clause(self) -> None:
         """"[S1] によると…" (space before the idiom) binds the marker to its
         own fragment's clause. Without whitespace tolerance the marker is
@@ -6358,6 +6380,20 @@ class TestNumericMismatches(unittest.TestCase):
 
         text = "採用率は37%だった。[S1]"
         self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [1])
+
+    def test_lead_marker_keeps_later_occurrences(self) -> None:
+        """Same lead+trailing shape as the grounding pin, numeric side: the
+        number's later occurrence carries its own segment — the fabricated
+        price inside it must flag even though the lead claim was clean."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches(
+                "りんごは赤い果物である。[S1] 価格は999円である[S1]、",
+                {1: "りんごは赤い果物である。価格は100円である。"},
+            ),
+            [1],
+        )
 
     def test_no_flag_when_number_present(self) -> None:
         from shoin.citation import numeric_mismatches
@@ -13701,9 +13737,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:576", "citation.py:580", "citation.py:592",
-    "citation.py:593", "citation.py:630", "citation.py:643",
-    "citation.py:1037", "citation.py:1437", "citation.py:1664",
+    "citation.py:580", "citation.py:584", "citation.py:596",
+    "citation.py:597", "citation.py:634", "citation.py:647",
+    "citation.py:1042", "citation.py:1444", "citation.py:1672",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18946,7 +18982,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [576, 580, 592, 593, 643, 1037, 1437, 1664],
+            "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

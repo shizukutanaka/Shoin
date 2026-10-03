@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.600
+## Version History: v0.1.37 → v0.2.601
+
+### v0.2.601 — evaluate every occurrence when a citation is both lead and trailing
+
+In one fragment like "[S1] B [S1]", the same S-number is simultaneously a
+leading backward marker (claiming the PREVIOUS fragment's clause) and a
+trailing marker claiming its own segment. All five check functions
+(verify_grounding, numeric/unit/quote/negation_mismatches) short-circuited
+on `n in lead` and evaluated only the lead claim — the later occurrence's
+segment escaped every check, so a misattribution or fabricated number
+inside it stayed invisible (false silence; the _segment_claims contract
+already requires per-occurrence evaluation). Each site now unions the
+lead claim with the number's segment occurrences. Pins:
+`test_verify_grounding_lead_marker_keeps_later_occurrences` and
+`TestNumericMismatches.test_lead_marker_keeps_later_occurrences` (old
+code produced no flag; fail-verified).
 
 ### v0.2.600 — roll back the failed batch's writes in _embed_chunks
 
