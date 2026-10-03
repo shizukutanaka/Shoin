@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.545")
+        self.assertEqual(VERSION, "0.2.546")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -7034,6 +7034,27 @@ class TestDegenerateSpans(unittest.TestCase):
         from shoin.citation import degenerate_spans
 
         self.assertEqual(degenerate_spans("結論は常に同じ結論である。" * 2), [])
+
+    def test_orthography_alternating_repeat_flagged(self) -> None:
+        """v0.2.546: a loop alternating orthography (データ / でーた) repeats
+        the SAME content — counting each spelling separately starves every
+        variant below _DEGEN_REPEAT while three semantic repeats fire."""
+        from shoin.citation import degenerate_spans
+
+        text = "要点はデータである。要点はでーたである。要点はデータである。"
+        out = degenerate_spans(text)
+        self.assertTrue(
+            any("でーた" in s for s in out),
+            "three folded-identical sentences must flag as a parrot loop",
+        )
+
+    def test_orthography_distinct_sentences_stay_silent(self) -> None:
+        """Sentences genuinely differing in content still pass under the fold —
+        only orthographic near-duplicates converge."""
+        from shoin.citation import degenerate_spans
+
+        text = "要点はデータである。要点は索引である。要点は結論である。"
+        self.assertEqual(degenerate_spans(text), [])
 
     def test_whitespace_variants_still_match(self) -> None:
         """Spacing differences do not disguise the same repeated sentence."""

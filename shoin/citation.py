@@ -1488,20 +1488,25 @@ def degenerate_spans(text: str, *, history: str = "") -> list[str]:
     occurrence per message). Sentences in ``history`` count toward the ≥3
     threshold; only the current answer's own repeated sentences are flagged.
 
+    Repetition is counted on the _match_fold canonical form (v0.2.546): a
+    loop alternating orthography — '要点はデータです。' then '要点はでーた
+    です。' — is the same content repeated, but NFKC + casefold leaves the
+    spellings byte-distinct so each variant starves below _DEGEN_REPEAT.
+
     Deliberately asymmetric like the other checks: nothing is flagged below
     these bounds — parallel structures ("Aである。Bである。") and honest
-    emphasis repeat *differently*, never verbatim-normed ≥3 times.
+    emphasis repeat *differently*, never folded-normed ≥3 times.
     """
     text = _strip_fences(text)  # repeated statements inside code aren't degeneration
-    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).casefold()
+    low = _match_fold(re.sub(r"\s+", "", text))
     out: set[str] = set()
     counts: dict[str, int] = {}
     for raw in _SENTENCE_SPLIT_RE.split(text):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).casefold()
+        s = _match_fold(re.sub(r"\s+", "", raw))
         if len(s) >= _DEGEN_SENT_MIN:
             counts[s] = counts.get(s, 0) + 1
     for raw in _SENTENCE_SPLIT_RE.split(history):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).casefold()
+        s = _match_fold(re.sub(r"\s+", "", raw))
         if s in counts:
             counts[s] += 1
     for s, c in counts.items():

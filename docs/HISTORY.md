@@ -142,7 +142,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   now key on _match_fold — one line per canonical content.  Two pins
   (rewrite slot + chip e2e) + fail-direction.
 
-## Version History: v0.1.37 → v0.2.545
+### v0.2.546
+- degenerate_spans counts repetition on the _match_fold canonical form:
+  a parrot loop alternating orthography ('要点はデータです。' then
+  '要点はでーたです。') left each spelling at 1-2 occurrences, starving
+  every variant below _DEGEN_REPEAT while three semantic repeats fired
+  — the last normalized-comparison surface still casefold-only.  All
+  three sites (answer sentences, history sentences, the consecutive-
+  span regex input) now fold.  Two pins (alternating loop flags,
+  distinct content stays silent) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.546
 
 ### v0.2.534
 
