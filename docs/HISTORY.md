@@ -29,7 +29,33 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.528
+## Version History: v0.1.37 → v0.2.529
+
+### v0.2.529
+
+- Alphabetic scripts are content now: accented Latin, Cyrillic,
+  Greek, Hebrew, Arabic, Syriac, Thaana, NKo, the Indic family
+  (Devanagari..Sinhala), Tibetan, Georgian, Ethiopic, Cherokee,
+  Canadian syllabics, Ogham, Runic, Mongolian and the combining-mark
+  blocks all join _CJK_RANGES.  Before this 'café' silently lost é,
+  a Cyrillic/Arabic query returned nothing at all (its whole term
+  list dropped out), and every such char rode the token budget at
+  cost 0.
+- _is_cjk_word gains a category path: Unicode alnum covers every
+  script's letters/digits without enumerating subranges, and Mn/Mc/Me
+  marks continue a run (NFD diacritics, Devanagari matras, nikkud).
+  Block-internal punctuation (، ؛ ؟ ־ । · ፣՝) stays a boundary via
+  the same category test — near-whole blocks, no per-block punct
+  tables.  ・ and ･ keep their word-character exception.
+- ASCII stays on _WORD_RE's side: 'café' splits 'caf'+'é' (both
+  needles cover it — 'café' reaches 'cafe' docs) and a glued
+  'Python入門' query keeps two terms instead of narrowing to one
+  contiguous-match term.  Negation covers the new scripts too
+  ('-über', '-كتاب') through the auto-extended classes.
+- `test_alphabetic_scripts_are_cjk_terms` pins classification,
+  retention, matra glue, punct boundaries and negation;
+  `test_nonlatin_query_retrieves_across_scripts` proves Cyrillic and
+  Arabic queries reach their documents end-to-end.
 
 ### v0.2.528
 

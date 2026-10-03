@@ -128,9 +128,29 @@ def _is_cjk_word(ch: str) -> bool:
     NFKC target ・ (U+30FB) already is one.  Without this, ｿﾌﾄｳｪｱ･ｱｰｷﾃｸﾁｬ and
     ソフトウェア・アーキテクチャ would split into different numbers of terms.
     """
+    # Letters, digits and combining marks of every script are word characters
+    # (v0.2.529): Unicode alnum covers the alphabetic blocks _CJK_RANGES now
+    # contains (accented Latin, Cyrillic, Greek, Hebrew, Arabic, Indic...)
+    # without enumerating each letter subrange, and the mark categories
+    # (Mn/Mc/Me) continue a run so decomposed spellings (e+◌́, Devanagari
+    # matras) stay whole.  Punctuation inside those blocks (Hebrew ־,
+    # Arabic ؛؟, danda, Armenian stops) drops out by not being alnum — no
+    # per-block punct tables.  ASCII stays on _WORD_RE's side: 'café' still
+    # splits 'caf' + 'é' so a glued 'Python入門' query keeps two terms
+    # rather than narrowing to one contiguous-match term.
+    if ch.isascii():
+        return False
+    if ch.isalnum() or unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+        return True
     cp = ord(ch)
     if not is_cjk(ch):
         return False
+    # Punctuation category inside any block is a boundary — the alphabetic
+    # blocks taken near-whole carry their own stops (، ؛ ؟ ־ । ፣՝ etc.)
+    # and must not glue runs.  ・ and ･ stay word characters: they join
+    # kana terms exactly like the existing block-exclusion handles them.
+    if unicodedata.category(ch).startswith("P"):
+        return ch in "・･"
     if 0x3000 <= cp <= 0x303F:
         return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
     # ｡｢｣､ (U+FF61–FF64) are the halfwidth counterparts of 。「」、 and break runs

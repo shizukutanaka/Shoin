@@ -56,6 +56,58 @@ _CJK_RANGES = (
     (0xFB00, 0xFB4F),    # alphabetic presentation forms ﬀ-ﬅ + Hebrew forms
     (0xFFA0, 0xFFDC),    # halfwidth Hangul jamo (NFKC → jamo → syllables)
     (0xFFE0, 0xFFE6),    # fullwidth currency/symbols ￠￡￥￦
+    # Alphabetic scripts: letters, vowel marks and digits that are NOT
+    # NFKC-foldable but ARE content.  Before this, 'café' silently lost
+    # é, a Cyrillic/Greek/Arabic query matched nothing at all (its whole
+    # term list was dropped), and every such char rode the token budget
+    # at cost 0.  Blocks are taken near-whole — punctuation they contain
+    # (Hebrew ־, Arabic ؛؟, danda, Armenian stops) is excluded from word
+    # runs by _is_cjk_word()'s category test, not by range surgery.
+    (0x00C0, 0x00FF),    # Latin-1 letters à-ÿ (× ÷ excluded word-side)
+    (0x0100, 0x024F),    # Latin extended A+B
+    (0x0250, 0x02AF),    # IPA extensions
+    (0x02B0, 0x02FF),    # spacing modifier letters
+    (0x0300, 0x036F),    # combining diacritical marks (NFD text)
+    (0x0370, 0x03FF),    # Greek and Coptic
+    (0x0400, 0x052F),    # Cyrillic + supplement
+    (0x0530, 0x058F),    # Armenian
+    (0x0590, 0x05FF),    # Hebrew (letters + nikkud marks)
+    (0x0600, 0x06FF),    # Arabic (letters + harakat + Eastern digits)
+    (0x0700, 0x077F),    # Syriac + Arabic supplement
+    (0x0780, 0x07BF),    # Thaana
+    (0x07C0, 0x07FF),    # NKo
+    (0x08A0, 0x08FF),    # Arabic extended-A
+    (0x0900, 0x097F),    # Devanagari
+    (0x0980, 0x09FF),    # Bengali
+    (0x0A00, 0x0A7F),    # Gurmukhi
+    (0x0A80, 0x0AFF),    # Gujarati
+    (0x0B00, 0x0B7F),    # Oriya
+    (0x0B80, 0x0BFF),    # Tamil
+    (0x0C00, 0x0C7F),    # Telugu
+    (0x0C80, 0x0CFF),    # Kannada
+    (0x0D00, 0x0D7F),    # Malayalam
+    (0x0D80, 0x0DFF),    # Sinhala
+    (0x0F00, 0x0FFF),    # Tibetan
+    (0x10A0, 0x10FF),    # Georgian
+    (0x1200, 0x137F),    # Ethiopic
+    (0x13A0, 0x13FF),    # Cherokee
+    (0x1400, 0x167F),    # Unified Canadian Aboriginal Syllabics
+    (0x1680, 0x169F),    # Ogham (1680 space excluded word-side)
+    (0x16A0, 0x16FF),    # Runic
+    (0x1800, 0x18AF),    # Mongolian
+    (0x1AB0, 0x1AFF),    # combining diacritical marks extended
+    (0x1D00, 0x1DBF),    # phonetic extensions
+    (0x1DC0, 0x1DFF),    # combining marks supplement
+    (0x1E00, 0x1EFF),    # Latin extended additional
+    (0x1F00, 0x1FFF),    # Greek extended
+    (0x20D0, 0x20FF),    # combining marks for symbols
+    (0x2C60, 0x2C7F),    # Latin extended-C
+    (0x2DE0, 0x2DFF),    # Cyrillic extended-A
+    (0xA640, 0xA69F),    # Cyrillic extended-B
+    (0xA720, 0xA7FF),    # Latin extended-D
+    (0xAB30, 0xAB6F),    # Latin extended-E
+    (0xFE20, 0xFE2F),    # combining half marks
+    (0xE0100, 0xE01EF),  # variation selectors supplement
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")

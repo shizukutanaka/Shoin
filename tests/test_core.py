@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.528")
+        self.assertEqual(VERSION, "0.2.529")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1906,6 +1906,32 @@ class TestChunk(unittest.TestCase):
         self.assertIn("한", term_variants("한"))
         self.assertIn("III", term_variants("Ⅲ"))
         self.assertIn("fi", term_variants("ﬁ"))
+
+    def test_alphabetic_scripts_are_cjk_terms(self) -> None:
+        """v0.2.529: non-foldable letters (accented Latin, Cyrillic, Greek,
+        Hebrew, Arabic, Indic) must classify and survive query_terms — before
+        the fix 'café' lost é and a Cyrillic query searched nothing at all.
+        Vowel marks continue a run (Devanagari matras, NFD diacritics);
+        punctuation inside the alphabetic blocks (، ؛ ؟ ־ । ·) stays a
+        boundary via the category test — no per-block punct table needed."""
+        for ch in ("é", "д", "λ", "א", "ق", "क", "า", "ქ", "አ", "ᚠ"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        # Whole-word runs per script — matras and marks glue, spaces split.
+        self.assertEqual(query_terms("привет мир"), ["привет", "мир"])
+        self.assertEqual(query_terms("देवनागरी"), ["देवनागरी"])
+        # 'café' keeps its accented char now (split at the ASCII boundary,
+        # like every ASCII/non-ASCII mix — 'caf'+'é' needles cover it).
+        self.assertEqual(query_terms("café"), ["caf", "é"])
+        # Block-internal punctuation is a boundary, not glue.
+        self.assertEqual(query_terms("كتاب،كتاب"), ["كتاب", "كتاب"])
+        self.assertEqual(query_terms("λόγος·κόσμος"), ["λόγος", "κόσμος"])
+        self.assertEqual(query_terms("שלום־עולם"), ["שלום", "עולם"])
+        # Negation gains the same coverage through the auto-extended class.
+        self.assertEqual(neg_terms("x -über"), ["ü"])
+        self.assertEqual(neg_terms("x -كتاب"), ["كتاب"])
+        # And the letters stop riding the token budget for free.
+        self.assertEqual(estimate_tokens("café"), 2)
+        self.assertGreater(estimate_tokens("привет"), 0)
 
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
@@ -3942,6 +3968,31 @@ class TestSearch(unittest.TestCase):
             texts_d = {h.text for h in bm25_search(s, nb.id, "한", 5)}
             self.assertEqual(texts_c, {"한の資料", "한の資料"})
             self.assertEqual(texts_d, {"한の資料", "한の資料"})
+
+    def test_nonlatin_query_retrieves_across_scripts(self) -> None:
+        """v0.2.529: a Cyrillic/Arabic query used to return nothing — its
+        whole term list was dropped before reaching FTS or LIKE.  Now each
+        script's query reaches its document, and 'café' reaches both the
+        accented and the unaccented spelling (the 'caf' needle bridges)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                ["caféの記録", "cafeの記録", "привет書類", "العربية文書", "関係ない文"],
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "café", 5)},
+                {"caféの記録", "cafeの記録"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "привет", 5)},
+                {"привет書類"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "العربية", 5)},
+                {"العربية文書"},
+            )
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
@@ -14342,11 +14393,11 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:126",
+            "chunk.py:178",
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:780",
+            "search.py:65", "search.py:800",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14780,7 +14831,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:582"],
+            sites, ["search.py:602"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -16995,9 +17046,9 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [126],
+            "chunk.py": [178],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 780],
+            "search.py": [65, 800],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17045,7 +17096,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:780"],
+            escaped_interps, ["search.py:800"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17060,7 +17111,9 @@ class TestResidualGuards(unittest.TestCase):
         '１２３４'.isdigit() and '²'.isdigit() are True, so a bare call
         on unnormalized text accepts shapes the code never intended.
         Every call site is cataloged: today's sites are either
-        `isascii() && isdigit()` guarded (search.py), downstream of
+        `isascii() && isdigit()` guarded (search.py — and v0.2.529's
+        `isalnum`, the deliberate Unicode-wide test that makes every
+        script's letters word chars after the ASCII guard), downstream of
         NFKC normalization that already folded width/superscripts
         (citation.py `_part_value`), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
@@ -17071,7 +17124,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py": 1,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 2,
+            "search.py": 3,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",
