@@ -695,8 +695,14 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # length would read "fully covered" and skip the LIKE scan, leaving every
         # fullwidth-spelled document unreachable for exactly the halfwidth queries
         # this variant machinery exists to serve.
+        # _numeric_query_terms count too: fts_query feeds them the same gram
+        # comprehension, so a short expanded value ('五割'→'50') is silently
+        # skipped there — without it in the check, an FTS-covered query never
+        # reaches its own numeric bridge.
         if fts_hits and all(
-            len(v) >= 3 for t in query_terms(clean_query) for v in term_variants(t)
+            len(v) >= 3
+            for t in query_terms(clean_query) + _numeric_query_terms(clean_query)
+            for v in term_variants(t)
         ):
             if negs:
                 fts_hits = _apply_neg_filter(fts_hits, negs)

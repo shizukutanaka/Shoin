@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.572
+## Version History: v0.1.37 → v0.2.573
+
+### v0.2.573
+- bm25_search's early-return coverage check now counts
+  _numeric_query_terms: fts_query silently drops expanded values
+  below the trigram floor ('五割' -> '50', len 2), and a query whose
+  CJK run is FTS-covered returned early — so the numeric bridge's own
+  LIKE needle ('%50%') never ran and '50%...' chunks stayed
+  unreachable exactly when the bridge was needed.  Short numeric
+  terms now force the LIKE path.  Pinned by
+  test_short_numeric_expansion_keeps_like_fallback (e2e).
 
 ### v0.2.572
 - _stem_variants no longer stems invariant mass nouns: 'news' is not a

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.572")
+        self.assertEqual(VERSION, "0.2.573")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2101,6 +2101,23 @@ class TestChunk(unittest.TestCase):
                         ("quickly", "quick")):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any(frag in h.text for h in hits), q)
+
+    def test_short_numeric_expansion_keeps_like_fallback(self) -> None:
+        """v0.2.573: the early-return coverage check must count
+        _numeric_query_terms too — fts_query silently drops a short
+        expanded value ('五割'->'50', len<3), and a query whose CJK run is
+        FTS-covered otherwise returns early, leaving the numeric bridge's
+        own needle unrun."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["五割の回答者は賛成した",
+                              "50%が通過を決めた",   # no gram shared with the query
+                              "全員が反対した"])
+        hits = bm25_search(s, nb.id, "五割の回答者", 10)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
+        hits = bm25_search(s, nb.id, "五割", 10)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
 
 
     def test_neg_filter_matches_variant_spellings(self) -> None:
@@ -13016,7 +13033,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:526", "citation.py:530", "citation.py:542",
     "citation.py:543", "citation.py:580", "citation.py:593",
     "citation.py:978", "citation.py:1357", "citation.py:1571",
-    "search.py:72", "search.py:913",
+    "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -18177,7 +18194,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
             "citation.py": [526, 530, 542, 543, 593, 978, 1357, 1571],
-            "search.py": [72, 913],
+            "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -18225,7 +18242,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:913"],
+            escaped_interps, ["search.py:919"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
