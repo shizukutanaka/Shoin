@@ -249,6 +249,12 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
             or not isinstance(rec, (int, float))
             or not isinstance(rr, (int, float))
             or not isinstance(miss, list)
+            # Element types checked like parse_cases' source ids — and like the
+            # `missing` check right above (bool excluded: it is an int subclass
+            # that never names a real source id). A string/bool id loaded from a
+            # hand-edited baseline otherwise serializes back out unchanged.
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in exp)
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in got)
             or any(isinstance(s, bool) or not isinstance(s, int) for s in miss)
         ):
             raise ValueError(f"baseline case {i}: missing or mistyped fields")

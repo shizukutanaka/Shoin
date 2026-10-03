@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.561
+## Version History: v0.1.37 → v0.2.562
+
+### v0.2.562
+- `report_from_dict` validates `expected`/`retrieved` id elements as ints
+  (bool excluded — an int subclass that never names a real source), the
+  same check the `missing` field and `parse_cases`' source ids already
+  get. A string/bool/float id in a hand-edited baseline previously loaded
+  silently and round-tripped back out unchanged — inside one validation
+  block, `missing` was element-checked while its sibling id lists were
+  not. Pinned by `test_report_from_dict_rejects_nonint_id_elements`
+  (fail-direction verified: fails on the pre-change reader). The same
+  cycle audited CHANGELOG.md (frozen at v0.1.55 with a version-agnostic
+  pointer to docs/HISTORY.md — by design, not drift) and ci/README.
 
 ### v0.2.561
 - meta-pin: the doc sync markers in spec.md (`実装 vX.Y.Z 時点に同期`)

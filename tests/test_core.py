@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.561")
+        self.assertEqual(VERSION, "0.2.562")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12874,6 +12874,26 @@ class TestResidualGuards(unittest.TestCase):
             report_from_dict({"cases": ["x"], "recall": 0.0, "mrr": 0.0})
         with self.assertRaises(ValueError):
             report_from_dict({"cases": []})
+
+    def test_report_from_dict_rejects_nonint_id_elements(self) -> None:
+        """expected/retrieved id elements get the same check `missing` got —
+        a string or bool id (bool is an int subclass that never names a real
+        source) in a hand-edited baseline must refuse, not round-trip silently."""
+        from shoin.evaluate import report_from_dict
+
+        base_case = {"q": "a", "expected": [1], "retrieved": [1],
+                     "recall": 1.0, "rr": 1.0}
+        for bad in (
+            dict(base_case, expected=["1"]),
+            dict(base_case, expected=[True]),
+            dict(base_case, retrieved=[1.5]),
+            dict(base_case, retrieved=["x"]),
+            dict(base_case, missing=[False]),
+        ):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                report_from_dict({"cases": [bad], "recall": 1.0, "mrr": 1.0})
+        rep, _ = report_from_dict({"cases": [base_case], "recall": 1.0, "mrr": 1.0})
+        self.assertEqual(rep.cases[0].expected, [1])
 
     def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
         """--save → --diff fidelity: every field report_to_dict writes must be
