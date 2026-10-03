@@ -625,6 +625,12 @@ def rewrite_queries(
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
         if len(q) < 2:
             continue
+        # Cap BEFORE dedup: the emitted string is the truncated one, so the
+        # fold key must be computed on it — two rewrites that differ only past
+        # the cap would otherwise both survive, truncate to the identical
+        # string, and spend two rewrite slots on zero vocabulary diversity
+        # (the same class v0.2.545 closed for orthographic variants).
+        q = q[:MAX_QUESTION_LEN]
         # Folded dedup (v0.2.545): a rewrite differing only in orthography
         # (データ vs でーた, café vs cafe) retrieves the identical chunk set —
         # term_variants bridges that spelling at search time — so keeping it
@@ -633,7 +639,7 @@ def rewrite_queries(
         if key in seen:
             continue
         seen.add(key)
-        out.append(q[:MAX_QUESTION_LEN])
+        out.append(q)
         if len(out) >= n:
             break
     return out

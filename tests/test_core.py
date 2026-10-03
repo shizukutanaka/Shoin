@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.589")
+        self.assertEqual(VERSION, "0.2.590")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13721,6 +13721,26 @@ class TestResidualGuards(unittest.TestCase):
             rewrite_queries(_Stub(), "データ設計はどう進めるか"),  # type: ignore[arg-type]
             ["café の要点は何か", "実装手順の確認点は何か"],
         )
+
+    def test_rewrite_queries_dedups_on_truncated_form(self) -> None:
+        """v0.2.590: the fold key must be computed on the emitted (capped)
+        string — two rewrites that differ only past MAX_QUESTION_LEN truncate
+        to the identical text, spending two rewrite slots on zero diversity
+        (the same class v0.2.545 closed for orthographic variants)."""
+        from shoin.config import MAX_QUESTION_LEN
+        from shoin.qa import rewrite_queries
+
+        # 1999-char head: the differing suffix lands past the 2000-char cap,
+        # so both lines truncate to `head + " "` — byte-identical emissions.
+        head = "共通長文ヘッダー " + "x" * (MAX_QUESTION_LEN - 10)
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return f"{head} 末尾差A\n{head} 末尾差B\n別の言い換えです"
+
+        out = rewrite_queries(_Stub(), "元の質問")  # type: ignore[arg-type]
+        self.assertEqual(out, [head + " ", "別の言い換えです"])
 
     def test_degraded_text_caps_at_three_sources(self) -> None:
         """The degraded fallback enumerates at most 3 sources — a fourth must

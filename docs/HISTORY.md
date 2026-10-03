@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.589
+## Version History: v0.1.37 → v0.2.590
+
+### v0.2.590
+- rewrite_queries dedups on the emitted (capped) string: the fold key was computed on the FULL line, then the emitted value was truncated to MAX_QUESTION_LEN — two rewrites that differ only past the 2000-char cap both survived dedup and truncated to the identical text, spending two rewrite slots on zero vocabulary diversity (the same class v0.2.545 closed for orthographic variants). The cap now runs before the fold-key computation. Fail-direction verified (the pin emits two capped dupes on the old code).
 
 ### v0.2.589
 - refresh_source no-op path reports pages_failed: the byte-identical early return (v0.2.243's re-chunk/embedding preservation) still ran a full extraction, but hardcoded `IndexResult(..., 0)` with `pages_failed` left at its default — a refresh that re-failed the same PDF pages reported 0 to the caller, silently dropping the "index holds less than the document" signal the dataclass field exists to surface. The early return now propagates `extracted.pages_failed`. Fail-direction verified (0 vs 2 on the old code).
