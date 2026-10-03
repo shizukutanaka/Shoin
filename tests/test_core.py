@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.576")
+        self.assertEqual(VERSION, "0.2.577")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7847,6 +7847,33 @@ class TestUncitedSentences(unittest.TestCase):
             uncited_sentences("前置きの主張文。[S1][S2] 二番目の断言。"),
             ["二番目の断言。"],
         )
+    def test_verify_grounding_attributes_leading_markers_backward(self) -> None:
+        from shoin.citation import verify_grounding
+
+        # "A. [S1] B. [S2]" — each marker trails the claim before it, the
+        # convention _segment_claims already encodes inside a fragment. A
+        # marker leading its own fragment ("[S1] B.") must not be judged
+        # against that fragment's claim: S1's claim is A.
+        conf, mis = verify_grounding(
+            "apples are red。[S1] bananas are yellow。[S2]",
+            {1: "apples are red and round", 2: "bananas are yellow fruits"},
+        )
+        self.assertEqual(conf, [1, 2])
+        self.assertEqual(mis, [])
+
+    def test_numeric_mismatches_attributes_leading_markers_backward(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        # Same convention on the numeric side: S1 must be checked against
+        # claim A's digits, not claim B's — otherwise B's number falsely
+        # flags S1 as absent-from-source.
+        self.assertEqual(
+            numeric_mismatches(
+                "参加者は100人だった。[S1] 売上は200万円だ。[S2]",
+                {1: "参加者は100人だったと報告", 2: "売上は200万円の見通し"},
+            ),
+            [],
+        )
 
 class TestStoreChunksForSource(unittest.TestCase):
     def test_chunks_for_source_returns_correct_chunks(self) -> None:
@@ -13102,9 +13129,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:528", "citation.py:532", "citation.py:544",
-    "citation.py:545", "citation.py:582", "citation.py:595",
-    "citation.py:980", "citation.py:1359", "citation.py:1573",
+    "citation.py:542", "citation.py:546", "citation.py:558",
+    "citation.py:559", "citation.py:596", "citation.py:609",
+    "citation.py:996", "citation.py:1379", "citation.py:1595",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18265,7 +18292,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [528, 532, 544, 545, 595, 980, 1359, 1573],
+            "citation.py": [542, 546, 558, 559, 609, 996, 1379, 1595],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

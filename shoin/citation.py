@@ -435,6 +435,16 @@ def verify_grounding(
                 prev_claim = cand
             continue
         claim = _bigrams(bare)
+        # Markers leading the fragment trail the previous claim ("A. [S1] B."
+        # splits as "A." + "[S1] B.") — the shared backward convention in
+        # _leading_markers assigns them prev_claim, not this fragment's text.
+        # Snapshot before prev_claim advances to this fragment's own claim.
+        lead = (
+            _leading_markers(sentence, nums)
+            if claim and prev_claim
+            else set()
+        )
+        lead_claim = prev_claim
         if not claim:
             # Citation-only fragment after sentence boundary split (e.g. " [S1]").
             # Re-use the preceding sentence's bigrams so the citation is still
@@ -449,7 +459,11 @@ def verify_grounding(
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = _bigrams(segments[n]) if n in segments else claim
+            claim_n = (
+                lead_claim
+                if n in lead
+                else (_bigrams(segments[n]) if n in segments else claim)
+            )
             overlap_n = _overlap(claim_n, src_bg[n])
             if overlap_n >= CONFIRM_MIN:
                 confirmed.add(n)
@@ -908,13 +922,15 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
+            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
             # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
             # the substring fallback preserves v0.2.184's rounding tolerance
             # (claim "63" stays silent inside source "63.5%"); the conversion
@@ -1124,13 +1140,15 @@ def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
+            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
             for num, unit in _unit_pairs(claim_n):
                 if num not in src_norm[n]:
                     continue  # absent number — numeric_mismatches()' signal
@@ -1222,13 +1240,15 @@ def quote_mismatches(
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
+            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
             for q in _quote_spans(claim_n):
                 if q in src_norm[n]:
                     continue
@@ -1426,6 +1446,8 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
@@ -1433,7 +1455,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
             claim_norm = re.sub(
-                r"\s+", " ", _match_fold(segments.get(n, claim_text))
+                r"\s+", " ", _match_fold(lead_claim if n in lead else segments.get(n, claim_text))
             ).strip()
             cb = _bigrams(claim_norm)
             if not cb:
@@ -1634,6 +1656,20 @@ _MIN_CLAIM_CHARS = 5
 # back to the mid-fragment path, which is the conservative direction.
 _LEAD_CITE_RUN = re.compile(r"^(\[[^\[\]]{0,80}\](?:\s{0,4}\[[^\[\]]{0,80}\])*)")
 _FORWARD_BIND_RE = re.compile(r"^(?:によると|によれば|では)")
+
+
+def _leading_markers(sentence: str, nums: list[int]) -> set[int]:
+    """Citation numbers in a fragment's leading marker run.
+
+    Every citation check must agree on which claim a marker annotates —
+    the v0.2.77-79 duplicated-heuristic drift lesson — so the backward
+    convention lives here once: a marker opening a fragment trails the
+    PREVIOUS claim ("A. [S1] B."), unless a forward idiom binds it to its
+    own fragment's text ("[S1]によると…")."""
+    lm = _LEAD_CITE_RUN.match(sentence)
+    if lm is None or _FORWARD_BIND_RE.match(sentence[lm.end() :]) is not None:
+        return set()
+    return {int(x) for x in _SNUM_RE.findall(lm.group(1)) if int(x) in nums}
 
 
 def uncited_sentences(text: str) -> list[str]:

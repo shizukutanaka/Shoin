@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.576
+## Version History: v0.1.37 → v0.2.577
+
+### v0.2.577
+- Verification-side backward attribution for fragment-leading markers (shared _leading_markers helper): the v0.2.576 fix covered uncited_sentences, but verify_grounding/numeric_mismatches/unit_mismatches/quote_mismatches/negation_mismatches still judged a leading marker against its own fragment's claim — "apples are red. [S1] bananas are yellow. [S2]" flagged the CORRECT S1 as misattributed (the v0.1.4 never-accuse-a-correct-answer class). All six checks now route leading marker runs through _leading_markers → prev_claim, with a snapshot before prev_claim advances. Fail-direction verified on both grounding and numeric pins.
 
 ### v0.2.576
 - Fragment-leading citation markers resolve the previous sentence, not their own ("claim. [S1] next." convention): _SENTENCE_SPLIT_RE makes a marker head the fragment containing the NEXT claim, but uncited_sentences counted a fragment with any citation as self-covered — flagging the claim the marker actually trails and exempting the truly markerless claim after it (a double inversion on the most common multi-claim line shape). The leading-marker run now resolves the pending claim per _segment_claims' backward convention; forward-bound forms ("[S1]によると…") keep their own fragment. Behavior pins for the trailing, forward-bound, and multi-marker shapes. Fail-direction verified.
