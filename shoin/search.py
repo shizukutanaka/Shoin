@@ -373,6 +373,56 @@ def _int_to_kanji(v: int) -> str:
     return "".join(parts)
 
 
+# Live decimal-digit blocks (each Nd row is contiguous 0-9).  NFKC folds
+# only the fullwidth row, so Arabic-Indic ٣٤٥, Persian ۳۴۵, Devanagari
+# ३४५, Bengali ৩৪৫, Thai ๓๔๕ and friends are byte-distinct spellings
+# of the same number with nothing bridging them — query "345" could not
+# reach a document writing "٣٤٥", and vice versa, even though Python's
+# own \d and int() both treat them as digits.  Unlike the accent-fold
+# bridge (open-ended, unenumerable) the digit space is closed: each row
+# is a fixed 10-glyph permutation, so the fold enumerates in both
+# directions — the script term gains its ASCII fold (which then feeds
+# _numeric_variants for 万/億/kanji spellings) and the ASCII term gains
+# every script row.
+_DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
+    tuple("0123456789"),           # ASCII (also the fold target)
+    tuple(chr(0x0660 + d) for d in range(10)),   # Arabic-Indic ٠-٩
+    tuple(chr(0x06F0 + d) for d in range(10)),   # Extended (Persian/Urdu) ۰-۹
+    tuple(chr(0x0966 + d) for d in range(10)),   # Devanagari ०-९
+    tuple(chr(0x09E6 + d) for d in range(10)),   # Bengali ০-৯
+    tuple(chr(0x0A66 + d) for d in range(10)),   # Gurmukhi ੦-੯
+    tuple(chr(0x0AE6 + d) for d in range(10)),   # Gujarati ૦-૯
+    tuple(chr(0x0B66 + d) for d in range(10)),   # Oriya ୦-୯
+    tuple(chr(0x0BE6 + d) for d in range(10)),   # Tamil ௦-௯
+    tuple(chr(0x0C66 + d) for d in range(10)),   # Telugu ౦-౯
+    tuple(chr(0x0CE6 + d) for d in range(10)),   # Kannada ೦-೯
+    tuple(chr(0x0D66 + d) for d in range(10)),   # Malayalam ൦-൯
+    tuple(chr(0x0E50 + d) for d in range(10)),   # Thai ๐-๙
+    tuple(chr(0x0ED0 + d) for d in range(10)),   # Lao ໐-໙
+    tuple(chr(0x1040 + d) for d in range(10)),   # Myanmar ၀-၉
+    tuple(chr(0x17E0 + d) for d in range(10)),   # Khmer ០-៩
+    tuple(chr(0x0F20 + d) for d in range(10)),   # Tibetan ༠-༩
+    tuple(chr(0x1810 + d) for d in range(10)),   # Mongolian ᠐-᠙
+)
+
+
+def _digit_variants(term: str) -> list[str]:
+    """Script-row spellings of an all-decimal-digit term (v0.2.534).
+
+    Only fires when every char is a decimal digit — decimal() also
+    rejects kanji numerals (四 is Lo, not Nd), letters, and mixed
+    terms like 'a3', so letter-digit terms never explode into a
+    per-script cartesian product of nonsense needles."""
+    vals: list[int] = []
+    for ch in term:
+        if not ch.isdecimal():   # deliberately Unicode-wide: every Nd row
+            return []
+        vals.append(unicodedata.decimal(ch))
+    if not vals:
+        return []
+    return ["".join(row[d] for d in vals) for row in _DIGIT_ROWS]
+
+
 def _numeric_variants(term: str) -> list[str]:
     """Magnitude/kanji spellings an all-digit term should also retrieve.
 
@@ -474,6 +524,12 @@ def term_variants(term: str) -> list[str]:
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))
     candidates.extend(_numeric_variants(norm))
+    digits = _digit_variants(norm)
+    candidates.extend(digits)
+    if digits and not norm.isascii():
+        # The ASCII fold of script digits is itself a numeral whose
+        # shorthand family must bridge too ('٣٢٠٠٠' → '3.2万' path).
+        candidates.extend(_numeric_variants(digits[0]))
     candidates.extend(_kyujitai_variants(norm))
     out: list[str] = []
     for v in candidates:

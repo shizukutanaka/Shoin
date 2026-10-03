@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.533
+## Version History: v0.1.37 → v0.2.534
+
+### v0.2.534
+
+- term_variants bridges decimal-digit script rows in both directions:
+  NFKC folds only the fullwidth row, so Arabic-Indic ٣٤٥, Persian ۳۴۵,
+  Devanagari ३४५, Bengali ৩৪৫, Thai ๓๔๕ and the other live Nd blocks
+  were byte-distinct spellings of one number with nothing joining them
+  ('345' could not reach a '٣٤٥' document and vice versa).  _digit_variants
+  folds through unicodedata.decimal — a closed 10-glyph permutation per
+  row, enumerable both ways unlike the open accent space — and fires
+  only on all-digit terms (kanji numerals are Lo, letters and 'a3'-style
+  mixes never expand).  The ASCII fold feeds _numeric_variants, so a
+  '٣٢٠٠٠' query gains the 3.2万 family too.
+- `test_script_digit_variants_bridge_both_directions` pins the row
+  coverage + the no-explode guards; `test_script_digit_query_retrieves_
+  across_rows` proves retrieval in both directions (345/٣٤٥/۳۴۵ reach
+  all three docs; 2025↔२०२५).  Citation-side \d regexes already see
+  Unicode digits, and int() parses them — only the LIKE/FTS bridge
+  was missing.
 
 ### v0.2.533
 

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.533")
+        self.assertEqual(VERSION, "0.2.534")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1955,6 +1955,47 @@ class TestChunk(unittest.TestCase):
         # And they count: an emoji run is no longer a free token ride.
         self.assertEqual(estimate_tokens("☕😀"), 2)
         self.assertEqual(estimate_tokens("👨‍💻"), 3)
+
+    def test_script_digit_variants_bridge_both_directions(self) -> None:
+        """v0.2.534: live decimal-digit rows (Arabic-Indic ٣٤٥, Persian ۳۴۵,
+        Devanagari ३४५, Bengali ৩৪৫, Thai ๓๔๕ …) are byte-distinct spellings
+        of the same number — NFKC folds only the fullwidth row, so '345' and
+        '٣٤٥' could not retrieve each other even though \\d and int() both
+        treat them as digits.  The fold enumerates the closed 10-glyph rows
+        in both directions."""
+        # ASCII term gains every script row.
+        v345 = term_variants("345")
+        for row in ("\u0663\u0664\u0665", "\u06F3\u06F4\u06F5",
+                    "\u0969\u096A\u096B", "\u09E9\u09EA\u09EB",
+                    "\u0E53\u0E54\u0E55", "\u17E3\u17E4\u17E5",
+                    "\u0ED3\u0ED4\u0ED5"):
+            self.assertIn(row, v345)
+        # Script term gains its ASCII fold (which feeds the magnitude table).
+        va = term_variants("٣٤٥")
+        self.assertIn("345", va)
+        self.assertIn("\u06F3\u06F4\u06F5", va)
+        self.assertIn("\u0969\u096A\u096B", va)
+        # Mixed/Lo terms never explode into per-script products.
+        self.assertNotIn("٣", term_variants("a3"))
+        self.assertEqual(term_variants("四"), ["四"])
+
+    def test_script_digit_query_retrieves_across_rows(self) -> None:
+        """e2e for the digit bridge: any row's query reaches any row's doc."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, [
+            "التعداد كان ٣٤٥ شخصاً في المدينة",
+            "العدد كان ۳۴۵ حالة مسجلة",
+            "वर्ष २०२५ में घटना हुई",
+            "the count was 345 cases total",
+        ])
+        texts = {h.text for q in ("345", "٣٤٥", "۳۴۵")
+                 for h in bm25_search(s, nb.id, q, 10)}
+        self.assertEqual(len(texts), 3, texts)   # all three 345-docs, both directions
+        for q in ("2025", "२०२५"):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any("२०२५" in h.text for h in hits), q)
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14495,7 +14536,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:804",
+            "search.py:65", "search.py:860",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14929,7 +14970,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:606"],
+            sites, ["search.py:662"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17146,7 +17187,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 804],
+            "search.py": [65, 860],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17194,7 +17235,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:804"],
+            escaped_interps, ["search.py:860"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17211,8 +17252,9 @@ class TestResidualGuards(unittest.TestCase):
         Every call site is cataloged: today's sites are either
         `isascii() && isdigit()` guarded (search.py — v0.2.529's
         `isalnum` the deliberate Unicode-wide test that makes every
-        script's letters word chars, and v0.2.532's `isspace` which
-        must see U+1680/U+3000 as spaces, not just ASCII ones), downstream of
+        script's letters word chars, v0.2.532's `isspace` which must
+        see U+1680/U+3000 as spaces, and v0.2.534's `isdecimal` whose
+        whole job is seeing every script's digit row), downstream of
         NFKC normalization that already folded width/superscripts
         (citation.py `_part_value`), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
@@ -17223,7 +17265,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py": 1,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 4,
+            "search.py": 5,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",
