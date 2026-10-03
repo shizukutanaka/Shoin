@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.587
+## Version History: v0.1.37 → v0.2.588
+
+### v0.2.588
+- fenced code blocks carry no structure in _blocks(): a `# comment` line inside ``` fences was parsed as an ATX heading — it closed the real enclosing section AND pushed itself onto the breadcrumb stack, so retrieval breadcrumbs absorbed code comments as document headings and following content inherited the fake heading; blank lines inside the fence also split the code mid-block. _blocks() now tracks fence state per CommonMark (opener = 3+ backticks/tildes indented ≤3 spaces; closer = same marker char, ≥ opener length, no info string; unclosed fence runs to document end), so fenced lines never produce headings or block boundaries. Fail-direction verified (the new pin shows the bogus breadcrumb and split blocks on the old code).
 
 ### v0.2.587
 - pdf_to_text page-object access tolerance: pypdf resolves page objects lazily, so `reader.pages[i]` itself can raise (corrupt xref entry) before `extract_text()` is ever reached — the `for page in reader.pages` loop wrapped only extract_text, so one bad page object aborted the ENTIRE document with a raw non-IngestError exception (escaping the error-code contract as a 500-class failure) instead of counting a failed page. Iterates by index now: a page that cannot even be materialized counts in `pages_failed` like any other per-page failure; a page list that cannot be enumerated at all maps to the same INGEST_PARSE_FAILED as reader construction. Fail-direction verified.

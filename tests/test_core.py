@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.587")
+        self.assertEqual(VERSION, "0.2.588")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12173,6 +12173,44 @@ class TestChunkContext(unittest.TestCase):
         # still be stripped, per CommonMark.
         pairs = _context_blocks("## Heading ##\nBody.")
         self.assertEqual(pairs[0][0], "Heading")
+
+    def test_fenced_code_lines_carry_no_structure(self) -> None:
+        """v0.2.588: inside a fenced code block every structural signal is
+        content — a `# comment` line is a comment, not an ATX heading, and a
+        blank line is padding, not a block boundary. Before the fence tracking,
+        a fenced `#` line closed the real enclosing section AND pushed itself
+        onto the breadcrumb stack, while the fence's blank lines split the
+        code mid-block — retrieval breadcrumbs absorbing code comments as
+        document headings and the section content inheriting the fake one.
+        """
+        from shoin.chunk import _blocks, _context_blocks
+
+        doc = (
+            "# 実際の章\n解説テキスト。\n\n"
+            "```python\n# コメント内の偽見出し\nx = 1\n\ny = 2\n```\n"
+            "章に属する後続テキスト。\n"
+        )
+        pairs = _context_blocks(doc)
+        # The fenced comment never becomes a heading and never replaces the
+        # real enclosing section — every block stays under 実際の章.
+        self.assertTrue(all(ctx == "実際の章" for ctx, _ in pairs))
+        # One block holds the whole fence + its trailing paragraph: the
+        # blank line inside the code did not split it.
+        self.assertEqual(len(pairs), 2)
+        self.assertIn("x = 1\n\ny = 2", pairs[1][1])
+        self.assertIn("章に属する後続テキスト", pairs[1][1])
+
+        # CommonMark close rule: a closer carries no info string — a
+        # backticked line with trailing text is content, not a close, so the
+        # "# real heading" below stays fenced content, not a heading.
+        self.assertEqual(len(_blocks("```py\na\n``` extra\n# h\nb")), 1)
+        # A longer closer closes a shorter opener; the OTHER marker char
+        # cannot close at all; tildes fence the same way.
+        self.assertEqual(len(_blocks("```\na\n````\n# h\nb")), 2)
+        self.assertEqual(len(_blocks("```\na\n~~~\n# h\nb")), 1)
+        self.assertEqual(len(_blocks("~~~\na\n~~~\n# h\nb")), 2)
+        # Non-fenced structure is unchanged: heading + blank-line splits.
+        self.assertEqual(len(_blocks("# a\nt\n\n## b\nu")), 2)
 
     def test_context_capped(self) -> None:
         """A pathologically deep/long heading path is capped so it can't bloat

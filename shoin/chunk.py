@@ -248,11 +248,40 @@ def estimate_tokens(text: str) -> int:
     return cjk + words
 
 
+# Inside a fenced code block every structural signal is content: a
+# `# comment` line is a comment, not an ATX heading, and a blank line is
+# padding, not a block boundary. Without tracking fence state both were
+# misparsed — a fenced `#` line closed the real enclosing section and pushed
+# itself onto the breadcrumb stack, and every blank line inside the fence
+# split the code mid-block. Rules per CommonMark: an opener is a run of 3+
+# backticks or tildes indented ≤3 spaces; the closer is the same marker
+# character, at least the opener's length, with no info string. An unclosed
+# fence (CommonMark: runs to end of document) simply keeps accumulating.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
 def _blocks(text: str) -> list[str]:
     """Split into blocks at markdown headings and blank lines."""
     blocks: list[str] = []
     buf: list[str] = []
+    fence = ""
     for line in text.splitlines():
+        if fence:
+            buf.append(line)
+            m = _FENCE_RE.match(line)
+            if (
+                m
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= len(fence)
+                and not line[m.end() :].strip()
+            ):
+                fence = ""
+            continue
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = m.group(1)
+            buf.append(line)
+            continue
         if _HEADING_RE.match(line):
             if buf:
                 blocks.append("\n".join(buf).strip())
