@@ -99,6 +99,23 @@ class EvalDiff:
     matched_questions: int = 0
 
 
+def _utf8_ok(s: str) -> bool:
+    """True when a decoded-JSON string can round-trip through UTF-8.
+
+    json.loads materializes lone surrogates from \\ud800-style escapes that
+    raw UTF-8 input cannot carry; one reaching a sqlite bound term (evaluate()
+    via retrieve_for_question) or stdout (diff_reports' question lists)
+    escapes every handler as a raw UnicodeEncodeError — the same defect class
+    server._check_utf8 rejects on the wire. These functions' contract is
+    ValueError, not StoreError, so the check lives here.
+    """
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def parse_cases(data: object) -> list[EvalCase]:
     """Parse the cases file's decoded JSON into EvalCase objects.
 
@@ -117,6 +134,8 @@ def parse_cases(data: object) -> list[EvalCase]:
         if not isinstance(q, str) or not q.strip():
             raise ValueError(f"case {i}: 'q' must be a non-empty string")
         q = q.strip()
+        if not _utf8_ok(q):
+            raise ValueError(f"case {i}: 'q' contains an unpaired surrogate")
         # A case longer than the product's own input bound (the /ask and cli
         # ask paths both reject > MAX_QUESTION_LEN) measures a question the app
         # cannot answer — and it builds a pathological FTS5 OR-expression from
@@ -245,6 +264,7 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
         miss = raw.get("missing", [])  # absent in pre-v0.2.551 baselines
         if (
             not isinstance(q, str)
+            or not _utf8_ok(q)
             or not isinstance(exp, list)
             or not isinstance(got, list)
             # Python's json module decodes the non-standard NaN/Infinity

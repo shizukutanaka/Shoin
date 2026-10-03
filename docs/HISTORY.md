@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.597
+## Version History: v0.1.37 → v0.2.598
+
+### v0.2.598 — reject unpaired surrogates in eval case/baseline files
+
+json.loads materializes lone surrogates from \ud800 escapes; a `q` containing
+one passed both readers and later crashed raw-UnicodeEncodeError out of the
+sqlite bind (evaluate via retrieve_for_question's bound terms) or stdout
+(diff's question lists) — escaping every handler mid-run. `parse_cases` and
+`report_from_dict` now refuse via `_utf8_ok()` — the same defect class
+server._check_utf8 rejects on the wire, under this module's ValueError
+contract. Pin: `test_eval_rejects_surrogate_questions_in_both_readers`
+(fail-verified against the old code).
 
 ### v0.2.597
 - spec.mdを実装v0.2.597時点へ同期: 引用検証へマーカー帰属規約

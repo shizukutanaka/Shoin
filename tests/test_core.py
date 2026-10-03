@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.597")
+        self.assertEqual(VERSION, "0.2.598")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13739,6 +13739,30 @@ class TestResidualGuards(unittest.TestCase):
         rep, k = report_from_dict(dict(good, k=8))
         self.assertEqual(k, 8)
 
+    def test_eval_rejects_surrogate_questions_in_both_readers(self) -> None:
+        """json.loads materializes lone surrogates from \\ud800 escapes; one
+        reaching sqlite (evaluate via retrieve_for_question's bound terms) or
+        stdout (diff's question lists) escapes every handler as a raw
+        UnicodeEncodeError — same class server._check_utf8 rejects on the
+        wire. parse_cases and report_from_dict must both refuse."""
+        from shoin.evaluate import parse_cases, report_from_dict
+
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "\ud800", "sources": [1]}])
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "ok\ud800x", "sources": [1]}])
+        with self.assertRaises(ValueError):
+            report_from_dict(
+                {
+                    "cases": [
+                        {"q": "\ud800", "expected": [1], "retrieved": [],
+                         "recall": 0.0, "rr": 0.0}
+                    ],
+                    "recall": 0.0,
+                    "mrr": 0.0,
+                }
+            )
+
     def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
         """--save → --diff fidelity: every field report_to_dict writes must be
         read back identically by report_from_dict. A writer/reader key or dtype
@@ -17154,6 +17178,7 @@ class TestResidualGuards(unittest.TestCase):
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
                 "OSError", "json.JSONDecodeError",
             ],
+            "evaluate.py": ["UnicodeEncodeError"],
             "export.py": ["(ValueError,json.JSONDecodeError)"],
             "ingest.py": [
                 "(OSError,http.client.HTTPException)",
@@ -17209,7 +17234,8 @@ class TestResidualGuards(unittest.TestCase):
             ],
         }
         trivial_baseline = {
-            "config.py": 6, "export.py": 1, "ingest.py": 1, "llm.py": 2,
+            "config.py": 6, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
+            "llm.py": 2,
             "pipeline.py": 2, "qa.py": 2, "server.py": 11, "studio.py": 1,
         }
         actual: dict[str, list[str]] = {}
@@ -17327,7 +17353,7 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
             ],
-            "evaluate.py": ["ValueError"] * 14,
+            "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
             "ingest.py": ["IngestError"] * 25 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
