@@ -670,10 +670,12 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # The LIKE-only path caps at k; cap the merge path for consistency so
         # callers can rely on the k parameter being respected on all code paths.
         return fts_hits[:k]
-    result = like_hits[:k]
     if negs:
-        result = _apply_neg_filter(result, negs)
-    return result
+        like_hits = _apply_neg_filter(like_hits, negs)
+    # Filter before capping, exactly as the merge path does above: slicing
+    # [:k] first would starve the result when the top-k hits all carry the
+    # negated term, dropping better-qualified chunks just below the cap.
+    return like_hits[:k]
 
 
 # Field weight for the context breadcrumb column, applied identically in the

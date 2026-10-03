@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.524
+## Version History: v0.1.37 → v0.2.525
+
+### v0.2.525
+
+- Real defect: `bm25_search`'s LIKE-only return path sliced
+  `like_hits[:k]` and *then* applied `_apply_neg_filter` — the
+  opposite order from the merge path two branches above.  When the
+  top-k LIKE hits all carry the negated term, the filter emptied
+  the capped slice and qualified chunks sitting just below
+  position k silently vanished (`猫 -犬` whose two densest 猫
+  chunks contain 犬 returned `[]` while a 猫-only hit existed).
+  The filter now runs before the cap, refilling the surviving
+  pool to k — same order as the merge path.
+- New `test_like_only_neg_filter_runs_before_cap` pins the defect
+  class behaviorally: a negated top-k must not starve the result.
 
 ### v0.2.524
 

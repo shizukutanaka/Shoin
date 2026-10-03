@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.524")
+        self.assertEqual(VERSION, "0.2.525")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -3828,6 +3828,33 @@ class TestSearch(unittest.TestCase):
             ids = [h.chunk_id for h in hits]
             self.assertEqual(len(ids), 3)
             self.assertEqual(ids, sorted(ids))
+
+    def test_like_only_neg_filter_runs_before_cap(self) -> None:
+        """v0.2.525: the LIKE-only return path sliced `like_hits[:k]` and
+        *then* applied the negation filter — the opposite order from the
+        merge path two branches up.  When the top-k LIKE hits all carry
+        the negated term, the filter empties the capped slice and the
+        qualified chunks sitting just below position k silently vanish.
+        Filter must run before the cap so the surviving pool is refilled
+        to k."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                [
+                    "猫 猫 猫 と犬",
+                    "猫 猫 と犬",
+                    "猫 と鳥",
+                ],
+            )
+            hits = bm25_search(s, nb.id, "猫 -犬", 2)
+            self.assertEqual(
+                [h.text for h in hits], ["猫 と鳥"],
+                "LIKE-only path: negated top-k must be filtered before the "
+                "[:k] slice, not after — the 猫-only chunk below the cap "
+                "is the correct hit",
+            )
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
@@ -14204,7 +14231,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:55", "search.py:754",
+            "search.py:55", "search.py:756",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -16855,7 +16882,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [100],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [55, 754],
+            "search.py": [55, 756],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -16903,7 +16930,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:754"],
+            escaped_interps, ["search.py:756"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
