@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.558
+## Version History: v0.1.37 → v0.2.559
+
+### v0.2.559
+- product-review ledger synced to v0.2.558: adds the
+  **v0.2.555-558 の要約** block covering the vector-leg dead-zone
+  close (non-positive cosines no longer take RRF rank slots), the
+  add_source title-validation symmetry (strip + empty reject across
+  all three write paths), and the parse_cases input-contract parity
+  (MAX_QUESTION_LEN bound + duplicate rejection). Header tip and
+  test-count marker (1206) updated to match.
 
 ### v0.2.558
 - parse_cases() bounds 'q' to MAX_QUESTION_LEN and rejects duplicate
