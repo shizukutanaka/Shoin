@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.577")
+        self.assertEqual(VERSION, "0.2.578")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7873,6 +7873,42 @@ class TestUncitedSentences(unittest.TestCase):
                 {1: "参加者は100人だったと報告", 2: "売上は200万円の見通し"},
             ),
             [],
+        )
+    def test_mid_fragment_marker_leaves_its_tail_uncited(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A marker owns only the claim segment BEFORE it — text after the
+        # LAST marker in a fragment is a fresh claim surface, so
+        # "claimA [S1] claimB" must flag claimB the same way a
+        # fragment-leading marker's tail does.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、バナナは黄色い。"),
+            ["バナナは黄色い。"],
+        )
+
+    def test_trailing_tail_is_resolved_by_a_later_citation(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # The uncovered tail pends like any claim — a trailing citation-only
+        # fragment still resolves it.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、バナナは黄色い。[S2]"),
+            [],
+        )
+
+    def test_forward_bound_run_covers_its_tail(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "[S1]によると…" binds forward — it cites the text after the run,
+        # NOT the claim it trails, so the prior claim is still uncited; the
+        # bound text itself is covered (a later [S2] trailer stays silent).
+        self.assertEqual(
+            uncited_sentences("先行情報だ。[S1]によると中間文だ。[S2]"),
+            ["先行情報だ。"],
+        )
+        self.assertEqual(
+            uncited_sentences("先行情報だ。[S1]によれば中間文だ。"),
+            ["先行情報だ。"],
         )
 
 class TestStoreChunksForSource(unittest.TestCase):

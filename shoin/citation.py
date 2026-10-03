@@ -1753,6 +1753,13 @@ def uncited_sentences(text: str) -> list[str]:
             continue
         if nums and has_claim:
             lm = _LEAD_CITE_RUN.match(sentence)
+            # A forward idiom ("[S1]によると…") binds the text right after the
+            # run, so that text is cited even though it follows the marker.
+            forward = (
+                lm is not None
+                and _SNUM_RE.search(lm.group(1))
+                and _FORWARD_BIND_RE.match(sentence[lm.end() :]) is not None
+            )
             if (
                 lm is not None
                 and _SNUM_RE.search(lm.group(1))
@@ -1767,6 +1774,33 @@ def uncited_sentences(text: str) -> list[str]:
                 nums = extract_citations(sentence)
                 bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
                 has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+                lm = None
+            if nums:
+                # Every marker covers only the claim segment BEFORE it, so the
+                # text after the LAST citation marker is an uncovered claim
+                # surface — "claimA [S1] claimB" leaves claimB uncited even
+                # though the fragment carries a marker. A forward-bound run is
+                # the exception: when it is the last marker its bound text is
+                # already covered, so only a later marker's tail is exposed.
+                last_end = 0
+                for m in _BRACKET_RE.finditer(sentence):
+                    if _SNUM_RE.search(m.group(1)):
+                        last_end = m.end()
+                trailing = sentence[last_end :].strip() if last_end else ""
+                if forward and lm is not None and last_end <= lm.end():
+                    pass
+                elif trailing:
+                    # A mid-fragment marker leaves its clause punctuation on
+                    # the uncovered tail ("claimA [S1]、claimB") — joiners are
+                    # not claim content, so strip them before the length gate.
+                    sentence = trailing.lstrip("、，,.．・:：;；")
+                    nums = []
+                    bare = _BRACKET_RE.sub(
+                        " ", unicodedata.normalize("NFKC", sentence)
+                    ).strip()
+                    has_claim = (
+                        len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+                    )
         # Not a pure citation trailer: any still-pending sentence was never resolved
         # by a trailing citation, so it truly has no citation attached — flag it.
         if pending is not None:
