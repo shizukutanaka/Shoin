@@ -33,6 +33,7 @@ from shoin.search import (
     Hit,
     _char_bigrams,
     _fallback_needles,
+    _is_cjk_word,
     _kanji_skeleton,
     bm25_search,
     fts_query,
@@ -106,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.531")
+        self.assertEqual(VERSION, "0.2.532")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1954,6 +1955,29 @@ class TestChunk(unittest.TestCase):
         # And they count: an emoji run is no longer a free token ride.
         self.assertEqual(estimate_tokens("☕😀"), 2)
         self.assertEqual(estimate_tokens("👨‍💻"), 3)
+
+    def test_word_char_boundary_edges(self) -> None:
+        """v0.2.532: two residual boundary defects in _is_cjk_word — the
+        3000-303F block returned False for its symbol marks (〠〶〷 invisible
+        while ✓ is a word), and any non-punct non-alnum char in a content
+        block returned True unconditionally, so Ogham's visible space
+        U+1680 glued the words either side into one term."""
+        # The 3000-block symbol marks are content (So), its space and
+        # punctuation are boundaries.
+        for ch, want in (("〠", True), ("〶", True), ("〷", True),
+                         ("　", False), ("〽", False), ("々", True)):
+            self.assertEqual(_is_cjk_word(ch), want, f"U+{ord(ch):04X}")
+        # Ogham space is a boundary; Ogham letters are words.
+        self.assertEqual(query_terms("ᚁᚂ\u1680ᚃ"), ["ᚁᚂ", "ᚃ"])
+        self.assertEqual(query_terms("ᚁᚂᚃ"), ["ᚁᚂᚃ"])
+        # Regressions: halfwidth punct still boundary, both dots still words.
+        for ch, want in (("｡", False), ("｢", False), ("｣", False),
+                         ("､", False), ("・", True), ("･", True),
+                         ("a", False), ("", False)):
+            self.assertEqual(_is_cjk_word(ch), want, f"U+{ord(ch):04X}")
+        # And terms flow through both directions.
+        self.assertEqual(query_terms("〶記号"), ["〶記号"])
+        self.assertEqual(neg_terms("x -〶"), ["〶"])
 
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
@@ -14447,7 +14471,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:800",
+            "search.py:65", "search.py:804",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14881,7 +14905,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:602"],
+            sites, ["search.py:606"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17098,7 +17122,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [197],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 800],
+            "search.py": [65, 804],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17146,7 +17170,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:800"],
+            escaped_interps, ["search.py:804"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17161,9 +17185,10 @@ class TestResidualGuards(unittest.TestCase):
         '１２３４'.isdigit() and '²'.isdigit() are True, so a bare call
         on unnormalized text accepts shapes the code never intended.
         Every call site is cataloged: today's sites are either
-        `isascii() && isdigit()` guarded (search.py — and v0.2.529's
-        `isalnum`, the deliberate Unicode-wide test that makes every
-        script's letters word chars after the ASCII guard), downstream of
+        `isascii() && isdigit()` guarded (search.py — v0.2.529's
+        `isalnum` the deliberate Unicode-wide test that makes every
+        script's letters word chars, and v0.2.532's `isspace` which
+        must see U+1680/U+3000 as spaces, not just ASCII ones), downstream of
         NFKC normalization that already folded width/superscripts
         (citation.py `_part_value`), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
@@ -17174,7 +17199,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py": 1,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 3,
+            "search.py": 4,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",

@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.531
+## Version History: v0.1.37 → v0.2.532
+
+### v0.2.532
+
+- Two residual boundary defects in _is_cjk_word, found by the
+  coverage tail after v0.2.529's category reorder: the 3000-303F
+  block still returned False for its symbol marks (〠〶〷 stayed
+  invisible while ✓ was already a word char), and the trailing
+  branch returned True unconditionally — so Ogham's visible space
+  U+1680 became a word char and glued 'ᚁᚂ ᚃ' into one term.
+- The 3000-block carve-out now returns the category answer (So marks
+  are words, space/punctuation boundaries — 々/〆 had already exited
+  through the alnum path, so its `cp == 0x3005` True-arm was dead),
+  and the tail becomes `not ch.isspace()` — the ｡｢｣､-only check it
+  replaced could never be False anymore (all four are Po and die at
+  the P-check above).
+- `test_word_char_boundary_edges` pins the mark/space asymmetry, the
+  Ogham-space split, the halfwidth-punct and middle-dot regressions,
+  and negation for the newly visible marks; the search.py:155
+  coverage gap this closes is exercised by the 〶/space probes.
 
 ### v0.2.531
 

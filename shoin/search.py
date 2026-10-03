@@ -152,11 +152,15 @@ def _is_cjk_word(ch: str) -> bool:
     if unicodedata.category(ch).startswith("P"):
         return ch in "・･"
     if 0x3000 <= cp <= 0x303F:
-        return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
-    # ｡｢｣､ (U+FF61–FF64) are the halfwidth counterparts of 。「」、 and break runs
-    # the same way; ･ (U+FF65) is excluded from this test because its NFKC target
-    # ・ (U+30FB) is already a word character.
-    return not 0xFF61 <= cp <= 0xFF64
+        # 々/〆 exited via the alnum path and the block's punctuation died
+        # at the P-check; what remains is the ideographic space and the
+        # symbol marks 〠〶〷 — the marks are words, the space is a boundary.
+        return unicodedata.category(ch) == "So"
+    # Every other char in a content block is a symbol/glue character — a
+    # word char unless it is itself a space (Ogham's U+1680 must not merge
+    # the words either side of it).  The ｡｢｣､ chars this test used to
+    # list are all Po and exit at the P-check above.
+    return not ch.isspace()
 
 
 def query_terms(query: str) -> list[str]:
