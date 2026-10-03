@@ -29,6 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
+## Version History: v0.1.37 → v0.2.550
+
+### v0.2.550
+- `test_env_and_process_globals_stay_centralized` — env reads are
+  configuration and belong in config.py's `_get` (env-over-config.json
+  merge + per-name validation, pinned since v0.2.344); an
+  `os.environ.get` elsewhere silently bypasses both. AST pin: any
+  `os.environ`/`environb`/`getenv` attribute outside config.py fails,
+  with exactly one curated exception — search._debug's SHOIN_DEBUG
+  read, which deliberately skips `_get` (a debug knob must not be
+  settable via config file; the whitelist binds to the literal arg).
+  Writes are banned outright: `os.environ[...] =`/putenv/setdefault
+  mutate process-global state mid-flight. Same scan pins the sibling
+  verbs: `sys.path` list-mutation, `os.chdir`/`putenv`/`unsetenv`/
+  `umask`, `signal.signal`/`pthread_sigmask`/`siginterrupt`, and
+  `sys.setrecursionlimit`/`settrace`/`setprofile`/`setswitchinterval`.
+  Audit: zero violations (config.py `_get`/XDG + SHOIN_DEBUG only).
+  Probed both directions: stray read, env write, chdir, sys.path.append,
+  putenv all flagged at file:line; clean tree green.
+
 ## Version History: v0.1.37 → v0.2.549
 
 ### v0.2.549
@@ -1050,6 +1070,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   OSError` and `except (ValueError, OSError)` stay allowed — same
   policy as narrow except clauses. Probed both directions: tuple and
   except* injections flagged at file:line, clean tree green.
+
 
 
 ## Version History: v0.1.37 → v0.2.479
