@@ -528,6 +528,19 @@ _MAG_NUM_RE = re.compile(rf"({_NUM_PART})(千万|百万|億|万|千|兆)")
 # "一億2000万" — = 120,000,000. A chain is ≥2 adjacent numeral+suffix pairs;
 # the sum is added alongside the per-part values.
 _MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
+# Big-magnitude positional tokens (v0.2.568): a 億/万/兆-delimited numeral is
+# a sum of sub-10000 groups — digit strings, kanji runs, or digit+place
+# shorthand (3千) — plus an optional unsuffixed tail as the last group:
+# "一万二千三百四十五" = 一万 + 二千三百四十五 = 12345, "1億2345万6789" =
+# 1億 + 2345万 + 6789.  The suffix-pair paths cannot see this shape: the
+# tail has no suffix, so it dropped out and the truncated prefix registered
+# a wrong sum ("一万二千三百四十五" → 12000, true 12345 missing).  Group
+# segs may end in a place char only for digit parts ("3千億" = 3千 × 億);
+# kanji runs carry their own place notation.
+_MAG_BIG = r"(?:億|万|兆)"
+_SEG = rf"(?:{_NUM_PART}[十百千]?)"
+_MAG_TOKEN_RE = re.compile(rf"(?:{_SEG}{_MAG_BIG})+{_SEG}?")
+_SEG_MAG_RE = re.compile(rf"({_SEG})({_MAG_BIG})")
 # Bare kanji-numeral runs (v0.2.195): "十二人" ↔ "12人". The lookahead keeps
 # the run maximal — a run ending right before another numeral or suffix char
 # is a component of a larger form, not a standalone value.
@@ -679,6 +692,16 @@ def _part_value(part: str) -> float | None:
     return float(v) if v is not None else None
 
 
+def _seg_value(seg: str) -> float | None:
+    """Value of one sub-10000 group inside a magnitude token."""
+    if seg[0].isdigit():
+        if seg[-1] in _KANJI_PLACE:
+            return float(seg[:-1]) * _KANJI_PLACE[seg[-1]]
+        return float(seg)
+    v = _kanji_value(seg)
+    return float(v) if v is not None else None
+
+
 def _numbers_expanded(text: str) -> set[str]:
     """_numbers() plus canonical values for magnitude-suffixed shorthand.
 
@@ -694,10 +717,38 @@ def _numbers_expanded(text: str) -> set[str]:
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
     nums = _numbers(t)
     suffixed: set[str] = set()
+    token_spans = [m.span() for m in _MAG_TOKEN_RE.finditer(t)]
+    for m in _MAG_TOKEN_RE.finditer(t):
+        total = 0.0
+        end = 0
+        for p in _SEG_MAG_RE.finditer(m.group(0)):
+            seg = p.group(1)
+            sv = _seg_value(seg)
+            if sv is None:
+                break
+            if seg[0].isdigit():
+                suffixed.add(seg.rstrip("十百千"))
+            total += sv * _MAG_SUFFIX[p.group(2)]
+            end = p.end()
+        else:
+            tail = m.group(0)[end:]
+            sv = _seg_value(tail) if tail else 0.0
+            if sv is None:
+                continue
+            if tail and tail[0].isdigit():
+                suffixed.add(tail)
+            v = total + sv
+            r = round(v)
+            if abs(v - r) < 1e-6:
+                nums.add(str(r))
     # Numeral+suffix pairs INSIDE a chain are components, not asserted values:
     # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
     # separate members would flag a claim spelling the summed value out.
-    chain_spans = [m.span() for m in _MAG_CHAIN_RE.finditer(t)]
+    chain_spans = token_spans + [
+        m.span()
+        for m in _MAG_CHAIN_RE.finditer(t)
+        if not any(ts <= m.start() < te for ts, te in token_spans)
+    ]
     for m in _MAG_NUM_RE.finditer(t):
         part, suf = m.group(1), m.group(2)
         if part[0].isdigit():
@@ -712,6 +763,8 @@ def _numbers_expanded(text: str) -> set[str]:
         if abs(v - r) < 1e-6:
             nums.add(str(r))
     for m in _MAG_CHAIN_RE.finditer(t):
+        if any(ts <= m.start() < te for ts, te in token_spans):
+            continue
         total = 0.0
         for p in _MAG_NUM_RE.finditer(m.group(0)):
             pv = _part_value(p.group(1))
@@ -723,6 +776,8 @@ def _numbers_expanded(text: str) -> set[str]:
             if abs(total - r) < 1e-6:
                 nums.add(str(r))
     for m in _KANJI_BARE_RE.finditer(t):
+        if any(ts <= m.start() and m.end() <= te for ts, te in token_spans):
+            continue
         kv = _kanji_value(m.group(1))
         if kv is not None and kv > 0:
             nums.add(str(kv))

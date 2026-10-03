@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.567
+## Version History: v0.1.37 → v0.2.568
+
+### v0.2.568
+- _numbers_expanded parses big-magnitude numerals as positional tokens:
+  a 億/万/兆-delimited numeral is a sum of sub-10000 groups (digits,
+  kanji runs, or digit+place shorthand like 3千) plus an optional
+  unsuffixed tail as the last group.  The suffix-pair chain could not
+  see that shape — '一万二千三百四十五' registered 12000 (一万+二千 only,
+  truncating at the last suffixed pair) plus a stray bare run 2345,
+  while the asserted 12345 was missing, so a correct digit restatement
+  was flagged by numeric_mismatches.  '1億2345万6789', '十二万三千四
+  百五十六', and full-width '九千九百九十九億…万九千九百九十九' parse
+  to their true values; digit+place groups now close at a magnitude
+  boundary ('3千億' = 3千×億 = 3e11, was {3000}).  Group members are
+  components — '五千' inside '四万五千' no longer registers a bare
+  5000.  Silence semantics preserved: ambiguous runs (二三万) still
+  expand to nothing.  Pinned by
+  test_magnitude_tokens_sum_every_group_including_tail and
+  test_positional_kanji_numeral_matches_digit_claim.
 
 ### v0.2.567
 - _match_fold drops stray combining marks: a mark that survived NFKC

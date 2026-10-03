@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.567")
+        self.assertEqual(VERSION, "0.2.568")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6213,6 +6213,16 @@ class TestNumericMismatches(unittest.TestCase):
         src = "導入数は1234件だった。"
         self.assertEqual(numeric_mismatches("導入数は1,234件だった。[S1]", {1: src}), [])
         self.assertEqual(numeric_mismatches("導入数は１２３４件だった。[S1]", {1: src}), [])
+
+    def test_positional_kanji_numeral_matches_digit_claim(self) -> None:
+        """v0.2.568: '一万二千三百四十五' asserts 12345 — the suffix-pair
+        chain dropped a token's unsuffixed tail group and registered the
+        truncated prefix (12000), so a correct digit restatement was
+        flagged. Positional tokens now sum every group."""
+        from shoin.citation import numeric_mismatches
+
+        src = "総額は一万二千三百四十五円だった。"
+        self.assertEqual(numeric_mismatches("総額は12345円だった。[S1]", {1: src}), [])
 
     def test_clause_level_attribution(self) -> None:
         """Co-cited sentence: only the citation whose clause carries the absent
@@ -12816,6 +12826,33 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertEqual(_numbers_expanded("令和一二年"), set())  # era continue
         self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
 
+    def test_magnitude_tokens_sum_every_group_including_tail(self) -> None:
+        """v0.2.568: a big-magnitude token is a sum of sub-10000 groups with
+        an optional unsuffixed tail — '一万二千三百四十五' = 一万 + 二千三
+        百四十五 = 12345.  Groups are components, not asserted values: the
+        truncated-prefix sum (12000) and the tail's bare run (2345) must
+        NOT register — only the whole-token value asserts anything."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("一万二千三百四十五"), {"12345"})
+        self.assertIn("123456789", _numbers_expanded("一億二千三百四十五万六千七百八十九"))
+        self.assertIn("123456789", _numbers_expanded("1億2345万6789"))
+        self.assertIn("123456", _numbers_expanded("十二万三千四百五十六"))
+        self.assertIn("120034", _numbers_expanded("12万34"))
+        self.assertIn("999999999999", _numbers_expanded(
+            "九千九百九十九億九千九百九十九万九千九百九十九"))
+        # digit+place groups at a magnitude boundary: '3千億' = 3千 × 億
+        self.assertIn("300000000000", _numbers_expanded("3千億"))
+        self.assertIn("50000000000", _numbers_expanded("5百億"))
+        self.assertIn("1000000000000", _numbers_expanded("10千億"))
+        # components stay silent: '五千' inside '四万五千' asserts nothing
+        self.assertEqual(_numbers_expanded("四万五千"), {"45000"})
+        # previously-correct shapes preserved
+        self.assertIn("32000", _numbers_expanded("3.2万"))
+        self.assertIn("120000000", _numbers_expanded("一億二千万"))
+        self.assertIn("500000000000", _numbers_expanded("五千億"))
+        self.assertIn("10000000000", _numbers_expanded("百億"))
+
     def test_citation_only_first_sentence_skips_claim(self) -> None:
         """'[S1]' alone carries a citation number but no text and no prior
         claim — every checker must skip it rather than fabricate a claim."""
@@ -12875,9 +12912,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:526", "citation.py:530", "citation.py:567",
-    "citation.py:580", "citation.py:892", "citation.py:1271",
-    "citation.py:1485",
+    "citation.py:526", "citation.py:530", "citation.py:542",
+    "citation.py:543", "citation.py:580", "citation.py:593",
+    "citation.py:947", "citation.py:1326", "citation.py:1540",
     "search.py:72", "search.py:907",
 }
 _ERROR_CODE_CATALOG = {
@@ -18038,7 +18075,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 580, 892, 1271, 1485],
+            "citation.py": [526, 530, 542, 543, 593, 947, 1326, 1540],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
@@ -18111,14 +18148,17 @@ class TestResidualGuards(unittest.TestCase):
         bases, plus v0.2.536's isalpha guard gating the stem fold to
         letters-only terms), downstream of
         NFKC normalization that already folded width/superscripts
-        (citation.py `_part_value`), or on export-format keys where a
+        (citation.py `_part_value`/`_seg_value`/the token loop — the
+        digit-vs-kanji head test on `_NUM_PART`-matched segments, whose
+        digit class is already Unicode-wide and `float()` parses the
+        same rows), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
         is a drift event: it must be justified like these."""
         import ast as _ast
 
         baseline: dict[str, int] = {
             "chunk.py": 5,
-            "citation.py": 2,
+            "citation.py": 5,
             "export.py": 3,
             "search.py": 6,
         }
