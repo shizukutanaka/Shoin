@@ -941,16 +941,35 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     those characters.  The word-char set mirrors query_terms' [0-9A-Za-z_]
     tokenization so the exclusion boundary is the same boundary that produced
     the term.
+
+    The needle side runs through term_variants() for the same reason the
+    positive side does (v0.2.537): every spelling a term would *retrieve* it
+    must also *exclude*.  `-documents` that cannot drop a 'document' chunk is
+    the same silent gap as a 'documents' query that cannot reach it — and now
+    visibly asymmetric since stems/accents/digits/kana all bridge positively.
+    The widened set stays inside this filter's own discipline: ASCII-spelled
+    variants keep whole-word boundaries (a `-documents` stem still spares
+    'documentation'), everything else keeps substring semantics.
     """
     folded_negs = [unicodedata.normalize("NFKC", n).casefold() for n in negs]
     checks: list[tuple[str | None, re.Pattern[str] | None]] = []
     for n in folded_negs:
-        if re.fullmatch(r"[0-9A-Za-z_]+", n):
+        ascii_words: list[str] = []
+        for v in term_variants(n):
+            fv = unicodedata.normalize("NFKC", v).casefold()
+            if re.fullmatch(r"[0-9A-Za-z_]+", fv):
+                if fv not in ascii_words:
+                    ascii_words.append(fv)
+            else:
+                checks.append((fv, None))
+        if ascii_words:
+            # Longest first so a stem variant can't shadow the full term.
+            words = sorted(ascii_words, key=len, reverse=True)
             checks.append(
-                (None, re.compile(rf"(?<![0-9A-Za-z_]){re.escape(n)}(?![0-9A-Za-z_])"))
+                (None, re.compile(
+                    rf"(?<![0-9A-Za-z_])(?:{'|'.join(re.escape(w) for w in words)})(?![0-9A-Za-z_])"
+                ))
             )
-        else:
-            checks.append((n, None))
     out: list[Hit] = []
     for h in hits:
         folded_text = unicodedata.normalize("NFKC", h.text).casefold()

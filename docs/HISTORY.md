@@ -54,7 +54,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   → 'Document').  Two pins (rule coverage + guards + per-term e2e); fail
   direction verified.
 
-## Version History: v0.1.37 → v0.2.536
+### v0.2.537
+- _apply_neg_filter expands needles through term_variants: `-documents`
+  drops 'document' chunks, `-データ` drops 'でーた', `-345` drops '٣٤٥' —
+  every spelling a term retrieves it now excludes, the symmetric contract
+  the filter already stated for the NFKC width fold.  ASCII-spelled
+  variants keep whole-word boundaries ('documentation' survives
+  `-documents`); non-ASCII variants keep substring semantics.  One pin +
+  fail-direction verified.
+
+## Version History: v0.1.37 → v0.2.537
 
 ### v0.2.534
 

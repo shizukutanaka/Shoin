@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.536")
+        self.assertEqual(VERSION, "0.2.537")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2068,6 +2068,33 @@ class TestChunk(unittest.TestCase):
                         ("quickly", "quick")):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any(frag in h.text for h in hits), q)
+
+
+    def test_neg_filter_matches_variant_spellings(self) -> None:
+        """v0.2.537: exclusion must cover every spelling a term would
+        retrieve — a '-documents' that drops only the literal spelling left
+        'document' chunks visible, the mirror gap of positive stemming.
+        Needles run through term_variants(); ASCII-spelled variants keep
+        whole-word boundaries ('documentation' survives), non-ASCII variants
+        keep substring semantics (kana/digit rows excluded)."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["the document store design",
+                              "a query engine guide",
+                              "documentation tips",
+                              "\u3067\u30fc\u305f analysis",
+                              "345 arabic test \u0663\u0664\u0665"])
+        for q, frag in (("design -documents", "document"),
+                        ("guide -queries", "query"),
+                        ("analysis -\u30c7\u30fc\u30bf", "analysis"),
+                        ("arabic -345", "arabic")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertFalse(any(frag in h.text for h in hits), q)
+        # ASCII stems stay whole-word: '-documents' must not drop
+        # 'documentation' (the variant 'document' needs a boundary).
+        hits = bm25_search(s, nb.id, "tips -documents", 10)
+        self.assertTrue(any("documentation" in h.text for h in hits))
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14608,7 +14635,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:950",
+            "search.py:65", "search.py:969",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -17259,7 +17286,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 950],
+            "search.py": [65, 969],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17307,7 +17334,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:950"],
+            escaped_interps, ["search.py:969"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
