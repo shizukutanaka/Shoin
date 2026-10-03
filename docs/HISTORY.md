@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.588
+## Version History: v0.1.37 → v0.2.589
+
+### v0.2.589
+- refresh_source no-op path reports pages_failed: the byte-identical early return (v0.2.243's re-chunk/embedding preservation) still ran a full extraction, but hardcoded `IndexResult(..., 0)` with `pages_failed` left at its default — a refresh that re-failed the same PDF pages reported 0 to the caller, silently dropping the "index holds less than the document" signal the dataclass field exists to surface. The early return now propagates `extracted.pages_failed`. Fail-direction verified (0 vs 2 on the old code).
 
 ### v0.2.588
 - fenced code blocks carry no structure in _blocks(): a `# comment` line inside ``` fences was parsed as an ATX heading — it closed the real enclosing section AND pushed itself onto the breadcrumb stack, so retrieval breadcrumbs absorbed code comments as document headings and following content inherited the fake heading; blank lines inside the fence also split the code mid-block. _blocks() now tracks fence state per CommonMark (opener = 3+ backticks/tildes indented ≤3 spaces; closer = same marker char, ≥ opener length, no info string; unclosed fence runs to document end), so fenced lines never produce headings or block boundaries. Fail-direction verified (the new pin shows the bogus breadcrumb and split blocks on the old code).

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.588")
+        self.assertEqual(VERSION, "0.2.589")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9294,6 +9294,39 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(before, after, "chunk ids must survive an unchanged refresh")
         self.assertEqual(EmbedLLM.calls, 0, "unchanged content must not re-embed")
         self.assertEqual(res1.n_chunks, len(before))
+        self.assertEqual(res1.n_embedded, 0)
+
+    def test_refresh_source_noop_still_reports_pages_failed(self) -> None:
+        """v0.2.589: the unchanged-content early return still ran a full
+        extraction — a partial one (a PDF whose page objects stay corrupt
+        across refreshes) is equally partial on the no-op path, so
+        IndexResult.pages_failed must carry extracted.pages_failed, not a
+        hardcoded 0 that silently drops the 'index holds less than the
+        document' signal the dataclass field exists to surface."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        original = Extracted(
+            kind="url", title="Page", origin="http://partial.test",
+            sha256="sha-partial", text="word " * 200, pages_failed=2,
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("noop-pages-failed-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://partial.test")
+            self.assertEqual(res0.pages_failed, 2)
+            again = Extracted(
+                kind="url", title="Page", origin="http://partial.test",
+                sha256="sha-partial", text="word " * 200, pages_failed=2,
+            )
+            with patch("shoin.pipeline.extract_url", return_value=again):
+                res1 = refresh_source(s, res0.source.id)
+        self.assertEqual(
+            res1.pages_failed, 2,
+            "a no-op refresh that re-failed pages must still report them",
+        )
         self.assertEqual(res1.n_embedded, 0)
 
     def test_refresh_source_preserves_user_renamed_title(self) -> None:

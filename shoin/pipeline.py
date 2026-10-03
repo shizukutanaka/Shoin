@@ -302,7 +302,15 @@ def refresh_source(
         # delete+reinsert only mints fresh rowids — discarding every embedding
         # (paid for in LLM calls) and churning the rowid-reuse surface that
         # v0.2.230's excerpt check guards stored source_chunk_ids against.
-        return IndexResult(src, len(store.text_chunks_for_source(source_id)), 0)
+        return IndexResult(
+            src,
+            len(store.text_chunks_for_source(source_id)),
+            0,
+            # The no-op path still performed a full extraction — a partial
+            # one (a PDF whose page objects stayed corrupt) is equally partial
+            # here, and callers warn on the same dataclass field either way.
+            pages_failed=extracted.pages_failed,
+        )
     pairs = split_text_with_context(
         extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
     )
