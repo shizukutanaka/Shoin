@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.557")
+        self.assertEqual(VERSION, "0.2.558")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12834,6 +12834,37 @@ class TestResidualGuards(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_cases([42])
 
+    def test_parse_cases_rejects_oversize_question(self) -> None:
+        """A case question longer than MAX_QUESTION_LEN is one the product
+        cannot answer at all — /ask and cli ask both reject it — so measuring
+        recall against it is meaningless, and it builds a pathological FTS5
+        OR-expression from thousands of terms. parse_cases must refuse loudly
+        like it refuses every other malformed case."""
+        from shoin.config import MAX_QUESTION_LEN
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "x" * (MAX_QUESTION_LEN + 1), "sources": [1]}])
+        # The boundary itself is accepted (same contract as /ask).
+        cases = parse_cases([{"q": "x" * MAX_QUESTION_LEN, "sources": [1]}])
+        self.assertEqual(len(cases), 1)
+
+    def test_parse_cases_rejects_duplicate_question(self) -> None:
+        """A duplicated question silently double-counts in the run's mean
+        recall/MRR — same question weighed twice with no marker — and a diff
+        pairing occurrence-by-occurrence can't tell which twin is which case.
+        Refusing follows parse_cases' refuse-loudly contract (whitespace is
+        stripped before comparing, matching EvalCase's stored question)."""
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases(
+                [
+                    {"q": "同じ質問", "sources": [1]},
+                    {"q": "  同じ質問  ", "sources": [2]},
+                ]
+            )
+
     def test_report_from_dict_bad_case_and_missing_scores(self) -> None:
         """Baseline rebuild refuses malformed cases AND missing recall/mrr —
         a silently-dropped field would fabricate a score delta."""
@@ -16403,11 +16434,7 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
             ],
-            "evaluate.py": [
-                "ValueError", "ValueError", "ValueError", "ValueError",
-                "ValueError", "ValueError", "ValueError", "ValueError",
-                "ValueError", "ValueError", "ValueError",
-            ],
+            "evaluate.py": ["ValueError"] * 13,
             "export.py": ["ValueError"],
             "ingest.py": ["IngestError"] * 24 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],

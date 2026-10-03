@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.557
+## Version History: v0.1.37 → v0.2.558
+
+### v0.2.558
+- parse_cases() bounds 'q' to MAX_QUESTION_LEN and rejects duplicate
+  questions: a case longer than the product's own input bound (the
+  /ask and cli ask paths both reject > MAX_QUESTION_LEN) measures a
+  question the app cannot answer and builds a pathological FTS5
+  OR-expression from thousands of terms — the same contract
+  suggest_questions() already applies to its own output ("the app
+  would suggest a question it cannot itself answer"). A duplicated
+  question silently double-counts in the run's mean recall/MRR and
+  a diff pairing occurrence-by-occurrence can't tell which twin is
+  which case. Both now raise ValueError per the function's
+  refuse-loudly contract; 'q' is stripped once up-front (whitespace
+  compares equal to the stored EvalCase question).
 
 ### v0.2.557
 - add_source() strips + rejects blank titles: the ingest-path writer

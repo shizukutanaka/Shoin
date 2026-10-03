@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from .config import TOP_K
+from .config import MAX_QUESTION_LEN, TOP_K
 from .qa import ChatBackend, _check_embed_model_ok, _query_vector, retrieve_for_question
 from .store import Store
 
@@ -108,12 +108,30 @@ def parse_cases(data: object) -> list[EvalCase]:
     if not isinstance(data, list):
         raise ValueError("cases file must contain a JSON array of case objects")
     cases: list[EvalCase] = []
+    seen_qs: set[str] = set()
     for i, raw in enumerate(data):
         if not isinstance(raw, dict):
             raise ValueError(f"case {i}: expected an object, got {type(raw).__name__}")
         q = raw.get("q")
         if not isinstance(q, str) or not q.strip():
             raise ValueError(f"case {i}: 'q' must be a non-empty string")
+        q = q.strip()
+        # A case longer than the product's own input bound (the /ask and cli
+        # ask paths both reject > MAX_QUESTION_LEN) measures a question the app
+        # cannot answer — and it builds a pathological FTS5 OR-expression from
+        # thousands of terms. Same contract suggest_questions() applies to its
+        # own output ("the app would suggest a question it cannot answer").
+        if len(q) > MAX_QUESTION_LEN:
+            raise ValueError(
+                f"case {i}: 'q' exceeds MAX_QUESTION_LEN ({len(q)} > {MAX_QUESTION_LEN})"
+            )
+        # A duplicated question silently double-counts in the run's mean
+        # recall/MRR — the same question weighs twice with no marker — and a
+        # diff pairing it occurrence-by-occurrence can't tell which twin is
+        # which case. Refusing follows this function's refuse-loudly contract.
+        if q in seen_qs:
+            raise ValueError(f"case {i}: duplicate question {q!r}")
+        seen_qs.add(q)
         srcs = raw.get("sources")
         if not isinstance(srcs, list) or not srcs:
             raise ValueError(f"case {i}: 'sources' must be a non-empty array of source ids")
@@ -122,7 +140,7 @@ def parse_cases(data: object) -> list[EvalCase]:
             if isinstance(s, bool) or not isinstance(s, int):
                 raise ValueError(f"case {i}: source ids must be integers, got {s!r}")
             ids.append(s)
-        cases.append(EvalCase(q.strip(), ids))
+        cases.append(EvalCase(q, ids))
     if not cases:
         raise ValueError("cases file contains no cases")
     return cases
