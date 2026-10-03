@@ -29,6 +29,1050 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
+## Version History: v0.1.37 → v0.2.550
+
+### v0.2.550
+- `test_env_and_process_globals_stay_centralized` — env reads are
+  configuration and belong in config.py's `_get` (env-over-config.json
+  merge + per-name validation, pinned since v0.2.344); an
+  `os.environ.get` elsewhere silently bypasses both. AST pin: any
+  `os.environ`/`environb`/`getenv` attribute outside config.py fails,
+  with exactly one curated exception — search._debug's SHOIN_DEBUG
+  read, which deliberately skips `_get` (a debug knob must not be
+  settable via config file; the whitelist binds to the literal arg).
+  Writes are banned outright: `os.environ[...] =`/putenv/setdefault
+  mutate process-global state mid-flight. Same scan pins the sibling
+  verbs: `sys.path` list-mutation, `os.chdir`/`putenv`/`unsetenv`/
+  `umask`, `signal.signal`/`pthread_sigmask`/`siginterrupt`, and
+  `sys.setrecursionlimit`/`settrace`/`setprofile`/`setswitchinterval`.
+  Audit: zero violations (config.py `_get`/XDG + SHOIN_DEBUG only).
+  Probed both directions: stray read, env write, chdir, sys.path.append,
+  putenv all flagged at file:line; clean tree green.
+
+## Version History: v0.1.37 → v0.2.549
+
+### v0.2.549
+- `test_text_io_always_names_an_encoding` — `Path.read_text()`/
+  `write_text()`/`open()` without `encoding=` decode through
+  `locale.getpreferredencoding()`: locale-dependent. Under LANG=C the
+  default is ASCII and Shoin's CJK-heavy corpus turns into mojibake or
+  UnicodeDecodeError — invisible to CI, which always runs UTF-8. (The
+  `.encode()`/`.decode()`/`json.loads` defaults are UTF-8, NOT
+  locale-dependent, so they're out of scope.) AST pin over shoin/:
+  every `open`/`io.open`/`os.fdopen`/`codecs.open`/`.open(`/
+  `.read_text`/`.write_text`/`.open_text` call site must pass
+  `encoding=` or prove binary mode via a literal 'b'-mode; `os.open`
+  stays exempt (fd-level, no codec). Audit: zero violations — all four
+  existing sites already pass utf-8. Probed: bare read_text/
+  write_text/open flagged, "rb" mode and os.open allowed.
+
+### v0.2.535
+- term_variants gains the enumerable half of accent bridging: `_ascii_fold`
+  strips combining marks over ASCII-letter bases (café→cafe, naïve→naive,
+  Łódź→Lodz) and maps NFKC-unfolded Latin specials (œ→oe, ß→ss, æ→ae, ø→o,
+  þ→th, ŋ→n, ı→i — the ICU Latin-ASCII core set), so an accented query
+  reaches a document that wrote the word unaccented.  The fold is emitted
+  only when the result is pure ASCII and differs — kana dakuten decomposes
+  too but its base isn't ASCII ('データ' never emits dead 'テータ'), and
+  Cyrillic/pure non-Latin terms are untouched.  The reverse direction
+  (ASCII query → 'café' docs) stays closed: accent spellings are an open
+  space no finite variant list can enumerate — same structural wall as the
+  SHY bridge.  e2e: six accented queries each reach their unaccented doc;
+  fail direction verified.
+
+### v0.2.536
+- term_variants bridges English inflection: `_stem_variants` emits the closed
+  BM25-lite suffix family (final -s/-es/-ies, -ing/-ed with double-consonant
+  and silent-e handling, -ly) so 'documents' reaches 'document', 'queries'
+  reaches 'query', 'running' reaches 'run' — the English half of the
+  conjugation gap _kanji_skeleton already bridges for Japanese.  Lookalike
+  endings that are not inflections ('this', 'status', 'hiss') excluded by
+  shape; ≥3-char alphabetic stems only; casing follows the term ('Documents'
+  → 'Document').  Two pins (rule coverage + guards + per-term e2e); fail
+  direction verified.
+
+### v0.2.537
+- _apply_neg_filter expands needles through term_variants: `-documents`
+  drops 'document' chunks, `-データ` drops 'でーた', `-345` drops '٣٤٥' —
+  every spelling a term retrieves it now excludes, the symmetric contract
+  the filter already stated for the NFKC width fold.  ASCII-spelled
+  variants keep whole-word boundaries ('documentation' survives
+  `-documents`); non-ASCII variants keep substring semantics.  One pin +
+  fail-direction verified.
+
+### v0.2.538
+- bm25_search answers negation-only queries: '-dogs' used to return []
+  (no positive term meant no FTS/LIKE needle — silently reading as
+  "every chunk contains dogs").  With no positive needle it now pools the
+  notebook's chunks under the same cap as the LIKE path, neg-filters, and
+  k-caps — "everything except X" over a bounded corpus.  One pin +
+  fail-direction verified.
+
+### v0.2.539
+- Scoring sees variant spellings: _norm_query_terms emits variant groups,
+  so a chunk bridged by a stem/accent/digit/kana spelling no longer reads
+  lex=0 — it was demoted by rerank's blend and eligible for _tail_cut as
+  "term-free".  Overlap sums occurrences across the group (literal > bridged
+  still holds), pool-IDF counts a doc once per group, proximity occurrences
+  carry group identity + the variant's own length.  One pin + fail-direction.
+
+### v0.2.540
+- Citation checks see variant spellings: _match_fold (chunk.py — shared
+  bottom layer) canonicalises both sides of every comparison, so an answer
+  echoing データ as でーた, café as cafe, ٣٤٥ as 345, 學 as 学, or text
+  with SHY/ZWSP no longer scores 0 bigram overlap.  confirm / misattributed
+  / negation / self-contradiction / uncited_supported all gain recall on
+  exactly the orthographies retrieval bridges.  The fold tables
+  (_SHIN_TO_KYU, _LATIN_SPECIALS, _ascii_fold) moved from search.py to
+  chunk.py — importing across would be circular.  The verbatim-quote check
+  deliberately stays literal: exactness is its evidence.  One pin +
+  fail-direction.
+
+### v0.2.541
+- Numeric check folds digit rows: _NUM_TOKEN_RE's \d is Unicode-wide, so
+  '٣٤٥' tokenized but compared verbatim — a claim restating '345' as
+  '٣٤٥' was flagged absent from its own source.  New chunk._digit_fold
+  canonicalises every Nd row to ASCII inside _numbers(); the era-name
+  pattern also widened [0-9] -> \d so 令和٦年 expands to 2024.  Different
+  values still flag.  One pin + fail-direction.
+
+### v0.2.542
+- _tail_cut spares expansion-provenance hits: its lex==0 test read every
+  hit surfaced without a user-typed term as noise — including the exact
+  chunks PRF expansion and RAG-Fusion rewrites exist to add (they carry a
+  system-proposed term, so lex==0 vs the user's query is structural).
+  bm25_prf_search now flags merged expansion hits detail["exp"], and
+  retrieve_multi flags every rewrite-surfaced BM25 hit the same way; the
+  cliff test requires no flag.  A term-free vector/utterly-unmatched hit
+  behind an expansion hit still clips.  Three pins (cliff unit + PRF and
+  retrieve_multi provenance e2e) + fail-direction.
+
+### v0.2.543
+- MMR redundancy sees variant spellings: _sim's bigrams were casefold-only,
+  so a chunk identical to a selected one modulo kana/accent/digit-row/
+  kyujitai orthography scored ~0 redundancy — counted as maximally diverse
+  and spent a selection slot on the same content.  _char_bigrams now folds
+  via _match_fold (the same canonical form citation checks use), so
+  データ / でーた, café / cafe, 345 / ٣٤٥ chunks read as duplicates.
+  One pin (dup-vs-diverse selection + accent/digit sim probe) +
+  fail-direction.
+
+### v0.2.544
+- _prf_terms counts doc-frequency by the FOLDED gram: a topical term
+  spelled データベース in one feedback hit and でーたべーす in another
+  split its evidence across literal keys — each variant gram counted 1
+  doc, starved below PRF_MIN_DOCS, and was never proposed (or two
+  variant grams of one term each passed and burned two PRF_TERMS
+  slots).  counts/reps are now keyed by _match_fold, with the
+  first-seen spelling kept as the proposed representative — any
+  rep retrieves every variant when the expanded query is re-searched.
+  One e2e pin (folded gram evidence surfaces a doc no literal gram
+  reached) + fail-direction.
+
+### v0.2.545
+- Dedup keys fold orthography in rewrite_queries and suggest_questions:
+  both compared lines under NFKC + casefold, so a rewrite 'データ設計…'
+  vs 'でーた設計…' survived dedup and spent a MULTI_QUERY_REWRITES
+  slot retrieving the identical chunk set (term_variants already
+  bridges the spelling), and suggest chips differing only in kana /
+  accent / digit-row orthography rendered as duplicates.  Both sites
+  now key on _match_fold — one line per canonical content.  Two pins
+  (rewrite slot + chip e2e) + fail-direction.
+
+### v0.2.546
+- degenerate_spans counts repetition on the _match_fold canonical form:
+  a parrot loop alternating orthography ('要点はデータです。' then
+  '要点はでーたです。') left each spelling at 1-2 occurrences, starving
+  every variant below _DEGEN_REPEAT while three semantic repeats fired
+  — the last normalized-comparison surface still casefold-only.  All
+  three sites (answer sentences, history sentences, the consecutive-
+  span regex input) now fold.  Two pins (alternating loop flags,
+  distinct content stays silent) + fail-direction.
+
+### v0.2.547
+- _NEG_EN_RE covers 'cannot' and curly-quote contractions: \bnot\b
+  never fires inside the fused 'cannot' and NFKC does not fold
+  U+2019, so "the feature cannot process" and "it doesn’t scale"
+  both read parity 0 — can↔cannot and do↔don’t polarity flips were
+  invisible to negation_mismatches AND self_contradictions (shared
+  _neg_parity).  Now n['’]t and \bcannot\b count.  Three pins +
+  fail-direction; quote-doctored overlap pin added for the already-
+  folded _bigrams contract.
+
+### v0.2.548
+- _claim_sents excludes questions (looks_like_question): self_contradictions
+  treated an interrogative as a claim, so the rhetorical-lead pattern
+  "効果はあるのか？効果はない。" — and FAQ/study-guide Q→A pairs, which the
+  studio kinds emit systematically — flagged the answer as contradicting
+  its own question.  A question asserts nothing: same exclusion rule
+  uncited_sentences already applies.  Two pins (question-claim pair
+  silent, claim-question pair silent) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.548
+
+### v0.2.534
+
+- term_variants bridges decimal-digit script rows in both directions:
+  NFKC folds only the fullwidth row, so Arabic-Indic ٣٤٥, Persian ۳۴۵,
+  Devanagari ३४५, Bengali ৩৪৫, Thai ๓๔๕ and the other live Nd blocks
+  were byte-distinct spellings of one number with nothing joining them
+  ('345' could not reach a '٣٤٥' document and vice versa).  _digit_variants
+  folds through unicodedata.decimal — a closed 10-glyph permutation per
+  row, enumerable both ways unlike the open accent space — and fires
+  only on all-digit terms (kanji numerals are Lo, letters and 'a3'-style
+  mixes never expand).  The ASCII fold feeds _numeric_variants, so a
+  '٣٢٠٠٠' query gains the 3.2万 family too.
+- `test_script_digit_variants_bridge_both_directions` pins the row
+  coverage + the no-explode guards; `test_script_digit_query_retrieves_
+  across_rows` proves retrieval in both directions (345/٣٤٥/۳۴۵ reach
+  all three docs; 2025↔२०२५).  Citation-side \d regexes already see
+  Unicode digits, and int() parses them — only the LIKE/FTS bridge
+  was missing.
+
+### v0.2.533
+
+- _SENTENCE_SPLIT_RE learned the terminators of the scripts v0.2.529
+  made word characters: ।॥ danda, ။ Myanmar, ។ Khmer, །༎ Tibetan,
+  ۔ Urdu/Arabic stop, ؟ Arabic question, ።፧፨ Ethiopic, ᠃ Mongolian,
+  ： Armenian, ׃ Hebrew sof pasuq.  Without them a Hindi/Urdu/
+  Amharic paragraph was one giant "sentence" — _hard_split cut at an
+  arbitrary character window and every sentence-iterating citation
+  check (uncited/negation/degen/self-contradiction) saw the whole
+  paragraph as a single unit.  All unambiguous terminators, so they
+  sit in the no-space-guard branch beside 。 (ASCII '.' still needs
+  its space — '3.14' must not split).
+- `test_sentence_split_indic_and_alphabetic_terminators` pins all
+  eleven script families; verified the fail direction on the
+  pre-change regex (every case stays one sentence).
+
+### v0.2.532
+
+- Two residual boundary defects in _is_cjk_word, found by the
+  coverage tail after v0.2.529's category reorder: the 3000-303F
+  block still returned False for its symbol marks (〠〶〷 stayed
+  invisible while ✓ was already a word char), and the trailing
+  branch returned True unconditionally — so Ogham's visible space
+  U+1680 became a word char and glued 'ᚁᚂ ᚃ' into one term.
+- The 3000-block carve-out now returns the category answer (So marks
+  are words, space/punctuation boundaries — 々/〆 had already exited
+  through the alnum path, so its `cp == 0x3005` True-arm was dead),
+  and the tail becomes `not ch.isspace()` — the ｡｢｣､-only check it
+  replaced could never be False anymore (all four are Po and die at
+  the P-check above).
+- `test_word_char_boundary_edges` pins the mark/space asymmetry, the
+  Ogham-space split, the halfwidth-punct and middle-dot regressions,
+  and negation for the newly visible marks; the search.py:155
+  coverage gap this closes is exercised by the 〶/space probes.
+
+### v0.2.531
+
+- Ledger sync (recurring): product-review.md gains the
+  v0.2.518-530 summary block — the meta-audit tail (suppress
+  cataloging, argparse dest contract, interpolated-regex and
+  unicode-predicate inventories, querySelector literal pinning, the
+  CSS-var fix) plus the Unicode-visibility arc's four stages
+  (enclosed compat → all foldable blocks + NFD bridge → alphabetic
+  scripts + category path → symbols/emoji/joiners).  Header version
+  and test-count markers follow (1160 tests); spec.md's measured
+  row tracks the same count and the 4 uncovered lines.
+
+### v0.2.530
+
+- Symbol/emoji closure: the last invisible class — So/Sc/Sk
+  characters (☕ 😀 ✓ ⚠ € ∑ ⌘ ♥, arrows/math/box-drawing, dingbats,
+  regional indicators, the whole emoji tail) join _CJK_RANGES.
+  '☕カフェ' searched 'カフェ' alone and an emoji-only query returned
+  nothing at all; every such char also rode the token budget at 0.
+- Sequence joiners are word characters: ZWNJ/ZWJ glue Indic
+  orthography and emoji sequences ('👨‍💻' stays one term), and
+  VS1-16 keep emoji presentation forms ('☕️') inside the run.
+  Currency symbols become terms beside their number ('€50' →
+  '50','€').
+- Historic scripts needed no work — v0.2.529's isalnum path already
+  made them terms; this closes the So-shaped hole they left.
+- `test_symbols_and_emoji_are_cjk_terms` pins classification, run
+  glue, sequence joins, negation and the new token cost;
+  `test_emoji_query_retrieves_emoji_documents` proves emoji-only and
+  inside-ZWJ-sequence queries reach their documents end-to-end.
+
+### v0.2.529
+
+- Alphabetic scripts are content now: accented Latin, Cyrillic,
+  Greek, Hebrew, Arabic, Syriac, Thaana, NKo, the Indic family
+  (Devanagari..Sinhala), Tibetan, Georgian, Ethiopic, Cherokee,
+  Canadian syllabics, Ogham, Runic, Mongolian and the combining-mark
+  blocks all join _CJK_RANGES.  Before this 'café' silently lost é,
+  a Cyrillic/Arabic query returned nothing at all (its whole term
+  list dropped out), and every such char rode the token budget at
+  cost 0.
+- _is_cjk_word gains a category path: Unicode alnum covers every
+  script's letters/digits without enumerating subranges, and Mn/Mc/Me
+  marks continue a run (NFD diacritics, Devanagari matras, nikkud).
+  Block-internal punctuation (، ؛ ؟ ־ । · ፣՝) stays a boundary via
+  the same category test — near-whole blocks, no per-block punct
+  tables.  ・ and ･ keep their word-character exception.
+- ASCII stays on _WORD_RE's side: 'café' splits 'caf'+'é' (both
+  needles cover it — 'café' reaches 'cafe' docs) and a glued
+  'Python入門' query keeps two terms instead of narrowing to one
+  contiguous-match term.  Negation covers the new scripts too
+  ('-über', '-كتاب') through the auto-extended classes.
+- `test_alphabetic_scripts_are_cjk_terms` pins classification,
+  retention, matra glue, punct boundaries and negation;
+  `test_nonlatin_query_retrieves_across_scripts` proves Cyrillic and
+  Arabic queries reach their documents end-to-end.
+
+### v0.2.528
+
+- Same defect class as v0.2.527, completed: the rest of the
+  NFKC-foldable blocks — Hangul Jamo + compatibility/halfwidth jamo
+  (the macOS NFD filename spelling), Roman numerals, super/subscript
+  digits and letters, vulgar fractions, letterlike symbols (℃ ℉ №
+  ㏄), alphabetic presentation forms (ﬀ-ﬅ), kana-supplement
+  hentaigana, math alphanumerics, fullwidth currency — silently
+  vanished from query_terms.  Added the remaining foldable ranges so
+  'Ⅲ章', 'x²', '気温30℃', '한문서' all keep their terms.
+- term_variants now also emits the NFD form: a composed query (한
+  syllable) reaches documents whose text is decomposed — macOS
+  writes filenames NFD and breadcrumbs carry them.  Combined with
+  NFKC the bridge runs both directions (한 ⇄ 한).
+- `test_foldable_blocks_are_cjk_terms` pins classification,
+  retention and the composed↔decomposed variants;
+  `test_hangul_composed_query_retrieves_nfd_docs` proves a '한' query
+  reaches NFD documents and a '한' query reaches composed ones.
+
+### v0.2.527
+
+- Real defect: the NFKC-foldable enclosed/compat blocks — ①-⑳, Ⓐ-Ⓩ,
+  ㈠-㈩, ㈱㈲, ㋿㍻㍼ (era shorthand), ㌀㌢㌔ (squared-katakana words),
+  ㎏㎞㎟㍑㍉㎠㎡ (squared units), 🈶🈚🈸🈯🉐 — sat outside `_CJK_RANGES`,
+  so `query_terms` silently dropped them: a '㍻元年' query searched
+  '元年' alone, and each char rode the token budget for free.  Added
+  U+2460-24FF, U+3200-33FF (contiguous Enclosed CJK + CJK
+  Compatibility) and U+1F200-1F2FF to the table; `term_variants`' NFKC
+  form then bridges literal spellings to canonical ones (㍻→平成,
+  ㎏→kg) through the existing LIKE path, and `-㍻` negation works via
+  the auto-extended dash classes.
+- `test_enclosed_compat_chars_are_cjk_terms` pins classification,
+  query-term retention and token cost; `test_enclosed_char_query_retrieves_via_variants`
+  proves a '㍻元年' query now reaches both the literal-㍻ and
+  canonical-平成 documents end-to-end.
+
+### v0.2.526
+
+- Real defect: `-term` negation only recognised ASCII '-' — every
+  other dash a keyboard or IME emits (U+2212 minus, U+FF0D fullwidth
+  hyphen-minus, the U+2010-2015 dash family, U+FE63) fell through,
+  so '猫 −犬' negated nothing and POSITIVELY searched 犬 — the
+  exact opposite of the exclusion the user typed.  `_NEG_RE` now
+  matches the full dash family while 'ー'/'ｰ' stay word characters
+  (prolonged-sound marks must never negate: スーパー is a term).
+- `test_neg_terms_unicode_dash_family` pins all ten dash spellings
+  plus the glued/prolonged-mark guards; `test_fullwidth_dash_negates_end_to_end`
+  proves the inversion is closed end-to-end through bm25_search.
+
+### v0.2.525
+
+- Real defect: `bm25_search`'s LIKE-only return path sliced
+  `like_hits[:k]` and *then* applied `_apply_neg_filter` — the
+  opposite order from the merge path two branches above.  When the
+  top-k LIKE hits all carry the negated term, the filter emptied
+  the capped slice and qualified chunks sitting just below
+  position k silently vanished (`猫 -犬` whose two densest 猫
+  chunks contain 犬 returned `[]` while a 猫-only hit existed).
+  The filter now runs before the cap, refilling the surviving
+  pool to k — same order as the merge path.
+- New `test_like_only_neg_filter_runs_before_cap` pins the defect
+  class behaviorally: a negated top-k must not starve the result.
+
+### v0.2.524
+
+- Real defect: `color:var(--ink)` in `.src .src-rename` referenced a
+  custom property never defined in `:root` — the input silently fell
+  back to `initial` (browser default) instead of `--sumi`. Fixed to
+  `var(--sumi)`.
+- New pin `test_css_var_refs_are_defined`: every `var(--x)` in
+  index.html must resolve to a `--x:` definition — undefined custom
+  properties degrade silently to initial/inherit with no signal.
+
+### v0.2.523
+
+- New pin `test_ui_selectors_are_cataloged`: every
+  `querySelector`/`querySelectorAll` literal in index.html is
+  cataloged — renaming a class/attribute token without updating the
+  selector silently returns null forever, killing the feature with
+  no test or console signal (a silent-death class no check saw).
+  Multi-line literals are whitespace-normalized; the `$` alias
+  definition site (`s`) is excluded.
+- Fail-direction: the initial baseline mismatch surfaced the full
+  selector diff listing; corrected baseline is green.
+
+### v0.2.522
+
+- New pin `test_unicode_predicate_calls_are_cataloged`: the
+  `isdigit`/`isnumeric`/`isdecimal`/`isspace`/`isalpha`/`isalnum`
+  family is Unicode-wide — `'１２３４'.isdigit()` and `'²'.isdigit()`
+  return True, so a bare call on unnormalized text accepts shapes
+  the code never intended. The 8 live sites are cataloged per file:
+  `isascii() &&` guarded (search.py), post-NFKC where width and
+  superscripts already folded (citation.py `_part_value`), or on
+  export keys where a Unicode digit still parses (export.py). A new
+  predicate call is a drift event requiring the same justification.
+- Fail-direction probed: an `isnumeric` injection in studio.py
+  surfaces in the counts drift at its line; restore green.
+
+### v0.2.521
+
+- New pin `test_interpolated_regexes_are_cataloged`: an interpolated
+  regex pattern injects its value into regex syntax — an unescaped
+  runtime term can rewrite match semantics or raise re.error (and
+  defeats static ReDoS review). The 9 live interpolated sites all
+  interpolate module-level constants; the one runtime-term path
+  keeps its `re.escape` (search.py) pinned as a separate assertion.
+  Any new interpolated re.* call is a drift event requiring
+  justification.
+- Fail-direction probed: an f-string `re.compile` injection in
+  studio.py surfaces at its line; restore green.
+
+### v0.2.520
+
+- New pin `test_argparse_reads_stay_declared`: every `args.<attr>`
+  read in cli.py must resolve to a declared argparse destination —
+  a misspelled read (`args.noteboook_id`) raises AttributeError
+  only when that subcommand runs, and dispatch tests may not touch
+  every flag path. Declared dests come from `add_argument`
+  (long-option-derived + explicit dest=), `add_subparsers(dest=)`,
+  and `set_defaults(...)` keyword names.
+- Fail-direction probed: `args.actoin` surfaces in the unknown-read
+  listing at its line; restore green.
+
+### v0.2.519
+
+- Except-inventory pin extended to `contextlib.suppress(...)`: a
+  suppress context is an except-handler spelled differently — the
+  ExceptHandler walk never saw it, so `with contextlib.suppress(X):`
+  could land anywhere in prod silently swallowing a defect class.
+  Suppress calls are folded into the same signature list prefixed
+  `suppress(...)` (args sorted like tuple handlers); the one real
+  site — `suppress(OSError)` in store.py's best-effort chmod repair —
+  is cataloged. Both spellings covered: `contextlib.suppress` and a
+  from-imported bare `suppress`.
+- Fail-direction probed: a `suppress(ValueError)` injection in
+  studio.py surfaced in the drift listing at its line; restore green.
+
+### v0.2.518
+
+- Ledger sync: product-review.md gains the v0.2.496-517 summary
+  block (the pin-system meta-audit arc — 16 structural pins + 1 real
+  defect sealing every escape route past literal-match AST pins:
+  gate-suppression catalogs, file-mutation verbs, except/raise
+  inventories, the symlink chmod fix, alias/from-import/dynamic-
+  dispatch/verb-as-value/dunder/module-namespace-write bans, and
+  the statement-level bans). Header version + test-count markers
+  updated; spec.md's measured line follows the same count.
+
+### v0.2.517
+
+- New pin `test_dangerous_statements_are_banned`: the assert ban
+  (v0.2.281) gets its sibling — the rest of the statement-level
+  surface pinned to zero:
+  - `global`/`nonlocal`: lets a function mutate outer-scope state
+    without appearing as a module-level Assign — the module-mutable
+    catalog (v0.2.451) sees declarations, not this other half.
+  - `del x`/`del obj.attr`/`del lst[i]`: makes a name or slot
+    disappear; every reader-side pin assumes declared names stay
+    bound.
+  - `if TYPE_CHECKING:` / `typing.TYPE_CHECKING`: a block that can
+    never execute — dead code still counted in the coverage
+    denominator and hiding untestable paths.
+- Fail-direction probed: `global` and `del` injections in studio.py
+  each caught at their line; restore green.
+
+### v0.2.516
+
+- New pin `test_watched_modules_never_mutated`: writes *into* a
+  watched module's namespace mutate shared interpreter state
+  invisibly to every read-side pin. Three shapes sealed:
+  `os.chmod = fake` / `del os.environ` (runtime monkeypatching —
+  every later call site resolves to the replacement), subscript
+  stores into a watched module's mutable data attribute
+  (`os.environ["X"]=`, `sys.modules["os"]=fake` — injects state or
+  fake modules wholesale), and mutator methods on module data
+  attributes (`sys.path.insert`, `os.environ.update`). Reads like
+  `os.environ.get(...)` stay legal; zero-inventory catalog.
+- The sibling binding pin's dynamic set gained `setattr`/`delattr`
+  on watched modules — the monkeypatch primitive that was missing
+  from the getattr-era list.
+- Fail-direction probed: `os.chmod = None`, `os.environ["X"]=`, and
+  `setattr(os, "chmod", ...)` injections each caught at their line.
+
+### v0.2.515
+
+- New pin `test_dunder_traversal_is_banned`: the import-free escape —
+  object-model traversal reaches arbitrary capability without a
+  single watched-module name (`f.__globals__["os"].chmod`,
+  `().__class__.__base__.__subclasses__()`, `__code__`/`__closure__`
+  internals, `__reduce__` pickle-gadget protocol, raw
+  `__get__`/`__set__`/`__delete__`, `mod.__builtins__`,
+  `__loader__`/`__spec__`). Live surface is only benign
+  `.__name__`/`.__init__`; the dangerous set is banned outright
+  while data dunders (`__doc__`, `__file__`, `__cause__`, ...) stay
+  legal.
+- Capability-import pin extended: dynamic module loading
+  (`importlib`/`runpy`/`zipimport`/`modulefinder` — a module that
+  materializes other modules sidesteps the inventory itself),
+  non-http protocols (`smtplib`/`ftplib`/`telnetlib`/`poplib`/
+  `imaplib`/`nntplib`/`xmlrpc` — bypass the SSRF guard wholesale),
+  `concurrent`/`asyncio` (new concurrency capability), and dotted
+  `http.client` (direct fetch skipping the pinned connection; the
+  existing exception-type imports are cataloged as live grants).
+- Fail-direction probed: `f.__globals__`, `import smtplib`, and an
+  `http.client` grant in a new file each caught at their line.
+
+### v0.2.514
+
+- New pin `test_capability_imports_are_cataloged`: call-site pins
+  watch *usage*; this watches the *grant*. A module acquires a
+  capability the moment it imports subprocess/ctypes/pickle/mmap/
+  signal/multiprocessing/raw-socket — the import itself is the
+  smallest reviewable event and passes through no call-site pattern.
+  The per-file inventory is pinned: only ingest.py's `socket`+`ssl`
+  (the SSRF-pinned TLS connection, ADR-001) are live grants. A new
+  `import subprocess` anywhere — or socket/ssl spreading beyond
+  ingest.py — drifts loudly instead of arriving silently in a diff.
+- http.server/urllib stay outside the list: they are the sanctioned
+  network surfaces already covered by the timeout/SSRF pins.
+- Fail-direction probed: `import subprocess` injection in studio.py
+  caught at its line; restore green.
+
+### v0.2.513
+
+- New pin `test_watched_verbs_never_become_values`: the binding pins
+  cover names; this covers the remaining route — referencing a
+  watched module's dangerous verb as a *value*. `functools.
+  partial(os.chmod, p)` / `map(os.chmod, paths)` / `handler(os.chmod)`
+  never put the attribute in a call `func`, so every module-attribute
+  inventory missed them. Rule: `<watched>.<danger-verb>` Attributes
+  may appear only as a direct call func or a type annotation
+  (`x: threading.Lock` names a type, not a smuggled callable).
+- Three sibling escapes sealed in the same pin:
+  `sys.modules["os"].chmod(p)` and `globals()["os"].chmod(p)`
+  (Subscript receivers, not Names); `builtins.eval`/`builtins.open`
+  (attribute spelling of call-banned primitives); and
+  `operator.methodcaller("unlink")`/`attrgetter("chmod")` (verb names
+  smuggled as strings).
+- Tuning found by the pin itself: `threading.Lock` used as an
+  *annotation* (`generation_lock: threading.Lock`) is a legitimate
+  type reference — annotation subtrees (AnnAssign/args/returns) are
+  exempt so type usage cannot be flagged as a value escape.
+- Fail-direction probed: `map(os.chmod, ...)`, `sys.modules["os"]
+  .chmod`, and `builtins.eval` injections each caught at their line.
+
+### v0.2.512
+
+- New pin `test_watched_module_bindings_are_cataloged`: the alias ban
+  (v0.2.511) closed `import os as o`, but three sibling routes still
+  rebound a watched module's verbs under a bare name invisible to
+  every `func.value.id == "<module>"` pin — all now sealed:
+  1. `from os import chmod` / `import *`: the from-import inventory
+     of watched modules is cataloged (Path x4, io.BytesIO,
+     datetime/timezone); any new bare-name binding drifts loudly.
+  2. `getattr(os, "chmod")` / `__import__` / `importlib.import_module`
+     / `.__dict__` dynamic dispatch is banned (duck-typed
+     `getattr(llm, ...)` reads stay legal).
+  3. `f = os.chmod` rebinding into a plain Name is banned
+     (`self.conn.row_factory = sqlite3.Row` is an attribute target,
+     exempt).
+- Fail-direction probed: `from os import chmod`, `getattr(os, "chmod")`,
+  and `_f = os.chmod` injections each caught at their line.
+
+### v0.2.511
+
+- New pin `test_time_and_thread_calls_are_cataloged`: the codebase's
+  entire clock/concurrency call surface is exact-match cataloged —
+  `datetime.now(timezone.utc)` in `_now` + the bounded `time.sleep`
+  backoff + three `threading.Lock()` sites. Naive producers
+  (`utcnow`/`fromtimestamp`/bare `now()`/`datetime(...)`), second
+  timestamp formats (`strftime`/`strptime`/`fromisoformat`), and new
+  `threading.Thread`/`Timer`/`Event` spawns all drift the catalog.
+- Arg-level check: the `datetime.now` site must carry a tz (positional
+  or `tz=`) — swapping `_now`'s body to naive local time fails without
+  touching the inventory.
+- Same pin bans aliased imports of watched modules (`import os as o`
+  evades every module-attribute pin — `o.chmod` never matches
+  `func.value.id == "os"`). `cli.py`'s gratuitous `import json as
+  _json` was the one live violation: renamed to canonical `json`.
+- Fail-direction probed: `time.time`/`datetime.now()`/`threading.Timer`
+  injections and `import os as _o` each caught at their line.
+
+### v0.2.510
+
+- Hardened the gate-suppression pin (v0.2.497): the marker regex missed
+  `pragma: allowlist` (detect-secrets' own suppression — a literal
+  `# pragma: allowlist secret` already lived unmonitored at
+  tests/test_qa.py:1283), `pragma: no branch` (coverage partial-branch
+  waivers), `coverage: ignore`, `nosec`, and `yapf:`/`isort:` variants.
+- Same pin now scans the test tree for secret-evasion markers only
+  (`type: ignore` is noise in test stubs; a suppressed secret in a
+  fixture is still a leaked secret), and bans `.coveragerc`/`setup.cfg`/
+  `tox.ini` outright — coverage merges them before pyproject, so an
+  `omit`/`exclude_lines` there would shrink the 90% floor invisibly.
+- Fail-direction probed: `# nosec` injected into a test file caught at
+  its line; prod baseline {cli:2, ingest:2, pipeline:1, server:5}
+  unchanged, test baseline {test_qa.py:1} cataloged.
+
+### v0.2.509
+
+- Extended the file-mutation pin (v0.2.498): `OS_VERBS` was missing
+  the less-common mutators — `os.utime`/`chown`/`lchown`/`removedirs`/
+  `renames`/`mkfifo`/`mknod`/`lchmod`/`chflags`/`lchflags`/`setxattr`/
+  `removexattr`/`ftruncate` all slip through `os.*`-only inventories.
+- `Path.replace` (rename-with-overwrite) was unmonitored but can't
+  join PATH_VERBS — the verb collides with `str.replace`, which is
+  everywhere. The pin now flags it on Path receivers only:
+  `Path(x).replace(y)` chained-call form, or a name bound to
+  `Path(...)` anywhere in the same file.
+- Fail-direction probed: name-bound `p.replace()`, chained
+  `Path().replace()`, and `os.utime` injections each caught at their
+  line; str.replace sites stay unflagged; baseline {cli:1, server:2,
+  store:4} unchanged.
+
+### v0.2.508
+
+- SSE mid-stream error frame leaked the raw `str(exc)` to the client
+  (DB paths, query fragments, LLM internals) while the `_dispatch` 500
+  path already sent only `type(exc).__name__` (v0.2.476). The
+  build_context-failure path now sends the type name and logs the full
+  exception to stderr instead — same leak class, same fix.
+  `test_build_context_error_frame_and_no_dangling_turn` now pins the
+  client-visible `message` to the type name.
+
+### v0.2.507
+
+- New pin `test_lookup_sentinels_are_cataloged`: `.find()`/`.rfind()`/
+  `.index()` call sites are cataloged per file ({ingest:2, search:1}) —
+  find's -1 sentinel is silent (``s[:s.find(x)]`` on absence truncates
+  the last char) and index's ValueError escapes as a 500; new sites
+  must justify their guard, same convention as the file-mutations pin.
+- Same pin bans `f"{expr=}"` debug-`=` markers in production strings —
+  they render `x=42` verbatim into user-facing text/LLM prompts.
+  Detection matches the AST Constant before each FormattedValue to the
+  expression's own source (`label={q}` output stays unflagged:
+  "label" != "q"), and `type(x) == T` compares (subclass-blind;
+  `isinstance` is the convention).
+- Sweep context: every `pop(` site is while/if-guarded or defaulted;
+  `suppress(OSError)` is the single narrow catch in the chmod loop;
+  every `sorted()`/`heapq` call keys or sorts scalars; `type()` calls
+  are `__name__` diagnostics plus one legitimate metaclass
+  construction; the one `for...else` correctly uses
+  else-on-full-completion semantics; no `%`-printf formatting, no
+  platform/sys.version_info branches, no `.partition` uses.
+
+### v0.2.506
+
+- Extended the dangerous-primitives pin: builtin `hash()` is now banned
+  in production code — it is salted per process (PYTHONHASHSEED), so
+  any cache key/ordering/digest built on it silently differs between
+  invocations; content hashing already goes through hashlib.sha256.
+- New pin `test_no_iteration_mutation_or_builtin_shadow` covering three
+  silent-semantics defect classes: (a) mutating the collection a `for`
+  loop iterates (the classic skip-an-element bug), (b) builtin-name
+  shadowing inside function scope (a `list`/`type`/`id` local that
+  hijacks later builtin calls in the same scope — class-scope field
+  names like a dataclass `id:` are attributes, exempt), (c) `is`/
+  `is not` against non-singleton literals (identity-vs-equality that
+  works by accident under CPython interning). Nested function bodies
+  are never descended into — a closure does not run during iteration.
+- Sweep context: `re.match` sites already anchored `^..$` by the route
+  pin; multi-char `strip()` args all intentional char-set uses; every
+  Content-Length parse ValueError-guarded; dynamic regex needles either
+  static tables or `re.escape()`d; zero mutation-during-iteration,
+  zero `is`-literal compares, zero `hash(` call sites today.
+
+### v0.2.505
+
+- Require `strict=` on every `zip()` call site (AST pin): positional
+  pairing was silently truncating at the shorter side — fused/scored
+  lists in search.py, context titles/ids in server.py, context/text
+  pairs and embed batches in pipeline.py (8 sites total).
+- Surface embed count mismatches instead of truncating silently: when a
+  backend returns fewer/more vectors than requested, `_embed_chunks`
+  now warns on stderr (stdout purity is pinned) and embeds only the
+  correctly paired prefix via an explicit slice; positional pairing was
+  already correct for a short list, so under-delivery — the real defect
+  — is now visible instead of silent.
+- New pins: `test_zip_calls_require_strict` (AST: no `zip(` Name-call
+  may lack the `strict` keyword) and
+  `test_embed_count_mismatch_warns_and_keeps_prefix` (behavioral:
+  short batch → stderr warning + leading-ids-only embeddings).
+
+### v0.2.504
+- **New pin**: `test_finally_blocks_never_swallow_exceptions` —
+  `return`/`break`/`continue` inside a `finally` body silently
+  discards any in-flight exception (the error neither propagates
+  nor logs; a real error path becomes a quiet early exit). CPython
+  SyntaxWarnings `break`/`continue` there in 3.14; `return` is the
+  legal form of the same defect. Zero tolerance in `shoin/` —
+  every finally block scanned for flow statements.
+- **New pin**: `test_single_arg_minmax_sites_are_cataloged` —
+  `min(seq)`/`max(seq)` on one sequence argument is the
+  rarest-input crash class (ValueError on `[]`), invisible to
+  tests that always pass non-empty data. The only sites today are
+  `_minmax`'s guarded pair in search.py; any new single-arg
+  min/max drifts the catalog and must justify its emptiness guard.
+- Audited this cycle, clean: zero flow-statements in finally;
+  every other `min`/`max` site is a two-arg scalar clamp;
+  `_minmax` guards `if not values` before both calls.
+- Fail-direction verified for both pins (injected `return` in a
+  finally body and a bare `min(seq)` — each caught, then reverted).
+
+### v0.2.503
+- **Real fix (fd leak on TLS failure)**:
+  `_PinnedHTTPSConnection.connect` created the raw TCP socket then
+  handed it to `wrap_socket` — a handshake failure (bad cert,
+  protocol error) orphaned the raw socket: one leaked fd per failed
+  HTTPS attempt, accumulating on a long-running server and invisible
+  to tests that never open a real socket. The wrap is now paired
+  with `raw.close()` whenever it raises; the success path leaves
+  ownership with the SSLSocket. `except Exception` (not
+  BaseException) keeps the codebase's never-catch-BaseException
+  convention — the three pin baselines (except-Exception sites,
+  handler signatures, raise inventory) updated accordingly.
+- **New pin**: `test_tls_handshake_failure_closes_raw_socket` —
+  fakes `socket.create_connection` + a raising `wrap_socket`,
+  asserts the raw socket is closed on failure and NOT closed on
+  success. Fail-direction verified: removing `raw.close()` is
+  caught by the assertion.
+- Audited this cycle, clean: all `urlopen` sites are `with`;
+  fetch_url's connection is closed in `finally`; `os.open`/`os.close`
+  is immediately paired; `sqlite3.connect` lives behind Store's
+  `with`-pinned lifecycle; `socket.create_connection` results are
+  owned by `self.sock` and closed via `conn.close()`.
+
+### v0.2.502
+- **Real fix (Unicode recall hole)**: every lexical-matching path folded
+  text via `.lower()`, which for fold-differing characters ('ß'→'ss',
+  'ﬁ'→'fi', ligatures, dotted-i) silently misses matches — 'STRASSE'
+  vs 'straße' scored 0.0. All double-sided Python comparisons now fold
+  via NFKC + `.casefold()` (24 sites across citation.py and
+  search.py): strictly widens recall, identical results for ASCII/CJK.
+- **Deliberately NOT converted**: the SQL LIKE path (`LOWER(c.text)`
+  vs `LOWER(?)` needle) folds ASCII only — a casefolded needle would
+  *miss* content the folded form can't reproduce ('ß' content vs 'ss'
+  needle), so single-sided `.lower()` symmetry is kept there by
+  contract. ASCII-token compares (env flags, extensions, ASCII
+  stopwords, hostname literals, charset/content-type tokens, sqlite
+  error probes) also stay `.lower()`.
+- **New pin**: `test_text_folds_use_casefold_for_matching` — catalogs
+  the remaining `.lower()` sites per file (config 1, ingest 4,
+  search 3, server 3, store 2 — all ASCII-token compares) plus a
+  behavioural assert that `lexical_overlap("STRASSE", "…straße…")`
+  now scores > 0. Fail-direction verified: reverting
+  `_norm_query_terms` to `.lower()` is caught at `search.py:1044`.
+
+### v0.2.501
+- **Real fix (chmod-through-symlink)**: the DB-permission repair loop
+  globs `db_name*` and `os.chmod` follows symlinks — inside a shared
+  `--db` parent directory a planted `shoin.sqlite3-evil` symlink would
+  tighten whatever file it pointed at (integrity tamper via our own
+  repair pass). The glob now skips symlinks; real DB/sidecars still
+  tighten. Pinned by `test_db_chmod_repair_never_follows_symlinks`
+  (planted link → victim file keeps its mode).
+- **New pin**: `test_decorators_are_cataloged` — every decorator on a
+  production function must come from the allowed set
+  (staticmethod/classmethod/property/wraps): a decorator silently wraps
+  its function, and the dangerous members (`@lru_cache`, a swallowing
+  custom retry, `@contextmanager` on a writer) are invisible to the
+  name-based scans.
+- Audited this cycle, clean: HTTP response bodies are all bounded
+  (`resp.read(MAX_UPLOAD_BYTES+1)` in ingest, `_MAX_RESPONSE+1` = 32MB
+  in llm, `exc.read(300)` on error bodies); `sqlite3.connect` lives
+  only in store.py; prod has exactly one decorator (a `@staticmethod`);
+  `os.open`/`sqlite3.connect` on the DB path is the only file-open
+  that can follow a link, and the residual write-through-symlink
+  window requires an attacker-writable `--db` parent — where content
+  privacy is already moot.
+
+### v0.2.500
+- **New pin**: `test_raise_inventory_is_cataloged` — every `raise` in
+  `shoin/` is pinned to a per-file type-signature inventory (the mirror
+  of the except-handler pin). The error-code pin curates the CODES
+  inside coded domain errors, but the TYPE raised is a separate
+  surface: a generic `raise Exception("...")` or an uncoded
+  `raise ValueError` on the request path escapes the coded-error
+  mapping and surfaces as an unclassified 500 while looking perfectly
+  ordinary in review. Today's inventory is fully curated: coded domain
+  errors wherever the client can see them; builtin guards only where a
+  programmer error is the right signal (`ValueError` in internal
+  validators, the loopback pin in `build_server`, `AssertionError` on a
+  proven-unreachable line, `argparse.ArgumentTypeError`); bare
+  re-raises and variable re-raises (`raise last_exc`) in retry loops.
+- Audited this cycle, clean: both `while True` loops are bounded by
+  invariant (decompressor output capped by `_check_size`, `str.find`
+  start strictly increases); all `yield` sites are streaming
+  generators; no `global`/`nonlocal`/`del`/`assert` statements in prod;
+  every dynamic `getattr` uses a literal name + default.
+
+### v0.2.499
+- **New pin**: `test_except_handler_inventory_is_cataloged` — every
+  `except` handler in `shoin/` is pinned to a per-file signature
+  inventory (canonical: tuple members sorted). The earlier catch-all
+  pin curates `except Exception` and broad forms, but a new
+  specific-typed handler (`except TypeError: return None`) was
+  invisible to it — neither bare nor Exception-wide, sliding through
+  lint and every gate while silently swallowing a defect class.
+  Silent-fallback bodies (pass/continue/return of a constant, name, or
+  empty literal) are counted per file too, so flipping a real error
+  path to a quiet default at an existing signature site is caught.
+- Audited this cycle, clean: no `asyncio`/`async`/`await` in prod
+  (llm.py is synchronous urllib); every dynamic-`getattr` site uses a
+  literal attribute name with a default (duck-typing); zero bare
+  `except`/`BaseException`; the two `KeyboardInterrupt` catches are the
+  legitimate top-level sites; every silent-fallback body is a
+  documented default (optional config file -> {}, degraded LLM answer
+  -> None/[], write attempt on a gone client -> pass).
+
+### v0.2.498
+- **New pin**: `test_file_writes_are_cataloged` — every
+  filesystem-mutating call (delete/rename/mkdir/chmod/write/tempfile
+  creation/`os.*`/`shutil.*`/`open` in a write mode) in `shoin/` is
+  pinned to a per-file inventory: `cli.py` 1 (eval `--save`),
+  `server.py` 2 (upload staging temp + cleanup), `store.py` 4
+  (private-permission DB setup). An unlisted mutation could silently
+  create, rewrite, or delete user files — e.g. a new "cleanup" path
+  reaching a document folder — invisible to every test until data was
+  gone.
+- Audited this cycle, clean: DNS-rebinding defense already exists
+  (`_reject_cross_site` pins Host and non-GET Origin to loopback);
+  `hashlib` is sha256-only; no `eval`/`exec`/`compile`/`importlib`,
+  `random`/`uuid`, `lru_cache`, or `input()`; `re.sub` replacements all
+  static; upload filenames are basename-sanitized; export writes to
+  stdout only; JS dynamic selectors use static `data-*` values.
+
+### v0.2.497
+- **New pin**: `test_gate_suppressions_are_cataloged` — every
+  gate-silencing marker (`noqa` / `type: ignore` / `pragma: no cover`
+  / pyright/pylint/flake8/fmt/isort/ruff cousins) in `shoin/` is pinned
+  to a per-file catalog (cli 2, ingest 2, pipeline 1, server 5); a
+  waiver smuggled inside an unrelated change is invisible to lint,
+  typecheck, and coverage, so the inventory itself is now gated.
+  `pyproject.toml` may not carry `per-file-ignores`, `exclude`,
+  `overrides`, or any `ignore_errors`-class key — file-wide gate
+  narrowing is forbidden at config level too.
+- Audited this cycle, clean: `threading.*` usage is the three
+  declared `Lock()`s only; JS `setTimeout`/`setInterval` sites are
+  already guarded; no `outerHTML`/`insertAdjacentHTML`/`document.write`
+  sinks exist.
+
+### v0.2.496
+- **Ledger sync**: `docs/product-review.md` brought to v0.2.496 — new
+  summary block covering v0.2.472-495 (the failure-surfacing pins, the
+  three real UI defects, and the completed E501 paydown), plus stale
+  header/test-count markers refreshed. `docs/spec.md`'s quality
+  snapshot updated to the v0.2.496 measurement (1123 tests).
+
+### v0.2.495
+- **Backlog paydown (final installment)**: all over-long lines in
+  `test_core.py` wrapped (114 sites — assert/call sites to
+  continuation style with recursive argument explosion, long
+  literals split via content-preserving adjacent concatenation,
+  docstrings/comments reflowed). The ratchet baseline is now empty:
+  every file in the tree sits at E501 budget 0, so any new over-long
+  line anywhere fails the suite. Backlog: 220 → 0; the E501 debt is
+  fully repaid and permanently prevented from regrowing.
+
+### v0.2.494
+- **Backlog paydown (fourth installment)**: all over-long lines in
+  `test_ui_contract.py` wrapped (25 sites — JS-inside-Python-string
+  harness lines split at block/comma boundaries where a newline is
+  semantics-neutral in JS; Python call/assert sites to continuation
+  style). The file leaves the ratchet catalog. Backlog: 139 → 114;
+  only `test_core.py` remains.
+
+### v0.2.493
+- **Backlog paydown (third installment)**: all over-long lines in
+  `test_qa.py`, `test_server.py`, and `test_studio.py` wrapped (25 sites
+  — assert calls to continuation style, docstrings reflowed, fake-LLM
+  `reply=` literals split via content-preserving adjacent concatenation).
+  Those files leave the ratchet catalog entirely. Backlog: 164 → 139
+  (only `test_core.py` 114 and `test_ui_contract.py` 25 remain).
+
+### v0.2.492
+- **Backlog paydown (second installment — production tree complete)**:
+  all remaining over-long lines in `shoin/` wrapped (48 sites across
+  citation/cli/qa/search/server/store/studio). String literals split at
+  content-preserving boundaries via adjacent-literal concatenation;
+  raise/call/dict-comprehension sites wrapped with standard continuation
+  indent. The entire production tree is now out of the ratchet catalog —
+  every `shoin/*.py` file is at budget 0 permanently. Backlog: 220 → 164,
+  all of it in `tests/`.
+
+### v0.2.491
+- **Backlog paydown (first installment)**: all over-long lines in
+  `config.py`, `pipeline.py`, `ingest.py`, and `export.py` wrapped
+  (8 sites) — those files leave the ratchet catalog entirely, so their
+  budget is now 0: they can never acquire a new long line. Baseline
+  drift assert is now computed from the catalog itself, so paying a
+  line down REQUIRES updating the baseline — the bookkeeping that keeps
+  the ratchet honest. Backlog: 220 → 212 across 12 remaining files.
+
+### v0.2.490
+- **Ratchet pin**: E501 sits outside the ruff select set because 220
+  pre-existing over-long lines are grandfathered — but nothing stopped
+  the backlog from growing. `test_e501_violations_never_grow` pins each
+  file's violation count to today's baseline: shrink-only, never grow.
+  The measure replicates ruff's E501 semantics exactly (East-Asian
+  display width W/F = 2 columns, `# type: ignore`/`# noqa` pragmas
+  stripped, trailing unbreakable URL exempt — verified count-for-count
+  against ruff: 220). Fail-direction: an injected 110-char line in
+  studio.py fails with the file's budget in the message.
+- **Audit (clean)**: flag-set-before-success sweep — every `disabled=`
+  site restores in catch/finally, `_nbSeq`/`_sealSeq` stale guards are
+  monotonic by construction, `refreshQuestions` captures `nbId` before
+  awaiting, `questions_cache` writes only after full compute under the
+  lock, SSE failure tails are all bounded, every `href` write is a
+  server-id path with `removeAttribute` cleanup.
+
+### v0.2.489
+- **Fix + pin**: the source viewer's lazy `<details>` full-text load set
+  `dataset.loaded` BEFORE the fetch and never cleared it on failure —
+  collapse→reopen could not retry, so a transient fetch error pinned the
+  error text on permanently for that viewer session. The catch now
+  deletes the flag (reopen = retry gesture) and the handler reuses one
+  `.full-body` element (`querySelector` then create) so a retry can
+  never stack a second placeholder. Pin
+  `test_lazy_details_retries_after_failure` (node-run): failure clears
+  the flag + writes the error, reopen refetches into the same body with
+  the placeholder back, successful retry renders and re-arms the flag.
+  Fail-direction: removing `delete det.dataset.loaded` fails the pin.
+
+### v0.2.488
+- **Fix + pin**: `import sre_parse` (inside the ReDoS-geometry pin)
+  emitted a DeprecationWarning on every verify run and ImportErrors
+  once CPython removes the alias — migrated to `re._parser`, the
+  canonical 3.11+ name. New pin
+  `test_no_removed_or_deprecated_stdlib_imports` (TestResidualGuards)
+  AST-scans prod AND test files for every scheduled-removal module:
+  PEP 594 dead batteries (cgi/telnetlib/audioop/...), legacy asyncore/
+  asynchat/imp/smtpd, and the sre_* trio. Relative imports
+  (`from .chunk import`) are excluded — they resolve to sibling
+  package modules, not stdlib. Fail-direction: `import sre_parse`
+  and `import telnetlib` each caught at file:line.
+
+### v0.2.487
+- **Fix + pin**: response-shape collection reads were defensively
+  inconsistent — `cur.sources.forEach` raw while `cur.sources?.length`
+  guarded elsewhere, `(j.chunks || [])` in one fetch vs bare `j.chunks`
+  into `renderFullSource` in the next, `j.questions.forEach` raw. A
+  malformed/truncated envelope then produced a TypeError toast or an
+  empty render depending on which call site received it. Collections
+  are now normalized at the trust boundary — `openNotebook` assigns
+  `cur = {sources:[], messages:[], notes:[], studio:[], ...j}` so
+  every collection exists inside render*, `loadNotebooks` defaults
+  `j.notebooks || []`, `renderFullSource`/`refreshQuestions` default
+  at the consumer. Pin `test_collection_reads_are_boundary_normalized`
+  (node-run lexical + behavioral: undefined chunks → clean empty
+  render, replaceChildren observed).
+
+### v0.2.486
+- **Pin extension**: `test_no_dangerous_primitives_or_mutable_defaults`
+  gains the process-exit / debugger primitive class — `breakpoint()`
+  (request-thread hang on stdin), `exit()`/`quit()`/`sys.exit()`/
+  `os._exit()`/`raise SystemExit` (BaseException — sails past every
+  `except Exception` guard and kills the handler thread silently),
+  `pdb`/`bdb` imports, and the uncurated `warnings`/`traceback`
+  diagnostic channels (same class the logging ban covers). `sys.exit`
+  stays legitimate only at the two CLI entry tails
+  (`cli.py: sys.exit(main())`, `__main__.py`), catalogued by
+  (file, count). Also audited clean this cycle: the
+  `isinstance(True, int)` type-confusion surface — every JSON body
+  field routes through `_require`/`_optional_str` which REJECT
+  non-strings outright, so no numeric/bool field exists to confuse;
+  `int(Content-Length)` sites are ValueError-guarded at both call
+  sites (`_read_json` → 400-path, `_h_src_upload` → INGEST_EMPTY);
+  `format=` validated against `FORMATS`; `_drain` bounded.
+
+### v0.2.485
+- **Pin**: `test_timestamps_come_only_from_store_now`
+  (TestResidualGuards) — `ORDER BY updated_at DESC` is a string sort,
+  correct only while every timestamp shares `_now()`'s exact shape
+  (`datetime.now(timezone.utc).isoformat(timespec="microseconds")`,
+  fixed 32 chars ending `+00:00`). A second producer — naive
+  `datetime.now()`, `strftime`, `time.time` — still string-sorts but
+  silently corrupts ordering around the offset suffix, and no test
+  would ever write two different producers at once to notice. AST
+  walk: every clock-producing call (`now`/`utcnow`/`today`/`isoformat`/
+  `strftime`/`strptime`/`fromisoformat`/`mktime`/`time`/`monotonic`/
+  `perf_counter`; `time.sleep` the busy-retry exempted) must live
+  lexically inside `store.py::_now`'s body. Behavioral floor:
+  `_now()` output parses via `fromisoformat` with tz, is 32 chars,
+  non-decreasing; ≥5 real `_now()` write sites exist today.
+  Fail-direction: injected `__import__("time").time()` in search.py →
+  `search.py:1418` caught; restored.
+- **Adjacent audit (clean)**: all `updated_at`/`created_at` writes
+  already funnel through `_now()`; zero `fromisoformat`/`strptime`/
+  `mktime`/`time.time`/`monotonic` reads in prod; `datetime`/`time`
+  imports exist only in store.py (sleep for the lock retry).
+
+### v0.2.484
+- **Fix (UI)**: `localStorage.getItem("shoin.lang")` ran unguarded at
+  script top level (and `setItem` in the toggle handler) — where
+  storage is disabled (private-mode restrictions, sandboxed iframe,
+  blocked cookies) the SecurityError aborts script evaluation entirely:
+  markup renders, every control inert, zero console-diagnosable hint
+  for users. All access now funnels through `_lsGet`/`_lsSet`, which
+  degrade to in-memory no-ops (language falls back through the
+  documented precedence; the toggle simply doesn't persist).
+- **Pin**: `test_localStorage_access_is_failure_tolerant`
+  (tests/test_ui_contract.py) — lexical containment: outside the two
+  helper bodies `localStorage.` may not appear (any new bare site is
+  the same boot-killer; a raw `count == 2` would NOT discriminate
+  because pre-fix code also had two sites) + node-run both-directions
+  check (throwing store degrades to null/no-throw, real store
+  passthrough). Fail-direction proven by reverting the read site —
+  containment catches it.
+- **Adjacent audit (clean)**: every `async` function/handler in the
+  file self-guards — `openNotebook`/`health`/`refreshQuestions`/
+  `openSeal`/`showSource`/`commit` and all ~20 onclick/onsubmit/
+  onchange/toggle async bodies carry `try`/`catch` (the two remaining
+  unguarded fire-and-forget rejections were `loadNotebooks`, fixed in
+  v0.2.483, and the boot `.catch`). No `sessionStorage` use.
+
+### v0.2.483
+- **Fix (UI)**: `loadNotebooks()` was the only async function in index.html
+  whose fetch+`.json()` lived outside any `try` — `openNotebook`,
+  `health`, `refreshQuestions`, and `api()`'s envelope parse all
+  self-guard, but the one function called fire-and-forget from ~15
+  sites (post-mutation refresh inside PATCH/DELETE/openNotebook
+  handlers, row click/keyboard open, the boot call's `.catch` being the
+  only guarded one) let an envelope error or malformed JSON escape as an
+  `unhandledrejection`: no toast, silently stale notebook list, evidence
+  in the console only. Wrapped the body in the file's own
+  `catch(e){ toast(e.message); }` convention so every call site is safe
+  by construction; the boot `.catch` becomes redundant but harmless.
+- **Pin**: `test_loadNotebooks_toasts_instead_of_rejecting`
+  (tests/test_ui_contract.py) extracts the real function under node,
+  makes `api()` throw `[500] down`, and asserts the promise *resolves*
+  and the message reaches `toast`. Fail-direction proven by stripping
+  the guard — the rejection crashed the harness (exit ≠ 0).
+
+## Version History: v0.1.37 → v0.2.480
+
+### v0.2.480
+- Extended `test_bare_except_exception_sites_are_curated` with an AST
+  pass over `Try`/`TryStar` handler shapes: the line-level regex and
+  catalog counts cannot see `except (Exception, OSError)` (tuple form
+  — no literal `except Exception` text exists to count) or
+  `except* Exception` (TryStar, legal since the pinned 3.11 floor) —
+  both reach the same catch-all class uncatalogued. Handlers whose
+  type reaches Exception/BaseException through bare/tuple/starred/
+  attribute/subscript shapes now fail unless they are the lone
+  catalogued `except Exception` Name under `Try`. Narrow `except*
+  OSError` and `except (ValueError, OSError)` stay allowed — same
+  policy as narrow except clauses. Probed both directions: tuple and
+  except* injections flagged at file:line, clean tree green.
+
+
+
 ## Version History: v0.1.37 → v0.2.479
 
 ### v0.2.479

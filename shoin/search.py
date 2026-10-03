@@ -23,7 +23,14 @@ import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
-from .chunk import _CJK_RANGES, is_cjk
+from .chunk import (
+    _CJK_RANGES,
+    _KYU_TO_SHIN,
+    _SHIN_TO_KYU,
+    _ascii_fold,
+    _match_fold,
+    is_cjk,
+)
 from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
 from .config import TOP_K
 from .store import Store
@@ -44,14 +51,27 @@ _CJK_NEG_CLASS = "".join(f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES)
 # what CAN be negated) to cover every _CJK_RANGES script, but never extended
 # this lookbehind (what precedes a hyphen that DISQUALIFIES it from being
 # negation) to match \u2014 so a hyphen tightly glued to a preceding CJK word
-# character (e.g. "\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0\u306E-\u6700\u9069\u5316", hiragana \u306E directly before the
-# hyphen) was misparsed as `-\u6700\u9069\u5316` negation syntax instead of an ordinary
-# in-sentence hyphen, silently discarding real query content.
+# character (e.g.
+# "\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0\u306E-\u6700\u9069\u5316",
+# hiragana \u306E directly before the hyphen) was misparsed as
+# `-\u6700\u9069\u5316` negation syntax instead of an ordinary in-sentence
+# hyphen, silently discarding real query content.
 _CJK_WORD_NEG_CLASS = "".join(
     f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES if (lo, hi) != (0x3000, 0x303F)
 )
+# Every dash a keyboard or IME can emit, not just ASCII '-': the
+# U+2010-2015 dash family (hyphen, non-breaking hyphen, figure/en/em
+# dashes, horizontal bar), U+2212 minus sign, U+FE63 small
+# hyphen-minus and U+FF0D fullwidth hyphen-minus — the two most
+# common fullwidth-IME outputs for '-'. 'ー'/'ｰ' are deliberately
+# absent: prolonged-sound marks are CJK word characters (スーパー,
+# ｼﾞｰｸ), so treating them as negation syntax would misparse real
+# terms.  Before this, '猫 −犬' negated nothing and POSITIVELY
+# searched 犬 — the exact opposite of the user's exclusion.
+_NEG_DASHES = "\\-‐-―−﹣－"
 _NEG_RE = re.compile(
-    rf"(?<![A-Za-z0-9_])(?<![{_CJK_WORD_NEG_CLASS}])-([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)"
+    rf"(?<![A-Za-z0-9_])(?<![{_CJK_WORD_NEG_CLASS}])"
+    rf"[{_NEG_DASHES}]([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)"
 )
 
 
@@ -68,7 +88,7 @@ def neg_terms(query: str) -> list[str]:
     Example: "Python -2.7 -legacy" → ["2.7", "legacy"] (note: "2.7" contains
     a dot that _NEG_RE does not capture across; the caller strips the raw hit).
     """
-    return [m.group(1).lower() for m in _NEG_RE.finditer(query)]
+    return [m.group(1).casefold() for m in _NEG_RE.finditer(query)]
 
 
 def strip_neg_terms(query: str) -> str:
@@ -115,15 +135,39 @@ def _is_cjk_word(ch: str) -> bool:
     NFKC target ・ (U+30FB) already is one.  Without this, ｿﾌﾄｳｪｱ･ｱｰｷﾃｸﾁｬ and
     ソフトウェア・アーキテクチャ would split into different numbers of terms.
     """
+    # Letters, digits and combining marks of every script are word characters
+    # (v0.2.529): Unicode alnum covers the alphabetic blocks _CJK_RANGES now
+    # contains (accented Latin, Cyrillic, Greek, Hebrew, Arabic, Indic...)
+    # without enumerating each letter subrange, and the mark categories
+    # (Mn/Mc/Me) continue a run so decomposed spellings (e+◌́, Devanagari
+    # matras) stay whole.  Punctuation inside those blocks (Hebrew ־,
+    # Arabic ؛؟, danda, Armenian stops) drops out by not being alnum — no
+    # per-block punct tables.  ASCII stays on _WORD_RE's side: 'café' still
+    # splits 'caf' + 'é' so a glued 'Python入門' query keeps two terms
+    # rather than narrowing to one contiguous-match term.
+    if ch.isascii():
+        return False
+    if ch.isalnum() or unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+        return True
     cp = ord(ch)
     if not is_cjk(ch):
         return False
+    # Punctuation category inside any block is a boundary — the alphabetic
+    # blocks taken near-whole carry their own stops (، ؛ ؟ ־ । ፣՝ etc.)
+    # and must not glue runs.  ・ and ･ stay word characters: they join
+    # kana terms exactly like the existing block-exclusion handles them.
+    if unicodedata.category(ch).startswith("P"):
+        return ch in "・･"
     if 0x3000 <= cp <= 0x303F:
-        return cp == 0x3005  # 々 is a word character; everything else is punctuation/space
-    # ｡｢｣､ (U+FF61–FF64) are the halfwidth counterparts of 。「」、 and break runs
-    # the same way; ･ (U+FF65) is excluded from this test because its NFKC target
-    # ・ (U+30FB) is already a word character.
-    return not 0xFF61 <= cp <= 0xFF64
+        # 々/〆 exited via the alnum path and the block's punctuation died
+        # at the P-check; what remains is the ideographic space and the
+        # symbol marks 〠〶〷 — the marks are words, the space is a boundary.
+        return unicodedata.category(ch) == "So"
+    # Every other char in a content block is a symbol/glue character — a
+    # word char unless it is itself a space (Ogham's U+1680 must not merge
+    # the words either side of it).  The ｡｢｣､ chars this test used to
+    # list are all Po and exit at the P-check above.
+    return not ch.isspace()
 
 
 def query_terms(query: str) -> list[str]:
@@ -235,56 +279,6 @@ def _to_halfwidth(s: str) -> str:
 # common jōyō simplifications. A query or source written in pre-reform
 # orthography shares ZERO trigrams with the modern spelling — the same
 # all-or-nothing gap the kanji skeleton fixes for inflections (v0.2.224).
-# The bridge is query-side like every other variant (the index stays
-# byte-identical to the source): emit the fully-converted counterpart of
-# whichever script the term arrived in. Ambiguous simplifications (弁, 台,
-# 与…) pick the most common predecessor — an occasionally wrong old form is
-# harmless: the variant only adds an extra needle/gram and can never suppress
-# a document the term itself matched.
-_SHIN_TO_KYU: dict[str, str] = {
-    "圧": "壓", "悪": "惡", "為": "爲", "医": "醫", "壱": "壹", "隠": "隱",
-    "栄": "榮", "衛": "衞", "円": "圓", "縁": "緣", "応": "應", "欧": "歐",
-    "殴": "毆", "桜": "櫻", "温": "溫", "穏": "穩", "仮": "假", "価": "價",
-    "画": "畫", "会": "會", "懐": "懷", "壊": "壞", "概": "槪", "拡": "擴",
-    "殻": "殼", "覚": "覺", "学": "學", "楽": "樂", "缶": "罐", "関": "關",
-    "陥": "陷", "勧": "勸", "寛": "寛", "観": "觀", "気": "氣", "亀": "龜",
-    "偽": "僞", "戯": "戲", "犠": "犧", "旧": "舊", "拠": "據", "挙": "擧",
-    "虚": "虛", "峡": "峽", "狭": "狹", "郷": "鄕", "暁": "曉", "区": "區",
-    "駆": "驅", "継": "繼", "茎": "莖", "渓": "溪", "経": "經", "蛍": "螢",
-    "軽": "輕", "鶏": "鷄", "芸": "藝", "撃": "擊", "研": "硏", "県": "縣",
-    "倹": "儉", "剣": "劍", "険": "險", "献": "獻", "検": "驗", "顕": "顯",
-    "広": "廣", "効": "效", "鉱": "鑛", "号": "號", "国": "國", "穀": "榖",
-    "黒": "黑", "砕": "碎", "済": "濟", "剤": "劑", "斎": "齋", "雑": "雜",
-    "桟": "棧", "賛": "贊", "蚕": "蠶", "残": "殘", "辞": "辭", "歯": "齒",
-    "児": "兒", "湿": "濕", "実": "實", "写": "寫", "釈": "釋", "寿": "壽",
-    "収": "收", "従": "從", "渋": "澁", "獣": "獸", "縦": "縱", "粛": "肅",
-    "処": "處", "将": "將", "奨": "奬", "醤": "醬", "焼": "燒", "証": "證",
-    "条": "條", "乗": "乘", "剰": "剩", "浄": "淨", "畳": "疊", "縄": "繩",
-    "壌": "壤", "醸": "釀", "嬢": "孃", "触": "觸", "寝": "寢", "慎": "愼",
-    "真": "眞", "尽": "盡", "図": "圖", "粋": "粹", "酔": "醉", "穂": "穗",
-    "随": "隨", "髄": "髓", "枢": "樞", "数": "數", "声": "聲", "静": "靜",
-    "摂": "攝", "専": "專", "浅": "淺", "戦": "戰", "践": "踐", "銭": "錢",
-    "潜": "潛", "繊": "纖", "禅": "禪", "壮": "壯", "争": "爭", "荘": "莊",
-    "装": "裝", "捜": "搜", "挿": "插", "蔵": "藏", "臓": "臟", "増": "增",
-    "即": "卽", "属": "屬", "続": "續", "堕": "墮", "対": "對", "体": "體",
-    "帯": "帶", "滞": "滯", "台": "臺", "滝": "瀧", "択": "擇", "沢": "澤",
-    "単": "單", "胆": "膽", "団": "團", "弾": "彈", "断": "斷", "痴": "癡",
-    "虫": "蟲", "鋳": "鑄", "庁": "廳", "徴": "徵", "聴": "聽", "懲": "懲",
-    "勅": "敕", "転": "轉", "伝": "傳", "灯": "燈", "当": "當", "盗": "盜",
-    "稲": "稻", "徳": "德", "独": "獨", "読": "讀", "弐": "貳", "悩": "惱",
-    "脳": "腦", "覇": "霸", "拝": "拜", "廃": "廢", "売": "賣", "麦": "麥",
-    "発": "發", "髪": "髮", "抜": "拔", "蛮": "蠻", "秘": "祕", "浜": "濱",
-    "氷": "冰", "弁": "辯", "歩": "步", "宝": "寶", "豊": "豐", "没": "沒",
-    "万": "萬", "満": "滿", "黙": "默", "訳": "譯", "薬": "藥", "与": "與",
-    "誉": "譽", "揺": "搖", "様": "樣", "謡": "謠", "来": "來", "覧": "覽",
-    "竜": "龍", "涙": "淚", "塁": "壘", "暦": "曆", "歴": "歷", "恋": "戀",
-    "楼": "樓", "録": "錄", "練": "練", "齢": "齡", "労": "勞", "炉": "爐",
-    "禄": "祿", "乱": "亂", "湾": "灣",
-}
-
-_KYU_TO_SHIN = {v: k for k, v in _SHIN_TO_KYU.items()}
-
-
 def _kyujitai_variants(s: str) -> list[str]:
     """Fully-traditional and fully-simplified spellings of *s*.
 
@@ -334,6 +328,103 @@ def _int_to_kanji(v: int) -> str:
     if v:
         parts.append(_kanji_group(v, omit_one=True))
     return "".join(parts)
+
+
+# Live decimal-digit blocks (each Nd row is contiguous 0-9).  NFKC folds
+# only the fullwidth row, so Arabic-Indic ٣٤٥, Persian ۳۴۵, Devanagari
+# ३४५, Bengali ৩৪৫, Thai ๓๔๕ and friends are byte-distinct spellings
+# of the same number with nothing bridging them — query "345" could not
+# reach a document writing "٣٤٥", and vice versa, even though Python's
+# own \d and int() both treat them as digits.  Unlike the accent-fold
+# bridge (open-ended, unenumerable) the digit space is closed: each row
+# is a fixed 10-glyph permutation, so the fold enumerates in both
+# directions — the script term gains its ASCII fold (which then feeds
+# _numeric_variants for 万/億/kanji spellings) and the ASCII term gains
+# every script row.
+_DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
+    tuple("0123456789"),           # ASCII (also the fold target)
+    tuple(chr(0x0660 + d) for d in range(10)),   # Arabic-Indic ٠-٩
+    tuple(chr(0x06F0 + d) for d in range(10)),   # Extended (Persian/Urdu) ۰-۹
+    tuple(chr(0x0966 + d) for d in range(10)),   # Devanagari ०-९
+    tuple(chr(0x09E6 + d) for d in range(10)),   # Bengali ০-৯
+    tuple(chr(0x0A66 + d) for d in range(10)),   # Gurmukhi ੦-੯
+    tuple(chr(0x0AE6 + d) for d in range(10)),   # Gujarati ૦-૯
+    tuple(chr(0x0B66 + d) for d in range(10)),   # Oriya ୦-୯
+    tuple(chr(0x0BE6 + d) for d in range(10)),   # Tamil ௦-௯
+    tuple(chr(0x0C66 + d) for d in range(10)),   # Telugu ౦-౯
+    tuple(chr(0x0CE6 + d) for d in range(10)),   # Kannada ೦-೯
+    tuple(chr(0x0D66 + d) for d in range(10)),   # Malayalam ൦-൯
+    tuple(chr(0x0E50 + d) for d in range(10)),   # Thai ๐-๙
+    tuple(chr(0x0ED0 + d) for d in range(10)),   # Lao ໐-໙
+    tuple(chr(0x1040 + d) for d in range(10)),   # Myanmar ၀-၉
+    tuple(chr(0x17E0 + d) for d in range(10)),   # Khmer ០-៩
+    tuple(chr(0x0F20 + d) for d in range(10)),   # Tibetan ༠-༩
+    tuple(chr(0x1810 + d) for d in range(10)),   # Mongolian ᠐-᠙
+)
+
+
+def _stem_variants(term: str) -> list[str]:
+    """Singular/base spellings of an English ASCII term (v0.2.536).
+
+    Neither FTS5's trigram tokeniser nor SQL LIKE stems, so 'documents'
+    cannot reach a document that wrote 'document' — the English half of the
+    same inflection gap _kanji_skeleton bridges for Japanese conjugation.
+    The rule set is deliberately the small, closed BM25-lite family (final
+    -s/-es/-ies, -ing/-ed with double-consonant and silent-e handling, -ly):
+    every emitted stem keeps a ≥3-char alphabetic base, inflection-lookalike
+    endings that aren't ('this', 'status', 'hiss') are excluded by shape,
+    and each candidate is an OR'd extra term — a dead spelling costs one
+    pattern but can never hide a real hit.  Casing follows the term's own
+    first letter so 'Documents' yields 'Document'.  Non-ASCII and mixed
+    alphanumeric terms are untouched."""
+    if not (term.isascii() and term.isalpha() and len(term) >= 4):
+        return []
+    low = term.lower()
+    stems: list[str] = []
+
+    def add(stem: str) -> None:
+        if len(stem) >= 3 and stem != low and stem not in stems:
+            stems.append(stem)
+
+    if low.endswith("ies"):
+        add(low[:-3] + "y")                    # queries -> query
+    if low.endswith(("sses", "shes", "ches", "xes", "zes")):
+        add(low[:-2])                          # classes/wishes/watches/boxes
+    if low.endswith("s") and not low.endswith(("ss", "us", "is")):
+        add(low[:-1])                          # documents -> document
+    if low.endswith("ing"):
+        add(low[:-3])                          # hunting -> hunt
+        if len(low) >= 7 and low[-4] == low[-5]:
+            add(low[:-4])                      # running -> run
+        else:
+            add(low[:-3] + "e")                # making -> make
+    if low.endswith("ed"):
+        add(low[:-2])                          # walked -> walk
+        add(low[:-2] + "e")                    # achieved -> achieve
+        if len(low) >= 6 and low[-3] == low[-4]:
+            add(low[:-3])                      # dropped -> drop
+    if low.endswith("ly") and len(low) >= 5:
+        add(low[:-2])                          # quickly -> quick
+    if term[:1].isupper():
+        stems = [s[:1].upper() + s[1:] for s in stems]
+    return stems
+
+
+def _digit_variants(term: str) -> list[str]:
+    """Script-row spellings of an all-decimal-digit term (v0.2.534).
+
+    Only fires when every char is a decimal digit — decimal() also
+    rejects kanji numerals (四 is Lo, not Nd), letters, and mixed
+    terms like 'a3', so letter-digit terms never explode into a
+    per-script cartesian product of nonsense needles."""
+    vals: list[int] = []
+    for ch in term:
+        if not ch.isdecimal():   # deliberately Unicode-wide: every Nd row
+            return []
+        vals.append(unicodedata.decimal(ch))
+    if not vals:
+        return []
+    return ["".join(row[d] for d in vals) for row in _DIGIT_ROWS]
 
 
 def _numeric_variants(term: str) -> list[str]:
@@ -419,12 +510,35 @@ def term_variants(term: str) -> list[str]:
     """
     norm = unicodedata.normalize("NFKC", term)
     katakana = _to_katakana(norm)
-    candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    candidates = [
+        term,
+        norm,
+        # NFD is the one-directional inverse of NFKC's composition: a
+        # canonically-spelled query (한 syllable, 亀 ideograph) must
+        # still reach a document whose text is compatibility-decomposed —
+        # macOS writes filenames in NFD, and those filenames land in
+        # chunk contexts.  For terms with nothing to decompose this is
+        # identity and dedups away.
+        unicodedata.normalize("NFD", norm),
+        _to_hiragana(norm),
+        katakana,
+        _to_halfwidth(katakana),
+    ]
     candidates.append(_kanji_skeleton(norm))
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))
     candidates.extend(_numeric_variants(norm))
+    digits = _digit_variants(norm)
+    candidates.extend(digits)
+    if digits and not norm.isascii():
+        # The ASCII fold of script digits is itself a numeral whose
+        # shorthand family must bridge too ('٣٢٠٠٠' → '3.2万' path).
+        candidates.extend(_numeric_variants(digits[0]))
     candidates.extend(_kyujitai_variants(norm))
+    ascii_folded = _ascii_fold(norm)
+    if ascii_folded != norm and ascii_folded.isascii():
+        candidates.append(ascii_folded)
+    candidates.extend(_stem_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
@@ -600,9 +714,29 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
     # win was silently absent for exactly those queries.
     needles = _fallback_needles(clean_query)
     if not needles:
-        if negs:
-            fts_hits = _apply_neg_filter(fts_hits, negs)
-        return fts_hits  # return whatever FTS5 found (possibly empty)
+        if fts_hits or not negs or query_terms(clean_query):
+            # fts_hits or negs-only: same early return as before.  A positive
+            # term that produced no needle ('a -cd') is an unmatchable
+            # positive, not a negation-only query — keep the empty answer.
+            return _apply_neg_filter(fts_hits, negs) if negs else fts_hits
+        # Negation-only query ('-dogs'): no positive term to match, but the
+        # corpus is bounded — "everything except X" is a meaningful scan here
+        # even though web-scale engines refuse it.  Silently returning []
+        # read as "every chunk contains X", the opposite of the truth.
+        # Same pool cap as the LIKE path; all scores 0, ordered by c.id for
+        # determinism.
+        rows = store.conn.execute(
+            "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
+            " JOIN sources s ON s.id = c.source_id"
+            " WHERE s.notebook_id = ? ORDER BY c.id LIMIT ?",
+            (notebook_id, max(k * 10, 2000)),
+        ).fetchall()
+        pool = [
+            Hit(r["id"], r["source_id"], str(r["text"]), 0.0,
+                context=str(r["context"] or ""), seq=int(r["seq"]))
+            for r in rows
+        ]
+        return _apply_neg_filter(pool, negs)[:k]
     conditions = " OR ".join(
         "(c.text LIKE ? ESCAPE '|' OR c.context LIKE ? ESCAPE '|')" for _ in needles
     )
@@ -668,10 +802,12 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # The LIKE-only path caps at k; cap the merge path for consistency so
         # callers can rely on the k parameter being respected on all code paths.
         return fts_hits[:k]
-    result = like_hits[:k]
     if negs:
-        result = _apply_neg_filter(result, negs)
-    return result
+        like_hits = _apply_neg_filter(like_hits, negs)
+    # Filter before capping, exactly as the merge path does above: slicing
+    # [:k] first would starve the result when the top-k hits all carry the
+    # negated term, dropping better-qualified chunks just below the cap.
+    return like_hits[:k]
 
 
 # Field weight for the context breadcrumb column, applied identically in the
@@ -704,12 +840,12 @@ def _needle_score(text: str, context: str, needles: list[str]) -> float:
     that section's chunks, so a context match lifts the whole section
     uniformly and never reorders chunks within it.
     """
-    low_text = text.lower()
-    low_ctx = context.lower()
+    low_text = text.casefold()
+    low_ctx = context.casefold()
     return float(
         sum(
-            low_text.count(n.lower())
-            + (_CTX_BM25_WEIGHT if n.lower() in low_ctx else 0.0)
+            low_text.count(n.casefold())
+            + (_CTX_BM25_WEIGHT if n.casefold() in low_ctx else 0.0)
             for n in needles
         )
     )
@@ -743,20 +879,39 @@ def _apply_neg_filter(hits: list[Hit], negs: list[str]) -> list[Hit]:
     those characters.  The word-char set mirrors query_terms' [0-9A-Za-z_]
     tokenization so the exclusion boundary is the same boundary that produced
     the term.
+
+    The needle side runs through term_variants() for the same reason the
+    positive side does (v0.2.537): every spelling a term would *retrieve* it
+    must also *exclude*.  `-documents` that cannot drop a 'document' chunk is
+    the same silent gap as a 'documents' query that cannot reach it — and now
+    visibly asymmetric since stems/accents/digits/kana all bridge positively.
+    The widened set stays inside this filter's own discipline: ASCII-spelled
+    variants keep whole-word boundaries (a `-documents` stem still spares
+    'documentation'), everything else keeps substring semantics.
     """
-    folded_negs = [unicodedata.normalize("NFKC", n).lower() for n in negs]
+    folded_negs = [unicodedata.normalize("NFKC", n).casefold() for n in negs]
     checks: list[tuple[str | None, re.Pattern[str] | None]] = []
     for n in folded_negs:
-        if re.fullmatch(r"[0-9A-Za-z_]+", n):
+        ascii_words: list[str] = []
+        for v in term_variants(n):
+            fv = unicodedata.normalize("NFKC", v).casefold()
+            if re.fullmatch(r"[0-9A-Za-z_]+", fv):
+                if fv not in ascii_words:
+                    ascii_words.append(fv)
+            else:
+                checks.append((fv, None))
+        if ascii_words:
+            # Longest first so a stem variant can't shadow the full term.
+            words = sorted(ascii_words, key=len, reverse=True)
             checks.append(
-                (None, re.compile(rf"(?<![0-9A-Za-z_]){re.escape(n)}(?![0-9A-Za-z_])"))
+                (None, re.compile(
+                    rf"(?<![0-9A-Za-z_])(?:{'|'.join(re.escape(w) for w in words)})(?![0-9A-Za-z_])"
+                ))
             )
-        else:
-            checks.append((n, None))
     out: list[Hit] = []
     for h in hits:
-        folded_text = unicodedata.normalize("NFKC", h.text).lower()
-        folded_ctx = unicodedata.normalize("NFKC", h.context).lower()
+        folded_text = unicodedata.normalize("NFKC", h.text).casefold()
+        folded_ctx = unicodedata.normalize("NFKC", h.context).casefold()
         drop = False
         for s, w in checks:
             if w is not None:
@@ -796,7 +951,11 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
     (the codebase's existing LIKE/FTS granularity); ASCII candidates are whole
     words >= 3 chars, matching fts_query's whole-term threshold.  Exclusion
     uses each gram's full spelling-variant set, so a katakana gram in the docs
-    is not re-added against a hiragana query (and vice-versa).
+    is not re-added against a hiragana query (and vice-versa).  Doc-frequency
+    counts by the FOLDED gram (v0.2.544): データベース in one feedback hit
+    and でーたべーす in another is one topical term — literal keys split the
+    evidence across spellings, dropping a term both docs share below
+    PRF_MIN_DOCS and listing variant grams of it twice.
     """
     docs = hits[:PRF_DOCS]
     if len(docs) < PRF_MIN_DOCS:
@@ -804,6 +963,7 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
     norm_q = unicodedata.normalize("NFKC", query).casefold()
     query_vocab = {v.casefold() for t in query_terms(query) for v in term_variants(t)}
     counts: dict[str, int] = {}
+    reps: dict[str, str] = {}
     for h in docs:
         seen_in_doc: set[str] = set()
         for term in query_terms(f"{h.text} {h.context}"):
@@ -813,15 +973,20 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
             elif len(term) >= 3:
                 seen_in_doc.add(term.casefold())
         for g in seen_in_doc:
-            counts[g] = counts.get(g, 0) + 1
+            kf = _match_fold(g)
+            counts[kf] = counts.get(kf, 0) + 1
+            reps.setdefault(kf, g)
     cands = [
-        g
-        for g, c in counts.items()
+        reps[kf]
+        for kf, c in counts.items()
         if c >= PRF_MIN_DOCS
-        and all(v.casefold() not in query_vocab and v.casefold() not in norm_q for v in term_variants(g))
+        and all(
+            v.casefold() not in query_vocab and v.casefold() not in norm_q
+            for v in term_variants(reps[kf])
+        )
     ]
     # df desc, longer grams first (more specific), then text — deterministic.
-    cands.sort(key=lambda g: (-counts[g], -len(g), g))
+    cands.sort(key=lambda g: (-counts[_match_fold(g)], -len(g), g))
     return cands[:PRF_TERMS]
 
 
@@ -845,7 +1010,13 @@ def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[
         return hits
     extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k)
     seen = {h.chunk_id for h in hits}
-    merged = hits + [h for h in extra if h.chunk_id not in seen]
+    # Expansion-surfaced chunks match a SYSTEM-proposed term, not the user's
+    # vocabulary — detail["exp"] lets _tail_cut tell them apart from hits that
+    # reached the pool sharing no retrieval term at all (the real clip class).
+    extras = [h for h in extra if h.chunk_id not in seen]
+    for h in extras:
+        h.detail["exp"] = 1.0
+    merged = hits + extras
     merged.sort(key=lambda h: h.bm25, reverse=True)
     return merged[:k]
 
@@ -903,7 +1074,9 @@ def cosine(a: list[float], b: list[float]) -> float:
     return _cosine_prepared(a, _vec_norm(a), b)
 
 
-def vector_search(store: Store, notebook_id: int, query_vec: list[float] | None, k: int) -> list[Hit]:
+def vector_search(
+    store: Store, notebook_id: int, query_vec: list[float] | None, k: int
+) -> list[Hit]:
     if not query_vec:
         return []
     # Streamed, not fetchall(): only the top k survive, so there is no reason to
@@ -1026,19 +1199,40 @@ def rrf_fuse_lists(
 
 
 def _char_bigrams(text: str) -> set[str]:
-    t = text.lower()
+    # _match_fold, not casefold alone: MMR redundancy must see the spellings
+    # retrieval itself bridges.  A chunk that is another modulo kana/accent/
+    # digit-row/kyujitai orthography is the same content — counting it as
+    # diverse spent a selection slot on a duplicate (v0.2.543).
+    t = _match_fold(text)
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def _norm_query_terms(query: str) -> list[str]:
-    """Query terms, NFKC-folded and lower-cased — the form the scorers compare in."""
-    return [unicodedata.normalize("NFKC", t).lower() for t in query_terms(query)]
+def _norm_query_terms(query: str) -> list[list[str]]:
+    """Query terms as variant GROUPS, NFKC-folded and lower-cased.
+
+    Every spelling a term is retrieved by must also count as that term when
+    the hit is scored (v0.2.539): without the group a stem/accent/digit/
+    kana-bridged chunk read lex=0.0 — demoted by rerank() and eligible for
+    _tail_cut clipping as "term-free", the same retrieval-vs-scoring
+    blindness the width fold fixed one dimension earlier.
+    """
+    groups: list[tuple[str, ...]] = []
+    for t in query_terms(query):
+        variants = tuple(
+            dict.fromkeys(
+                unicodedata.normalize("NFKC", v).casefold()
+                for v in term_variants(t)
+            )
+        )
+        if variants and variants not in groups:
+            groups.append(variants)
+    return [list(g) for g in groups]
 
 
 def _overlap_from_norm(
-    norm_terms: list[str], text: str, idf: dict[str, float] | None = None
+    norm_terms: list[list[str]], text: str, idf: dict[str, float] | None = None
 ) -> float:
     """lexical_overlap's core, given already-normalised terms (see rerank()).
 
@@ -1050,23 +1244,23 @@ def _overlap_from_norm(
     """
     if not norm_terms:
         return 0.0
-    low = unicodedata.normalize("NFKC", text).lower()
+    low = unicodedata.normalize("NFKC", text).casefold()
     if idf is None:
         score = 0.0
-        for t in norm_terms:
-            tf = low.count(t)
+        for group in norm_terms:
+            tf = sum(low.count(v) for v in group)
             score += tf / (tf + 1.0)  # saturate repeated occurrences
         return score / len(norm_terms)
     num = den = 0.0
-    for t in norm_terms:
-        w = idf.get(t, 0.0)
-        tf = low.count(t)
+    for group in norm_terms:
+        w = idf.get(group[0], 0.0)
+        tf = sum(low.count(v) for v in group)
         num += w * (tf / (tf + 1.0))
         den += w
     return num / den if den else 0.0
 
 
-def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
+def _pool_idf(norm_terms: list[list[str]], texts: list[str]) -> dict[str, float]:
     """BM25-style IDF of each query term over the candidate pool itself.
 
     A term present in every candidate got them all retrieved in the first
@@ -1078,11 +1272,11 @@ def _pool_idf(norm_terms: list[str], texts: list[str]) -> dict[str, float]:
     everywhere then, so the large weight is multiplied by zero.
     """
     n = len(texts)
-    lows = [unicodedata.normalize("NFKC", t).lower() for t in texts]
+    lows = [unicodedata.normalize("NFKC", t).casefold() for t in texts]
     out: dict[str, float] = {}
-    for t in dict.fromkeys(norm_terms):
-        df = sum(1 for s in lows if t in s)
-        out[t] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+    for group in dict.fromkeys(tuple(g) for g in norm_terms):
+        df = sum(1 for s in lows if any(v in s for v in group))
+        out[group[0]] = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
     return out
 
 
@@ -1103,7 +1297,7 @@ def _occurrences(low: str, term: str) -> Iterator[int]:
         start = p + 1
 
 
-def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
+def _proximity_from_norm(norm_terms: list[list[str]], text: str) -> float:
     """0..1 unordered-window term-dependency score (Metzler & Croft, SIGIR 2005).
 
     BM25 and lexical_overlap both treat the query as a bag of words: a chunk
@@ -1119,26 +1313,34 @@ def _proximity_from_norm(norm_terms: list[str], text: str) -> float:
     there is no pair to be near — which keeps every single-term scoring path
     byte-identical to before this signal existed.
     """
-    terms = list(dict.fromkeys(norm_terms))
+    terms = list(dict.fromkeys(tuple(g) for g in norm_terms))
     if len(terms) < 2:
         return 0.0
-    low = unicodedata.normalize("NFKC", text).lower()
-    pts = sorted((p, t) for t in terms for p in _occurrences(low, t))
-    if len({t for _, t in pts}) < 2:
+    low = unicodedata.normalize("NFKC", text).casefold()
+    # Occurrences carry (offset, group index, variant length): every spelling
+    # in a group counts as that term, and the span closes on the variant's
+    # own end, not a representative's.
+    pts = sorted(
+        (p, gi, len(v))
+        for gi, g in enumerate(terms)
+        for v in g
+        for p in _occurrences(low, v)
+    )
+    if len({gi for _, gi, _ in pts}) < 2:
         return 0.0
     # Sliding window over the sorted occurrence list: contract left while the
     # leftmost term still occurs again inside the window, so each residual
     # window is the tightest covering of its distinct set for that right edge.
-    counts: dict[str, int] = {}
+    counts: dict[int, int] = {}
     best_cover, best_span = 0, len(low) + 1
     left = 0
     for right in range(len(pts)):
-        pos, term = pts[right]
-        counts[term] = counts.get(term, 0) + 1
+        pos, gi, vlen = pts[right]
+        counts[gi] = counts.get(gi, 0) + 1
         while counts[pts[left][1]] > 1:
             counts[pts[left][1]] -= 1
             left += 1
-        span = pos + len(term) - pts[left][0]
+        span = pos + vlen - pts[left][0]
         cover = len(counts)
         if cover > best_cover or (cover == best_cover and span < best_span):
             best_cover, best_span = cover, span
@@ -1194,7 +1396,7 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     the machinery entirely — every such scoring path is identical to before.
     """
     norm_terms = _norm_query_terms(query)
-    multi = len(set(norm_terms)) >= 2
+    multi = len(norm_terms) >= 2
     scored_texts = [f"{h.text}\n{h.context}" if h.context else h.text for h in hits]
     idf = _pool_idf(norm_terms, scored_texts) if multi else None
     for h, scored in zip(hits, scored_texts, strict=True):
@@ -1255,10 +1457,19 @@ def _tail_cut(hits: list[Hit]) -> list[Hit]:
     zero lexical overlap — a hit that reached the pool without sharing any
     query term.  Never reorders; a pool with no cliff or whose tail still
     carries terms passes through untouched.
+
+    detail["exp"] marks a hit surfaced by a system-proposed term (a PRF
+    expansion term, or a RAG-Fusion rewrite phrasing): lex==0 against the
+    user's query is expected for those, so they count as term-carrying —
+    clipping them would undo the recall the expansion machinery added.
     """
     for i in range(len(hits) - 1):
         nxt = hits[i + 1]
-        if hits[i].score - nxt.score >= ADAPTIVE_GAP and nxt.detail.get("lex", 0.0) == 0.0:
+        if (
+            hits[i].score - nxt.score >= ADAPTIVE_GAP
+            and nxt.detail.get("lex", 0.0) == 0.0
+            and not nxt.detail.get("exp")
+        ):
             return hits[: i + 1]
     return hits
 
@@ -1282,7 +1493,10 @@ def _debug_enabled() -> bool:
     return os.environ.get("SHOIN_DEBUG", "").strip().lower() not in ("", "0", "false")
 
 
-def _debug_print(label: str, query: str, negs: list[str], bm25_n: int, vec_n: int, final: list[Hit]) -> None:
+def _debug_print(
+    label: str, query: str, negs: list[str], bm25_n: int, vec_n: int,
+    final: list[Hit],
+) -> None:
     print(
         f"[DEBUG {label}] query={query!r} negs={negs} bm25_hits={bm25_n}"
         f" vec_hits={vec_n} final={len(final)}",
@@ -1390,6 +1604,13 @@ def retrieve_multi(
         # Same PRF-wrapped search as retrieve(): every phrasing expands on its
         # own feedback evidence — original and rewrite queries alike.
         bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool)
+        if i > 0:
+            # A hit surfaced only by a rewrite's vocabulary still matched a
+            # retrieval term — mark it so _tail_cut's term-free test (built on
+            # the primary query only, as the docstring above prescribes) does
+            # not clip the recall multi-query fusion exists to add.
+            for h in bm25_hits:
+                h.detail["exp"] = 1.0
         if negs and i > 0:
             # bm25_search() already applied the primary query's own negs (i==0);
             # rewrite lists were searched without them and need the filter here.
@@ -1412,5 +1633,8 @@ def retrieve_multi(
     # so the tail is longer and the clip more valuable.
     result = mmr(_tail_cut(rerank(clean, fused)), k)
     if _debug_enabled():
-        _debug_print(f"retrieve_multi({len(queries)} queries)", primary, negs, total_bm25, total_vec, result)
+        _debug_print(
+            f"retrieve_multi({len(queries)} queries)",
+            primary, negs, total_bm25, total_vec, result,
+        )
     return result

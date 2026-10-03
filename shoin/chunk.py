@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect
 import re
+import unicodedata
 
 from .config import CHUNK_OVERLAP, CHUNK_TOKENS
 
@@ -16,8 +17,29 @@ _CJK_RANGES = (
     (0x0E80, 0x0EFF),    # Lao
     (0x1000, 0x109F),    # Myanmar
     (0x1780, 0x17FF),    # Khmer
+    # NFKC-foldable blocks: characters that decompose to canonical
+    # Japanese/ASCII spellings.  Outside the ranges they silently
+    # vanished from query_terms (a '㍻元年' query searched '元年' alone)
+    # and escaped the CJK token cost; inside, term_variants' NFKC form
+    # bridges them to canonical spellings (㍻→平成, ㎏→kg, ﬁ→fi, Ⅲ→III).
+    (0x00AA, 0x00AA),    # ª feminine ordinal → a
+    (0x00B2, 0x00B3),    # ² ³ superscripts
+    (0x00B5, 0x00B5),    # µ micro sign → μ
+    (0x00B9, 0x00B9),    # ¹
+    (0x00BA, 0x00BA),    # º masculine ordinal → o
+    (0x00BC, 0x00BE),    # ¼ ½ ¾ vulgar fractions
+    (0x1100, 0x11FF),    # Hangul Jamo (decomposed — macOS NFD filenames)
+    (0x1B001, 0x1B152),  # kana supplement + ext-A hentaigana (→ katakana)
+    (0x2044, 0x2044),    # ⁄ fraction slash → /
+    (0x2070, 0x209C),    # superscript/subscript digits and letters ⁰-₉ₐ-ₜ
+    (0x2100, 0x214F),    # letterlike symbols ℃ ℉ № ℠ ㏄ (all fold)
+    (0x2160, 0x2188),    # Roman numerals Ⅰ-Ⅻ ⅰ-ⅻ ↀ-ↈ
+    (0x2460, 0x24FF),    # enclosed alphanumerics ①Ⓐⓐ
     (0x3000, 0x303F),    # CJK symbols and punctuation (。、　〆々 etc.)
     (0x3040, 0x30FF),    # hiragana + katakana
+    (0x3130, 0x318F),    # Hangul compatibility jamo ㄱ-ㆎ (fold to jamo)
+    (0x31F0, 0x31FF),    # katakana phonetic extensions (Ainu kana)
+    (0x3200, 0x33FF),    # enclosed CJK letters/months + compat (㈱㋿㍻㎏)
     (0x3400, 0x4DBF),    # CJK ext A
     (0x4E00, 0x9FFF),    # CJK unified ideographs
     (0xF900, 0xFAFF),    # CJK compat
@@ -27,9 +49,85 @@ _CJK_RANGES = (
     (0xFF61, 0xFF65),    # halfwidth CJK punctuation ｡｢｣､ and middle dot ･
     (0xFF66, 0xFF9F),    # halfwidth katakana + voiced/semi-voiced marks ﾞﾟ
     (0xAC00, 0xD7A3),    # Hangul syllables
+    (0x1F200, 0x1F2FF),  # enclosed ideographic supplement (🈶🈚🈸🈯🉐)
+    (0x1D400, 0x1D7FF),  # math alphanumeric 𝐀-𝞃 (→ ASCII letters)
     (0x20000, 0x2A6DF),  # CJK ext B (supplementary plane — rare/historical chars)
     (0x2A700, 0x2CEAF),  # CJK ext C/D/E/F
     (0x2CEB0, 0x2EBEF),  # CJK ext G/H
+    (0xFB00, 0xFB4F),    # alphabetic presentation forms ﬀ-ﬅ + Hebrew forms
+    (0xFFA0, 0xFFDC),    # halfwidth Hangul jamo (NFKC → jamo → syllables)
+    (0xFFE0, 0xFFE6),    # fullwidth currency/symbols ￠￡￥￦
+    # Alphabetic scripts: letters, vowel marks and digits that are NOT
+    # NFKC-foldable but ARE content.  Before this, 'café' silently lost
+    # é, a Cyrillic/Greek/Arabic query matched nothing at all (its whole
+    # term list was dropped), and every such char rode the token budget
+    # at cost 0.  Blocks are taken near-whole — punctuation they contain
+    # (Hebrew ־, Arabic ؛؟, danda, Armenian stops) is excluded from word
+    # runs by _is_cjk_word()'s category test, not by range surgery.
+    (0x00C0, 0x00FF),    # Latin-1 letters à-ÿ (× ÷ excluded word-side)
+    (0x0100, 0x024F),    # Latin extended A+B
+    (0x0250, 0x02AF),    # IPA extensions
+    (0x02B0, 0x02FF),    # spacing modifier letters
+    (0x0300, 0x036F),    # combining diacritical marks (NFD text)
+    (0x0370, 0x03FF),    # Greek and Coptic
+    (0x0400, 0x052F),    # Cyrillic + supplement
+    (0x0530, 0x058F),    # Armenian
+    (0x0590, 0x05FF),    # Hebrew (letters + nikkud marks)
+    (0x0600, 0x06FF),    # Arabic (letters + harakat + Eastern digits)
+    (0x0700, 0x077F),    # Syriac + Arabic supplement
+    (0x0780, 0x07BF),    # Thaana
+    (0x07C0, 0x07FF),    # NKo
+    (0x08A0, 0x08FF),    # Arabic extended-A
+    (0x0900, 0x097F),    # Devanagari
+    (0x0980, 0x09FF),    # Bengali
+    (0x0A00, 0x0A7F),    # Gurmukhi
+    (0x0A80, 0x0AFF),    # Gujarati
+    (0x0B00, 0x0B7F),    # Oriya
+    (0x0B80, 0x0BFF),    # Tamil
+    (0x0C00, 0x0C7F),    # Telugu
+    (0x0C80, 0x0CFF),    # Kannada
+    (0x0D00, 0x0D7F),    # Malayalam
+    (0x0D80, 0x0DFF),    # Sinhala
+    (0x0F00, 0x0FFF),    # Tibetan
+    (0x10A0, 0x10FF),    # Georgian
+    (0x1200, 0x137F),    # Ethiopic
+    (0x13A0, 0x13FF),    # Cherokee
+    (0x1400, 0x167F),    # Unified Canadian Aboriginal Syllabics
+    (0x1680, 0x169F),    # Ogham (1680 space excluded word-side)
+    (0x16A0, 0x16FF),    # Runic
+    (0x1800, 0x18AF),    # Mongolian
+    (0x1AB0, 0x1AFF),    # combining diacritical marks extended
+    (0x1D00, 0x1DBF),    # phonetic extensions
+    (0x1DC0, 0x1DFF),    # combining marks supplement
+    (0x1E00, 0x1EFF),    # Latin extended additional
+    (0x1F00, 0x1FFF),    # Greek extended
+    (0x20D0, 0x20FF),    # combining marks for symbols
+    (0x2C60, 0x2C7F),    # Latin extended-C
+    (0x2DE0, 0x2DFF),    # Cyrillic extended-A
+    (0xA640, 0xA69F),    # Cyrillic extended-B
+    (0xA720, 0xA7FF),    # Latin extended-D
+    (0xAB30, 0xAB6F),    # Latin extended-E
+    (0xFE20, 0xFE2F),    # combining half marks
+    (0xE0100, 0xE01EF),  # variation selectors supplement
+    # Symbol/emoji closure (v0.2.530): the last invisible class — So/Sc/Sk
+    # characters and sequence gluers.  '☕' / '😀' / '✓' / '€' used to drop
+    # from query_terms entirely ('☕カフェ' searched 'カフェ' alone, an
+    # emoji-only query returned nothing) and cost 0 tokens.  Sequence
+    # joiners (ZWNJ/ZWJ, variation selectors) become word characters too so
+    # '👨‍💻' and '☕️' keep their codepoint runs — FTS5 trigram indexes
+    # them, and the LIKE needles do literal substring anyway.  Historic
+    # scripts already ride the isalnum path; these fill the So-shaped hole.
+    (0x200C, 0x200D),    # ZWNJ/ZWJ — Indic orthography + emoji sequences
+    (0x20A0, 0x20CF),    # currency symbols € ₹ ₽ ₩ (Sc — content)
+    (0x2190, 0x245F),    # arrows, math ops ∑√∫, misc technical ⌘⌚
+    (0x2500, 0x2BFF),    # box/geometric shapes, misc symbols ☕⚠★,
+                        # dingbats ✓✈✂, supplemental arrows/math
+    (0x2FF0, 0x2FFF),    # ideographic description chars ⿴
+    (0x31C0, 0x31EF),    # CJK strokes
+    (0xFE00, 0xFE0F),    # variation selectors VS1-16 (emoji text/emoji form)
+    (0x1B000, 0x1B0FF),  # kana supplement (hentaigana — whole-range)
+    (0x1F000, 0x1F1FF),  # mahjong/domino/cards + regional indicators
+    (0x1F300, 0x1FAFF),  # emoji + symbols + enclosed supplement 🄯
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -42,7 +140,17 @@ _HEADING_RE = re.compile(r"^#{1,6}\s")
 # saw one giant "sentence" whose diluted bigram overlap hid unsupported claims.
 # (The other terminators need no halfwidth twin: ！？ fold to the ASCII !? already
 # in the class, and ． 's halfwidth is ASCII . handled by the (?<=\.)(?=\s) branch.)
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；｡])|(?<=\.)(?=\s)")
+# v0.2.533: the scripts v0.2.529 made word characters carry their own
+# terminators, and without them a Hindi or Urdu paragraph is one giant
+# "sentence" — the same width-blind failure ｡ had, one script family wider:
+# ।॥ danda (Devanagari & friends), ။ Myanmar section, ។ Khmer khan,
+# །༎ Tibetan shad/nyis shad, 。 Urdu/Arabic full stop, ؟ Arabic question,
+# ።፧፨ Ethiopic full stop/question/paragraph, ᠃ Mongolian full stop,
+# ։ Armenian full stop, ׃ Hebrew sof pasuq.  Each is unambiguous like 。
+# (unlike ASCII '.', no space-guard needed — none appears mid-number).
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<=[。．！？!?\n；｡।॥။។།༎۔؟።፧፨᠃։׃])|(?<=\.)(?=\s)"
+)
 # A genuine ATX heading closing sequence per CommonMark: one or more '#'
 # preceded by at least one space, with optional trailing spaces only
 # (e.g. "## Heading ##" -> the " ##" suffix). Requiring the preceding space
@@ -361,3 +469,145 @@ def split_text(
 ) -> list[str]:
     """Split *text* into chunks of ~chunk_tokens with overlap between chunks."""
     return [t for _, t in split_text_with_context(text, chunk_tokens, overlap_tokens)]
+
+
+# --- Spelling-fold primitives (v0.2.540) ------------------------------------
+# Retrieval bridges spelling variants query-side (term_variants enumerates
+# the spellings a term might carry).  The citation checks face the same
+# variants on BOTH sides of a comparison — an answer echoing データ as
+# でーた, 學習 as 学習, café as cafe, ٣٤٥ as 345 — but they cannot enumerate:
+# instead both texts fold to one canonical spelling so every variant pair
+# converges.  The tables live here, the shared bottom layer, because both
+# search.py (variant generation) and citation.py (comparison folding) use
+# them; importing across between those two would be circular.
+
+# shinjitai → kyujitai.  Ambiguous simplifications (弁, 台, 与…) pick the
+# most common predecessor — an occasionally wrong old form is harmless in
+# both consumers: the variant adds an extra needle/gram, and the fold only
+# ever merges spellings of the same word.
+_SHIN_TO_KYU: dict[str, str] = {
+    "圧": "壓", "悪": "惡", "為": "爲", "医": "醫", "壱": "壹", "隠": "隱",
+    "栄": "榮", "衛": "衞", "円": "圓", "縁": "緣", "応": "應", "欧": "歐",
+    "殴": "毆", "桜": "櫻", "温": "溫", "穏": "穩", "仮": "假", "価": "價",
+    "画": "畫", "会": "會", "懐": "懷", "壊": "壞", "概": "槪", "拡": "擴",
+    "殻": "殼", "覚": "覺", "学": "學", "楽": "樂", "缶": "罐", "関": "關",
+    "陥": "陷", "勧": "勸", "寛": "寛", "観": "觀", "気": "氣", "亀": "龜",
+    "偽": "僞", "戯": "戲", "犠": "犧", "旧": "舊", "拠": "據", "挙": "擧",
+    "虚": "虛", "峡": "峽", "狭": "狹", "郷": "鄕", "暁": "曉", "区": "區",
+    "駆": "驅", "継": "繼", "茎": "莖", "渓": "溪", "経": "經", "蛍": "螢",
+    "軽": "輕", "鶏": "鷄", "芸": "藝", "撃": "擊", "研": "硏", "県": "縣",
+    "倹": "儉", "剣": "劍", "険": "險", "献": "獻", "検": "驗", "顕": "顯",
+    "広": "廣", "効": "效", "鉱": "鑛", "号": "號", "国": "國", "穀": "榖",
+    "黒": "黑", "砕": "碎", "済": "濟", "剤": "劑", "斎": "齋", "雑": "雜",
+    "桟": "棧", "賛": "贊", "蚕": "蠶", "残": "殘", "辞": "辭", "歯": "齒",
+    "児": "兒", "湿": "濕", "実": "實", "写": "寫", "釈": "釋", "寿": "壽",
+    "収": "收", "従": "從", "渋": "澁", "獣": "獸", "縦": "縱", "粛": "肅",
+    "処": "處", "将": "將", "奨": "奬", "醤": "醬", "焼": "燒", "証": "證",
+    "条": "條", "乗": "乘", "剰": "剩", "浄": "淨", "畳": "疊", "縄": "繩",
+    "壌": "壤", "醸": "釀", "嬢": "孃", "触": "觸", "寝": "寢", "慎": "愼",
+    "真": "眞", "尽": "盡", "図": "圖", "粋": "粹", "酔": "醉", "穂": "穗",
+    "随": "隨", "髄": "髓", "枢": "樞", "数": "數", "声": "聲", "静": "靜",
+    "摂": "攝", "専": "專", "浅": "淺", "戦": "戰", "践": "踐", "銭": "錢",
+    "潜": "潛", "繊": "纖", "禅": "禪", "壮": "壯", "争": "爭", "荘": "莊",
+    "装": "裝", "捜": "搜", "挿": "插", "蔵": "藏", "臓": "臟", "増": "增",
+    "即": "卽", "属": "屬", "続": "續", "堕": "墮", "対": "對", "体": "體",
+    "帯": "帶", "滞": "滯", "台": "臺", "滝": "瀧", "択": "擇", "沢": "澤",
+    "単": "單", "胆": "膽", "団": "團", "弾": "彈", "断": "斷", "痴": "癡",
+    "虫": "蟲", "鋳": "鑄", "庁": "廳", "徴": "徵", "聴": "聽", "懲": "懲",
+    "勅": "敕", "転": "轉", "伝": "傳", "灯": "燈", "当": "當", "盗": "盜",
+    "稲": "稻", "徳": "德", "独": "獨", "読": "讀", "弐": "貳", "悩": "惱",
+    "脳": "腦", "覇": "霸", "拝": "拜", "廃": "廢", "売": "賣", "麦": "麥",
+    "発": "發", "髪": "髮", "抜": "拔", "蛮": "蠻", "秘": "祕", "浜": "濱",
+    "氷": "冰", "弁": "辯", "歩": "步", "宝": "寶", "豊": "豐", "没": "沒",
+    "万": "萬", "満": "滿", "黙": "默", "訳": "譯", "薬": "藥", "与": "與",
+    "誉": "譽", "揺": "搖", "様": "樣", "謡": "謠", "来": "來", "覧": "覽",
+    "竜": "龍", "涙": "淚", "塁": "壘", "暦": "曆", "歴": "歷", "恋": "戀",
+    "楼": "樓", "録": "錄", "練": "練", "齢": "齡", "労": "勞", "炉": "爐",
+    "禄": "祿", "乱": "亂", "湾": "灣",
+}
+
+_KYU_TO_SHIN = {v: k for k, v in _SHIN_TO_KYU.items()}
+
+# Latin letters NFKC does not fold to ASCII: digraphs and letters with no
+# canonical decomposition (ICU Latin-ASCII transliterator's core closed set).
+# The mark-strip half handles the composable rest (é→e, ñ→n, ü→u).
+_LATIN_SPECIALS: dict[str, str] = {
+    "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+    "ß": "ss", "ẞ": "SS", "ø": "o", "Ø": "O",
+    "đ": "d", "Đ": "D", "þ": "th", "Þ": "TH", "ð": "d", "Ð": "D",
+    "ł": "l", "Ł": "L", "ı": "i", "ŋ": "n", "Ŋ": "N",
+    "ħ": "h", "Ħ": "H", "ə": "e", "Ə": "E",
+}
+
+
+def _ascii_fold(term: str) -> str:
+    """ASCII spelling of a Latin term: diacritics stripped, specials mapped.
+
+    Decompose each character and drop its combining marks only when the
+    base is an ASCII letter — kana dakuten/handedakuten decompose too
+    (ド → ト + ゛) but their base is not ASCII, so 'データ' stays 'データ'
+    rather than emitting the dead 'テータ' spelling."""
+    out: list[str] = []
+    for ch in term:
+        mapped = _LATIN_SPECIALS.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        decomp = unicodedata.normalize("NFD", ch)
+        if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
+            out.append("".join(c for c in decomp if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _match_fold(text: str) -> str:
+    """Canonical spelling for content comparison (v0.2.540).
+
+    NFKC + casefold leaves same-word spellings byte-distinct — データ vs
+    でーた, 學 vs 学, café vs cafe, ٣٤٥ vs 345, ド in NFC vs ト + ゛ in
+    NFD, ソフト with a U+00AD SHY vs ソフト — so any check that compares
+    an answer against a source was blind to the very spellings retrieval
+    bridges.  A fold applied to BOTH sides needs no enumeration: every
+    variant pair converges to one canonical form.
+
+    Per character, after NFKC + casefold: katakana → hiragana, format
+    characters (ZWSP/SHY/ZWNJ/WJ/tags) dropped, decimal digit rows →
+    ASCII digits, kyujitai → shinjitai, Latin specials → ASCII, and
+    combining marks on ASCII bases stripped."""
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFKC", text).casefold():
+        cp = ord(ch)
+        if 0x30A1 <= cp <= 0x30F6:
+            out.append(chr(cp - 0x60))  # katakana → hiragana
+            continue
+        if unicodedata.category(ch) == "Cf":
+            continue  # ZWSP / SHY / ZWNJ / WJ / tag characters carry no content
+        mapped = _LATIN_SPECIALS.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        if ch.isdecimal():  # every script's Nd row → ASCII digits
+            out.append(chr(ord("0") + unicodedata.decimal(ch)))
+            continue
+        kyu = _KYU_TO_SHIN.get(ch)
+        if kyu is not None:
+            out.append(kyu)
+            continue
+        decomp = unicodedata.normalize("NFD", ch)
+        if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
+            out.append("".join(c for c in decomp if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _digit_fold(s: str) -> str:
+    """Every script's Nd row → ASCII digits (same mapping _match_fold applies
+    inline): '٣٤٥', '३४५', '๓๔๕' all become '345'.  int()/float() already
+    accept these digits; the fold exists for code that compares digit
+    strings verbatim."""
+    return "".join(
+        chr(ord("0") + unicodedata.decimal(c)) if c.isdecimal() else c
+        for c in s
+    )

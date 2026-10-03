@@ -96,7 +96,7 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .src .k{font-size:11px;color:var(--sumi-soft)}
 .src .src-act{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0}
 .src .src-act:hover{color:var(--shu)}
-.src .src-rename{font-size:13px;width:100%;border:1px solid var(--border-strong);border-radius:2px;padding:1px 4px;background:var(--paper);color:var(--ink);outline:none}
+.src .src-rename{font-size:13px;width:100%;border:1px solid var(--border-strong);border-radius:2px;padding:1px 4px;background:var(--paper);color:var(--sumi);outline:none}
 .adders{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .adders .row{display:flex;gap:6px}
 #nbList{list-style:none;padding:0}
@@ -351,6 +351,14 @@ const I18N = {
     "a11y.citation":"Citation S","a11y.delnote":"Delete note","a11y.nbname":"Notebook name","a11y.ask":"Question","a11y.notetitle":"Title","a11y.notebody":"Body"
   }
 };
+// Storage can be outright disabled (private-mode restrictions, sandboxed
+// iframes, cookies blocked): localStorage access throws SecurityError, and at
+// script top level that kills the entire boot — page renders, every control
+// dead. Accesses funnel through these guards; failures degrade to in-memory
+// no-ops (language falls back per the precedence below; the toggle just
+// doesn't persist).
+const _lsGet = k => { try{ return localStorage.getItem(k) }catch(e){ return null } };
+const _lsSet = (k,v) => { try{ localStorage.setItem(k,v) }catch(e){} };
 // Precedence: an explicit toggle click (persisted to localStorage) always wins;
 // otherwise the operator's SHOIN_LANG (server-injected into the meta tag below
 // as a real 2-letter code — see server.py's _h_ui; an unsubstituted build-time
@@ -360,7 +368,7 @@ const I18N = {
 // configured default; otherwise the browser's own locale; "ja" is the final
 // fallback if nothing else applies.
 const _serverLang = document.querySelector('meta[name="shoin-lang"]')?.content;
-let lang = localStorage.getItem("shoin.lang")
+let lang = _lsGet("shoin.lang")
   || (_serverLang && _serverLang.length === 2 ? _serverLang : null)
   || (navigator.language||"ja").slice(0,2);
 if (!I18N[lang]) lang = "en";
@@ -420,8 +428,9 @@ let externalPendingRename = null;
 
 /* ---------- notebooks & sources ---------- */
 async function loadNotebooks(){
+  try{
   const j = await (await api("/api/notebooks")).json();
-  notebooks = j.notebooks;
+  notebooks = j.notebooks || [];
   const ul = $("#nbList"); ul.replaceChildren();
   for (const nb of notebooks){
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
@@ -462,6 +471,7 @@ async function loadNotebooks(){
     const e0 = el("div","empty"); e0.append(el("b",null,t("nb.empty.title")), el("span",null,t("nb.empty.body")));
     ul.append(e0);
   } else if (!cur){ openNotebook(notebooks[0].id); }
+  }catch(e){ toast(e.message); }
 }
 // Requests can resolve out of order (click notebook A, then B; B's response
 // arrives first) — last-write-wins would then leave the user looking at the
@@ -473,7 +483,10 @@ async function openNotebook(id){
   try{
     const j = await (await api(`/api/notebooks/${id}`)).json();
     if (seq !== _nbSeq) return;
-    cur = j; renderNotebook(); loadNotebooks();
+    // Boundary normalization: inside render* every collection field exists,
+    // so raw .forEach/.length reads and ?./||[] guards stay interchangeable.
+    cur = {sources:[], messages:[], notes:[], studio:[], ...j};
+    renderNotebook(); loadNotebooks();
   }catch(e){ if (seq === _nbSeq) toast(e.message); }
 }
 // Enters inline-rename mode for a source row. Factored out of the dblclick
@@ -757,7 +770,7 @@ function renderFullSource(container, chunks, citedIds, excerpt){
   // there is nothing to verify against, so the old id-only behavior stays.
   const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
-  chunks.forEach((c, i) => {
+  (chunks || []).forEach((c, i) => {
     if (i) container.append(el("div","chunk-sep","⋯"));
     const isCited = marked.has(c.id) &&
       (!provable || excerpt.includes(String(c.text).slice(0, 24)));
@@ -809,13 +822,20 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
     det.addEventListener("toggle", async () => {
       if (!det.open || det.dataset.loaded) return;
       det.dataset.loaded = "1";
-      const body = el("div","full-body", "…");
-      det.append(body);
+      // One body element per <details>: reused on retry so a failed fetch
+      // can never leave a stale second placeholder behind.
+      let body = det.querySelector(".full-body");
+      if (!body){ body = el("div","full-body", "…"); det.append(body); }
+      body.textContent = "…";
       try{
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
         renderFullSource(body, j.chunks, citedIds, excerpt);
-      }catch(e){ if (!sig.aborted) body.textContent = e.message; }
+      }catch(e){
+        // Failure must clear `loaded` — collapse→reopen is the retry gesture,
+        // and keeping the flag set would pin the error text on permanently.
+        if (!sig.aborted){ delete det.dataset.loaded; body.textContent = e.message; }
+      }
     });
     vt.append(det);
     $("#viewer").classList.add("open");
@@ -949,7 +969,7 @@ async function refreshQuestions(){
   try{
     const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();
     if (!cur || cur.id !== nbId) return;  // notebook changed while waiting
-    j.questions.forEach(q=>{
+    (j.questions || []).forEach(q=>{
       const b = el("button","q-chip", q); b.type="button";
       b.onclick = ()=>{ $("#askInput").value=q; $("#askInput").focus(); };
       $("#qs").append(b);
@@ -1175,7 +1195,7 @@ document.querySelectorAll(".tabs button").forEach(b=>{
   };
 });
 $("#langBtn").onclick = ()=>{
-  lang = lang==="ja" ? "en":"ja"; localStorage.setItem("shoin.lang", lang);
+  lang = lang==="ja" ? "en":"ja"; _lsSet("shoin.lang", lang);
   applyI18n(); buildKindButtons(); if (cur) renderNotebook();
 };
 async function health(){

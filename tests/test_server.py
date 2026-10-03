@@ -467,7 +467,10 @@ class ServerTest(unittest.TestCase):
                 f"/api/notebooks/{nb['id']}/sources",
                 {"target": bad_target},
             )
-            self.assertEqual(status, 400, msg=f"file path target should be rejected: {bad_target!r}")
+            self.assertEqual(
+                status, 400,
+                msg=f"file path target should be rejected: {bad_target!r}",
+            )
             self.assertEqual(err["error"]["code"], "INGEST_UNSUPPORTED_FORMAT")  # type: ignore[index]
 
     def test_upload_duplicate_content_returns_409(self) -> None:
@@ -501,7 +504,10 @@ class ServerTest(unittest.TestCase):
         """Adding a note to a deleted notebook must return 404."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "delnb"})
         self._json("DELETE", f"/api/notebooks/{nb['id']}")
-        status, err = self._json("POST", f"/api/notebooks/{nb['id']}/notes", {"title": "T", "body": "B"})
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb['id']}/notes",
+            {"title": "T", "body": "B"},
+        )
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
@@ -1062,7 +1068,10 @@ class ServerTest(unittest.TestCase):
         handles both client-disconnect scenarios without data loss.
         """
         for exc_class in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            with self.assertRaises(ConnectionError, msg=f"{exc_class.__name__} must be ConnectionError"):
+            with self.assertRaises(
+                ConnectionError,
+                msg=f"{exc_class.__name__} must be ConnectionError",
+            ):
                 raise exc_class("test")
 
     def test_reindex_endpoint_returns_embedded_and_total_counts(self) -> None:
@@ -1183,7 +1192,10 @@ class NonStreamingLLMTest(unittest.TestCase):
     def _url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"
 
-    def _json(self, method: str, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object]]:
+    def _json(
+        self, method: str, path: str,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, dict[str, object]]:
         body = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(
             self._url(path), data=body, method=method,
@@ -1488,7 +1500,8 @@ class CacheControlTest(unittest.TestCase):
 
 
 class PostStreamStoreErrorTest(unittest.TestCase):
-    """StoreError from assistant message persistence after SSE headers must not corrupt the stream."""
+    """StoreError from assistant message persistence after SSE headers must
+    not corrupt the stream."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -2260,7 +2273,9 @@ class LLMErrorDispatchTest(unittest.TestCase):
             def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
                 raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
 
-            def chat_stream(self, messages: list[dict[str, str]], temperature: float = 0.2) -> Iterator[str]:
+            def chat_stream(
+                self, messages: list[dict[str, str]], temperature: float = 0.2
+            ) -> Iterator[str]:
                 raise _LLMError("SYSTEM_SERVICE_UNAVAILABLE", "endpoint down")
                 yield  # unreachable; keeps the mock a generator like real chat_stream
 
@@ -2683,11 +2698,67 @@ class SSEConnectionErrorTest(unittest.TestCase):
         self.assertNotIn("done", kinds)
         err_payload = [d for e, d in events if e == "error"][0]
         self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        # v0.2.508: the client sees only the exception type name — the raw
+        # str(exc) ("ctx boom" here, but DB paths/LLM internals in general)
+        # stays on stderr, matching the _dispatch 500 path's policy.
+        self.assertEqual(err_payload["message"], "RuntimeError")
         # The dangling-turn guard: an empty assistant turn was persisted.
         with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
             msgs = store.list_messages(nb_id)
         self.assertEqual(msgs[-1]["role"], "assistant")
         self.assertEqual(msgs[-1]["body"], "")
+
+    def test_build_context_error_frame_leaks_type_name_only(self) -> None:
+        """An unhandled build_context failure must mirror _dispatch's
+        catch-all: the SSE error frame carries only type(exc).__name__,
+        never str(exc) — raw messages can contain internals (SQL text,
+        filesystem paths) that must not reach the client."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-leak"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch(
+            "shoin.server.build_context",
+            side_effect=RuntimeError("secret path /Users/x/internal.db"),
+        ):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
+        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertEqual(err_payload["message"], "RuntimeError")
+        self.assertNotIn("secret", err_payload["message"])
+
+    def test_build_context_error_frame_passes_coded_errors(self) -> None:
+        """A coded error (StoreError/IngestError/LLMError) carries its
+        curated (code, message) into the SSE error frame — mirroring the
+        _dispatch envelope mapping rather than flattening to 500."""
+        from shoin.store import StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-coded"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch(
+            "shoin.server.build_context",
+            side_effect=StoreError("NOTEBOOK_NOT_FOUND", "notebook 7 not found"),
+        ):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
+        self.assertEqual(err_payload["code"], "NOTEBOOK_NOT_FOUND")
+        self.assertEqual(err_payload["message"], "notebook 7 not found")
 
 
 class HostnameOfTest(unittest.TestCase):

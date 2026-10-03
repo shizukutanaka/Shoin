@@ -118,10 +118,23 @@ def _embed_chunks(
         for i in range(0, len(texts), batch_size):
             batch_ids = chunk_ids[i : i + batch_size]
             vectors = embed(texts[i : i + batch_size])
+            if len(vectors) != len(batch_ids):
+                # Vectors pair positionally with texts, so a short list
+                # still pairs correctly — but a count mismatch was
+                # previously silent: the backend under-delivered and
+                # nobody saw. Warn on stderr (stdout purity is pinned).
+                print(
+                    f"Warning: embed returned {len(vectors)} vectors for "
+                    f"{len(batch_ids)} texts; only "
+                    f"{min(len(vectors), len(batch_ids))} chunk(s) get "
+                    "embeddings.",
+                    file=sys.stderr,
+                )
             count = 0
-            # strict=False: a short vector list is supported input — `done`
-            # must count the pairs actually stored, not the batch size.
-            for cid, vec in zip(batch_ids, vectors, strict=False):
+            n_pair = min(len(vectors), len(batch_ids))
+            for cid, vec in zip(
+                batch_ids[:n_pair], vectors[:n_pair], strict=True
+            ):
                 # Establish expected dimension from the first vector and validate all
                 # subsequent vectors against it.  A mismatched dimension (e.g. from a
                 # restarting endpoint momentarily returning truncated vectors) would
@@ -296,7 +309,10 @@ def refresh_source(
     contexts = [c for c, _ in pairs]
     texts = [t for _, t in pairs]
     if not texts:
-        raise IngestError("INGEST_EMPTY", "no text content could be extracted from refreshed source")
+        raise IngestError(
+            "INGEST_EMPTY",
+            "no text content could be extracted from refreshed source",
+        )
     # spec.md STRIDE DoS control (same guard as index_source): cap total chunks
     # per notebook. Subtract this source's own current chunk count first — a
     # refresh REPLACES this source's chunks, it doesn't add a new source, so the
