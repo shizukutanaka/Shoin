@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.565
+## Version History: v0.1.37 → v0.2.566
+
+### v0.2.566
+- product-review.md ledger sync to v0.2.565: the "**v0.2.559-565 の要約**"
+  block records the interval's arc — the audit net expanded onto the
+  documentation layer itself (lagging-marker ceiling pin v0.2.561, the
+  12→13 spec-count drift fix v0.2.563 and its recurrence prevention via
+  module-level catalogs + test_doc_catalog_counts_match_spec v0.2.564)
+  plus two real defects (baseline id-element symmetry v0.2.562, stream
+  finish_reason ordering v0.2.565). Header marker and test count
+  (1206 → 1210) updated to match.
+- Cross-file audit: the satellite test files (test_qa, test_server,
+  test_studio, test_ui_contract — 393 test methods) reference the real
+  constants (KINDS, FORMATS, _EXT_KIND) instead of duplicating literals,
+  so the v0.2.564 catalog-hoisting class has no parallel drift surface.
 
 ### v0.2.565
 - chat_stream: capture finish_reason before the delta read. The final SSE
