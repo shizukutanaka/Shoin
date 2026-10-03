@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.553
+## Version History: v0.1.37 → v0.2.554
+
+### v0.2.554
+- Row keydown handlers fire only when the row itself is the event target:
+  both the notebook rows and source rows ran their row action
+  (openNotebook/showSource) on ANY bubbled keydown, and the handler's
+  preventDefault() then cancelled the focused child control's native
+  Enter/Space activation — the ✎/×/↻ buttons inside a row were
+  keyboard-unreachable (pressing Enter ran the row's own command instead),
+  and Enter inside the in-place rename input both committed AND opened the
+  source viewer mid-commit. `e.target !== row` guard on both handlers;
+  two node pins + fail-direction.
 
 ### v0.2.553
 - `shoin note list` / `shoin messages list` validate the notebook id first:
