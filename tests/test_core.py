@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.541")
+        self.assertEqual(VERSION, "0.2.542")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -4480,6 +4480,29 @@ class TestSearch(unittest.TestCase):
             self.assertTrue(any("中心科目" in h.text for h in hits),
                             "PRF expansion must surface the mismatch chunk")
 
+    def test_prf_expanded_hits_carry_exp_flag(self) -> None:
+        """v0.2.542: chunks surfaced by the feedback terms — not the user's
+        own vocabulary — carry detail["exp"] so _tail_cut's term-free test
+        can tell their lex==0 apart from a genuinely unmatched tail."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-flag").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは儒学教育を行う学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            tagged = [h for h in hits if h.detail.get("exp")]
+            self.assertTrue(tagged, "expansion-surfaced hits must be flagged")
+            self.assertTrue(all("書院" not in h.text for h in tagged))
+            untagged = [h for h in hits if not h.detail.get("exp")]
+            self.assertTrue(untagged)
+            self.assertTrue(all("書院" in h.text for h in untagged))
+
     def test_prf_skips_when_fewer_than_min_feedback_docs(self) -> None:
         """Fewer than PRF_MIN_DOCS feedback hits means no expansion evidence —
         the result list must be returned unchanged (single-doc drift guard)."""
@@ -5093,6 +5116,44 @@ class TestTailCut(unittest.TestCase):
 
         self.assertEqual(_tail_cut([]), [])
         self.assertEqual(len(_tail_cut([self._h(1, 0.9, lex=0.0)])), 1)
+
+    def test_expansion_tagged_chunk_survives_cliff(self) -> None:
+        """v0.2.542: detail["exp"] marks a hit surfaced by a system-proposed
+        term (PRF expansion or a RAG-Fusion rewrite) — lex==0 vs the user's
+        query is expected there, so the cliff test treats it as
+        term-carrying.  A hit behind it with no retrieval term at all still
+        clips."""
+        from shoin.search import _tail_cut
+
+        exp_hit = self._h(2, 0.5, lex=0.0)
+        exp_hit.detail["exp"] = 1.0
+        free_hit = self._h(3, 0.2, lex=0.0)
+        hits = [self._h(1, 0.9, lex=0.5), exp_hit, free_hit]
+        # Cliff 0.9 -> 0.5 is blocked by the flag; 0.5 -> 0.2 still clips.
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1, 2])
+        # Without the flag the same geometry cuts at the first cliff.
+        exp_hit.detail.pop("exp")
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1])
+
+    def test_retrieve_multi_marks_rewrite_only_hits_exp(self) -> None:
+        """v0.2.542: a chunk surfaced only by a rewrite's vocabulary reaches
+        _tail_cut flagged — lex==0 against the primary query is the whole
+        point of multi-query recall, not a noise signature."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "a", "o", "sha")
+            s.add_chunks(a.id, ["書院は近世日本の学問所である。"])
+            b = s.add_source(nb.id, "txt", "b", "o2", "sha2")
+            s.add_chunks(b.id, ["儒学教育は素読と会読を基礎とした。"])
+            hits = retrieve_multi(s, nb.id, ["書院", "儒学"])
+            rewrite_only = [h for h in hits if "儒学" in h.text]
+            self.assertTrue(rewrite_only)
+            self.assertTrue(all(h.detail.get("exp") for h in rewrite_only))
+            primary_hit = [h for h in hits if "書院" in h.text]
+            self.assertTrue(primary_hit)
+            self.assertFalse(any(h.detail.get("exp") for h in primary_hit))
 
     def test_retrieve_drops_vector_tail(self) -> None:
         """End-to-end via the vector list: semantically-near chunks sharing

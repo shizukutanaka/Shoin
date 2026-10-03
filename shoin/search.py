@@ -1002,7 +1002,13 @@ def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[
         return hits
     extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k)
     seen = {h.chunk_id for h in hits}
-    merged = hits + [h for h in extra if h.chunk_id not in seen]
+    # Expansion-surfaced chunks match a SYSTEM-proposed term, not the user's
+    # vocabulary — detail["exp"] lets _tail_cut tell them apart from hits that
+    # reached the pool sharing no retrieval term at all (the real clip class).
+    extras = [h for h in extra if h.chunk_id not in seen]
+    for h in extras:
+        h.detail["exp"] = 1.0
+    merged = hits + extras
     merged.sort(key=lambda h: h.bm25, reverse=True)
     return merged[:k]
 
@@ -1439,10 +1445,19 @@ def _tail_cut(hits: list[Hit]) -> list[Hit]:
     zero lexical overlap — a hit that reached the pool without sharing any
     query term.  Never reorders; a pool with no cliff or whose tail still
     carries terms passes through untouched.
+
+    detail["exp"] marks a hit surfaced by a system-proposed term (a PRF
+    expansion term, or a RAG-Fusion rewrite phrasing): lex==0 against the
+    user's query is expected for those, so they count as term-carrying —
+    clipping them would undo the recall the expansion machinery added.
     """
     for i in range(len(hits) - 1):
         nxt = hits[i + 1]
-        if hits[i].score - nxt.score >= ADAPTIVE_GAP and nxt.detail.get("lex", 0.0) == 0.0:
+        if (
+            hits[i].score - nxt.score >= ADAPTIVE_GAP
+            and nxt.detail.get("lex", 0.0) == 0.0
+            and not nxt.detail.get("exp")
+        ):
             return hits[: i + 1]
     return hits
 
@@ -1577,6 +1592,13 @@ def retrieve_multi(
         # Same PRF-wrapped search as retrieve(): every phrasing expands on its
         # own feedback evidence — original and rewrite queries alike.
         bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool)
+        if i > 0:
+            # A hit surfaced only by a rewrite's vocabulary still matched a
+            # retrieval term — mark it so _tail_cut's term-free test (built on
+            # the primary query only, as the docstring above prescribes) does
+            # not clip the recall multi-query fusion exists to add.
+            for h in bm25_hits:
+                h.detail["exp"] = 1.0
         if negs and i > 0:
             # bm25_search() already applied the primary query's own negs (i==0);
             # rewrite lists were searched without them and need the filter here.

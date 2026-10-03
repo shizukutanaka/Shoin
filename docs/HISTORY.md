@@ -99,7 +99,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   pattern also widened [0-9] -> \d so 令和٦年 expands to 2024.  Different
   values still flag.  One pin + fail-direction.
 
-## Version History: v0.1.37 → v0.2.541
+### v0.2.542
+- _tail_cut spares expansion-provenance hits: its lex==0 test read every
+  hit surfaced without a user-typed term as noise — including the exact
+  chunks PRF expansion and RAG-Fusion rewrites exist to add (they carry a
+  system-proposed term, so lex==0 vs the user's query is structural).
+  bm25_prf_search now flags merged expansion hits detail["exp"], and
+  retrieve_multi flags every rewrite-surfaced BM25 hit the same way; the
+  cliff test requires no flag.  A term-free vector/utterly-unmatched hit
+  behind an expansion hit still clips.  Three pins (cliff unit + PRF and
+  retrieve_multi provenance e2e) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.542
 
 ### v0.2.534
 
