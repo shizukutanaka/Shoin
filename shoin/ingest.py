@@ -246,11 +246,21 @@ def pdf_to_text(data: bytes) -> tuple[str, int]:
     # own graceful-degradation principle (CLAUDE.md: "Studio outputs have
     # fallback text... History_messages() survives malformed chats"), already
     # applied the same way to per-batch embedding failures in pipeline.py.
+    # Iterate by index: pypdf resolves page objects lazily, so `pages[i]` itself
+    # can raise (corrupt xref entry) before extract_text() is ever reached —
+    # an iterator would abort the whole document on that page instead of
+    # skipping it. Enumerating the sequence at all is the document-level
+    # failure case and maps to the same parse error as construction.
+    try:
+        page_seq = reader.pages
+        n_pages = len(page_seq)
+    except Exception as exc:
+        raise IngestError("INGEST_PARSE_FAILED", f"PDF page list failed: {exc}") from exc
     pages: list[str] = []
     n_failed = 0
-    for page in reader.pages:
+    for i in range(n_pages):
         try:
-            pages.append(page.extract_text() or "")
+            pages.append(page_seq[i].extract_text() or "")
         except Exception:
             n_failed += 1
             continue

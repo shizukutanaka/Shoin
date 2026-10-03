@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.586")
+        self.assertEqual(VERSION, "0.2.587")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -3663,6 +3663,51 @@ class TestIngest(unittest.TestCase):
         # v0.2.256: the failure is COUNTED, not just tolerated — callers must
         # be able to warn that the index holds less than the document.
         self.assertEqual(pages_failed, 1)
+
+    def test_pdf_to_text_page_object_access_failure_skips_only_that_page(self) -> None:
+        """v0.2.587: pypdf resolves page objects lazily — reader.pages[i] can
+        raise (corrupt xref) before extract_text() runs. An iterator would
+        abort the whole document at that page; index iteration must skip only
+        the bad page, and an unenumerable page list maps to INGEST_PARSE_FAILED.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from shoin.ingest import IngestError, pdf_to_text
+
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+
+        good = MagicMock()
+        good.extract_text.return_value = "recoverable text on a good page"
+
+        class FlakyPages:
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, i: int) -> object:
+                if i == 0:
+                    raise ValueError("corrupt xref entry for page object")
+                return good
+
+        fake_reader = MagicMock()
+        fake_reader.pages = FlakyPages()
+        with patch("pypdf.PdfReader", return_value=fake_reader):
+            text, pages_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertIn("recoverable text on a good page", text)
+        self.assertEqual(pages_failed, 1)
+
+        class UnenumerablePages:
+            def __len__(self) -> int:
+                raise ValueError("cannot read /Pages /Count")
+
+        fake_reader2 = MagicMock()
+        fake_reader2.pages = UnenumerablePages()
+        with patch("pypdf.PdfReader", return_value=fake_reader2):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_PARSE_FAILED")
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
@@ -13383,7 +13428,7 @@ class TestCitationCoverageTail(unittest.TestCase):
 # spec.md states these sizes in prose, so they must live at module level for
 # test_doc_catalog_counts_match_spec to compare without duplicating them.
 _EXCEPT_CATALOG = {
-    "ingest.py": 3,
+    "ingest.py": 4,
     "server.py": 7,
     "cli.py": 1,
     "pipeline.py": 2,
@@ -16913,7 +16958,8 @@ class TestResidualGuards(unittest.TestCase):
             "ingest.py": [
                 "(OSError,http.client.HTTPException)",
                 "(LookupError,UnicodeDecodeError)",
-                "Exception", "Exception", "Exception", "ImportError",
+                "Exception", "Exception", "Exception", "Exception",
+                "ImportError",
                 "OSError", "ValueError", "ValueError",
                 "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
             ],
@@ -17082,7 +17128,7 @@ class TestResidualGuards(unittest.TestCase):
             ],
             "evaluate.py": ["ValueError"] * 13,
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 24 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 25 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError",

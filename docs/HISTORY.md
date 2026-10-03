@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.586
+## Version History: v0.1.37 → v0.2.587
+
+### v0.2.587
+- pdf_to_text page-object access tolerance: pypdf resolves page objects lazily, so `reader.pages[i]` itself can raise (corrupt xref entry) before `extract_text()` is ever reached — the `for page in reader.pages` loop wrapped only extract_text, so one bad page object aborted the ENTIRE document with a raw non-IngestError exception (escaping the error-code contract as a 500-class failure) instead of counting a failed page. Iterates by index now: a page that cannot even be materialized counts in `pages_failed` like any other per-page failure; a page list that cannot be enumerated at all maps to the same INGEST_PARSE_FAILED as reader construction. Fail-direction verified.
 
 ### v0.2.586
 - product-review ledger synced to v0.2.585 (v0.2.575-585 summary block: citation-marker attribution unified at fragment granularity — backward/forward binding, per-occurrence clauses, tail claims, disclaimer coverage — plus the export [S#] namespace fix). Header date/test-count refreshed.
