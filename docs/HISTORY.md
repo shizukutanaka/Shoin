@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.563
+## Version History: v0.1.37 → v0.2.564
+
+### v0.2.564
+- recurrence fix for the v0.2.563 drift class: the three site catalogs
+  spec.md counts in prose (except-Exception sites, dynamic re.compile
+  sites, declared error codes) moved to module level in test_core.py —
+  `_EXCEPT_CATALOG`, `_DYNAMIC_COMPILE_CATALOG`,
+  `_ERROR_CODE_CATALOG` — and `test_doc_catalog_counts_match_spec`
+  pins spec.md's stated numbers to them. A catalog growth now fails the
+  gate until the spec count moves with it; the 60-version drift that
+  v0.2.563 caught can no longer recur silently. The three original
+  catalog tests are unchanged except for referencing the constants.
+  Fail-direction verified (spec count 99 fails the pin).
 
 ### v0.2.563
 - spec.md's hardcoded except-Exception catalog count corrected 12 → 13

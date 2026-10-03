@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.563")
+        self.assertEqual(VERSION, "0.2.564")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12815,6 +12815,62 @@ class TestCitationCoverageTail(unittest.TestCase):
             make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
 
 
+# Catalogs shared between the site-pinning tests and the spec-count pin:
+# spec.md states these sizes in prose, so they must live at module level for
+# test_doc_catalog_counts_match_spec to compare without duplicating them.
+_EXCEPT_CATALOG = {
+    "ingest.py": 3,
+    "server.py": 7,
+    "cli.py": 1,
+    "pipeline.py": 2,
+}
+_DYNAMIC_COMPILE_CATALOG = {
+    "chunk.py:208",
+    "citation.py:526", "citation.py:530", "citation.py:567",
+    "citation.py:580", "citation.py:892", "citation.py:1271",
+    "citation.py:1485",
+    "search.py:72", "search.py:907",
+}
+_ERROR_CODE_CATALOG = {
+    # store.py raises (StoreError)
+    "CHUNK_NOT_FOUND",
+    "EMBEDDING_INVALID",
+    "INGEST_REFRESH_NOT_URL",
+    "NOTEBOOK_EMPTY",
+    "NOTEBOOK_NOT_FOUND",
+    "NOTE_NOT_FOUND",
+    "SOURCE_ALREADY_EXISTS",
+    "SOURCE_NOT_FOUND",
+    "STUDIO_KIND_INVALID",
+    "SYSTEM_DB_LOCKED",
+    "SYSTEM_IO_ERROR",
+    "SYSTEM_SERVICE_UNAVAILABLE",
+    # ingest.py / pipeline.py / server.py raises (IngestError)
+    "INGEST_EMPTY",
+    "INGEST_FILE_TOO_LARGE",
+    "INGEST_NOTEBOOK_FULL",
+    "INGEST_PDF_SUPPORT_MISSING",
+    "INGEST_FETCH_FAILED",
+    "INGEST_PARSE_FAILED",
+    "INGEST_UNSUPPORTED_FORMAT",
+    "INGEST_URL_BLOCKED",
+    # llm.py raises (LLMError)
+    "SYSTEM_EMBED_DISABLED",
+    "SYSTEM_LLM_TIMEOUT",
+    "SYSTEM_LLM_BAD_RESPONSE",
+    "SYSTEM_LLM_HTTP_ERROR",
+    # server.py raises (StoreError) + emit literals
+    "METHOD_NOT_ALLOWED",
+    "ROUTE_NOT_FOUND",
+    "SECURITY_CROSS_ORIGIN_BLOCKED",
+    "SECURITY_HOST_NOT_ALLOWED",
+    "SYSTEM_INTERNAL_ERROR",
+    "VALIDATION_FIELD_FORMAT_INVALID",
+    "VALIDATION_INTEGER_OVERFLOW",
+    "VALIDATION_REQUIRED_FIELD_MISSING",
+}
+
+
 class TestResidualGuards(unittest.TestCase):
     """Pin the last reachable guard tails left by the v0.2.270-275 sweep (v0.2.277)."""
 
@@ -13806,6 +13862,31 @@ class TestResidualGuards(unittest.TestCase):
         self.assertLessEqual(review_v, cur,
                              "product-review.md claims a future version")
 
+    def test_doc_catalog_counts_match_spec(self) -> None:
+        """spec.md states each catalog's size in prose — the except-Exception
+        count drifted to "12サイト" while the real catalog held 13 for ~60
+        versions (v0.2.503→v0.2.563) precisely because nothing checked it.
+        The catalogs live at module level so this compares, not duplicates."""
+        spec = (
+            Path(__file__).resolve().parent.parent / "docs" / "spec.md"
+        ).read_text(encoding="utf-8")
+        claims = {
+            "except-Exception catalog": (
+                r"広域捕捉は(\d+)サイト", sum(_EXCEPT_CATALOG.values())),
+            "dynamic re.compile catalog": (
+                r"re\.compile`を(\d+)サイト", len(_DYNAMIC_COMPILE_CATALOG)),
+            "error-code catalog": (
+                r"全コードを(\d+)件の宣言集合", len(_ERROR_CODE_CATALOG)),
+        }
+        for label, (pat, actual) in claims.items():
+            m = re.search(pat, spec)
+            if m is None:
+                self.fail(f"spec.md lost its {label} count claim ({pat})")
+            self.assertEqual(
+                int(m.group(1)), actual,
+                f"spec.md's {label} count drifted from the real catalog",
+            )
+
     def test_sql_literals_stay_interpolation_free(self) -> None:
         """User-controlled strings (notebook names, source titles,
         questions) flow into every query — an f-string, `+`, or `%`
@@ -14716,12 +14797,7 @@ class TestResidualGuards(unittest.TestCase):
             return False
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        expected = {
-            "ingest.py": 3,
-            "server.py": 7,
-            "cli.py": 1,
-            "pipeline.py": 2,
-        }
+        expected = _EXCEPT_CATALOG
         problems: list[str] = []
         total = 0
         n_suppress = 0
@@ -15133,13 +15209,7 @@ class TestResidualGuards(unittest.TestCase):
         # constant-table alternation (citation/search builder) or an
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
-        expected_dyn = {
-            "chunk.py:208",
-            "citation.py:526", "citation.py:530", "citation.py:567",
-            "citation.py:580", "citation.py:892", "citation.py:1271",
-            "citation.py:1485",
-            "search.py:72", "search.py:907",
-        }
+        expected_dyn = _DYNAMIC_COMPILE_CATALOG
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
 
@@ -15190,44 +15260,7 @@ class TestResidualGuards(unittest.TestCase):
         and every code conforms to the name-family taxonomy."""
         import ast
 
-        declared = {
-            # store.py raises (StoreError)
-            "CHUNK_NOT_FOUND",
-            "EMBEDDING_INVALID",
-            "INGEST_REFRESH_NOT_URL",
-            "NOTEBOOK_EMPTY",
-            "NOTEBOOK_NOT_FOUND",
-            "NOTE_NOT_FOUND",
-            "SOURCE_ALREADY_EXISTS",
-            "SOURCE_NOT_FOUND",
-            "STUDIO_KIND_INVALID",
-            "SYSTEM_DB_LOCKED",
-            "SYSTEM_IO_ERROR",
-            "SYSTEM_SERVICE_UNAVAILABLE",
-            # ingest.py / pipeline.py / server.py raises (IngestError)
-            "INGEST_EMPTY",
-            "INGEST_FILE_TOO_LARGE",
-            "INGEST_NOTEBOOK_FULL",
-            "INGEST_PDF_SUPPORT_MISSING",
-            "INGEST_FETCH_FAILED",
-            "INGEST_PARSE_FAILED",
-            "INGEST_UNSUPPORTED_FORMAT",
-            "INGEST_URL_BLOCKED",
-            # llm.py raises (LLMError)
-            "SYSTEM_EMBED_DISABLED",
-            "SYSTEM_LLM_TIMEOUT",
-            "SYSTEM_LLM_BAD_RESPONSE",
-            "SYSTEM_LLM_HTTP_ERROR",
-            # server.py raises (StoreError) + emit literals
-            "METHOD_NOT_ALLOWED",
-            "ROUTE_NOT_FOUND",
-            "SECURITY_CROSS_ORIGIN_BLOCKED",
-            "SECURITY_HOST_NOT_ALLOWED",
-            "SYSTEM_INTERNAL_ERROR",
-            "VALIDATION_FIELD_FORMAT_INVALID",
-            "VALIDATION_INTEGER_OVERFLOW",
-            "VALIDATION_REQUIRED_FIELD_MISSING",
-        }
+        declared = _ERROR_CODE_CATALOG
         taxonomy = re.compile(
             r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
             r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
