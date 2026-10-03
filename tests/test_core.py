@@ -107,8 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.548")
-
+        self.assertEqual(VERSION, "0.2.549")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -15496,6 +15495,89 @@ class TestResidualGuards(unittest.TestCase):
         # dict exists today (_h_note_add reads title+body through the helpers).
         self.assertGreaterEqual(len(spans), 1)
 
+    def test_text_io_always_names_an_encoding(self) -> None:
+        """`Path.read_text()`/`write_text()`/`open()` with no `encoding=`
+        keyword decode through `locale.getpreferredencoding()` — process-
+        locale dependent. On a LANG=C POSIX box that default is ASCII, and
+        Shoin's corpus is CJK-heavy: every file read becomes mojibake-or-
+        UnicodeDecodeError, invisible to CI which runs under a UTF-8 locale.
+        (`str.encode()`/`bytes.decode()`/`json.loads` default to UTF-8 and
+        are NOT locale-dependent — out of scope.) Pin: every text-I/O call
+        site — `open`, `io.open`, `os.fdopen`, `codecs.open`, `.open(`,
+        `.read_text`, `.write_text`, `.open_text` — must either pass
+        `encoding=` or provably open in binary mode (literal mode arg
+        containing 'b'). `os.open` itself is fd-level (returns a raw
+        descriptor, no codec) and is excluded. Zero violations today."""
+        import ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        sites = 0
+        text_fns = {"read_text", "write_text", "open_text"}
+        open_fns = {"open", "fdopen"}
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name: str | None = None
+                is_text_method = False
+                if isinstance(fn, ast.Name):
+                    name = fn.id
+                elif isinstance(fn, ast.Attribute):
+                    name = fn.attr
+                    if fn.attr in text_fns:
+                        is_text_method = True
+                    elif fn.attr in open_fns:
+                        # os.open is fd-level — skip only that one base
+                        if (
+                            isinstance(fn.value, ast.Name)
+                            and fn.value.id == "os"
+                            and fn.attr == "open"
+                        ):
+                            continue
+                    else:
+                        continue
+                if name not in text_fns and name not in open_fns:
+                    continue
+                sites += 1
+                if any(kw.arg == "encoding" for kw in node.keywords):
+                    continue
+                if is_text_method:
+                    problems.append(
+                        f"{path.name}:{node.lineno}: {name}() without "
+                        "encoding= (locale-dependent decode)"
+                    )
+                    continue
+                # open-family: binary if a literal mode arg contains 'b'
+                mode_arg = node.args[1] if len(node.args) > 1 else None
+                binary = (
+                    isinstance(mode_arg, ast.Constant)
+                    and isinstance(mode_arg.value, str)
+                    and "b" in mode_arg.value
+                ) or any(
+                    kw.arg == "mode"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                    and "b" in kw.value.value
+                    for kw in node.keywords
+                )
+                if not binary:
+                    problems.append(
+                        f"{path.name}:{node.lineno}: {name}() text-mode "
+                        "without encoding= (locale-dependent decode)"
+                    )
+        self.assertEqual(
+            problems, [], f"locale-dependent text I/O: {problems}"
+        )
+        self.assertGreaterEqual(
+            sites, 3,
+            "non-vacuous: read_text/write_text call sites must be visible",
+        )
+
     def test_timestamps_come_only_from_store_now(self) -> None:
         """`ORDER BY updated_at DESC` is a string sort — every timestamp
         written to the DB must share `_now()`'s exact shape
@@ -17808,6 +17890,7 @@ class TestResidualGuards(unittest.TestCase):
             "undefined custom properties silently fall back to "
             "initial/inherit:\n" + "\n".join(missing),
         )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

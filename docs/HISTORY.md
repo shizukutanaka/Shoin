@@ -29,6 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
+## Version History: v0.1.37 → v0.2.549
+
+### v0.2.549
+- `test_text_io_always_names_an_encoding` — `Path.read_text()`/
+  `write_text()`/`open()` without `encoding=` decode through
+  `locale.getpreferredencoding()`: locale-dependent. Under LANG=C the
+  default is ASCII and Shoin's CJK-heavy corpus turns into mojibake or
+  UnicodeDecodeError — invisible to CI, which always runs UTF-8. (The
+  `.encode()`/`.decode()`/`json.loads` defaults are UTF-8, NOT
+  locale-dependent, so they're out of scope.) AST pin over shoin/:
+  every `open`/`io.open`/`os.fdopen`/`codecs.open`/`.open(`/
+  `.read_text`/`.write_text`/`.open_text` call site must pass
+  `encoding=` or prove binary mode via a literal 'b'-mode; `os.open`
+  stays exempt (fd-level, no codec). Audit: zero violations — all four
+  existing sites already pass utf-8. Probed: bare read_text/
+  write_text/open flagged, "rb" mode and os.open allowed.
+
 ### v0.2.535
 - term_variants gains the enumerable half of accent bridging: `_ascii_fold`
   strips combining marks over ASCII-letter bases (café→cafe, naïve→naive,
@@ -1033,6 +1050,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   OSError` and `except (ValueError, OSError)` stay allowed — same
   policy as narrow except clauses. Probed both directions: tuple and
   except* injections flagged at file:line, clean tree green.
+
 
 ## Version History: v0.1.37 → v0.2.479
 
