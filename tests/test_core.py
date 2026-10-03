@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.575")
+        self.assertEqual(VERSION, "0.2.576")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7813,6 +7813,40 @@ class TestUncitedSentences(unittest.TestCase):
         for sp in range(4):  # 0-3 leading spaces remain valid fences
             text = "prose。\n" + " " * sp + "```\nhidden code\n```\n"
             self.assertNotIn("hidden code", _strip_fences(text))
+    def test_leading_marker_resolves_the_previous_sentence(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "claim. [S1] next." splits into "claim." + "[S1] next." — the
+        # fragment-leading marker trails the previous claim (the same
+        # backward convention _segment_claims uses), so only the truly
+        # markerless claim is flagged.
+        self.assertEqual(
+            uncited_sentences("第一主張はここに。[S1] 第二主張はここに。"),
+            ["第二主張はここに。"],
+        )
+        self.assertEqual(
+            uncited_sentences("第一主張はここに。[S1] 第二主張はここに。[S2]"),
+            [],
+        )
+
+    def test_forward_bound_marker_keeps_its_own_fragment(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "[S1]によるとX" binds the marker to its own fragment's claim —
+        # nothing to flag.
+        self.assertEqual(
+            uncited_sentences("[S1]によると、報告は正しいと述べている。"),
+            [],
+        )
+
+    def test_leading_marker_run_resolves_previous_claim(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A run of adjacent leading markers all trail the previous sentence.
+        self.assertEqual(
+            uncited_sentences("前置きの主張文。[S1][S2] 二番目の断言。"),
+            ["二番目の断言。"],
+        )
 
 class TestStoreChunksForSource(unittest.TestCase):
     def test_chunks_for_source_returns_correct_chunks(self) -> None:

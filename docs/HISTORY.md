@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.575
+## Version History: v0.1.37 → v0.2.576
+
+### v0.2.576
+- Fragment-leading citation markers resolve the previous sentence, not their own ("claim. [S1] next." convention): _SENTENCE_SPLIT_RE makes a marker head the fragment containing the NEXT claim, but uncited_sentences counted a fragment with any citation as self-covered — flagging the claim the marker actually trails and exempting the truly markerless claim after it (a double inversion on the most common multi-claim line shape). The leading-marker run now resolves the pending claim per _segment_claims' backward convention; forward-bound forms ("[S1]によると…") keep their own fragment. Behavior pins for the trailing, forward-bound, and multi-marker shapes. Fail-direction verified.
 
 ### v0.2.575
 - Indented fence markers are code, not fences (_FENCE_RE → `^ {0,3}` + uncited_sentences matches `raw`, not the stripped `sentence`): a ``` line indented 4+ spaces inside an indented code block is code content per CommonMark, but `^\s*` let it toggle in_fence — every claim after it was swallowed by both _strip_fences and uncited_sentences' inline tracking, blinding the degeneration/contradiction/uncited checks to real prose. Narrowed to the CommonMark 0-3-space rule; mid-paragraph indented ``` stays a lazy continuation (prose, not a fence either). Behavior pins for the code-block, lazy-continuation, and 0-3-space fence shapes.

@@ -1624,6 +1624,17 @@ def degenerate_spans(text: str, *, history: str = "") -> list[str]:
 # purpose (a 3-char filler word already clears it).
 _MIN_CLAIM_CHARS = 5
 
+# A bracket run that OPENS a fragment trails the previous sentence
+# ("claim. [S1] next.") — the same backward convention _segment_claims()
+# uses for attribution — so it belongs to the pending claim, not the text
+# after it. _FORWARD_BIND_RE covers the forward idiom ("[S1]によると…"),
+# where the leading marker introduces its own fragment's claim instead.
+# Bounds keep every inner quantifier out of an unbounded outer repeat —
+# a citation bracket longer than 80 chars simply won't match and falls
+# back to the mid-fragment path, which is the conservative direction.
+_LEAD_CITE_RUN = re.compile(r"^(\[[^\[\]]{0,80}\](?:\s{0,4}\[[^\[\]]{0,80}\])*)")
+_FORWARD_BIND_RE = re.compile(r"^(?:によると|によれば|では)")
+
 
 def uncited_sentences(text: str) -> list[str]:
     """Sentences that assert content with zero [S#] citations anywhere in them.
@@ -1704,6 +1715,22 @@ def uncited_sentences(text: str) -> list[str]:
             # resolves whatever sentence it trails; that sentence is not uncited.
             pending = None
             continue
+        if nums and has_claim:
+            lm = _LEAD_CITE_RUN.match(sentence)
+            if (
+                lm is not None
+                and _SNUM_RE.search(lm.group(1))
+                and _FORWARD_BIND_RE.match(sentence[lm.end() :]) is None
+            ):
+                # "claim. [S1] next." splits into "claim." + "[S1] next." — the
+                # leading marker resolves the pending claim, and the text after
+                # it is a fresh claim evaluated on its own (still falls through
+                # to `if nums` when a later marker covers it, e.g. "[S1] x [S2]").
+                pending = None
+                sentence = sentence[lm.end() :].strip()
+                nums = extract_citations(sentence)
+                bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+                has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
         # Not a pure citation trailer: any still-pending sentence was never resolved
         # by a trailing citation, so it truly has no citation attached — flag it.
         if pending is not None:
