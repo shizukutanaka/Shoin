@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.582")
+        self.assertEqual(VERSION, "0.2.583")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8046,6 +8046,34 @@ class TestUncitedSentences(unittest.TestCase):
 
         self.assertEqual(
             uncited_sentences("前提文。[S1]、次の主張です。"), ["、次の主張です。"]
+        )
+
+    def test_mid_fragment_forward_idiom_tail_stays_silent(self) -> None:
+        """A mid-fragment marker followed by the forward idiom ("A [S1]によると
+        B") binds the tail just like the leading-run case — flagging the bound
+        claim would accuse cited text. Whether the marker then ALSO covers the
+        pre-segment is ambiguous, so the fragment stays silent."""
+        from shoin.citation import uncited_sentences
+
+        for text in (
+            "根拠のない主張がある[S1]によると結果は良好だった。",
+            "根拠ある文[S2][S1]によると結果は良好だった。",
+            "文Aがある[S1,S2]によると文Bがある。",
+        ):
+            self.assertEqual(uncited_sentences(text), [], text)
+
+    def test_tail_after_forward_bound_segment_still_flags(self) -> None:
+        """Silence is scoped to the bound tail — a genuinely uncovered claim
+        after the idiom-bound text still flags."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(
+            uncited_sentences("文A[S1]によると文Bがある。別の主張もある。"),
+            ["別の主張もある。"],
+        )
+        # And the plain mid-fragment marker keeps its tail-flagging rule.
+        self.assertEqual(
+            uncited_sentences("文Aがある[S1]別の主張がある。"), ["別の主張がある。"]
         )
 
 class TestStoreChunksForSource(unittest.TestCase):

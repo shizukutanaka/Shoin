@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.582
+## Version History: v0.1.37 → v0.2.583
+
+### v0.2.583
+- uncited_sentences mid-fragment forward bind: the tail-scan flagged any text after the last marker as uncovered, so "A [S1]によると B" accused the idiom-bound tail — cited text — while the genuinely ambiguous pre-segment drove the verdict. A marker followed by a forward idiom now leaves the fragment silent (bound tail cited; pre-segment coverage ambiguous → stay silent per the module's asymmetry rule). Real uncovered tails after the bound segment still flag. Fail-direction verified.
 
 ### v0.2.582
 - _FORWARD_BIND_RE whitespace tolerance: "[S1] によると…" (any whitespace — half/full-width space, tab — between the marker and the forward idiom) broke the bind, so the leading run was attributed backward and the bound claim was flagged uncited while an unrelated pending claim got falsely covered — the v0.2.576 double-inversion under a one-byte shape. The pattern now skips leading whitespace before によると/によれば/では, fixing both call sites (_leading_markers and uncited_sentences) at once; a comma or other punctuation still breaks the idiom as before. Fail-direction verified.

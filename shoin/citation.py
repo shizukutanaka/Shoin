@@ -1851,6 +1851,9 @@ def uncited_sentences(text: str) -> list[str]:
                 # though the fragment carries a marker. A forward-bound run is
                 # the exception: when it is the last marker its bound text is
                 # already covered, so only a later marker's tail is exposed.
+                # The same bind can open mid-fragment ("A [S1]によると B") —
+                # there the tail is cited too, and whether the marker then
+                # also covers the pre-segment is ambiguous: stay silent.
                 last_end = 0
                 for m in _BRACKET_RE.finditer(sentence):
                     if _SNUM_RE.search(m.group(1)):
@@ -1858,7 +1861,7 @@ def uncited_sentences(text: str) -> list[str]:
                 trailing = sentence[last_end :].strip() if last_end else ""
                 if forward and lm is not None and last_end <= lm.end():
                     pass
-                elif trailing:
+                elif trailing and _FORWARD_BIND_RE.match(trailing) is None:
                     # A mid-fragment marker leaves its clause punctuation on
                     # the uncovered tail ("claimA [S1]、claimB") — joiners are
                     # not claim content, so strip them before the length gate.
