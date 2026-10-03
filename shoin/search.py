@@ -28,6 +28,7 @@ from .chunk import (
     _KYU_TO_SHIN,
     _SHIN_TO_KYU,
     _ascii_fold,
+    _match_fold,
     is_cjk,
 )
 from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
@@ -1191,7 +1192,11 @@ def rrf_fuse_lists(
 
 
 def _char_bigrams(text: str) -> set[str]:
-    t = text.casefold()
+    # _match_fold, not casefold alone: MMR redundancy must see the spellings
+    # retrieval itself bridges.  A chunk that is another modulo kana/accent/
+    # digit-row/kyujitai orthography is the same content — counting it as
+    # diverse spent a selection slot on a duplicate (v0.2.543).
+    t = _match_fold(text)
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}

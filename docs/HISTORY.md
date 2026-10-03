@@ -110,7 +110,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   behind an expansion hit still clips.  Three pins (cliff unit + PRF and
   retrieve_multi provenance e2e) + fail-direction.
 
-## Version History: v0.1.37 → v0.2.542
+### v0.2.543
+- MMR redundancy sees variant spellings: _sim's bigrams were casefold-only,
+  so a chunk identical to a selected one modulo kana/accent/digit-row/
+  kyujitai orthography scored ~0 redundancy — counted as maximally diverse
+  and spent a selection slot on the same content.  _char_bigrams now folds
+  via _match_fold (the same canonical form citation checks use), so
+  データ / でーた, café / cafe, 345 / ٣٤٥ chunks read as duplicates.
+  One pin (dup-vs-diverse selection + accent/digit sim probe) +
+  fail-direction.
+
+## Version History: v0.1.37 → v0.2.543
 
 ### v0.2.534
 

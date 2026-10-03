@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.542")
+        self.assertEqual(VERSION, "0.2.543")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -4716,6 +4716,23 @@ class TestSearch(unittest.TestCase):
         result = mmr([a, b], k=2, lam=1.0)  # lam=1.0: pure relevance, no diversity
         chunk_ids = {h.chunk_id for h in result}
         self.assertEqual(chunk_ids, {1, 2})
+
+    def test_mmr_counts_variant_spellings_as_redundant(self) -> None:
+        """v0.2.543: _sim folds spelling variants (kana/digit/accent/kyujitai)
+        — two chunks identical modulo orthography are the same content, and
+        counting them as diverse spent a selection slot on a duplicate."""
+        from shoin.search import _sim
+
+        a = Hit(1, 1, "データベースの設計を解説する。", 1.0)
+        dup = Hit(2, 1, "でーたべーすの設計を解説する。", 0.9)
+        diverse = Hit(3, 1, "気候変動の影響を分析する。", 0.8)
+        self.assertGreater(_sim(a, dup), 0.9)
+        picked = mmr([a, dup, diverse], k=2)
+        self.assertEqual({h.chunk_id for h in picked}, {1, 3})
+        # Accent/digit-row variants fold the same way.
+        cafe = Hit(4, 1, "café 345 notes", 1.0)
+        plain = Hit(5, 1, "cafe ٣٤٥ notes", 0.9)
+        self.assertGreater(_sim(cafe, plain), 0.9)
 
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
@@ -14790,7 +14807,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:526", "citation.py:530", "citation.py:567",
             "citation.py:580", "citation.py:892", "citation.py:1268",
             "citation.py:1473",
-            "search.py:71", "search.py:906",
+            "search.py:72", "search.py:907",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -15224,7 +15241,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:669"],
+            sites, ["search.py:670"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17441,7 +17458,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
             "citation.py": [526, 530, 580, 892, 1268, 1473],
-            "search.py": [71, 906],
+            "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17489,7 +17506,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:906"],
+            escaped_interps, ["search.py:907"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
