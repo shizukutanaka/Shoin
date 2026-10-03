@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.593
+## Version History: v0.1.37 → v0.2.594
+
+### v0.2.594
+- `llm.py`のRequest構築をtry内へ統一: `available()`で修復済みの「Request()コンストラクタがurlsplit経由でValueErrorを投げる」欠陥が`_post`/`chat_stream`に未移植——unclosed IPv6ブラケット等のmalformed base_url（`http://[::1:11434/v1`という実在タイポ形状）がchat/chat_stream/embed全経路で生ValueErrorとして漏出し、CLI traceback/server generic-500経路へ逸脱。全経路が`available()`と同じ`SYSTEM_SERVICE_UNAVAILABLE`グレースフル劣化へ写像するよう統一
+- 行動ピン: `test_malformed_base_url_raises_llmerror_on_every_path`——chat/stream/embed 3経路でのcoded error写像を固定（旧コードでfail確認）
 
 ### v0.2.593
 - `cli.py` `_cmd_eval`のUTF-8 decode失敗をコード化エラーへ写像: cases/baseline読みの`read_text(encoding="utf-8")`が投げる`UnicodeDecodeError`は`json.JSONDecodeError`でも`OSError`でもなく、main()の全ハンドラ(StoreError系/OperationalError/OSError/OverflowError/KeyboardInterrupt)を潜って生tracebackとして漏出——非UTF-8ファイルを渡したユーザーへクラッシュ画面を見せる、他の全ファイル読込パスが「コード化エラー+rc=1」契約を持つ中での唯一の例外経路。2サイト(cases/baseline)を同クラスへ統一

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.593")
+        self.assertEqual(VERSION, "0.2.594")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8235,6 +8235,26 @@ class TestLLMClient(unittest.TestCase):
         with self.assertRaises(LLMError) as cm:
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
+        """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
+        Request() itself raise ValueError via urlsplit — BEFORE urlopen runs.
+        available() already keeps construction inside its try; _post() and
+        chat_stream() must do the same or a plausible config typo crashes
+        chat/chat_stream/embed with a raw ValueError past every LLMError
+        handler (CLI traceback, server generic-500 path)."""
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(base_url="http://[::1:11434/v1")
+        calls = (
+            lambda: client.chat([{"role": "user", "content": "hi"}]),
+            lambda: next(client.chat_stream([{"role": "user", "content": "hi"}])),
+            lambda: client.embed_one("x"),
+        )
+        for call in calls:
+            with self.assertRaises(LLMError) as cm:
+                call()
+            self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
     def test_chat_sends_max_tokens_bound(self) -> None:
         """chat() must bound generation with max_tokens (v0.2.219): without it

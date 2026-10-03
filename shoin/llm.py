@@ -92,13 +92,16 @@ class LLMClient:
     # --- transport ---
 
     def _post(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
-        req = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
+            # Request() itself parses base_url via urlsplit — a malformed one
+            # (unclosed IPv6 bracket) raises ValueError here, not in urlopen,
+            # so construction stays inside the try.
+            req = urllib.request.Request(
+                f"{self.base_url}{path}",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 # Read one byte beyond the limit so len > _MAX_RESPONSE is the correct
                 # truncation signal — len == _MAX_RESPONSE means the response fit exactly
@@ -190,23 +193,26 @@ class LLMClient:
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
         """Yield content deltas from an SSE streaming chat completion."""
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(
-                {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "stream": True,
-                    "max_tokens": MAX_TOKENS,
-                }
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         total_bytes = 0
         self.last_finish_reason = None
         try:
+            # Request() parses base_url eagerly — an unclosed IPv6 bracket
+            # raises ValueError here (inside the try), mapping to the same
+            # SYSTEM_SERVICE_UNAVAILABLE the unreachable-endpoint path uses.
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": self.model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "stream": True,
+                        "max_tokens": MAX_TOKENS,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
                 for raw in resp:
                     total_bytes += len(raw)
