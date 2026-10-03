@@ -279,6 +279,25 @@ class ServerTest(unittest.TestCase):
             "upload response title must match what was actually persisted",
         )
 
+    def test_upload_whitespace_filename_falls_back(self) -> None:
+        """A whitespace-only X-Filename must not persist a blank source title —
+        it falls back to upload.txt, matching the empty-name fallback. Before
+        the strip was added, raw_name '   ' stayed truthy through the sanitize
+        chain and add_source() persisted it verbatim (the rename path rejects
+        the same title)."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "空白名"})
+        nb_id = nb["id"]
+        body = ("十分な長さの本文。" * 10).encode("utf-8")
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            body,
+            {"X-Filename": urllib.parse.quote("   ")},
+        )
+        self.assertEqual(status, 201)
+        up = json.loads(raw)
+        self.assertEqual(up["source"]["title"], "upload.txt")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is

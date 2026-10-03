@@ -317,6 +317,24 @@ class TestStore(unittest.TestCase):
                 s.add_source(nb.id, "txt", "b", "o2", "same-hash")
             self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
 
+    def test_add_source_rejects_blank_title(self) -> None:
+        """add_source must apply update_source_title's strip+reject — a
+        whitespace title could otherwise enter via the ingest path (caller
+        title=, whitespace filename) and persist a blank the rename path
+        itself refuses to write."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            for blank in ("", "   ", " \t \n "):
+                with self.assertRaises(StoreError) as cm:
+                    s.add_source(nb.id, "txt", blank, "o", f"sha-{blank!r}")
+                self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_add_source_strips_title(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "  report.pdf  ", "o", "sha-strip")
+            self.assertEqual(src.title, "report.pdf")
+
     def test_get_source_returns_source_and_raises_on_missing(self) -> None:
         with make_store() as s:
             nb = s.create_notebook("n")
@@ -16411,7 +16429,7 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 47,
+            ] + ["StoreError"] * 48,
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

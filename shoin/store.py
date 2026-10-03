@@ -533,7 +533,15 @@ class Store:
             # wrong citation types and renders a nonsense badge with no
             # corrective path (kind is immutable post-insert).
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown source kind: {kind!r}")
-        title = title[:MAX_TITLE_LEN]  # silently truncate; titles come from external content
+        # Silently truncate like update_source_title() — titles come from
+        # external content — but also strip + reject empty, the same validation
+        # update_source_title() and update_source_sha256() already apply. A
+        # whitespace title could otherwise enter via the ingest path (caller-
+        # supplied title=, whitespace filename) and persist a blank title the
+        # rename path itself refuses to write.
+        title = title.strip()[:MAX_TITLE_LEN]
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         self.get_notebook(notebook_id)
         dup = self.conn.execute(
             "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",

@@ -569,7 +569,7 @@ class _Handler(BaseHTTPRequestHandler):
         raw_name = (
             Path(urllib.parse.unquote(header_name)).name
             or "upload.txt"
-        ).replace("\x00", "").replace("\r", "").replace("\n", "") or "upload.txt"
+        ).replace("\x00", "").replace("\r", "").replace("\n", "").strip() or "upload.txt"
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)
