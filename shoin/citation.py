@@ -367,7 +367,7 @@ def _overlap(claim: set[str], source: set[str]) -> float:
     return len(claim & source) / len(claim) if claim else 0.0
 
 
-def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
+def _segment_claims(norm: str, valid: list[int]) -> dict[int, list[str]]:
     """Attribute each citation to the clause-text that precedes it.
 
     A sentence carrying several citations makes several claims; comparing the
@@ -388,6 +388,16 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
     numeric_mismatches() (digit strings per clause) so the two can never
     diverge on WHICH text a citation is held responsible for — the
     v0.2.77-79 duplicated-heuristic drift lesson.
+
+    Each S-number maps to a LIST of clause texts, one per marker occurrence
+    that cites it: "A.[S1] B.[S2,S1]" attributes both the A-clause and the
+    B-clause to S1. Keeping every occurrence matters twice over — the first
+    citation's clause would otherwise be overwritten, so a correct citation
+    could be judged on a later co-cited clause (false accusation) and the
+    earlier clause's numbers would escape numeric_mismatches entirely
+    (missed flag). Callers evaluate each occurrence independently; a number
+    may then land in both confirmed and misattributed, exactly as it already
+    can across sentences.
     """
     spans = list(_BRACKET_RE.finditer(norm))
     cited_spans = [
@@ -397,7 +407,7 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
     cited_spans = [(m, ns) for m, ns in cited_spans if ns]
     if len(cited_spans) < 2:
         return {}
-    out: dict[int, str] = {}
+    out: dict[int, list[str]] = {}
     prev_end = 0
     for m, ns in cited_spans:
         seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
@@ -405,7 +415,7 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
         if not _bigrams(seg):
             continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
         for n in ns:
-            out[n] = seg
+            out.setdefault(n, []).append(seg)
     return out
 
 
@@ -482,15 +492,16 @@ def verify_grounding(
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = (
-                lead_claim
+            claims_n = (
+                [lead_claim]
                 if n in lead
-                else (_bigrams(segments[n]) if n in segments else claim)
+                else ([_bigrams(s) for s in segments[n]] if n in segments else [claim])
             )
-            overlap_n = _overlap(claim_n, src_bg[n])
-            if overlap_n >= CONFIRM_MIN:
-                confirmed.add(n)
-            else:
+            for claim_n in claims_n:
+                overlap_n = _overlap(claim_n, src_bg[n])
+                if overlap_n >= CONFIRM_MIN:
+                    confirmed.add(n)
+                    continue
                 # A different source — including co-cited ones — may match far better,
                 # indicating this specific S-number is wrong even if others in the same
                 # sentence are correctly cited.
@@ -953,51 +964,58 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
-            # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
-            # the substring fallback preserves v0.2.184's rounding tolerance
-            # (claim "63" stays silent inside source "63.5%"); the conversion
-            # check suppresses only when the claim's OWN unit pairs with the
-            # same canonical value in the same family — "300円" against a
-            # source saying "5時間" (→300min) stays flagged because 円 is
-            # not a time unit.
-            conv_by_num: dict[str, set[tuple[int, float]]] = {}
-            for m in _CONV_NUM_RE.finditer(claim_n):
-                ent = _UNIT_SCALE.get(m.group(2))
-                if ent is not None:
-                    conv_by_num.setdefault(m.group(1), set()).add(
-                        (ent[0], float(m.group(1)) * ent[1])
-                    )
-            # Rate restatements (v0.2.214): a claim asserting "50%" matches a
-            # source writing the same rate as the bare fraction "0.5", and a
-            # bare-fraction claim "0.5" matches a source asserting "50%" — but
-            # the reverse directions stay strict: an unmarked claim "50" does
-            # NOT match a bare "0.5" (different magnitudes), and a fraction
-            # claim only bridges to a RATE-marked source value (claim "0.5" vs
-            # source "50個" keeps flagging — 50 was not asserted as a rate).
-            claim_rate = _rate_values(claim_n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
+                # the substring fallback preserves v0.2.184's rounding tolerance
+                # (claim "63" stays silent inside source "63.5%"); the conversion
+                # check suppresses only when the claim's OWN unit pairs with the
+                # same canonical value in the same family — "300円" against a
+                # source saying "5時間" (→300min) stays flagged because 円 is
+                # not a time unit.
+                conv_by_num: dict[str, set[tuple[int, float]]] = {}
+                for m in _CONV_NUM_RE.finditer(claim_n):
+                    ent = _UNIT_SCALE.get(m.group(2))
+                    if ent is not None:
+                        conv_by_num.setdefault(m.group(1), set()).add(
+                            (ent[0], float(m.group(1)) * ent[1])
+                        )
+                # Rate restatements (v0.2.214): a claim asserting "50%" matches a
+                # source writing the same rate as the bare fraction "0.5", and a
+                # bare-fraction claim "0.5" matches a source asserting "50%" — but
+                # the reverse directions stay strict: an unmarked claim "50" does
+                # NOT match a bare "0.5" (different magnitudes), and a fraction
+                # claim only bridges to a RATE-marked source value (claim "0.5" vs
+                # source "50個" keeps flagging — 50 was not asserted as a rate).
+                claim_rate = _rate_values(claim_n)
 
-            def _num_missing(
-                num: str, n: int, conv: dict[str, set[tuple[int, float]]], rate: set[str]
-            ) -> bool:
-                if (
-                    num in src_nums[n]
-                    or num in src_norm[n]
-                    or not conv.get(num, set()).isdisjoint(src_conv[n])
+                def _num_missing(
+                    num: str,
+                    n: int,
+                    conv: dict[str, set[tuple[int, float]]],
+                    rate: set[str],
+                ) -> bool:
+                    if (
+                        num in src_nums[n]
+                        or num in src_norm[n]
+                        or not conv.get(num, set()).isdisjoint(src_conv[n])
+                    ):
+                        return False
+                    f = float(num)
+                    if num in rate and _canon(f / 100) in src_nums[n]:
+                        return False
+                    if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
+                        return False
+                    return True
+
+                if any(
+                    _num_missing(num, n, conv_by_num, claim_rate)
+                    for num in _numbers_expanded(claim_n)
                 ):
-                    return False
-                f = float(num)
-                if num in rate and _canon(f / 100) in src_nums[n]:
-                    return False
-                if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
-                    return False
-                return True
-
-            if any(
-                _num_missing(num, n, conv_by_num, claim_rate)
-                for num in _numbers_expanded(claim_n)
-            ):
-                out.add(n)
+                    out.add(n)
+                    break
     return sorted(out)
 
 
@@ -1171,13 +1189,20 @@ def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
-            for num, unit in _unit_pairs(claim_n):
-                if num not in src_norm[n]:
-                    continue  # absent number — numeric_mismatches()' signal
-                units_n = [v for num2, v in src_units[n] if num2 == num]
-                if units_n and not any(_units_compat(unit, v) for v in units_n):
-                    out.add(n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                flagged = False
+                for num, unit in _unit_pairs(claim_n):
+                    if num not in src_norm[n]:
+                        continue  # absent number — numeric_mismatches()' signal
+                    units_n = [v for num2, v in src_units[n] if num2 == num]
+                    if units_n and not any(_units_compat(unit, v) for v in units_n):
+                        out.add(n)
+                        flagged = True
+                        break
+                if flagged:
                     break
     return sorted(out)
 
@@ -1271,34 +1296,44 @@ def quote_mismatches(
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = lead_claim if n in lead else segments.get(n, claim_text)
-            for q in _quote_spans(claim_n):
-                if q in src_norm[n]:
-                    continue
-                # Verbatim location of the quote, if any — a stronger provenance
-                # signal than bigram argmax, so this assignment wins when both
-                # checks flag the same number (make_report shares one dict).
-                hit_k = next((k for k in src_norm if k != n and q in src_norm[k]), None)
-                if hit_k is not None:
-                    out.add(n)
-                    if suggested is not None:
-                        suggested[n] = hit_k
-                    break
-                if len(q) >= _DOCTORED_MIN_LEN:
-                    # Doctored shape: argmax over ALL sources — a near-verbatim of
-                    # the cited source itself flags too (paraphrase wearing
-                    # quotes: the assertive 「…」 claims wording n never wrote).
-                    # The suggestion only helps when it points elsewhere.
-                    best_k, best_o = max(
-                        ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
-                        key=lambda kv: kv[1],
-                        default=(0, 0.0),
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                flagged = False
+                for q in _quote_spans(claim_n):
+                    if q in src_norm[n]:
+                        continue
+                    # Verbatim location of the quote, if any — a stronger provenance
+                    # signal than bigram argmax, so this assignment wins when both
+                    # checks flag the same number (make_report shares one dict).
+                    hit_k = next(
+                        (k for k in src_norm if k != n and q in src_norm[k]), None
                     )
-                    if best_o >= _DOCTORED_MIN_OVERLAP:
+                    if hit_k is not None:
                         out.add(n)
-                        if suggested is not None and best_k != n:
-                            suggested[n] = best_k
+                        if suggested is not None:
+                            suggested[n] = hit_k
+                        flagged = True
                         break
+                    if len(q) >= _DOCTORED_MIN_LEN:
+                        # Doctored shape: argmax over ALL sources — a near-verbatim of
+                        # the cited source itself flags too (paraphrase wearing
+                        # quotes: the assertive 「…」 claims wording n never wrote).
+                        # The suggestion only helps when it points elsewhere.
+                        best_k, best_o = max(
+                            ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
+                            key=lambda kv: kv[1],
+                            default=(0, 0.0),
+                        )
+                        if best_o >= _DOCTORED_MIN_OVERLAP:
+                            out.add(n)
+                            if suggested is not None and best_k != n:
+                                suggested[n] = best_k
+                            flagged = True
+                            break
+                if flagged:
+                    break
     return sorted(out)
 
 
@@ -1477,28 +1512,33 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_norm = re.sub(
-                r"\s+", " ", _match_fold(lead_claim if n in lead else segments.get(n, claim_text))
-            ).strip()
-            cb = _bigrams(claim_norm)
-            if not cb:
-                continue
-            best_i, best_o = -1, 0.0
-            for i, sb in enumerate(src_bg[n]):
-                o = _overlap(cb, sb)
-                if o > best_o:
-                    best_o, best_i = o, i
-            if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
-                continue
-            sb = src_bg[n][best_i]
-            if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
-                continue  # claim is only a subset of a longer source sentence
-            claim_ant = _ant_signs(claim_norm)
-            if _neg_parity(claim_norm) != src_par[n][best_i] or any(
-                claim_ant[c] != src_ant[n][best_i][c]
-                for c in claim_ant.keys() & src_ant[n][best_i].keys()
-            ):
-                out.add(n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                claim_norm = re.sub(
+                    r"\s+", " ", _match_fold(claim_n)
+                ).strip()
+                cb = _bigrams(claim_norm)
+                if not cb:
+                    continue
+                best_i, best_o = -1, 0.0
+                for i, sb in enumerate(src_bg[n]):
+                    o = _overlap(cb, sb)
+                    if o > best_o:
+                        best_o, best_i = o, i
+                if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
+                    continue
+                sb = src_bg[n][best_i]
+                if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
+                    continue  # claim is only a subset of a longer source sentence
+                claim_ant = _ant_signs(claim_norm)
+                if _neg_parity(claim_norm) != src_par[n][best_i] or any(
+                    claim_ant[c] != src_ant[n][best_i][c]
+                    for c in claim_ant.keys() & src_ant[n][best_i].keys()
+                ):
+                    out.add(n)
+                    break
     return sorted(out)
 
 

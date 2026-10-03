@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.579
+## Version History: v0.1.37 → v0.2.580
+
+### v0.2.580
+- _segment_claims per-occurrence attribution: a source cited twice in one sentence ("A.[S1] B.[S2,S1]") had its first clause overwritten by the second marker's, so verify_grounding judged the correct apple citation on the sky clause (false accusation + lost confirmed mark) and numeric/unit/quote/negation checks never inspected the earlier clause at all (missed flags — a fabricated 987円 in it escaped). The shared map now keeps a list of clause texts per S-number, and all five callers evaluate each occurrence independently — a number may land in both confirmed and misattributed, exactly as it already can across sentences. Fail-direction verified on both new pins.
 
 ### v0.2.579
 - _DISCLAIMER_MARKERS coverage: the tuple only matched 6 exact substrings, so the canonical "not in the source" phrasings LLMs actually emit — 記載がありません / 言及がありません / 記述されていません / 情報がありません / 確認できません / does not mention / not stated / no information — were flagged as unsupported assertions, the exact class the check exists NOT to flag (a disclaimer is the correct answer to missing facts). Stems (…ませ / noun phrases) cover ません・ませんでした both, the substring check casefolds so sentence-initial capitals match, and a domain noun is still required so real negation claims ("効果はありません") keep flagging. Fail-direction verified on both new pins.

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.579")
+        self.assertEqual(VERSION, "0.2.580")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6228,6 +6228,25 @@ class TestCitation(unittest.TestCase):
         self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
 
 
+    def test_verify_grounding_twice_cited_number_keeps_every_occurrence(self) -> None:
+        """A source cited twice in one sentence is judged on EACH clause it
+        annotates — the earlier clause must not be overwritten by the later
+        marker's, or a correct citation can be accused (and its confirmed
+        mark lost) while the failing occurrence alone is what should flag."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "りんごは赤い果物であり、甘みが強い。",
+            2: "空は青く広がっており、雲が浮かぶ。",
+        }
+        text = "りんごは赤い果物である[S1]、そして空は青く広がっている[S2,S1]。"
+        confirmed, misattributed = verify_grounding(text, sources)
+        # First S1 occurrence correctly cites the apple clause -> confirmed.
+        # Second S1 occurrence (inside [S2,S1]) claims the sky clause lives
+        # in S1 -> that occurrence is genuinely misattributed.
+        self.assertEqual(confirmed, [1, 2])
+        self.assertEqual(misattributed, [1])
+
 class TestNumericMismatches(unittest.TestCase):
     """numeric_mismatches() (v0.2.184): a cited claim asserting a number the
     source never contains — the fabricated-statistic failure shape the
@@ -6659,6 +6678,16 @@ class TestNumericMismatches(unittest.TestCase):
             [1],
         )
 
+
+    def test_twice_cited_number_first_clause_numbers_still_checked(self) -> None:
+        """When a source is cited twice in one sentence, numbers in the FIRST
+        cited clause are still checked — attribution must keep every marker
+        occurrence, not just the last."""
+        from shoin.citation import numeric_mismatches
+
+        sources = {1: "りんごは果物である。", 2: "空は青い。"}
+        text = "りんごの価格は987円である[S1]、空は青い[S2,S1]。"
+        self.assertIn(1, numeric_mismatches(text, sources))
 
 class TestUnitMismatches(unittest.TestCase):
     """unit_mismatches() (v0.2.190): a cited claim asserting a number the source
@@ -13200,9 +13229,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:565", "citation.py:569", "citation.py:581",
-    "citation.py:582", "citation.py:619", "citation.py:632",
-    "citation.py:1019", "citation.py:1402", "citation.py:1618",
+    "citation.py:576", "citation.py:580", "citation.py:592",
+    "citation.py:593", "citation.py:630", "citation.py:643",
+    "citation.py:1037", "citation.py:1437", "citation.py:1658",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18363,7 +18392,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [565, 569, 581, 582, 632, 1019, 1402, 1618],
+            "citation.py": [576, 580, 592, 593, 643, 1037, 1437, 1658],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
