@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.574
+## Version History: v0.1.37 → v0.2.575
+
+### v0.2.575
+- Indented fence markers are code, not fences (_FENCE_RE → `^ {0,3}` + uncited_sentences matches `raw`, not the stripped `sentence`): a ``` line indented 4+ spaces inside an indented code block is code content per CommonMark, but `^\s*` let it toggle in_fence — every claim after it was swallowed by both _strip_fences and uncited_sentences' inline tracking, blinding the degeneration/contradiction/uncited checks to real prose. Narrowed to the CommonMark 0-3-space rule; mid-paragraph indented ``` stays a lazy continuation (prose, not a fence either). Behavior pins for the code-block, lazy-continuation, and 0-3-space fence shapes.
+- Also: product-review ledger synced to v0.2.574 (v0.2.566-574 summary block).
 
 ### v0.2.574
 - _norm_query_terms now includes _numeric_query_terms, closing the

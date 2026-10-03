@@ -143,8 +143,10 @@ _STRUCTURAL_LINE_RE = re.compile(
     r"^\s*(?:#{1,6}\s|\|.*\|\s*$|[\-*_~]{3,}\s*$|>)"
 )
 # Fence open/close markers. `in_fence` in uncited_sentences() toggles on these;
-# everything between a pair is code, not prose sentences.
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# everything between a pair is code, not prose sentences. 0-3 leading spaces
+# only (CommonMark): a 4-space-indented ``` is indented-code content, not a
+# fence — matching it as one flipped in_fence and swallowed real prose.
+_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
 # Indented code blocks (v0.2.217): a 4-space/tab-indented line is ALSO code —
 # but only when the previous line is blank (or the block is already open).
 # Otherwise the indent is a lazy continuation of a wrapped paragraph
@@ -1677,7 +1679,7 @@ def uncited_sentences(text: str) -> list[str]:
             list_scope or (prev_cited and _LIST_INTRO_RE.search(prev_bare) is not None)
         )
         prev_bare, prev_cited = bare, bool(nums)
-        if _FENCE_RE.match(sentence):
+        if _FENCE_RE.match(raw):
             in_fence = not in_fence
             in_code = False
             prev_blank = False

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.574")
+        self.assertEqual(VERSION, "0.2.575")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7790,6 +7790,29 @@ class TestUncitedSentences(unittest.TestCase):
         self.assertTrue(answer.degraded)
         self.assertNotIn("uncited", answer.report)
 
+    def test_indented_fence_marker_is_code_not_a_fence(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A ``` line indented 4+ spaces inside an indented code block is code
+        # content, not a fence (CommonMark: fences allow 0-3 leading spaces).
+        # Treating it as one flipped in_fence and swallowed every later claim.
+        text = "説明はここにある。\n\n    x = 1\n    ```\n根拠のない断定をする。\n"
+        self.assertTrue(any("根拠のない断定" in s for s in uncited_sentences(text)))
+
+    def test_strip_fences_keeps_prose_after_indented_fence(self) -> None:
+        from shoin.citation import _strip_fences
+
+        # Same boundary, the shared stripper: the indented ``` line is part of
+        # the indented block, so the prose following it must stay visible.
+        text = "claim one。\n\n    code:\n    ```\nclaim two。\n"
+        self.assertIn("claim two", _strip_fences(text))
+
+    def test_strip_fences_still_hides_real_fences(self) -> None:
+        from shoin.citation import _strip_fences
+
+        for sp in range(4):  # 0-3 leading spaces remain valid fences
+            text = "prose。\n" + " " * sp + "```\nhidden code\n```\n"
+            self.assertNotIn("hidden code", _strip_fences(text))
 
 class TestStoreChunksForSource(unittest.TestCase):
     def test_chunks_for_source_returns_correct_chunks(self) -> None:
@@ -13045,9 +13068,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:526", "citation.py:530", "citation.py:542",
-    "citation.py:543", "citation.py:580", "citation.py:593",
-    "citation.py:978", "citation.py:1357", "citation.py:1571",
+    "citation.py:528", "citation.py:532", "citation.py:544",
+    "citation.py:545", "citation.py:582", "citation.py:595",
+    "citation.py:980", "citation.py:1359", "citation.py:1573",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18208,7 +18231,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 542, 543, 593, 978, 1357, 1571],
+            "citation.py": [528, 532, 544, 545, 595, 980, 1359, 1573],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
