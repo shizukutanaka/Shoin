@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.570
+## Version History: v0.1.37 → v0.2.571
+
+### v0.2.571
+- _en_value now requires real numeral grammar inside a small-cluster:
+  only a tens word may take a unit successor ("twenty five").  Any
+  other consecutive small values — "one two", "fifteen three",
+  "seven eight nine", "one-one" — enumerate, and enumeration is not
+  a sum, so the run is inconclusive → None (the same silence
+  "一二三" earns from _kanji_value).  Previously every such run
+  summed ("one two" → 3, "seven eight nine" → 24), registering
+  members the text never asserted and suppressing real flags.
+  Pinned by test_en_value_enumerations_stay_silent and
+  test_enumerated_english_numerals_do_not_sum (e2e).
 
 ### v0.2.570
 - _conv_values requires an additive gap for same-family chains: the

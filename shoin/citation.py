@@ -656,14 +656,32 @@ def _en_value(run: str) -> int | None:
     total = 0
     local = 0
     used = False
+    prev_small = False
+    pending_tens = False
     for tok in re.split(r"[ -]+", run.casefold()):
         if tok in _EN_SMALL:
-            local += _EN_SMALL[tok]
+            v = _EN_SMALL[tok]
+            # A small-cluster is a numeral only as tens+optional-unit —
+            # "one two", "fifteen three" enumerate, inconclusive → None.
+            if pending_tens:
+                if v >= 10:
+                    return None
+                pending_tens = False
+            elif prev_small:
+                return None
+            elif v >= 20:
+                pending_tens = True
+            local += v
+            prev_small = True
         elif tok == "hundred":
             local = (local or 1) * 100
+            prev_small = False
+            pending_tens = False
         else:
             total += (local or 1) * _EN_BIG[tok]
             local = 0
+            prev_small = False
+            pending_tens = False
         used = True
     return total + local if used else None
 

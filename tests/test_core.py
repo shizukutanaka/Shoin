@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.570")
+        self.assertEqual(VERSION, "0.2.571")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6512,6 +6512,22 @@ class TestNumericMismatches(unittest.TestCase):
         # additive join still sums
         self.assertEqual(
             numeric_mismatches("合計は90分だった。[S1]", {1: "所要は1時間と30分だった。"}),
+            [],
+        )
+
+    def test_enumerated_english_numerals_do_not_sum(self) -> None:
+        """v0.2.571: source 'seven eight nine' lists values, not the
+        numeral 24 — a claim asserting '24' must still flag (claims check
+        only multi-digit strings, so '3'/'17' are untestable here)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches("The count was 24 items.[S1]", {1: "seven eight nine rows"}),
+            [1],
+        )
+        # a true tens+unit spelling still suppresses
+        self.assertEqual(
+            numeric_mismatches("The count was 25 items.[S1]", {1: "there were twenty five"}),
             [],
         )
 
@@ -12932,6 +12948,23 @@ class TestCitationCoverageTail(unittest.TestCase):
             vals = _conv_values(f"1時間{gap}30分")
             self.assertIn((0, 90.0), vals)
 
+    def test_en_value_enumerations_stay_silent(self) -> None:
+        """v0.2.571: a small-cluster is a numeral only as tens+optional-
+        unit — 'one two', 'fifteen three' enumerate separate values, so
+        summing them registered members the run never asserted ('3', '17').
+        The same silence '一二三' earns from _kanji_value."""
+        from shoin.citation import _en_value
+
+        for run in ("one two", "one two three", "fifteen two",
+                    "seven eight nine", "one one", "one twenty",
+                    "twenty twenty", "twenty five three", "one-two"):
+            self.assertIsNone(_en_value(run))
+        for run, v in (("twenty five", 25), ("twenty-one", 21),
+                       ("three hundred fifty", 350),
+                       ("one million two thousand five hundred", 1002500),
+                       ("fifteen", 15), ("two million", 2000000)):
+            self.assertEqual(_en_value(run), v)
+
     def test_quote_mismatch_suggested_names_right_source(self) -> None:
         """When a doctored quote is flagged, `suggested` must name the source
         it actually matches — the fix is 'say [S2]', not 're-read'."""
@@ -12968,7 +13001,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
     "citation.py:526", "citation.py:530", "citation.py:542",
     "citation.py:543", "citation.py:580", "citation.py:593",
-    "citation.py:960", "citation.py:1339", "citation.py:1553",
+    "citation.py:978", "citation.py:1357", "citation.py:1571",
     "search.py:72", "search.py:907",
 }
 _ERROR_CODE_CATALOG = {
@@ -18129,7 +18162,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 542, 543, 593, 960, 1339, 1553],
+            "citation.py": [526, 530, 542, 543, 593, 978, 1357, 1571],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
