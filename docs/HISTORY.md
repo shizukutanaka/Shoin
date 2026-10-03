@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.559
+## Version History: v0.1.37 → v0.2.560
+
+### v0.2.560
+- spec.md synced to the implementation: header marker v0.2.517 →
+  v0.2.559 and the quality row's measured values refreshed
+  (v0.2.554 → v0.2.559, 1199 → 1206 tests; coverage still 99% with
+  the same 4 proven-unreachable lines). Contract-level rows were
+  audited and found current.
 
 ### v0.2.559
 - product-review ledger synced to v0.2.558: adds the
