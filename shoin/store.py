@@ -376,6 +376,10 @@ class Store:
             if db_file.parent == data_dir():
                 os.chmod(db_file.parent, 0o700)
             for f in db_file.parent.glob(db_file.name + "*"):
+                # Never chmod through a symlink: inside a shared --db parent a
+                # planted link would tighten an arbitrary file it points to.
+                if f.is_symlink():
+                    continue
                 with contextlib.suppress(OSError):
                     os.chmod(f, 0o600)
 
@@ -466,7 +470,10 @@ class Store:
         if not name:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
         if len(name) > MAX_NAME_LEN:
-            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"name too long (max {MAX_NAME_LEN} chars)")
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"name too long (max {MAX_NAME_LEN} chars)",
+            )
         ts = _now()
         cur = self.conn.execute(
             "INSERT INTO notebooks(name, created_at, updated_at) VALUES (?,?,?)",
@@ -482,7 +489,9 @@ class Store:
         return Notebook(row["id"], row["name"], row["created_at"], row["updated_at"])
 
     def list_notebooks(self) -> list[Notebook]:
-        rows = self.conn.execute("SELECT * FROM notebooks ORDER BY updated_at DESC, id DESC").fetchall()
+        rows = self.conn.execute(
+            "SELECT * FROM notebooks ORDER BY updated_at DESC, id DESC"
+        ).fetchall()
         return [Notebook(r["id"], r["name"], r["created_at"], r["updated_at"]) for r in rows]
 
     def rename_notebook(self, notebook_id: int, name: str) -> None:
@@ -490,7 +499,10 @@ class Store:
         if not name:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
         if len(name) > MAX_NAME_LEN:
-            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"name too long (max {MAX_NAME_LEN} chars)")
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"name too long (max {MAX_NAME_LEN} chars)",
+            )
         cur = self.conn.execute(
             "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
             (name, _now(), notebook_id),
@@ -559,7 +571,10 @@ class Store:
                 ) from e
             # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate
             # as a generic internal error rather than a misleading NOTEBOOK_NOT_FOUND.
-            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"unexpected constraint violation: {e}",
+            ) from e
         return Source(int(cur.lastrowid or 0), notebook_id, kind, title, origin, sha256, ts)
 
     def update_source_title(self, source_id: int, title: str, origin: str) -> None:
@@ -678,7 +693,10 @@ class Store:
         separate update_source_sha256 call in pipeline.refresh_source.
         """
         if not texts:
-            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "replacement chunk list must not be empty")
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING",
+                "replacement chunk list must not be empty",
+            )
         if contexts is not None and len(contexts) != len(texts):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
@@ -710,11 +728,17 @@ class Store:
                         (sha256, new_title, source_id),
                     )
                     if meta_cur.rowcount == 0:
-                        raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                        raise StoreError(
+                            "SOURCE_NOT_FOUND",
+                            f"source {source_id} was concurrently deleted",
+                        )
                 self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
-                raise StoreError("SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source") from e
+                raise StoreError(
+                    "SOURCE_ALREADY_EXISTS",
+                    "refreshed content hash matches another existing source",
+                ) from e
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) ON DELETE CASCADE — this is
                 # the genuine concurrent-deletion case: the source row was removed
@@ -725,7 +749,10 @@ class Store:
             # Unexpected constraint violation (e.g. CHECK, NOT NULL) — propagate as a
             # generic internal error rather than a misleading SOURCE_NOT_FOUND (mirrors
             # the same v0.2.53 fix already applied to add_source(), never ported here).
-            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"unexpected constraint violation: {e}",
+            ) from e
         return ids
 
     def update_source_sha256(self, source_id: int, sha256: str, title: str) -> None:
@@ -748,26 +775,36 @@ class Store:
                     "SELECT title FROM sources WHERE id=?", (source_id,)
                 ).fetchone()
                 if row is None:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                    raise StoreError(
+                        "SOURCE_NOT_FOUND",
+                        f"source {source_id} was concurrently deleted",
+                    )
                 old_title = str(row["title"])
                 cur = self.conn.execute(
                     "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
                 )
                 if cur.rowcount == 0:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
+                    raise StoreError(
+                        "SOURCE_NOT_FOUND",
+                        f"source {source_id} was concurrently deleted",
+                    )
                 if title != old_title:
                     self._rewrite_chunk_context_titles(source_id, old_title, title)
                 self.touch_notebook(src.notebook_id)
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
-                    "SOURCE_ALREADY_EXISTS", "refreshed content hash matches another existing source"
+                    "SOURCE_ALREADY_EXISTS",
+                    "refreshed content hash matches another existing source",
                 ) from e
             # This is an UPDATE that never touches notebook_id, so no FOREIGN KEY
             # violation is possible here — anything else (e.g. a NOT NULL on the
             # sha256 column) is a genuine unexpected constraint violation, not a
             # duplicate-hash collision. Mirrors the v0.2.53/86/104 fix pattern.
-            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"unexpected constraint violation: {e}",
+            ) from e
 
     def add_chunks(
         self, source_id: int, texts: list[str], contexts: list[str] | None = None
@@ -802,7 +839,10 @@ class Store:
             # as a generic internal error rather than a misleading SOURCE_NOT_FOUND.
             # Mirrors the same v0.2.53 fix already applied to add_source() and
             # replace_chunks_for_source() (v0.2.86), never ported to this third sibling.
-            raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"unexpected constraint violation: {e}",
+            ) from e
         return ids
 
     def _set_embedding_pair(self, chunk_id: int, blob: bytes, norm: float) -> None:
@@ -935,7 +975,10 @@ class Store:
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "note title is empty")
         if len(title) > MAX_NAME_LEN:
-            raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"title too long (max {MAX_NAME_LEN} chars)")
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"title too long (max {MAX_NAME_LEN} chars)",
+            )
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
@@ -951,7 +994,10 @@ class Store:
                 # notes has no UNIQUE constraint, so the only expected IntegrityError
                 # here is the FK on notebook_id (genuine concurrent deletion).
                 # Mirrors the v0.2.53/86/104 fix pattern.
-                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+                raise StoreError(
+                    "SYSTEM_INTERNAL_ERROR",
+                    f"unexpected constraint violation: {e}",
+                ) from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during note insertion",
@@ -1009,7 +1055,10 @@ class Store:
                 # studio_outputs has no UNIQUE constraint, so the only expected
                 # IntegrityError here is the FK on notebook_id (genuine concurrent
                 # deletion). Mirrors the v0.2.53/86/104 fix pattern.
-                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+                raise StoreError(
+                    "SYSTEM_INTERNAL_ERROR",
+                    f"unexpected constraint violation: {e}",
+                ) from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during studio output insertion",
@@ -1053,7 +1102,10 @@ class Store:
                 # messages has no UNIQUE constraint, so the only expected
                 # IntegrityError here is the FK on notebook_id (genuine concurrent
                 # deletion). Mirrors the v0.2.53/86/104 fix pattern.
-                raise StoreError("SYSTEM_INTERNAL_ERROR", f"unexpected constraint violation: {e}") from e
+                raise StoreError(
+                    "SYSTEM_INTERNAL_ERROR",
+                    f"unexpected constraint violation: {e}",
+                ) from e
             raise StoreError(
                 "NOTEBOOK_NOT_FOUND",
                 f"notebook {notebook_id} was deleted during message insertion",

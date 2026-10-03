@@ -253,7 +253,10 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             self._error(status, code, message)
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            print(f"Client disconnected before error response could be sent: {exc}", file=sys.stderr)
+            print(
+                f"Client disconnected before error response could be sent: {exc}",
+                file=sys.stderr,
+            )
 
     def _read_json(self) -> Json:
         try:
@@ -299,7 +302,8 @@ class _Handler(BaseHTTPRequestHandler):
         raw = data.get(key)
         if raw is not None and not isinstance(raw, str):
             raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a string, got {type(raw).__name__}",
             )
         value = (raw or "").strip()
         if not value:
@@ -318,7 +322,8 @@ class _Handler(BaseHTTPRequestHandler):
         raw = data.get(key)
         if raw is not None and not isinstance(raw, str):
             raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be a string, got {type(raw).__name__}"
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a string, got {type(raw).__name__}",
             )
         value = raw or ""
         _check_utf8(key, value)
@@ -742,7 +747,9 @@ class _Handler(BaseHTTPRequestHandler):
             _EXPORT_MIME[fmt],
             {
                 "Content-Length": str(len(body)),
-                "Content-Disposition": f'attachment; filename="notebook-{nb_id}.{_EXPORT_EXT[fmt]}"',
+                "Content-Disposition": (
+                    f'attachment; filename="notebook-{nb_id}.{_EXPORT_EXT[fmt]}"'
+                ),
             },
         )
         self.wfile.write(body)
@@ -787,7 +794,11 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)  # 404 before headers go out
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
-            qvec = _query_vector(self.llm, retrieval_q) if _check_embed_model_ok(store, self.llm) else None
+            qvec = (
+                _query_vector(self.llm, retrieval_q)
+                if _check_embed_model_ok(store, self.llm)
+                else None
+            )
             # Single-query retrieve() unless SHOIN_MULTI_QUERY opts in. Neither
             # this call's rewrite LLM request nor the qvec embedding call above
             # it is serialized under generation_lock (spec.md single-generation
@@ -829,8 +840,22 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 # Headers already committed; must not let this propagate to _dispatch
                 # (it would write a new HTTP status line into the SSE body stream).
+                # Message policy mirrors _dispatch: coded errors carry their
+                # curated (code, message); anything else leaks only the type
+                # name — str(exc) can carry internals (SQL text, paths).
+                # Full detail still goes to stderr.
+                print(
+                    f"build_context failed mid-SSE: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
                 try:
-                    self._sse("error", {"code": "SYSTEM_INTERNAL_ERROR", "message": str(exc)})
+                    if isinstance(exc, (StoreError, IngestError, LLMError)):
+                        self._sse("error", {"code": exc.code, "message": str(exc)})
+                    else:
+                        self._sse(
+                            "error",
+                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
+                        )
                 except ConnectionError:
                     pass
                 # Prevent dangling user turn: save an empty assistant message so

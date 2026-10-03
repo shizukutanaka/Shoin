@@ -20,10 +20,16 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_misattr": {"ja": "⚠番号取り違えの可能性", "en": "⚠ possible wrong source"},
     "status_numeric": {"ja": "⚠数値が出典に無し", "en": "⚠ number not in source"},
     "status_unit": {"ja": "⚠単位が出典と不一致", "en": "⚠ unit differs from source"},
-    "status_negation": {"ja": "⚠出典と逆の主張の可能性", "en": "⚠ possible contradiction with source"},
+    "status_negation": {
+        "ja": "⚠出典と逆の主張の可能性",
+        "en": "⚠ possible contradiction with source",
+    },
     "status_confirmed": {"ja": "✓根拠確認済み", "en": "✓ grounding confirmed"},
     "status_uncited": {"ja": "⚠無出典の断定文", "en": "⚠ uncited assertions"},
-    "status_uncited_supported": {"ja": "⚠出典内一致=引用欠落", "en": "⚠ source match — missing citation"},
+    "status_uncited_supported": {
+        "ja": "⚠出典内一致=引用欠落",
+        "en": "⚠ source match — missing citation",
+    },
     "found_label": {"ja": "検出: ", "en": "found: "},
     "found_fts": {"ja": "全文", "en": "full-text"},
     "found_vec": {"ja": "意味", "en": "semantic"},
@@ -69,7 +75,10 @@ def _status_line(report: dict[str, object]) -> str:
         sugg = sugg_raw if isinstance(sugg_raw, dict) else {}
         bits.append(
             f"{_t('status_misattr')}: "
-            + ", ".join(f"S{i}" + (f"\u2192{sugg[f'S{i}']}" if sugg.get(f"S{i}") else "") for i in misattr)
+            + ", ".join(
+                f"S{i}" + (f"\u2192{sugg[f'S{i}']}" if sugg.get(f"S{i}") else "")
+                for i in misattr
+            )
         )
     numeric = report.get("numeric_mismatch")
     if isinstance(numeric, list) and numeric:
@@ -306,7 +315,11 @@ def export_ris(store: Store, notebook_id: int) -> str:
     for src in store.sources_for_notebook(notebook_id):
         date = ((src.added_at or "")[:10].replace("-", "/")) or "unknown"
         ty = _RIS_TYPE.get(src.kind, "GEN")
-        lines = [f"TY  - {ty}", f"TI  - {_ris_escape(src.title)}", f"UR  - {_ris_escape(src.origin)}"]
+        lines = [
+            f"TY  - {ty}",
+            f"TI  - {_ris_escape(src.title)}",
+            f"UR  - {_ris_escape(src.origin)}",
+        ]
         # PY (publication year) is the canonical year field reference managers
         # (Zotero, Mendeley) use for author-year citation and sorting — DA is a
         # generic date they don't reliably derive the year from. Emit it only for

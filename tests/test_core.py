@@ -33,6 +33,7 @@ from shoin.search import (
     Hit,
     _char_bigrams,
     _fallback_needles,
+    _is_cjk_word,
     _kanji_skeleton,
     bm25_search,
     fts_query,
@@ -106,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.482")
+        self.assertEqual(VERSION, "0.2.549")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -193,7 +194,10 @@ class TestStore(unittest.TestCase):
         from shoin.store import MIGRATIONS
 
         for version, sql in MIGRATIONS:
-            script = f"BEGIN;\n{sql.strip()}\nINSERT INTO schema_migrations(version) VALUES ({int(version)});\nCOMMIT;"
+            script = (
+                f"BEGIN;\n{sql.strip()}\n"
+                f"INSERT INTO schema_migrations(version) VALUES ({int(version)});\nCOMMIT;"
+            )
             stripped = script.strip()
             self.assertTrue(stripped.startswith("BEGIN;"), f"v{version}: missing BEGIN")
             self.assertTrue(stripped.endswith("COMMIT;"), f"v{version}: missing COMMIT")
@@ -1859,6 +1863,356 @@ class TestChunk(unittest.TestCase):
         self.assertEqual(estimate_tokens("書院。"), 3)
         self.assertEqual(estimate_tokens("猫、犬。"), 4)
 
+    def test_enclosed_compat_chars_are_cjk_terms(self) -> None:
+        """v0.2.527: the NFKC-foldable enclosed/compat blocks — ①-⑳, ㈱,
+        ㋿㍻㍼ (era shorthand), ㌀㌢ (squared-katakana words), ㎏㎞㍑㍉
+        (squared units), 🈶🈸 — must be CJK term characters.  Outside
+        _CJK_RANGES they silently vanished from query_terms ('㍻元年'
+        searched '元年' alone) and escaped CJK token cost; inside,
+        term_variants' NFKC form already bridges them to canonical
+        spellings (㍻→平成, ㎏→kg), which the LIKE fallback finds."""
+        for ch in ("㍻", "㋿", "㈱", "①", "㎏", "🈶", "㌀", "㌢"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        for q in ("㍻元年", "㋿3年", "㈱決算", "①項目", "㎏あたり"):
+            terms = query_terms(q)
+            self.assertTrue(
+                any(t[0] in "㍻㋿㈱①㎏" for t in terms),
+                f"{q!r} dropped its enclosed char: {terms}",
+            )
+        # The same omission let these characters ride the token budget for
+        # free — cost 0 each before they classified as CJK.
+        self.assertEqual(estimate_tokens("㍻"), 1)
+        self.assertEqual(estimate_tokens("㍻元年"), 3)
+
+    def test_foldable_blocks_are_cjk_terms(self) -> None:
+        """v0.2.528: the remaining NFKC-foldable blocks — Hangul Jamo
+        (decomposed syllables, the macOS NFD filename spelling), Roman
+        numerals, super/subscript digits, vulgar fractions, letterlike
+        symbols, ligature presentation forms, kana-supplement
+        hentaigana, math alphanumerics, fullwidth currency — must
+        classify and survive query_terms like the enclosed blocks."""
+        for ch in ("ᄒ", "ᅡ", "Ⅲ", "²", "¼", "ﬁ", "℃", "№", "𛁂", "￦", "𝐀", "µ"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        for q in ("한문서", "Ⅲ章", "x²+y²", "½カップ", "気温30℃", "￦100"):
+            terms = query_terms(q)
+            self.assertTrue(
+                any(t[0] in "ᄒⅢx½気￦" for t in terms),
+                f"{q!r} dropped its foldable char: {terms}",
+            )
+        # term_variants' NFKC form composes decomposed jamo both ways:
+        # a composed query emits the NFD variant (macOS filenames are
+        # NFD), a jamo query emits the composed syllable.
+        from shoin.search import term_variants
+        self.assertIn("한", term_variants("한"))
+        self.assertIn("한", term_variants("한"))
+        self.assertIn("III", term_variants("Ⅲ"))
+        self.assertIn("fi", term_variants("ﬁ"))
+
+    def test_alphabetic_scripts_are_cjk_terms(self) -> None:
+        """v0.2.529: non-foldable letters (accented Latin, Cyrillic, Greek,
+        Hebrew, Arabic, Indic) must classify and survive query_terms — before
+        the fix 'café' lost é and a Cyrillic query searched nothing at all.
+        Vowel marks continue a run (Devanagari matras, NFD diacritics);
+        punctuation inside the alphabetic blocks (، ؛ ؟ ־ । ·) stays a
+        boundary via the category test — no per-block punct table needed."""
+        for ch in ("é", "д", "λ", "א", "ق", "क", "า", "ქ", "አ", "ᚠ"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        # Whole-word runs per script — matras and marks glue, spaces split.
+        self.assertEqual(query_terms("привет мир"), ["привет", "мир"])
+        self.assertEqual(query_terms("देवनागरी"), ["देवनागरी"])
+        # 'café' keeps its accented char now (split at the ASCII boundary,
+        # like every ASCII/non-ASCII mix — 'caf'+'é' needles cover it).
+        self.assertEqual(query_terms("café"), ["caf", "é"])
+        # Block-internal punctuation is a boundary, not glue.
+        self.assertEqual(query_terms("كتاب،كتاب"), ["كتاب", "كتاب"])
+        self.assertEqual(query_terms("λόγος·κόσμος"), ["λόγος", "κόσμος"])
+        self.assertEqual(query_terms("שלום־עולם"), ["שלום", "עולם"])
+        # Negation gains the same coverage through the auto-extended class.
+        self.assertEqual(neg_terms("x -über"), ["ü"])
+        self.assertEqual(neg_terms("x -كتاب"), ["كتاب"])
+        # And the letters stop riding the token budget for free.
+        self.assertEqual(estimate_tokens("café"), 2)
+        self.assertGreater(estimate_tokens("привет"), 0)
+
+    def test_symbols_and_emoji_are_cjk_terms(self) -> None:
+        """v0.2.530: So/Sc/Sk characters and sequence joiners were the last
+        invisible class — '☕カフェ' searched 'カフェ' alone and an emoji-only
+        query returned nothing at all.  Now they classify, survive
+        query_terms (gluing into CJK runs and ZWJ/VS16 sequences), count
+        against the token budget, and negate through the extended classes."""
+        for ch in ("☕", "😀", "✓", "⚠", "€", "∑", "⌘", "♥"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        # Emoji glues into the contiguous non-ASCII run like any CJK char.
+        self.assertEqual(query_terms("☕カフェ"), ["☕カフェ"])
+        self.assertEqual(query_terms("完了✓済み"), ["完了✓済み"])
+        # Sequence joiners keep their runs whole (👨‍💻, ☕️, Perso-Arabic ZWNJ).
+        self.assertEqual(query_terms("👨‍💻"), ["👨‍💻"])
+        self.assertEqual(query_terms("☕️"), ["☕️"])
+        # Currency and math symbols are terms beside the number.
+        self.assertEqual(query_terms("€50"), ["50", "€"])
+        self.assertEqual(query_terms("∑nの和"), ["n", "∑", "の和"])
+        self.assertEqual(neg_terms("x -☕"), ["☕"])
+        # And they count: an emoji run is no longer a free token ride.
+        self.assertEqual(estimate_tokens("☕😀"), 2)
+        self.assertEqual(estimate_tokens("👨‍💻"), 3)
+
+    def test_script_digit_variants_bridge_both_directions(self) -> None:
+        """v0.2.534: live decimal-digit rows (Arabic-Indic ٣٤٥, Persian ۳۴۵,
+        Devanagari ३४५, Bengali ৩৪৫, Thai ๓๔๕ …) are byte-distinct spellings
+        of the same number — NFKC folds only the fullwidth row, so '345' and
+        '٣٤٥' could not retrieve each other even though \\d and int() both
+        treat them as digits.  The fold enumerates the closed 10-glyph rows
+        in both directions."""
+        # ASCII term gains every script row.
+        v345 = term_variants("345")
+        for row in ("\u0663\u0664\u0665", "\u06F3\u06F4\u06F5",
+                    "\u0969\u096A\u096B", "\u09E9\u09EA\u09EB",
+                    "\u0E53\u0E54\u0E55", "\u17E3\u17E4\u17E5",
+                    "\u0ED3\u0ED4\u0ED5"):
+            self.assertIn(row, v345)
+        # Script term gains its ASCII fold (which feeds the magnitude table).
+        va = term_variants("٣٤٥")
+        self.assertIn("345", va)
+        self.assertIn("\u06F3\u06F4\u06F5", va)
+        self.assertIn("\u0969\u096A\u096B", va)
+        # Mixed/Lo terms never explode into per-script products.
+        self.assertNotIn("٣", term_variants("a3"))
+        self.assertEqual(term_variants("四"), ["四"])
+
+    def test_script_digit_query_retrieves_across_rows(self) -> None:
+        """e2e for the digit bridge: any row's query reaches any row's doc."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, [
+            "التعداد كان ٣٤٥ شخصاً في المدينة",
+            "العدد كان ۳۴۵ حالة مسجلة",
+            "वर्ष २०२५ में घटना हुई",
+            "the count was 345 cases total",
+        ])
+        texts = {h.text for q in ("345", "٣٤٥", "۳۴۵")
+                 for h in bm25_search(s, nb.id, q, 10)}
+        self.assertEqual(len(texts), 3, texts)   # all three 345-docs, both directions
+        for q in ("2025", "२०२५"):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any("२०२५" in h.text for h in hits), q)
+
+    def test_latin_accent_fold_bridges_unaccented_docs(self) -> None:
+        """v0.2.535: 'café'/'naïve'/'œuvre'/'Straße' queries gain the ASCII
+        fold so they reach docs that wrote the word unaccented. The fold is
+        one-directional by design — an ASCII query cannot enumerate the open
+        space of accent spellings ('cafe' -> 'café' docs stays closed), so
+        only the accented-QUERY direction is bridged. Guards: kana dakuten
+        decomposes too but its base is not ASCII, so 'データ' never emits the
+        dead 'テータ' spelling; Cyrillic/pure non-Latin terms are untouched."""
+        for t, want in (("caf\u00e9", "cafe"), ("na\u00efve", "naive"),
+                        ("\u0153uvre", "oeuvre"), ("Stra\u00dfe", "Strasse"),
+                        ("\u0141\u00f3d\u017a", "Lodz"),
+                        ("sm\u00f8rg\u00e5sbord", "smorgasbord"),
+                        ("\u00c5ngstr\u00f6m", "Angstrom")):
+            self.assertIn(want, term_variants(t), t)
+        # Fold only fires when the result is pure ASCII and differs —
+        # CJK, Cyrillic, plain ASCII stay exactly as before.
+        self.assertNotIn("\u30c6\u30fc\u30bf", term_variants("\u30c7\u30fc\u30bf"))
+        self.assertNotIn("\u041c\u043e\u0441\u043a\u0432\u0430\u0301",
+                         term_variants("\u041c\u043e\u0441\u043a\u0432\u0430"))
+        self.assertEqual(term_variants("cafe"), ["cafe", "\uff43\uff41\uff46\uff45"])
+
+    def test_accented_query_retrieves_unaccented_doc(self) -> None:
+        """e2e: every accented query reaches the doc that wrote it unaccented."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["cafe society and naive approaches",
+                              "the oeuvre and strasse of Lodz",
+                              "smorgasbord of ideas"])
+        for q, frag in (("caf\u00e9", "cafe"), ("na\u00efve", "naive"),
+                        ("\u0153uvre", "oeuvre"), ("Stra\u00dfe", "strasse"),
+                        ("\u0141\u00f3d\u017a", "Lodz"),
+                        ("sm\u00f8rg\u00e5sbord", "smorgasbord")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any(frag in h.text for h in hits), q)
+
+
+
+    def test_ascii_stem_variants_bridge_inflection(self) -> None:
+        """v0.2.536: English inflection gap — FTS5 trigrams and LIKE stem
+        nothing, so 'documents' could not reach 'document'. _stem_variants
+        emits the closed BM25-lite suffix family (-s/-es/-ies, -ing/-ed with
+        double-consonant and silent-e, -ly) as OR'd extras; lookalike endings
+        that are not inflections ('this', 'status', 'hiss') are excluded by
+        shape, non-ASCII/mixed-alnum terms are untouched, casing follows the
+        term's first letter."""
+        for t, want in (("documents", "document"), ("queries", "query"),
+                        ("running", "run"), ("walked", "walk"),
+                        ("achieved", "achieve"), ("dropped", "drop"),
+                        ("quickly", "quick"), ("classes", "class"),
+                        ("watches", "watch"), ("making", "make"),
+                        ("Documents", "Document")):
+            self.assertIn(want, term_variants(t), t)
+        for t in ("this", "status", "hiss", "gas", "yes", "bus", "S3"):
+            self.assertEqual(term_variants(t),
+                             [t, term_variants(t)[1]], t)
+            self.assertEqual(len(term_variants(t)), 2, t)
+
+    def test_inflected_query_retrieves_base_doc(self) -> None:
+        """e2e: every inflected query reaches its base-form doc."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["the document store design",
+                              "a quick query engine",
+                              "run and walk every day"])
+        for q, frag in (("documents", "document"), ("queries", "query"),
+                        ("running", "run"), ("walked", "walk"),
+                        ("quickly", "quick")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any(frag in h.text for h in hits), q)
+
+
+    def test_neg_filter_matches_variant_spellings(self) -> None:
+        """v0.2.537: exclusion must cover every spelling a term would
+        retrieve — a '-documents' that drops only the literal spelling left
+        'document' chunks visible, the mirror gap of positive stemming.
+        Needles run through term_variants(); ASCII-spelled variants keep
+        whole-word boundaries ('documentation' survives), non-ASCII variants
+        keep substring semantics (kana/digit rows excluded)."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["the document store design",
+                              "a query engine guide",
+                              "documentation tips",
+                              "\u3067\u30fc\u305f analysis",
+                              "345 arabic test \u0663\u0664\u0665"])
+        for q, frag in (("design -documents", "document"),
+                        ("guide -queries", "query"),
+                        ("analysis -\u30c7\u30fc\u30bf", "analysis"),
+                        ("arabic -345", "arabic")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertFalse(any(frag in h.text for h in hits), q)
+        # ASCII stems stay whole-word: '-documents' must not drop
+        # 'documentation' (the variant 'document' needs a boundary).
+        hits = bm25_search(s, nb.id, "tips -documents", 10)
+        self.assertTrue(any("documentation" in h.text for h in hits))
+
+
+    def test_negation_only_query_returns_complement(self) -> None:
+        """v0.2.538: a negation-only query ('-dogs') means "everything except
+        X" over a bounded corpus — silently returning [] read as the
+        opposite of the truth.  The pool is the notebook's chunks capped
+        like the LIKE path, neg-filtered, k-capped."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["cats and dogs", "only cats here",
+                              "nothing matches"])
+        hits = bm25_search(s, nb.id, "-dogs", 10)
+        self.assertEqual([h.text for h in hits],
+                         ["only cats here", "nothing matches"])
+        hits = bm25_search(s, nb.id, "-xyz", 10)
+        self.assertEqual(len(hits), 3)
+
+
+    def test_scoring_sees_variant_spellings(self) -> None:
+        """v0.2.539: bridged hits must not read lex=0 — a chunk retrieved via
+        a stem/accent/kana variant was scored term-free, demoted by rerank
+        and clip-eligible for _tail_cut.  _norm_query_terms now emits
+        variant groups; overlap sums occurrences across the group."""
+        self.assertGreater(
+            lexical_overlap("documents", "the document store"), 0.0)
+        self.assertGreater(lexical_overlap("caf\u00e9", "a cafe note"), 0.0)
+        self.assertGreater(
+            lexical_overlap("\u30c7\u30fc\u30bf", "\u3067\u30fc\u305f"), 0.0)
+        # Literal spelling still outscores the bridged one.
+        self.assertGreater(
+            lexical_overlap("documents", "the documents store"),
+            lexical_overlap("documents", "the document store"))
+        from shoin.search import _norm_query_terms, _proximity_from_norm
+        terms = _norm_query_terms("documents engine")
+        self.assertGreater(
+            _proximity_from_norm(terms, "the document engine runs"), 0.0)
+
+
+    def test_match_fold_bridges_spellings_in_checks(self) -> None:
+        """v0.2.540: citation checks were spelling-blind — an answer
+        echoing a source word in a bridged orthography scored 0 bigram
+        overlap, so confirm/misattribute/negation/self-contradiction all
+        went silent on exactly the variants retrieval bridges.
+        _match_fold now canonicalises both sides of every comparison."""
+        from shoin.chunk import _match_fold
+        from shoin.citation import _bigrams, _overlap, verify_grounding
+
+        self.assertEqual(
+            _match_fold("caf\u00e9 \u30c7\u30fc\u30bf"),
+            "cafe \u3067\u30fc\u305f")
+        self.assertEqual(_match_fold("\u0663\u0664\u0665"), "345")
+        self.assertEqual(_match_fold("\u0153uvre"), "oeuvre")
+        self.assertEqual(_match_fold("\u5b78\u7fd2"), "\u5b66\u7fd2")
+        # format chars dropped, accent on non-ASCII base kept
+        self.assertEqual(_match_fold("sof\u00adt"), "soft")
+        self.assertEqual(_match_fold("\u0439"), "\u0439")
+        # kana echo confirms; accent echo confirms
+        src = {1: "\u30c7\u30fc\u30bf\u5206\u6790\u306e\u624b\u6cd5\u3002"}
+        conf, _ = verify_grounding(
+            "\u3067\u30fc\u305f\u5206\u6790\u306e\u624b\u6cd5\u3002[S1]", src)
+        self.assertEqual(conf, [1])
+        conf2, _ = verify_grounding("caf\u00e9 study results.[S1]",
+                                    {1: "cafe study results."})
+        self.assertEqual(conf2, [1])
+        self.assertGreater(
+            _overlap(_bigrams("\u3067\u30fc\u305f"), _bigrams("\u30c7\u30fc\u30bf")),
+            0.9)
+
+
+    def test_numeric_check_folds_digit_rows(self) -> None:
+        """v0.2.541: _NUM_TOKEN_RE's \\d is Unicode-wide, so '٣٤٥'
+        tokenized but compared verbatim — a claim restating '345' as
+        '٣٤٥' was flagged absent from its own source. _digit_fold
+        canonicalises every Nd row to ASCII before comparison; the
+        era-name pattern also widened [0-9] -> \\d so 令和٦年 expands."""
+        from shoin.citation import _numbers, numeric_mismatches
+
+        self.assertEqual(_numbers("\u589e\u52a0\u0663\u0664\u0665\u5186"), {"345"})
+        # Same value in a different digit row: no flag.
+        src = {1: "\u589e\u52a0345\u5186\u3060\u3063\u305f\u3002"}
+        self.assertEqual(
+            numeric_mismatches(
+                "\u589e\u52a0\u0663\u0664\u0665\u5186\u3060\u3063\u305f\u3002[S1]",
+                src), [])
+        # Different value in a different digit row: still flags.
+        self.assertEqual(
+            numeric_mismatches(
+                "\u589e\u52a0\u0663\u0664\u0666\u5186\u3060\u3063\u305f\u3002[S1]",
+                src), [1])
+        # Era-name year written with Arabic-Indic digits expands.
+        self.assertEqual(
+            numeric_mismatches("\u4ee4\u548c\u0666\u5e74\u306e\u8a18\u9332\u3002[S1]",
+                               {1: "2024\u5e74\u306e\u8a18\u9332\u3002"}), [])
+
+    def test_word_char_boundary_edges(self) -> None:
+        """v0.2.532: two residual boundary defects in _is_cjk_word — the
+        3000-303F block returned False for its symbol marks (〠〶〷 invisible
+        while ✓ is a word), and any non-punct non-alnum char in a content
+        block returned True unconditionally, so Ogham's visible space
+        U+1680 glued the words either side into one term."""
+        # The 3000-block symbol marks are content (So), its space and
+        # punctuation are boundaries.
+        for ch, want in (("〠", True), ("〶", True), ("〷", True),
+                         ("　", False), ("〽", False), ("々", True)):
+            self.assertEqual(_is_cjk_word(ch), want, f"U+{ord(ch):04X}")
+        # Ogham space is a boundary; Ogham letters are words.
+        self.assertEqual(query_terms("ᚁᚂ\u1680ᚃ"), ["ᚁᚂ", "ᚃ"])
+        self.assertEqual(query_terms("ᚁᚂᚃ"), ["ᚁᚂᚃ"])
+        # Regressions: halfwidth punct still boundary, both dots still words.
+        for ch, want in (("｡", False), ("｢", False), ("｣", False),
+                         ("､", False), ("・", True), ("･", True),
+                         ("a", False), ("", False)):
+            self.assertEqual(_is_cjk_word(ch), want, f"U+{ord(ch):04X}")
+        # And terms flow through both directions.
+        self.assertEqual(query_terms("〶記号"), ["〶記号"])
+        self.assertEqual(neg_terms("x -〶"), ["〶"])
+
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
         range (v0.2.165). The classification must be identical to the original
@@ -1934,8 +2288,11 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(is_cjk("\U0002A700"), "first CJK Ext C char must be CJK")
         # U+2CEB0 — first CJK Ext G
         self.assertTrue(is_cjk("\U0002CEB0"), "first CJK Ext G char must be CJK")
-        # U+1F600 (emoji, outside all CJK ranges) must NOT be CJK
-        self.assertFalse(is_cjk("\U0001F600"), "emoji outside CJK ranges must not be CJK")
+        # U+1F600 (emoji) counts as content since v0.2.530 — the emoji tail
+        # joined the ranges so emoji queries and token costs stop vanishing.
+        self.assertTrue(is_cjk("\U0001F600"), "emoji is content now")
+        # A private-use char outside every content range must stay non-CJK.
+        self.assertFalse(is_cjk(""), "private-use area must not be CJK")
 
     def test_is_cjk_fullwidth_digits_and_letters(self) -> None:
         """Fullwidth digits/letters (U+FF10-19, FF21-3A, FF41-5A) must count as CJK.
@@ -2200,6 +2557,30 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(len(parts), 1)
         self.assertEqual(parts[0], "これは文章一。")
 
+    def test_sentence_split_indic_and_alphabetic_terminators(self) -> None:
+        """v0.2.533: the scripts v0.2.529 made word characters carry their own
+        sentence terminators.  Without them in the split class a Hindi or Urdu
+        paragraph is one giant "sentence" — the same width-blind failure ｡
+        had — so _hard_split cuts mid-sentence and every citation check that
+        iterates sentences (uncited/negation/degen/contra) sees the whole
+        paragraph as one unit."""
+        cases = [
+            "यह पहला वाक्य है। यह दूसरा वाक्य है।",   # Devanagari danda
+            "यह एक है॥ दो॥",                          # double danda
+            "ဒါက ပထမ။ ဒါက ဒုတိယ။",                  # Myanmar section
+            "នេះជាមួយ។ នេះពីរ។",                  # Khmer khan
+            "དེ་ལྟར། གཉིས།",                        # Tibetan shad
+            "یہ پہلا ہے۔ یہ دوسرا ہے۔",               # Urdu/Arabic full stop
+            "क्या यह ठीक है؟ हाँ।",                   # Arabic question mark
+            "ሰላም። ምን እንደሆነ፧",                      # Ethiopic stop/question
+            "ᠮᠣᠩᠭᠣᠯ᠃ ᠬᠣᠶᠠᠷ᠃",                    # Mongolian full stop
+            "այո։ երկու։",                            # Armenian full stop
+            "כן׃ שתיים׃",                            # Hebrew sof pasuq
+        ]
+        for text in cases:
+            parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+            self.assertGreater(len(parts), 1, f"unsplit: {text!r}")
+
     def test_sentence_split_no_split_on_decimal(self) -> None:
         """A decimal number like 3.14 must not trigger a sentence split (no space after dot)."""
         text = "Pi is 3.14 approximately."
@@ -2225,7 +2606,11 @@ class TestChunk(unittest.TestCase):
         parts = _hard_split(block, 50)
         # Old code (50-char window) → ~20 parts; new code (~300-char window) → ~4 parts.
         # Allow up to 8 to give slack for off-by-one at chunk boundaries.
-        self.assertLessEqual(len(parts), 8, msg="too many chunks indicates window was in chars not tokens")
+        self.assertLessEqual(
+            len(parts),
+            8,
+            msg="too many chunks indicates window was in chars not tokens",
+        )
         # All non-tail chunks must be substantially sized (>20 tokens), proving the window
         # is token-proportional. The last chunk may be a small word fragment so skip it.
         for p in parts[:-1]:
@@ -2251,7 +2636,11 @@ class TestChunk(unittest.TestCase):
         self.assertEqual(estimate_tokens(block), 0, "pre-condition: block must be zero-token")
         parts = _hard_split(block, 50)
         # Should have been split — not emitted as one 4000-char chunk
-        self.assertGreater(len(parts), 1, "zero-token oversized block must be split into multiple chunks")
+        self.assertGreater(
+            len(parts),
+            1,
+            "zero-token oversized block must be split into multiple chunks",
+        )
         # Each part must fit within limit * 5 chars (≈ 5 chars/token ASCII upper bound)
         for p in parts:
             self.assertLessEqual(len(p), 50 * 5 + 10, msg=f"part too large: len={len(p)}")
@@ -2367,7 +2756,8 @@ class TestIngest(unittest.TestCase):
         self.assertIn("Real content here", text)
 
     def test_html_unclosed_title_via_head_close_does_not_swallow_body(self) -> None:
-        """</head> seen while _in_title must implicitly close the title so body text is extracted."""
+        """</head> seen while _in_title must implicitly close the title
+        so body text is extracted."""
         html = "<html><head><title>My Page</head><body><p>Content here.</p></body></html>"
         title, text = html_to_text(html)
         self.assertEqual(title, "My Page")
@@ -2468,7 +2858,10 @@ class TestIngest(unittest.TestCase):
         that (unlike <script>/<style>) is not a real CDATA content element
         and has no browser-spec reason to swallow to end-of-document when
         genuinely unclosed."""
-        html = "<html><body><p>Before template.</p><template><p>After unclosed template.</p></body></html>"
+        html = (
+            "<html><body><p>Before template.</p><template>"
+            "<p>After unclosed template.</p></body></html>"
+        )
         _, text = html_to_text(html)
         self.assertIn("Before template", text)
         self.assertIn(
@@ -3390,7 +3783,11 @@ class TestIngest(unittest.TestCase):
         """HTML files must use the <title> tag as their title (lines 293-294)."""
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "page.html"
-            p.write_text("<html><head><title>My Title</title></head><body><p>Content here.</p></body></html>", encoding="utf-8")
+            p.write_text(
+                "<html><head><title>My Title</title></head><body><p>Content here.</p></body></html>"
+                "",
+                encoding="utf-8",
+            )
             result = extract_file(p)
         self.assertEqual(result.title, "My Title")
         self.assertIn("Content here", result.text)
@@ -3399,7 +3796,10 @@ class TestIngest(unittest.TestCase):
         """HTML response in extract_url must use <title> as the source title (lines 310-311)."""
         import shoin.ingest as ing
 
-        html_body = b"<html><head><title>Article Title</title></head><body><p>Article text here.</p></body></html>"
+        html_body = (
+            b"<html><head><title>Article Title</title></head>"
+            b"<body><p>Article text here.</p></body></html>"
+        )
         with patch.object(
             ing, "fetch_url",
             return_value=(html_body, "text/html; charset=utf-8", "http://example.com/article")
@@ -3447,7 +3847,8 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_pinned_https_connection_connect(self) -> None:
-        """_PinnedHTTPSConnection.connect() must use the pinned IP and wrap with SSL (lines 217-218)."""
+        """_PinnedHTTPSConnection.connect() must use the pinned IP and
+        wrap with SSL (lines 217-218)."""
         import ssl
 
         import shoin.ingest as ing
@@ -3459,7 +3860,8 @@ class TestIngest(unittest.TestCase):
         wrapped: list[bool] = []
 
         class FakeSocket:
-            pass
+            def close(self) -> None:
+                pass
 
         def fake_create_connection(addr: tuple[str, int], timeout: float) -> FakeSocket:
             captured_addr.append(addr)
@@ -3518,7 +3920,11 @@ class TestSearch(unittest.TestCase):
         with make_store() as s:
             nb = s.create_notebook("nb").id
             src = s.add_source(nb, "txt", "doc", "o", "sha")
-            s.add_chunks(src.id, ["光合成の詳細な説明がここに続く長い記述の文章。"], ["生物 > 光合成"])
+            s.add_chunks(
+                src.id,
+                ["光合成の詳細な説明がここに続く長い記述の文章。"],
+                ["生物 > 光合成"],
+            )
             bm = bm25_search(s, nb, "光合成", k=5)
             self.assertTrue(bm)
             self.assertEqual(bm[0].context, "生物 > 光合成")
@@ -3801,6 +4207,125 @@ class TestSearch(unittest.TestCase):
             self.assertEqual(len(ids), 3)
             self.assertEqual(ids, sorted(ids))
 
+    def test_like_only_neg_filter_runs_before_cap(self) -> None:
+        """v0.2.525: the LIKE-only return path sliced `like_hits[:k]` and
+        *then* applied the negation filter — the opposite order from the
+        merge path two branches up.  When the top-k LIKE hits all carry
+        the negated term, the filter empties the capped slice and the
+        qualified chunks sitting just below position k silently vanish.
+        Filter must run before the cap so the surviving pool is refilled
+        to k."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                [
+                    "猫 猫 猫 と犬",
+                    "猫 猫 と犬",
+                    "猫 と鳥",
+                ],
+            )
+            hits = bm25_search(s, nb.id, "猫 -犬", 2)
+            self.assertEqual(
+                [h.text for h in hits], ["猫 と鳥"],
+                "LIKE-only path: negated top-k must be filtered before the "
+                "[:k] slice, not after — the 猫-only chunk below the cap "
+                "is the correct hit",
+            )
+
+    def test_fullwidth_dash_negates_end_to_end(self) -> None:
+        """v0.2.526: the fullwidth minus an IME emits must exclude
+        end-to-end, not invert into a positive term.  '猫 −犬' on a
+        notebook where the densest 猫 chunk carries 犬 must return the
+        猫-only chunk — before the fix the query positively searched 犬."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["猫 猫 と犬", "猫 と鳥"])
+            hits = bm25_search(s, nb.id, "猫 −犬", 5)
+            self.assertEqual([h.text for h in hits], ["猫 と鳥"])
+
+    def test_enclosed_char_query_retrieves_via_variants(self) -> None:
+        """v0.2.527: a bare '㍻' query must reach documents — the term
+        produces LIKE needles for its literal self AND the NFKC variant
+        平成, so a canonically spelled doc surfaces too.  Before the fix
+        ㍻ was not a term at all and the query returned nothing."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["㍻元年の記録", "平成元年の記録", "関係ない文"])
+            hits = bm25_search(s, nb.id, "㍻", 5)
+            texts = {h.text for h in hits}
+            self.assertIn("㍻元年の記録", texts)
+            self.assertIn("平成元年の記録", texts)
+            self.assertNotIn("関係ない文", texts)
+
+    def test_hangul_composed_query_retrieves_nfd_docs(self) -> None:
+        """v0.2.528: composition is bridged both directions — a composed
+        '한' query reaches an NFD (macOS filename) document via the new
+        NFD variant, and a decomposed '한' query reaches the composed
+        document via NFKC.  Before the fix the jamo spelling wasn't a
+        term at all and the composed query missed NFD text entirely."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["한の資料", "한の資料", "関係ない文"])
+            texts_c = {h.text for h in bm25_search(s, nb.id, "한", 5)}
+            texts_d = {h.text for h in bm25_search(s, nb.id, "한", 5)}
+            self.assertEqual(texts_c, {"한の資料", "한の資料"})
+            self.assertEqual(texts_d, {"한の資料", "한の資料"})
+
+    def test_nonlatin_query_retrieves_across_scripts(self) -> None:
+        """v0.2.529: a Cyrillic/Arabic query used to return nothing — its
+        whole term list was dropped before reaching FTS or LIKE.  Now each
+        script's query reaches its document, and 'café' reaches both the
+        accented and the unaccented spelling (the 'caf' needle bridges)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                ["caféの記録", "cafeの記録", "привет書類", "العربية文書", "関係ない文"],
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "café", 5)},
+                {"caféの記録", "cafeの記録"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "привет", 5)},
+                {"привет書類"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "العربية", 5)},
+                {"العربية文書"},
+            )
+
+    def test_emoji_query_retrieves_emoji_documents(self) -> None:
+        """v0.2.530: an emoji-only query returned nothing — its term list was
+        empty before FTS or LIKE ever ran.  Now the emoji is a term and the
+        literal needle finds the document (inside a ZWJ sequence too)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                ["コーヒー☕を飲む", "絵文字😀のテスト", "エンジニア👨‍💻メモ", "関係ない文"],
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "☕", 5)},
+                {"コーヒー☕を飲む"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "😀", 5)},
+                {"絵文字😀のテスト"},
+            )
+            # 💻 sits inside the 👨‍💻 ZWJ sequence — the needle still lands.
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "💻", 5)},
+                {"エンジニア👨‍💻メモ"},
+            )
+
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
         `ORDER BY score` leaves equal-key order unspecified in SQLite —
@@ -3954,6 +4479,52 @@ class TestSearch(unittest.TestCase):
             hits = bm25_prf_search(s, nb_id, "書院", k=5)
             self.assertTrue(any("中心科目" in h.text for h in hits),
                             "PRF expansion must surface the mismatch chunk")
+
+    def test_prf_expanded_hits_carry_exp_flag(self) -> None:
+        """v0.2.542: chunks surfaced by the feedback terms — not the user's
+        own vocabulary — carry detail["exp"] so _tail_cut's term-free test
+        can tell their lex==0 apart from a genuinely unmatched tail."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-flag").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["書院は近世日本の学問所である。儒学を教えた。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["書院の多くは儒学教育を行う学問所だった。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["近世日本の学問所では儒学が中心科目だった。"])
+
+            hits = bm25_prf_search(s, nb_id, "書院", k=5)
+            tagged = [h for h in hits if h.detail.get("exp")]
+            self.assertTrue(tagged, "expansion-surfaced hits must be flagged")
+            self.assertTrue(all("書院" not in h.text for h in tagged))
+            untagged = [h for h in hits if not h.detail.get("exp")]
+            self.assertTrue(untagged)
+            self.assertTrue(all("書院" in h.text for h in untagged))
+
+    def test_prf_counts_variant_spellings_as_one_term(self) -> None:
+        """v0.2.544: the MIN_DOCS gate counts folded grams — a topical term
+        spelled データベース in one feedback hit and でーたべーす in another
+        is ONE term, not two half-evidences that both starve below the
+        gate."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-fold").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["猫の観察メモ。データベース設計の要点も記す。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["猫の飼育記録。でーたべーす正規化の話題あり。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["データベース移行の手順書。"])
+
+            base = bm25_search(s, nb_id, "猫", k=5)
+            self.assertFalse(any("移行" in h.text for h in base))
+            hits = bm25_prf_search(s, nb_id, "猫", k=5)
+            self.assertTrue(
+                any("移行" in h.text for h in hits),
+                "folded gram evidence must surface the topical doc")
 
     def test_prf_skips_when_fewer_than_min_feedback_docs(self) -> None:
         """Fewer than PRF_MIN_DOCS feedback hits means no expansion evidence —
@@ -4169,6 +4740,23 @@ class TestSearch(unittest.TestCase):
         chunk_ids = {h.chunk_id for h in result}
         self.assertEqual(chunk_ids, {1, 2})
 
+    def test_mmr_counts_variant_spellings_as_redundant(self) -> None:
+        """v0.2.543: _sim folds spelling variants (kana/digit/accent/kyujitai)
+        — two chunks identical modulo orthography are the same content, and
+        counting them as diverse spent a selection slot on a duplicate."""
+        from shoin.search import _sim
+
+        a = Hit(1, 1, "データベースの設計を解説する。", 1.0)
+        dup = Hit(2, 1, "でーたべーすの設計を解説する。", 0.9)
+        diverse = Hit(3, 1, "気候変動の影響を分析する。", 0.8)
+        self.assertGreater(_sim(a, dup), 0.9)
+        picked = mmr([a, dup, diverse], k=2)
+        self.assertEqual({h.chunk_id for h in picked}, {1, 3})
+        # Accent/digit-row variants fold the same way.
+        cafe = Hit(4, 1, "café 345 notes", 1.0)
+        plain = Hit(5, 1, "cafe ٣٤٥ notes", 0.9)
+        self.assertGreater(_sim(cafe, plain), 0.9)
+
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
 
@@ -4361,8 +4949,11 @@ class TestSearch(unittest.TestCase):
             texts = [h.text for h in hits]
             self.assertTrue(any("local" in t for t in texts),
                             "FTS5 result for 'local' must be present")
-            self.assertTrue(any("猫" in t for t in texts),
-                            "LIKE result for short CJK '猫' must not be suppressed by FTS5 early return")
+            self.assertTrue(
+                any("猫" in t for t in texts),
+                "LIKE result for short CJK '猫' must not be suppressed "
+                "by FTS5 early return",
+            )
 
     def test_bm25_mixed_query_no_duplicate_chunks(self) -> None:
         """When FTS5 and LIKE both match the same chunk, it must appear only once."""
@@ -4372,7 +4963,11 @@ class TestSearch(unittest.TestCase):
             s.add_chunks(src.id, ["local 猫 knowledge"])  # matches both FTS5 and LIKE
             hits = bm25_search(s, nb_id, "local 猫", k=10)
             chunk_ids = [h.chunk_id for h in hits]
-            self.assertEqual(len(chunk_ids), len(set(chunk_ids)), "duplicate chunk IDs in bm25_search result")
+            self.assertEqual(
+                len(chunk_ids),
+                len(set(chunk_ids)),
+                "duplicate chunk IDs in bm25_search result",
+            )
 
     def test_fts_query_katakana_query_includes_hiragana_trigrams(self) -> None:
         """fts_query() for a katakana term must also include hiragana-script trigrams.
@@ -4562,6 +5157,44 @@ class TestTailCut(unittest.TestCase):
         self.assertEqual(_tail_cut([]), [])
         self.assertEqual(len(_tail_cut([self._h(1, 0.9, lex=0.0)])), 1)
 
+    def test_expansion_tagged_chunk_survives_cliff(self) -> None:
+        """v0.2.542: detail["exp"] marks a hit surfaced by a system-proposed
+        term (PRF expansion or a RAG-Fusion rewrite) — lex==0 vs the user's
+        query is expected there, so the cliff test treats it as
+        term-carrying.  A hit behind it with no retrieval term at all still
+        clips."""
+        from shoin.search import _tail_cut
+
+        exp_hit = self._h(2, 0.5, lex=0.0)
+        exp_hit.detail["exp"] = 1.0
+        free_hit = self._h(3, 0.2, lex=0.0)
+        hits = [self._h(1, 0.9, lex=0.5), exp_hit, free_hit]
+        # Cliff 0.9 -> 0.5 is blocked by the flag; 0.5 -> 0.2 still clips.
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1, 2])
+        # Without the flag the same geometry cuts at the first cliff.
+        exp_hit.detail.pop("exp")
+        self.assertEqual([h.chunk_id for h in _tail_cut(hits)], [1])
+
+    def test_retrieve_multi_marks_rewrite_only_hits_exp(self) -> None:
+        """v0.2.542: a chunk surfaced only by a rewrite's vocabulary reaches
+        _tail_cut flagged — lex==0 against the primary query is the whole
+        point of multi-query recall, not a noise signature."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "a", "o", "sha")
+            s.add_chunks(a.id, ["書院は近世日本の学問所である。"])
+            b = s.add_source(nb.id, "txt", "b", "o2", "sha2")
+            s.add_chunks(b.id, ["儒学教育は素読と会読を基礎とした。"])
+            hits = retrieve_multi(s, nb.id, ["書院", "儒学"])
+            rewrite_only = [h for h in hits if "儒学" in h.text]
+            self.assertTrue(rewrite_only)
+            self.assertTrue(all(h.detail.get("exp") for h in rewrite_only))
+            primary_hit = [h for h in hits if "書院" in h.text]
+            self.assertTrue(primary_hit)
+            self.assertFalse(any(h.detail.get("exp") for h in primary_hit))
+
     def test_retrieve_drops_vector_tail(self) -> None:
         """End-to-end via the vector list: semantically-near chunks sharing
         zero query terms are clipped at the cliff instead of padding the
@@ -4730,7 +5363,8 @@ class TestQA(unittest.TestCase):
         self.assertEqual(msgs[0]["content"], "q3")
 
     def test_history_messages_drops_multiple_leading_assistants(self) -> None:
-        """Citation stripping may produce consecutive leading assistant turns; all must be removed."""
+        """Citation stripping may produce consecutive leading assistant
+        turns; all must be removed."""
         from shoin.qa import history_messages
 
         with make_store() as s:
@@ -5052,7 +5686,11 @@ class TestQA(unittest.TestCase):
 
         # Pure ellipsis/punctuation — estimate_tokens() returns 0 for these
         zero_tok_char = "…"  # U+2026, not CJK, not ASCII word → 0 tokens
-        self.assertEqual(estimate_tokens(zero_tok_char), 0, "pre-condition: char must be zero-token")
+        self.assertEqual(
+            estimate_tokens(zero_tok_char),
+            0,
+            "pre-condition: char must be zero-token",
+        )
         # 2000-char block of zero-token text → effective cost ≈ 400 tokens (2000 // 5)
         big_zero_tok = zero_tok_char * 2000
 
@@ -5252,14 +5890,19 @@ class TestCitation(unittest.TestCase):
         # Short sentence where bracket inflation would push 2-bigram claim below threshold
         # "AIが重要。" — bare bigrams without brackets: {"ai", "i重", "重要"} (3 bigrams)
         # With FW brackets in bare: would add ~4 bracket bigrams → 7 total → 3/7 = 0.43 (still ok)
-        # But for even shorter text: "AI ［Ｓ１］。" → 1 real bigram + 4 bracket = 5 → 1/5 = 0.20 < CONFIRM_MIN
+        # But for even shorter text: "AI ［Ｓ１］。" → 1 real bigram + 4 bracket
+        # = 5 → 1/5 = 0.20 < CONFIRM_MIN
         text = "AI ［Ｓ１］。"
         # Source contains the claim content — should confirm despite the short sentence
         source_texts = {1: "AIは次世代の基盤技術。AIの応用が広がる。"}
         confirmed, _ = verify_grounding(text, source_texts)
         # With the fix, bracket bigrams are stripped → bare = "ai" (1 bigram) → normalized correctly
         # Overlap: {"ai"} ∩ source bigrams containing "ai" / 1 = ≥1/1 = 1.0 → confirmed
-        self.assertIn(1, confirmed, "short sentence with FW brackets must be confirmed after bracket stripping")
+        self.assertIn(
+            1,
+            confirmed,
+            "short sentence with FW brackets must be confirmed after bracket stripping",
+        )
 
     def test_make_report_source_bodies_length_mismatch_raises(self) -> None:
         """source_bodies length != source_titles length must raise ValueError (defensive check)."""
@@ -5525,76 +6168,169 @@ class TestNumericMismatches(unittest.TestCase):
         must not flag a correct restatement in either direction (v0.2.192)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は3.2万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は32000円だった。"}),
+            [],
+        )
 
     def test_magnitude_expansion_oku_and_sen(self) -> None:
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}), [])
-        self.assertEqual(numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("資産は150000000円だった。[S1]", {1: "資産は1.5億円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("件数は25000件だった。[S1]", {1: "件数は2.5万件だった。"}),
+            [],
+        )
 
     def test_real_value_swap_still_flags(self) -> None:
         """Expansion must not mask a genuine error: 3.2万 ≠ 3.4万."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}), [1])
-        self.assertEqual(numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("売上は3.2万円だった。[S1]", {1: "売上は3.4万円だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は32000円だった。[S1]", {1: "売上は34000円だった。"}),
+            [1],
+        )
 
     def test_rounding_tolerance_preserved(self) -> None:
         """"63" inside "63.5%" stays silent — substring tolerance is kept so
         a rounded restatement does not flag (v0.2.184 behaviour)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("採用率は63%だった。[S1]", {1: "採用率は63.5%だった。"}),
+            [],
+        )
 
     def test_kanji_numeral_shorthand_matches(self) -> None:
         """"一万" and "10000" assert the same value — single-kanji shorthand
         expands like digit shorthand (v0.2.193)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("売上は10000円だった。[S1]", {1: "売上は一万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は一万円だった。[S1]", {1: "売上は10000円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は十億円だった。"}),
+            [],
+        )
 
     def test_multi_kanji_numerals_parsed(self) -> None:
         """Multi-kanji numerals parse positionally (v0.2.195): "二十億" = 20億,
         "百三万" = 103万 — equal values stay silent, differing values flag."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}), [])
-        self.assertEqual(numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}), [1])
-        self.assertEqual(numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("資産は2000000000円だった。[S1]", {1: "資産は二十億円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1030000円だった。[S1]", {1: "資産は百三万円だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は1000000000円だった。[S1]", {1: "資産は二十億円だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("資産は30000円だった。[S1]", {1: "資産は百三万円だった。"}),
+            [1],
+        )
 
     def test_kanji_and_mixed_chains(self) -> None:
         """"一億二千万" and mixed "一億2000万" both = 120,000,000 (v0.2.195)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億二千万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は一億二千万人。[S1]", {1: "人口は120000000人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は一億2000万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は一億3000万人。[S1]", {1: "人口は120000000人。"}),
+            [1],
+        )
 
     def test_bare_kanji_numerals(self) -> None:
         """"十二人" ↔ "12人" — a bare multi-char kanji numeral expands too;
         "二三" ("a few") is a counting sequence, not a numeral (v0.2.195)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}), [])
-        self.assertEqual(numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}), [])
-        self.assertEqual(numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("参加者は12人だった。[S1]", {1: "参加者は十二人だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("参加者は十二人だった。[S1]", {1: "参加者は12人だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("参加者は23人だった。[S1]", {1: "参加者は二三の例で集まった。"}),
+            [1],
+        )
 
     def test_spelled_english_numerals(self) -> None:
         """"three million" ↔ "3000000", "twenty-one" ↔ "21" — English numeral
         words expand like kanji and digit shorthand (v0.2.196)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("The city has 3000000 people. [S1]", {1: "The city has three million people."}), [])
-        self.assertEqual(numeric_mismatches("The city has three million people. [S1]", {1: "The city has 3000000 people."}), [])
-        self.assertEqual(numeric_mismatches("21 participants joined. [S1]", {1: "Twenty-one participants joined."}), [])
-        self.assertEqual(numeric_mismatches("Sales hit 325000 yen. [S1]", {1: "Sales hit three hundred twenty five thousand yen."}), [])
-        self.assertEqual(numeric_mismatches("The city has 4000000 people. [S1]", {1: "The city has three million people."}), [1])
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has 3000000 people. [S1]",
+                {1: "The city has three million people."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has three million people. [S1]",
+                {1: "The city has 3000000 people."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "21 participants joined. [S1]",
+                {1: "Twenty-one participants joined."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "Sales hit 325000 yen. [S1]",
+                {1: "Sales hit three hundred twenty five thousand yen."},
+            ),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "The city has 4000000 people. [S1]",
+                {1: "The city has three million people."},
+            ),
+            [1],
+        )
 
     def test_wari_percentage_notation(self) -> None:
         """"6割3分" = 63%, "五割" = 50%, "2割5分8厘" = 25.8% — 歩合 notation
@@ -5602,12 +6338,27 @@ class TestNumericMismatches(unittest.TestCase):
         not a percentage, and stays unchecked."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("打率は63%だった。[S1]", {1: "打率は6割3分だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("打率は6割3分だった。[S1]", {1: "打率は63%だった。"}),
+            [],
+        )
         self.assertEqual(numeric_mismatches("確率は50%だった。[S1]", {1: "確率は五割だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}), [])
-        self.assertEqual(numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}), [1])
-        self.assertEqual(numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("打率は25.8%だった。[S1]", {1: "打率は2割5分8厘だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("打率は70%だった。[S1]", {1: "打率は6割3分だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("確率は55%だった。[S1]", {1: "確率は五分五分だった。"}),
+            [1],
+        )
 
     def test_unit_conversion_equivalence(self) -> None:
         """"180分" ↔ "3時間", "1.5km" ↔ "1500m" — deterministic same-family
@@ -5615,28 +6366,58 @@ class TestNumericMismatches(unittest.TestCase):
         still flags (v0.2.198)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}), [])
-        self.assertEqual(numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}), [])
-        self.assertEqual(numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}), [])
-        self.assertEqual(numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("移動は180分かかった。[S1]", {1: "移動は3時間かかった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("距離は1.5kmだった。[S1]", {1: "距離は1500mだった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("所要は90分だった。[S1]", {1: "所要は1時間30分だった。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("重さは0.5kgだった。[S1]", {1: "重さは500gだった。"}),
+            [],
+        )
         # Cross-dimension: 300円 is not 300 minutes — must still flag.
-        self.assertEqual(numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}), [1])
-        self.assertEqual(numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("費用は300円だった。[S1]", {1: "作業は5時間かかった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("移動は200分かかった。[S1]", {1: "移動は3時間かかった。"}),
+            [1],
+        )
 
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
         value, so a claim spelling it out no longer false-flags (v0.2.194)."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}), [])
-        self.assertEqual(numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}), [])
-        self.assertEqual(numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}), [])
+        self.assertEqual(
+            numeric_mismatches("人口は120000000人。[S1]", {1: "人口は1億2000万人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("人口は1億2000万人。[S1]", {1: "人口は120000000人。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("売上は1350000000円。[S1]", {1: "売上は13億5000万円。"}),
+            [],
+        )
 
     def test_chained_magnitudes_wrong_value_still_flags(self) -> None:
         """A claim chain whose sum differs from the source's still flags."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("人口は1億3000万人。[S1]", {1: "人口は120000000人。"}),
+            [1],
+        )
 
     def test_rate_notation_equivalence(self) -> None:
         """v0.2.214: percent ↔ fraction ↔ wari restatements of one rate stay
@@ -5645,23 +6426,53 @@ class TestNumericMismatches(unittest.TestCase):
         from shoin.citation import numeric_mismatches
 
         # Claim fraction <-> source rate-marked value.
-        self.assertEqual(numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}), [])
-        self.assertEqual(numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}), [])
+        self.assertEqual(
+            numeric_mismatches("成長率は0.5であった。[S1]", {1: "成長率は50%を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("the rate was 0.5 [S1]", {1: "the rate was 50 percent"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("成長率は0.25であった。[S1]", {1: "成長率は25%を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches("達成率は0.5であった。[S1]", {1: "達成率は五割であった。"}),
+            [],
+        )
         # Claim rate-marked <-> source bare fraction.
-        self.assertEqual(numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}), [])
-        self.assertEqual(numeric_mismatches("成長率は50パーセントであった。[S1]", {1: "成長率は0.5を記録した。"}), [])
+        self.assertEqual(
+            numeric_mismatches("成長率は50%であった。[S1]", {1: "成長率は0.5を記録した。"}),
+            [],
+        )
+        self.assertEqual(
+            numeric_mismatches(
+                "成長率は50パーセントであった。[S1]",
+                {1: "成長率は0.5を記録した。"},
+            ),
+            [],
+        )
 
     def test_rate_notation_asymmetry_still_flags(self) -> None:
         """The bridge is directional: unmarked "50" does not match a bare "0.5",
         and a fraction claim only reaches a RATE-marked source value."""
         from shoin.citation import numeric_mismatches
 
-        self.assertEqual(numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}), [1])
-        self.assertEqual(numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}), [1])
+        self.assertEqual(
+            numeric_mismatches("量は50であった。[S1]", {1: "量は0.5個であった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("量は0.5であった。[S1]", {1: "量は50個であった。"}),
+            [1],
+        )
         # "percentile" is not a rate marker.
-        self.assertEqual(numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}), [1])
+        self.assertEqual(
+            numeric_mismatches("the rate was 0.5 [S1]", {1: "the 50 percentile group"}),
+            [1],
+        )
 
 
 class TestUnitMismatches(unittest.TestCase):
@@ -5709,7 +6520,10 @@ class TestUnitMismatches(unittest.TestCase):
         from shoin.citation import unit_mismatches
 
         self.assertEqual(unit_mismatches("資産は12億円あった。[S1]", {1: "資産は12億あった。"}), [])
-        self.assertEqual(unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}), [])
+        self.assertEqual(
+            unit_mismatches("試行は15回目で止まった。[S1]", {1: "試行は15回で止まった。"}),
+            [],
+        )
 
     def test_katakana_unit_swap_flagged(self) -> None:
         from shoin.citation import unit_mismatches
@@ -5750,16 +6564,31 @@ class TestUnitMismatches(unittest.TestCase):
         """km↔キロメートル, m↔メートル, %↔パーセント: same unit, other script."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}), [])
-        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}), [])
-        self.assertEqual(unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}), [])
-        self.assertEqual(unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}), [])
+        self.assertEqual(
+            unit_mismatches("距離は100キロメートルだった。[S1]", {1: "距離は100kmだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("距離は100kmだった。[S1]", {1: "距離は100キロメートルだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("身長は30メートルだった。[S1]", {1: "身長は30mだった。"}),
+            [],
+        )
+        self.assertEqual(
+            unit_mismatches("採用率は63パーセントだった。[S1]", {1: "採用率は63%だった。"}),
+            [],
+        )
 
     def test_counter_kanji_aliases_silent(self) -> None:
         """歳↔才, 名↔人, 棟↔軒: same count in another spelling."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}), [])
+        self.assertEqual(
+            unit_mismatches("創業者は45才だった。[S1]", {1: "創業者は45歳だった。"}),
+            [],
+        )
         self.assertEqual(unit_mismatches("委員は12名だった。[S1]", {1: "委員は12人だった。"}), [])
         self.assertEqual(unit_mismatches("被害は25棟だった。[S1]", {1: "被害は25軒だった。"}), [])
 
@@ -5775,14 +6604,23 @@ class TestUnitMismatches(unittest.TestCase):
         share the ambiguous alias キロ but are not aliases of each other."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}), [1])
-        self.assertEqual(unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}), [1])
+        self.assertEqual(
+            unit_mismatches("距離は100kmだった。[S1]", {1: "重量は100kgだった。"}),
+            [1],
+        )
+        self.assertEqual(
+            unit_mismatches("速度は40キロだった。[S1]", {1: "速度は40メートルだった。"}),
+            [1],
+        )
 
     def test_ascii_case_preserved(self) -> None:
         """MW vs mW differ by 9 orders of magnitude — case is meaning."""
         from shoin.citation import unit_mismatches
 
-        self.assertEqual(unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}), [1])
+        self.assertEqual(
+            unit_mismatches("出力は100MWだった。[S1]", {1: "出力は100mWだった。"}),
+            [1],
+        )
 
     def test_non_alias_counter_pairs_still_flag(self) -> None:
         """本/冊 and 番/位 are deliberately excluded — they can differ."""
@@ -5893,6 +6731,27 @@ class TestQuoteMismatches(unittest.TestCase):
         text = "「重要な設計原理」が鍵だ[S1]。"  # 8 chars, near-miss of 原則 — silent
         self.assertEqual(quote_mismatches(text, sources), [])
 
+    def test_orthography_respelled_quote_flagged(self) -> None:
+        """A quote respelled in a different orthography ('すきーま' for the
+        source's 'スキーマ') is still a misquote — it asserts wording the
+        source never wrote. Verbatim containment correctly fails; the doctored
+        path's _bigrams fold orthography (v0.2.540), so the respelling
+        converges to ~full overlap and flags. Pins that contract."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "仕様はデータベーススキーマの自動移行を定めている。"}
+        text = "出典は「でーたべーすすきーまの自動移行」と明記している[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_verbatim_quote_still_unflagged(self) -> None:
+        """The exact-wording contract is unchanged: a truly verbatim span
+        remains a correct quote, never a doctored one."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "データベース設計指針は冗長性を排除する原則に基づく。"}
+        text = "出典は「データベース設計指針は冗長性を排除する原則に基づく」と明記している[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
     def test_trailing_citation_fragment_inherits_claim(self) -> None:
         """"Claim. [S1]" splits to a citation-only fragment — the previous
         sentence's quotes are still checked against it."""
@@ -5980,6 +6839,24 @@ class TestNegationMismatches(unittest.TestCase):
 
         sources = {1: "the treatment does improve survival rates."}
         text = "the treatment does not improve survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_english_cannot_counts_as_negation(self) -> None:
+        """v0.2.547: 'cannot' is the fused negative — \bnot\b never fires
+        inside it, so a can/cannot polarity flip was invisible."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the feature can process large datasets."}
+        text = "the feature cannot process large datasets [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_english_curly_apostrophe_contraction_counts(self) -> None:
+        """v0.2.547: typographically correct LLM output uses U+2019 — NFKC
+        never folds it, so "doesn’t" read as non-negated before."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "it does scale well."}
+        text = "it doesn\u2019t scale well [S1]."
         self.assertEqual(negation_mismatches(text, sources), [1])
 
     def test_low_overlap_claim_stays_silent(self) -> None:
@@ -6076,6 +6953,30 @@ class TestSelfContradictions(unittest.TestCase):
 
         text = "A社の治療は効果がある。B社の治療は効果がない。"
         self.assertEqual(self_contradictions(text), [])
+
+    def test_rhetorical_question_answer_pair_stays_silent(self) -> None:
+        """v0.2.548: "効果はあるのか？効果はない。" is rhetoric, not a flip —
+        a question asserts nothing (same rule uncited_sentences applies),
+        so the answer cannot contradict it."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果はあるのか？効果はない。"), []
+        )
+        # The asymmetry cuts only toward questions: a stated claim followed
+        # by the same claim's negation still flags.
+        self.assertEqual(
+            self_contradictions("効果はある。効果はない。"), ["効果はない。"]
+        )
+
+    def test_question_vs_later_claim_stays_silent(self) -> None:
+        """Same rule in the other direction: a later claim can't contradict
+        a question that preceded it either."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果はない。効果はあるのか？"), []
+        )
 
     def test_list_prefix_stripped_before_comparing(self) -> None:
         """Numbered/bulleted lines compare on content, not the marker."""
@@ -6197,6 +7098,27 @@ class TestDegenerateSpans(unittest.TestCase):
 
         self.assertEqual(degenerate_spans("結論は常に同じ結論である。" * 2), [])
 
+    def test_orthography_alternating_repeat_flagged(self) -> None:
+        """v0.2.546: a loop alternating orthography (データ / でーた) repeats
+        the SAME content — counting each spelling separately starves every
+        variant below _DEGEN_REPEAT while three semantic repeats fire."""
+        from shoin.citation import degenerate_spans
+
+        text = "要点はデータである。要点はでーたである。要点はデータである。"
+        out = degenerate_spans(text)
+        self.assertTrue(
+            any("でーた" in s for s in out),
+            "three folded-identical sentences must flag as a parrot loop",
+        )
+
+    def test_orthography_distinct_sentences_stay_silent(self) -> None:
+        """Sentences genuinely differing in content still pass under the fold —
+        only orthographic near-duplicates converge."""
+        from shoin.citation import degenerate_spans
+
+        text = "要点はデータである。要点は索引である。要点は結論である。"
+        self.assertEqual(degenerate_spans(text), [])
+
     def test_whitespace_variants_still_match(self) -> None:
         """Spacing differences do not disguise the same repeated sentence."""
         from shoin.citation import degenerate_spans
@@ -6240,7 +7162,10 @@ class TestDegenerateSpans(unittest.TestCase):
         from shoin.citation import degenerate_spans
 
         self.assertEqual(
-            degenerate_spans("例：\n\n    result=compute(x)\n    result=compute(x)\n    result=compute(x)"),
+            degenerate_spans(
+                "例：\n\n    result=compute(x)\n"
+                "    result=compute(x)\n    result=compute(x)"
+            ),
             [],
         )
 
@@ -6920,7 +7845,8 @@ class TestLLMClient(unittest.TestCase):
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.__iter__ = lambda s: iter([
-            b'data: {"choices":[{"delta":{"content":[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
+            b'data: {"choices":[{"delta":{"content":'
+            b'[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}',
             b'data: {"choices":[{"delta":{"content":{"text":"junk"}}}]}',
             b'data: {"choices":[{"delta":{"content":"!"}}]}',
             b"data: [DONE]",
@@ -7213,7 +8139,8 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(
             read_arg,
             _MAX_RESPONSE + 1,
-            "_post() must read _MAX_RESPONSE + 1 bytes to avoid off-by-one on exact-limit responses",
+            "_post() must read _MAX_RESPONSE + 1 bytes to avoid "
+            "off-by-one on exact-limit responses",
         )
 
 
@@ -7283,7 +8210,11 @@ class TestServerSSE(unittest.TestCase):
                 msgs = s.list_messages(nb_id)
 
             # Must have two messages: user + empty assistant (not just the orphaned user)
-            self.assertEqual(len(msgs), 2, "user message + empty assistant message must both be saved")
+            self.assertEqual(
+                len(msgs),
+                2,
+                "user message + empty assistant message must both be saved",
+            )
             self.assertEqual(msgs[0]["role"], "user")
             self.assertEqual(msgs[1]["role"], "assistant")
             self.assertEqual(msgs[1]["body"], "")
@@ -7692,7 +8623,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted
         from shoin.pipeline import index_source
 
-        fake = Extracted(kind="url", title="Mock Page", origin="http://x.test", sha256="abc", text="page content")
+        fake = Extracted(
+            kind="url",
+            title="Mock Page",
+            origin="http://x.test",
+            sha256="abc",
+            text="page content",
+        )
         with patch("shoin.pipeline.extract_url", return_value=fake) as mock_eu:
             with make_store() as s:
                 nb_id = s.create_notebook("url-test").id
@@ -7713,8 +8650,20 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted
         from shoin.pipeline import refresh_source
 
-        original = Extracted(kind="url", title="Page v1", origin="http://refresh.test", sha256="sha-v1", text="old content")
-        updated = Extracted(kind="url", title="Page v2", origin="http://refresh.test", sha256="sha-v2", text="new content refreshed")
+        original = Extracted(
+            kind="url",
+            title="Page v1",
+            origin="http://refresh.test",
+            sha256="sha-v1",
+            text="old content",
+        )
+        updated = Extracted(
+            kind="url",
+            title="Page v2",
+            origin="http://refresh.test",
+            sha256="sha-v2",
+            text="new content refreshed",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("refresh-nb").id
             with patch("shoin.pipeline.extract_url", return_value=original):
@@ -7908,7 +8857,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.pipeline import index_source
 
         # Extracted text that collapses to no chunks (whitespace-only after processing)
-        fake = Extracted(kind="txt", title="Empty Doc", origin="/dev/null", sha256="sha-empty", text="")
+        fake = Extracted(
+            kind="txt",
+            title="Empty Doc",
+            origin="/dev/null",
+            sha256="sha-empty",
+            text="",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("empty-src-test").id
             with patch("shoin.pipeline.extract_file", return_value=fake):
@@ -7917,7 +8872,11 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(cm.exception.code, "INGEST_EMPTY")
             # No source row must have been committed
             sources = s.sources_for_notebook(nb_id)
-            self.assertEqual(len(sources), 0, "source row must not be committed when chunks are empty")
+            self.assertEqual(
+                len(sources),
+                0,
+                "source row must not be committed when chunks are empty",
+            )
 
     def test_add_chunks_empty_list_raises_store_error(self) -> None:
         """add_chunks([]) must raise StoreError, not silently create a zero-chunk source.
@@ -7978,7 +8937,13 @@ class TestPipeline(unittest.TestCase):
         from shoin.ingest import Extracted, IngestError
         from shoin.pipeline import refresh_source
 
-        blank = Extracted(text="", kind="html", title="empty page", origin="http://x.com/", sha256="abc123")
+        blank = Extracted(
+            text="",
+            kind="html",
+            title="empty page",
+            origin="http://x.com/",
+            sha256="abc123",
+        )
         with make_store() as s:
             nb_id = s.create_notebook("refresh-empty").id
             src = s.add_source(nb_id, "html", "original", "http://x.com/", "sha-orig")
@@ -8226,7 +9191,11 @@ class TestExport(unittest.TestCase):
             ris = export_ris(s, nb.id)
         da_lines = [ln for ln in ris.splitlines() if ln.startswith("DA  -")]
         self.assertEqual(len(da_lines), 1)
-        self.assertEqual(da_lines[0], "DA  - unknown", f"empty added_at must produce 'unknown', got {da_lines[0]!r}")
+        self.assertEqual(
+            da_lines[0],
+            "DA  - unknown",
+            f"empty added_at must produce 'unknown', got {da_lines[0]!r}",
+        )
         # No structured PY (year) line for a malformed/empty added_at (v0.2.136).
         self.assertNotIn("PY  -", ris)
 
@@ -8393,7 +9362,12 @@ class TestExport(unittest.TestCase):
                 ["書院はローカルツールである。"],
             )
             s.add_message(nb.id, "user", "書院とは何か", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1", md)
         self.assertTrue(
@@ -8443,7 +9417,12 @@ class TestExport(unittest.TestCase):
                 ["書院はローカルツールである。"],
             )
             s.add_message(nb.id, "user", "書院とは", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc", md)
         self.assertNotIn("§", md)
@@ -8473,7 +9452,12 @@ class TestExport(unittest.TestCase):
                 ],
             )
             s.add_message(nb.id, "user", "書院とは", "{}")
-            s.add_message(nb.id, "assistant", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_message(
+                nb.id,
+                "assistant",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertIn("S1=doc-a [検出: 全文 #2 + 意味 #5]", md)
         self.assertIn("S2=doc-b [検出: 意味 #3]", md)
@@ -8564,9 +9548,17 @@ class TestExport(unittest.TestCase):
             src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
             s.add_chunks(src.id, ["書院はローカルツールである。"])
             report = make_report(
-                "書院はローカルツールである[S1]。", ["doc"], [src.id], ["書院はローカルツールである。"]
+                "書院はローカルツールである[S1]。",
+                ["doc"],
+                [src.id],
+                ["書院はローカルツールである。"],
             )
-            s.add_studio_output(nb.id, "briefing", "書院はローカルツールである[S1]。", json.dumps(report))
+            s.add_studio_output(
+                nb.id,
+                "briefing",
+                "書院はローカルツールである[S1]。",
+                json.dumps(report),
+            )
             md = export_markdown(s, nb.id)
         self.assertTrue(
             any("根拠確認済み" in ln for ln in md.splitlines()),
@@ -8633,7 +9625,8 @@ class TestExport(unittest.TestCase):
                     s.set_embedding(cid, v)
             s.conn.commit()
             n_null = s.conn.execute(
-                "SELECT COUNT(*) c FROM chunks WHERE embedding IS NOT NULL AND embedding_norm IS NULL"
+                "SELECT COUNT(*) c FROM chunks "
+                "WHERE embedding IS NOT NULL AND embedding_norm IS NULL"
             ).fetchone()["c"]
             self.assertEqual(n_null, 15, "half the rows must exercise the fallback path")
 
@@ -8763,7 +9756,9 @@ class TestExport(unittest.TestCase):
             import sqlite3 as _sq
 
             conn = _sq.connect(path)
-            conn.executescript("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)",
+            )
             for version, sql in MIGRATIONS:
                 if version > 6:
                     break
@@ -8901,7 +9896,10 @@ class TestExport(unittest.TestCase):
         from shoin import server as srv
 
         with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
-            self.assertEqual(srv._t("serve.no_egress"), "No data leaves this machine. Ctrl+C to stop.")
+            self.assertEqual(
+                srv._t("serve.no_egress"),
+                "No data leaves this machine. Ctrl+C to stop.",
+            )
             self.assertEqual(srv._t("serve.stopped"), "Stopped.")
         with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
             self.assertEqual(srv._t("serve.no_egress"), "外部送信なし。Ctrl+C で終了。")
@@ -8916,7 +9914,9 @@ class TestExport(unittest.TestCase):
 
         with make_store() as s:
             nb = s.create_notebook("export-degraded-test")
-            report: dict[str, object] = {"degraded": True, "cited": [], "invalid": [], "coverage": 0.0}
+            report: dict[str, object] = {
+                "degraded": True, "cited": [], "invalid": [], "coverage": 0.0
+            }
             s.add_message(nb.id, "user", "書院とは何か", "{}")
             s.add_message(nb.id, "assistant", "検索のみの結果", json.dumps(report))
             md = export_markdown(s, nb.id)
@@ -9098,7 +10098,9 @@ class TestConfigXDG(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             cfg_path = Path(d) / "config.json"
-            cfg_path.write_text(json.dumps({"SHOIN_EMBED_MODEL": None, "SHOIN_LLM_MODEL": "real-model"}))
+            cfg_path.write_text(
+                json.dumps({"SHOIN_EMBED_MODEL": None, "SHOIN_LLM_MODEL": "real-model"}),
+            )
             env = dict(os.environ)
             env.pop("SHOIN_EMBED_MODEL", None)
             env.pop("SHOIN_LLM_MODEL", None)
@@ -9142,10 +10144,18 @@ class TestConfigXDG(unittest.TestCase):
                 env.pop(k, None)
             with patch.object(config_mod, "config_file", return_value=cfg_path):
                 with patch.dict(os.environ, env, clear=True):
-                    self.assertEqual(config_mod.llm_model(), "qwen3:4b", "list value must be ignored")
+                    self.assertEqual(
+                        config_mod.llm_model(),
+                        "qwen3:4b",
+                        "list value must be ignored",
+                    )
                     self.assertEqual(config_mod.ui_lang(), "ja", "bool value must be ignored")
                     self.assertEqual(config_mod.port(), 8080, "a plain int value must still work")
-                    self.assertNotIn("{'a': 1}", str(config_mod.data_dir()), "dict value must be ignored")
+                    self.assertNotIn(
+                        "{'a': 1}",
+                        str(config_mod.data_dir()),
+                        "dict value must be ignored",
+                    )
 
 
 class TestNegTerms(unittest.TestCase):
@@ -9199,12 +10209,38 @@ class TestNegTerms(unittest.TestCase):
         query content instead of treating it as ordinary prose punctuation.
         """
         self.assertEqual(neg_terms("アルゴリズムの-最適化について"), [])
-        self.assertEqual(strip_neg_terms("アルゴリズムの-最適化について"), "アルゴリズムの-最適化について")
+        self.assertEqual(
+            strip_neg_terms("アルゴリズムの-最適化について"),
+            "アルゴリズムの-最適化について",
+        )
         # A hyphen preceded by CJK PUNCTUATION (a word boundary, not a word
         # character) must still correctly introduce negation.
         self.assertEqual(neg_terms("書院。-legacy"), ["legacy"])
         # Existing space-preceded / string-start CJK negation must be unaffected.
         self.assertEqual(neg_terms("Python -日本語"), ["日本語"])
+
+    def test_neg_terms_unicode_dash_family(self) -> None:
+        """v0.2.526: a leading '-term' must negate under every Unicode dash
+        an IME or keyboard can emit — U+2212 minus sign, U+FF0D fullwidth
+        hyphen-minus (the two most common fullwidth-IME outputs), the
+        U+2010-2015 dash family, U+FE63 — not just ASCII '-'.  Before the
+        fix, '猫 −犬' negated nothing and POSITIVELY searched 犬: the exact
+        opposite of the exclusion the user typed.  'ー'/'ｰ' stay excluded —
+        prolonged-sound marks are CJK word characters (スーパー), so
+        treating them as negation syntax would misparse real terms."""
+        for dash in ("-", "‐", "‑", "‒", "–", "—", "―", "−", "﹣", "－"):
+            self.assertEqual(
+                neg_terms(f"猫 {dash}犬"), ["犬"],
+                f"U+{ord(dash):04X} must introduce negation",
+            )
+            self.assertEqual(strip_neg_terms(f"猫 {dash}犬"), "猫")
+        # Glued to a preceding CJK word char, any dash stays an ordinary
+        # in-sentence dash (same guard as ASCII 猫-犬).
+        self.assertEqual(neg_terms("猫−犬"), [])
+        # Prolonged-sound marks are word characters, never negation syntax.
+        self.assertEqual(neg_terms("猫 ー犬"), [])
+        # CJK punctuation before the dash still allows negation.
+        self.assertEqual(neg_terms("書院。−犬"), ["犬"])
 
     def test_retrieve_multi_neg_false_positive_does_not_suppress_rewrite_hits(self) -> None:
         """End-to-end: the CJK hyphen-glued false-positive negation must not
@@ -9370,7 +10406,8 @@ class TestBM25MergePathCap(unittest.TestCase):
             hits = bm25_search(s, nb_id, "quantum 猫", k=k)
             self.assertLessEqual(
                 len(hits), k,
-                f"bm25_search must return at most {k} hits on FTS5+LIKE merge path, got {len(hits)}",
+                f"bm25_search must return at most {k} hits on FTS5+LIKE "
+                f"merge path, got {len(hits)}",
             )
 
     def test_bm25_merge_path_globally_sorted(self) -> None:
@@ -9906,7 +10943,12 @@ class TestCLI(unittest.TestCase):
             source_map={"S1": "doc"}, confirmed=[], misattributed=[],
         )
         fake_hit = Hit(chunk_id=1, source_id=1, text="body", score=1.0)
-        fake_answer = Answer(text="ソースに記載なし。", hits=[fake_hit], report=report, degraded=False)
+        fake_answer = Answer(
+            text="ソースに記載なし。",
+            hits=[fake_hit],
+            report=report,
+            degraded=False,
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
             db_file = f.name
@@ -9984,7 +11026,10 @@ class TestCLI(unittest.TestCase):
 
         from shoin.cli import main
 
-        with patch("shoin.cli.Store.__enter__", side_effect=_sqlite3.OperationalError("database is locked")):
+        with patch(
+            "shoin.cli.Store.__enter__",
+            side_effect=_sqlite3.OperationalError("database is locked"),
+        ):
             err_out = io.StringIO()
             with patch("sys.stderr", err_out):
                 rc = main(["notebook", "list"])
@@ -10006,7 +11051,10 @@ class TestCLI(unittest.TestCase):
 
         from shoin.cli import main
 
-        with patch("shoin.cli.Store", side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'")):
+        with patch(
+            "shoin.cli.Store",
+            side_effect=OSError("[Errno 13] Permission denied: '/data/shoin'"),
+        ):
             err_out = io.StringIO()
             with patch("sys.stderr", err_out):
                 rc = main(["notebook", "list"])
@@ -10338,7 +11386,15 @@ class TestCLINoteSourceParity(unittest.TestCase):
                 nb_id = s.create_notebook("src-refresh-test").id
                 src_id = s.add_source(nb_id, "url", "old", "http://example.test", "sha1").id
 
-            fake_source = Source(src_id, nb_id, "url", "refreshed", "http://example.test", "sha2", "2026-01-01")
+            fake_source = Source(
+                src_id,
+                nb_id,
+                "url",
+                "refreshed",
+                "http://example.test",
+                "sha2",
+                "2026-01-01",
+            )
             fake_result = IndexResult(source=fake_source, n_chunks=3, n_embedded=0)
             out = io.StringIO()
             with patch("shoin.cli.refresh_source", return_value=fake_result):
@@ -10696,13 +11752,19 @@ class TestChunkContext(unittest.TestCase):
                 return config.chunk_tokens(), config.chunk_overlap()
 
         self.assertEqual(probe({}), (512, 64))  # unset → defaults
-        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}), (256, 32))
+        self.assertEqual(
+            probe({"SHOIN_CHUNK_TOKENS": "256", "SHOIN_CHUNK_OVERLAP": "32"}),
+            (256, 32),
+        )
         self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "abc"}), (512, 64))  # invalid → default
         self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "0"}), (512, 64))  # non-positive → default
         self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "-5"}), (512, 64))  # negative → default
         self.assertEqual(probe({"SHOIN_CHUNK_OVERLAP": "999"}), (512, 64))  # >= size → default
         # overlap == effective chunk size is rejected (would overlap wholly/stall)
-        self.assertEqual(probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}), (128, 64))
+        self.assertEqual(
+            probe({"SHOIN_CHUNK_TOKENS": "128", "SHOIN_CHUNK_OVERLAP": "128"}),
+            (128, 64),
+        )
 
     def test_chunk_env_changes_index_chunk_count(self) -> None:
         """The knob actually reaches the ingest path: with a smaller chunk size,
@@ -10867,7 +11929,13 @@ class TestRerankContext(unittest.TestCase):
     def test_lex_reads_context_breadcrumb(self) -> None:
         from shoin.search import rerank
 
-        hit = Hit(1, 1, "体内の防御機構が働く仕組みを説明する。", 1.0, context="免疫レポート > 概要")
+        hit = Hit(
+            1,
+            1,
+            "体内の防御機構が働く仕組みを説明する。",
+            1.0,
+            context="免疫レポート > 概要",
+        )
         rerank("免疫", [hit])
         self.assertGreater(hit.detail["lex"], 0.0)
 
@@ -10927,15 +11995,21 @@ class TestRerankContext(unittest.TestCase):
             nb = st.create_notebook("N")
             a = st.add_source(nb.id, "md", "免疫レポート", "a.md", "ha")
             st.add_chunks(
-                a.id, ["体内の防御機構が働く仕組みを説明する。"], contexts=["免疫レポート > 免疫の基礎"]
+                a.id,
+                ["体内の防御機構が働く仕組みを説明する。"],
+                contexts=["免疫レポート > 免疫の基礎"],
             )
             b = st.add_source(nb.id, "md", "研究総括", "b.md", "hb")
             st.add_chunks(
-                b.id, ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"], contexts=["研究総括 > 本文"]
+                b.id,
+                ["免疫の研究は進展した。免疫は複雑である。免疫を論じる。"],
+                contexts=["研究総括 > 本文"],
             )
             c = st.add_source(nb.id, "md", "経営会議メモ", "c.md", "hc")
             st.add_chunks(
-                c.id, ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"], contexts=["経営会議メモ > 議事"]
+                c.id,
+                ["予算配分を議論した。参考として免疫の研究予算にも触れた。以上。"],
+                contexts=["経営会議メモ > 議事"],
             )
             ranking = [h.source_id for h in retrieve(st, nb.id, "免疫", k=5)]
             self.assertEqual(ranking, [b.id, a.id, c.id])
@@ -10990,7 +12064,12 @@ class TestWidthVariants(unittest.TestCase):
         self.assertEqual(strip_neg_terms("Python -ﾃﾞｰﾀ"), "Python")
 
     def test_term_variants_shapes(self) -> None:
-        self.assertEqual(term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "でーた"])
+        # v0.2.528: the NFD variant bridges canonically-decomposed text
+        # (macOS NFD filenames; a dakuten spelled base+゙) — 'データ' is
+        # テ + combining voiced mark, a legitimate extra recall channel.
+        self.assertEqual(
+            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた"]
+        )
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
         # Control: a term whose spellings all coincide yields only itself, so
@@ -11200,7 +12279,9 @@ class TestRenameReembed(unittest.TestCase):
         st.add_chunks(a.id, ["ワクチンの話題についての本文"], contexts=["旧題"])
         b = st.add_source(nb.id, "md", "議事録", "mem://b", "sha-b")
         st.add_chunks(b.id, ["議事録: 免疫の話題が出た"], contexts=["議事録"])
-        rows = st.id_context_text_chunks_for_source(a.id) + st.id_context_text_chunks_for_source(b.id)
+        rows = st.id_context_text_chunks_for_source(
+            a.id,
+        ) + st.id_context_text_chunks_for_source(b.id)
         _embed_chunks(st, llm, [r[0] for r in rows], [_embed_input(r[1], r[2]) for r in rows])
         return st, nb.id, a.id, b.id
 
@@ -11210,9 +12291,10 @@ class TestRenameReembed(unittest.TestCase):
         try:
             rename_source(st, a_id, "免疫レポート", "mem://a", llm)
             stored = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             fresh = self._vec(_embed_input("免疫レポート", "ワクチンの話題についての本文"))
             stale = self._vec(_embed_input("旧題", "ワクチンの話題についての本文"))
@@ -11288,15 +12370,17 @@ class TestRenameReembed(unittest.TestCase):
         try:
             st.set_setting("embed_model", "some-other-model")
             before = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             n = rename_source(st, a_id, "免疫レポート", "mem://a", llm)
             after = unpack_vector(
-                st.conn.execute("SELECT embedding FROM chunks WHERE source_id=?", (a_id,)).fetchone()[
-                    "embedding"
-                ]
+                st.conn.execute(
+                    "SELECT embedding FROM chunks WHERE source_id=?",
+                    (a_id,),
+                ).fetchone()["embedding"]
             )
             self.assertEqual(n, 0)
             self.assertEqual(before, after)
@@ -11560,7 +12644,7 @@ class TestSearchCoverageTail(unittest.TestCase):
         is 3 (the tight cover), not 6 — the left-pointer shrink path."""
         from shoin.search import PROX_SPAN, _proximity_from_norm
 
-        got = _proximity_from_norm(["a", "b"], "a x a b")
+        got = _proximity_from_norm([["a"], ["b"]], "a x a b")
         self.assertAlmostEqual(got, (2 / 2) * (PROX_SPAN / (3 + PROX_SPAN)))
 
     def test_rrf_fuse_lists_merges_bm25_onto_vec_hit(self) -> None:
@@ -11749,6 +12833,29 @@ class TestResidualGuards(unittest.TestCase):
                 return "1. x\n2. 別の言い換えです\n別の言い換えです"
 
         self.assertEqual(rewrite_queries(_Stub(), "元の質問"), ["別の言い換えです"])  # type: ignore[arg-type]
+
+    def test_rewrite_queries_dedups_variant_spellings(self) -> None:
+        """v0.2.545: a rewrite differing only in orthography retrieves the
+        identical chunk set (term_variants bridges spelling) — keeping it
+        spends a MULTI_QUERY_REWRITES slot on zero vocabulary diversity."""
+        from shoin.qa import rewrite_queries
+
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return (
+                    "データ設計はどう進めるか\n"
+                    "でーた設計はどう進めるか\n"
+                    "café の要点は何か\n"
+                    "cafe の要点は何か\n"
+                    "実装手順の確認点は何か"
+                )
+
+        self.assertEqual(
+            rewrite_queries(_Stub(), "データ設計はどう進めるか"),  # type: ignore[arg-type]
+            ["café の要点は何か", "実装手順の確認点は何か"],
+        )
 
     def test_degraded_text_caps_at_three_sources(self) -> None:
         """The degraded fallback enumerates at most 3 sources — a fourth must
@@ -12167,6 +13274,33 @@ class TestResidualGuards(unittest.TestCase):
                 with Store(fdb):
                     self.assertEqual(mode(fdb), 0o600)
                     self.assertEqual(mode(foreign), 0o755)
+
+    def test_db_chmod_repair_never_follows_symlinks(self) -> None:
+        """v0.2.501: the chmod repair glob matches `db_name*`, and
+        `os.chmod` follows symlinks — so in a shared `--db` parent a
+        planted `other.db-evil` symlink would tighten whatever file it
+        pointed at. The glob must skip symlinks: a planted link keeps
+        its target untouched while the real DB and sidecars are still
+        tightened."""
+        import os
+        import stat
+
+        from shoin.store import Store
+
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            shared.mkdir(mode=0o755)
+            db = shared / "shoin.sqlite3"
+            victim = Path(tmp) / "victim.txt"
+            victim.write_text("keep me readable")
+            os.chmod(victim, 0o644)
+            link = shared / "shoin.sqlite3-evil"
+            link.symlink_to(victim)
+            with Store(db):
+                self.assertEqual(mode(db), 0o600)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(mode(victim), 0o644)
 
     def test_ci_yml_and_verify_sh_run_the_same_gates(self) -> None:
         """v0.2.298: the repo defines the verification gate twice — ci/ci.yml
@@ -13398,10 +14532,34 @@ class TestResidualGuards(unittest.TestCase):
         the catalogued class), `except BaseException` (same reach), and
         `contextlib.suppress(Exception/BaseException)` (the identical
         silent-swallow under a context manager; the one existing
-        `suppress(OSError)` site is narrow and stays allowed)."""
+        `suppress(OSError)` site is narrow and stays allowed). A line-level
+        regex cannot see two further forms that still reach the same class:
+        `except (Exception, OSError)` (tuple — matches `except Exception`
+        literally nowhere) and `except* Exception` (ExceptionGroup syntax,
+        legal since the pinned 3.11 floor). The AST pass below flags every
+        handler whose type is not a lone `Exception` Name — bare, tuple,
+        except*, or any other shape that reaches the class — is a bypass of
+        the curated catalog."""
+        import ast
+
+        def _reaches(t: ast.expr | None) -> bool:
+            if t is None:
+                return True
+            if isinstance(t, ast.Name):
+                return t.id in ("Exception", "BaseException")
+            if isinstance(t, ast.Attribute):
+                return t.attr in ("Exception", "BaseException")
+            if isinstance(t, ast.Starred):
+                return _reaches(t.value)
+            if isinstance(t, ast.Tuple):
+                return any(_reaches(elt) for elt in t.elts)
+            if isinstance(t, ast.Subscript):
+                return _reaches(t.value)
+            return False
+
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         expected = {
-            "ingest.py": 2,
+            "ingest.py": 3,
             "server.py": 7,
             "cli.py": 1,
             "pipeline.py": 2,
@@ -13415,6 +14573,25 @@ class TestResidualGuards(unittest.TestCase):
         )
         for path in sorted(shoin_dir.glob("*.py")):
             n = 0
+            tree = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Try, ast.TryStar)):
+                    for handler in node.handlers:
+                        t = handler.type
+                        catalogued_shape = (
+                            isinstance(node, ast.Try)
+                            and isinstance(t, ast.Name)
+                            and t.id == "Exception"
+                        )
+                        if _reaches(t) and not catalogued_shape:
+                            problems.append(
+                                f"{path.name}:{handler.lineno}: "
+                                "catch-all handler bypasses the "
+                                "except-Exception catalog "
+                                "(bare/tuple/except*/BaseException)"
+                            )
             for i, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), 1
             ):
@@ -13516,7 +14693,7 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
-            "search.py": {"_SHIN_TO_KYU"},
+            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
             "store.py": {"MIGRATIONS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
@@ -13576,13 +14753,45 @@ class TestResidualGuards(unittest.TestCase):
            dict shared across every call; the classic aliasing bug that
            passes every test that only calls once. Today there are zero;
            the pin keeps it zero.
+
+        3. Process-exit / debugger primitives — breakpoint() (thread
+           hang on stdin under the server), exit()/quit()/sys.exit()/
+           os._exit()/raise SystemExit (BaseException — sails past every
+           `except Exception` guard and kills the handler thread
+           silently), pdb/bdb imports, and the warnings/traceback
+           diagnostic channels (the logging ban covers the same class).
+           sys.exit is legitimate ONLY at the two CLI entry tails —
+           catalogued by (file, count).
         """
         import ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        banned_calls = {"eval", "exec", "compile", "__import__", "globals", "locals"}
+        banned_calls = {
+            "eval", "exec", "compile", "__import__", "globals", "locals",
+            # Process-exit/debugger builtins: breakpoint() hangs the request
+            # thread on a stdin read under the server; exit()/quit() raise
+            # SystemExit — BaseException, invisible to every
+            # `except Exception` guard — from wherever they're left behind.
+            "breakpoint", "exit", "quit",
+            # Builtin hash() on str/bytes is salted per process (PYTHONHASHSEED):
+            # values change every run, so any cache key, ordering, or stored
+            # digest built on it is silently nondeterministic across
+            # invocations — content hashing goes through hashlib.sha256.
+            "hash",
+        }
         banned_attrs = {"loads", "load"}  # only when receiver is pickle/marshal
-        banned_mods = {"pickle", "marshal", "subprocess", "ctypes", "code", "pty"}
+        # pdb/bdb are breakpoint()'s import route; warnings/traceback are the
+        # uncurated diagnostic channels the logging-ban class already covers.
+        banned_mods = {
+            "pickle", "marshal", "subprocess", "ctypes", "code", "pty",
+            "pdb", "bdb", "warnings", "traceback",
+        }
+        # sys.exit/os._exit are legitimate ONLY at the CLI entry boundary —
+        # sys.exit(main()) in cli.py's `if __name__` tail and __main__.py.
+        # Anywhere else (a request handler, a library helper) SystemExit kills
+        # the handler thread silently. Catalog by file -> site count.
+        expected_exit_sites = {"cli.py": 1, "__main__.py": 1}
+        exit_sites: dict[str, int] = {}
         problems: list[str] = []
         n_funcs = 0
         for path in sorted(shoin_dir.glob("*.py")):
@@ -13641,7 +14850,32 @@ class TestResidualGuards(unittest.TestCase):
                             problems.append(
                                 f"{path.name}:{node.lineno}: os.{f.attr}()"
                             )
+                        if root_name in ("sys", "os") and f.attr in (
+                            "exit", "_exit"
+                        ):
+                            exit_sites[path.name] = (
+                                exit_sites.get(path.name, 0) + 1
+                            )
+                elif isinstance(node, ast.Raise) and (
+                    (
+                        isinstance(node.exc, ast.Name)
+                        and node.exc.id == "SystemExit"
+                    )
+                    or (
+                        isinstance(node.exc, ast.Call)
+                        and isinstance(node.exc.func, ast.Name)
+                        and node.exc.func.id == "SystemExit"
+                    )
+                ):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: raise SystemExit"
+                    )
         self.assertEqual(problems, [], f"dangerous constructs: {problems}")
+        self.assertEqual(
+            exit_sites,
+            expected_exit_sites,
+            f"sys/os exit call sites drifted from the curated boundary: {exit_sites}",
+        )
         self.assertGreaterEqual(
             n_funcs, 100, f"non-vacuous: expected >=100 functions scanned (got {n_funcs})"
         )
@@ -13669,7 +14903,7 @@ class TestResidualGuards(unittest.TestCase):
         alternation or re.escape() around anything derived from input.
         """
         import ast
-        import sre_parse  # noqa: PLC2701
+        import re._parser as sre_parse  # noqa: PLC2701
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         maxr = sre_parse.MAXREPEAT
@@ -13742,11 +14976,11 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:100",
-            "citation.py:513", "citation.py:517", "citation.py:554",
-            "citation.py:567", "citation.py:874", "citation.py:1238",
-            "citation.py:1443",
-            "search.py:53", "search.py:752",
+            "chunk.py:208",
+            "citation.py:526", "citation.py:530", "citation.py:567",
+            "citation.py:580", "citation.py:892", "citation.py:1271",
+            "citation.py:1485",
+            "search.py:72", "search.py:907",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -13910,7 +15144,11 @@ class TestResidualGuards(unittest.TestCase):
                 and len(v.args) == 1
             ):
                 inner = v.args[0]
-                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "len":
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "len"
+                ):
                     return True  # str(len(body)) — byte count
                 if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
                     return True  # route-regex ints
@@ -14176,7 +15414,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:556"],
+            sites, ["search.py:670"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -14339,6 +15577,2320 @@ class TestResidualGuards(unittest.TestCase):
             sites, 3,
             "non-vacuous: read_text/write_text call sites must be visible",
         )
+
+    def test_timestamps_come_only_from_store_now(self) -> None:
+        """`ORDER BY updated_at DESC` is a string sort — every timestamp
+        written to the DB must share `_now()`'s exact shape
+        (`datetime.now(timezone.utc).isoformat(timespec="microseconds")`,
+        fixed 32 chars ending `+00:00`). A second producer — naive
+        `datetime.now()`, `strftime`, `time.time` — emits a differently
+        shaped value that still string-sorts, silently corrupting the
+        notebook/note ordering around the offset suffix. AST pin: every
+        clock-producing call must live lexically inside `store.py::_now`'s
+        body; behavioral pin: `_now()` output parses, carries tz, and is
+        non-decreasing."""
+        import ast
+        from datetime import datetime
+
+        root = Path(__file__).resolve().parent.parent
+        verbs = {
+            "now", "utcnow", "today", "isoformat", "strftime",
+            "strptime", "fromisoformat", "mktime", "time",
+            "monotonic", "perf_counter",
+        }
+        problems: list[str] = []
+        now_call_sites = 0
+        now_node = None
+        for path in root.glob("shoin/*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for fn in ast.walk(tree):
+                if (
+                    isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and path.name == "store.py"
+                    and fn.name == "_now"
+                ):
+                    now_node = fn
+            allowed = {id(n) for n in ast.walk(now_node)} if now_node else set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "sleep"
+                ):
+                    continue  # time.sleep is the busy-retry, not a clock
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in verbs
+                    and id(node) not in allowed
+                ):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: clock call "
+                        f"`{node.func.attr}()` outside store._now"
+                    )
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "_now"
+                    and path.name == "store.py"
+                ):
+                    now_call_sites += 1
+        self.assertEqual(problems, [], problems)
+        self.assertIsNotNone(now_node, "store._now producer missing")
+
+        from shoin.store import _now
+
+        a, b = _now(), _now()
+        self.assertLessEqual(a, b)
+        self.assertIsNotNone(datetime.fromisoformat(a).tzinfo)
+        self.assertTrue(a.endswith("+00:00"), a)
+        self.assertEqual(len(a), 32, a)
+        # Floor: the single-producer rule binds to real write sites today.
+        self.assertGreaterEqual(now_call_sites, 5, now_call_sites)
+
+    def test_no_removed_or_deprecated_stdlib_imports(self) -> None:
+        """Modules scheduled for removal (PEP 594's "dead batteries" plus the
+        sre_* trio) import silently today and ImportError on a future
+        interpreter — exactly what `import sre_parse` did inside the regex
+        pin (it emitted a DeprecationWarning on every verify run and breaks
+        outright once CPython drops it). The pinned tree has zero; the pin
+        keeps it zero, scanning prod AND test files since the defect lived
+        in tests. `re._parser` is the canonical 3.11+ name and stays legal."""
+        import ast
+
+        dead = {
+            # PEP 594 removals (gone in 3.13)
+            "aifc", "audioop", "cgi", "cgitb", "chunk", "crypt", "imghdr",
+            "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
+            "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",
+            # legacy/deprecated primitives
+            "asyncore", "asynchat", "imp", "smtpd",
+            # the deprecated sre_* aliases — use re._parser instead
+            "sre_parse", "sre_compile", "sre_constants",
+        }
+        root = Path(__file__).resolve().parent.parent
+        problems: list[str] = []
+        n_files = 0
+        for path in sorted(root.glob("shoin/*.py")) + sorted(
+            root.glob("tests/*.py")
+        ):
+            n_files += 1
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [a.name.split(".")[0] for a in node.names]
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.level == 0  # `from .chunk import` is ours, not stdlib
+                ):
+                    names = [node.module.split(".")[0]]
+                for name in names:
+                    if name in dead:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: imports {name}"
+                        )
+        self.assertEqual(problems, [], f"deprecated stdlib imports: {problems}")
+        self.assertGreaterEqual(n_files, 20, n_files)
+
+    def test_e501_violations_never_grow(self) -> None:
+        """E501 (line > 100 display columns) is outside the ruff select set
+        only because a pre-existing backlog of long lines is grandfathered
+        (220 at pin creation, fully paid down by v0.2.495). This is a
+        RATCHET: each file's violation count is pinned to the baseline
+        below and may only shrink — a new over-long line anywhere fails
+        the suite, so the backlog can't silently regrow. The measure
+        replicates ruff's own E501: East-Asian display width (W/F = 2
+        columns),
+        trailing `# type: ignore`/`# noqa` pragmas stripped first, and a
+        trailing unbreakable URL token exempted (count-for-count identical
+        to `ruff check --select E501`)."""
+        import re
+        from unicodedata import east_asian_width
+
+        def width(s: str) -> int:
+            return sum(2 if east_asian_width(c) in "WF" else 1 for c in s)
+
+        pragma = re.compile(
+            r"\s*#\s*(?:type:\s*ignore(?:\[[^\]]*\])?|noqa(?::\s*\S+)?)\s*$"
+        )
+
+        def over(line: str) -> bool:
+            if pragma.search(line):
+                line = pragma.sub("", line)
+            if width(line) <= 100:
+                return False
+            tail = line.rsplit(None, 1)[-1]
+            return "://" not in tail or width(line[: line.rfind(tail)]) > 100
+
+        # Empty since v0.2.495 — the whole backlog is paid; every file
+        # sits at budget 0, so any new over-long line fails here.
+        baseline: dict[str, int] = {}
+        root = Path(__file__).resolve().parent.parent
+        actual: dict[str, int] = {}
+        for path in sorted(root.glob("shoin/*.py")) + sorted(
+            root.glob("tests/*.py")
+        ):
+            rel = path.relative_to(root).as_posix()
+            n = sum(
+                1 for line in path.read_text(encoding="utf-8").splitlines()
+                if over(line)
+            )
+            if n:
+                actual[rel] = n
+        for rel, n in actual.items():
+            limit = baseline.get(rel, 0)
+            self.assertLessEqual(
+                n, limit,
+                f"{rel}: {n} over-long lines, ratchet allows at most {limit} "
+                "(new E501 violation — wrap the line or pay down the file's "
+                "baseline by shortening an existing one)",
+            )
+        # Non-vacuousness: the catalog must stay honest — paying a file or
+        # line down REQUIRES updating the baseline to match, which is the
+        # ratchet bookkeeping working as intended.
+        self.assertEqual(
+            sum(actual.values()), sum(baseline.values()),
+            "baseline drifted — update the catalog to the current count",
+        )
+
+    def test_gate_suppressions_are_cataloged(self) -> None:
+        """A suppression marker (``noqa``, ``type: ignore``, ``pragma: no
+        cover``, and tool cousins) switches a gate off for its own line:
+        lint, typecheck and coverage all keep passing while the line
+        opts out of the very check meant to catch its defect — so a
+        waiver smuggled inside an unrelated change is invisible to every
+        gate. The catalog below is the full inventory in production
+        code; every entry is deliberate (http.server's do_* verb names,
+        the optional-dependency ImportError guard, the single embed
+        lambda, the blocking entrypoint lines). Any new suppression
+        drifts the per-file count and fails here until it is cataloged.
+        The same check guards pyproject.toml: per-file-ignores or an
+        exclude/override key would shrink every file's gates at once,
+        so the config may contain none of those keys."""
+        markers = re.compile(
+            r"#\s*(?:noqa\b|type:\s*ignore|pragma:\s*(?:no\s*cover|"
+            r"no\s*branch|allowlist\b)|coverage:\s*ignore|nosec\b|"
+            r"pyright:\s*ignore|mypy:\s*ignore|pylint:\s*disable|"
+            r"flake8\b|fmt:\s*(?:off|skip)|isort:\s*\w+|ruff:\s*noqa|"
+            r"yapf:\s*disable)"
+        )
+        root = Path(__file__).resolve().parent.parent
+        baseline = {
+            "cli.py": 2,      # noqa: BLE001 broad CLI catch + pragma on __main__
+            "ingest.py": 2,   # type: ignore[misc] HTMLParser attr + pragma ImportError
+            "pipeline.py": 1,  # noqa: E731 embed lambda
+            "server.py": 5,   # noqa: N802 x4 (do_* verbs) + pragma serve loop
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        for path in sorted(root.glob("shoin/*.py")):
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                hits = markers.findall(line)
+                if hits:
+                    actual[path.name] = actual.get(path.name, 0) + len(hits)
+                    sites.append(f"{path.name}:{i}")
+        self.assertEqual(
+            actual, baseline,
+            f"suppression-marker inventory drifted at {sites} — a new "
+            "waiver must be added to the catalog (and justified), a "
+            "removed waiver subtracted",
+        )
+        # The test tree gets a narrower check: `# type: ignore` is noise
+        # there (stub helpers need it), but secret-evasion markers are
+        # not — allowlist pragmas and nosec comments suppress the secret
+        # scan and bandit respectively, and a key smuggled into a test
+        # fixture is the classic real-world leak path.
+        test_markers = re.compile(r"#\s*(?:pragma:\s*allowlist|nosec\b)")
+        test_baseline = {
+            "test_qa.py": 1,  # 50k-char fake entropy blob is not a secret
+        }
+        test_actual: dict[str, int] = {}
+        test_sites: list[str] = []
+        for path in sorted(root.glob("tests/*.py")):
+            for i, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                hits = test_markers.findall(line)
+                if hits:
+                    test_actual[path.name] = (
+                        test_actual.get(path.name, 0) + len(hits)
+                    )
+                    test_sites.append(f"{path.name}:{i}")
+        self.assertEqual(
+            test_actual, test_baseline,
+            f"test-tree secret-evasion marker inventory drifted at "
+            f"{test_sites} — a secret suppressed from detection in a "
+            "test file is still a leaked secret",
+        )
+        gate_narrowing = re.compile(
+            r"^\s*(?:per-file-ignores|extend-exclude|exclude|"
+            r"ignore_errors|disable_error_code|overrides|"
+            r"exclude_lines|omit)\s*="
+        )
+        config_hits = [
+            f"pyproject.toml:{i}"
+            for i, line in enumerate(
+                (root / "pyproject.toml").read_text(encoding="utf-8").splitlines(), 1
+            )
+            if gate_narrowing.search(line)
+        ]
+        self.assertEqual(
+            config_hits, [],
+            "pyproject.toml gained a gate-narrowing key — suppressions "
+            "belong inline at the line they waive, cataloged here",
+        )
+        # coverage also merges .coveragerc/setup.cfg/tox.ini before
+        # pyproject — a `[run] omit` or `[report] exclude_lines` there
+        # would shrink the 90% floor invisibly even though the CLI
+        # --fail-under flag keeps passing.
+        alt_configs = [
+            f.name
+            for f in (root / n for n in (".coveragerc", "setup.cfg", "tox.ini"))
+            if f.exists()
+        ]
+        self.assertEqual(
+            alt_configs, [],
+            "a coverage-readable config file appeared outside "
+            "pyproject.toml — gate narrowing there is invisible to this pin",
+        )
+
+    def test_file_writes_are_cataloged(self) -> None:
+        """Filesystem-mutating calls may appear only at the curated
+        sites below: the eval ``--save`` baseline writer (cli.py), the
+        upload staging temp file and its cleanup (server.py), and
+        store.py's private-permission DB dir/file setup. An unlisted
+        mutation means Shoin would silently create, rewrite, truncate,
+        or delete a user file outside those contracts — e.g. a new
+        "cleanup" path reaching into someone's document folder, which
+        no test would notice until real data was gone. sqlite3.connect
+        is file-writing too but is single-sited in store.py and pinned
+        separately."""
+        import ast
+
+        PATH_VERBS = {
+            "unlink", "rmdir", "rename", "mkdir", "touch", "chmod",
+            "lchmod", "symlink_to", "hardlink_to", "link_to",
+            "write_text", "write_bytes", "truncate", "writelines",
+        }
+        OS_VERBS = {
+            "remove", "unlink", "rmdir", "rename", "replace",
+            "makedirs", "mkdir", "chmod", "truncate", "link",
+            "symlink", "open", "fdopen", "utime", "chown", "lchown",
+            "removedirs", "renames", "mkfifo", "mknod", "lchmod",
+            "chflags", "lchflags", "setxattr", "removexattr", "ftruncate",
+        }
+        TEMP_VERBS = {
+            "NamedTemporaryFile", "mkstemp", "mkdtemp",
+            "TemporaryFile", "TemporaryDirectory",
+        }
+        WRITEY_MODE = re.compile(r"[wax+]")
+
+        def writey_mode(node: ast.Call) -> bool:
+            mode: object = None
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                mode = node.args[1].value
+            for kw in node.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                    mode = kw.value.value
+            return isinstance(mode, str) and bool(WRITEY_MODE.search(mode))
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline = {
+            "cli.py": 1,     # Path(args.save).write_text — eval baseline export
+            "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
+            "store.py": 4,   # mkdir + os.open(O_CREAT,0600) + os.chmod x2
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Path.replace is the rename-with-overwrite mutation — as
+            # dangerous as unlink — but the verb name collides with
+            # str.replace, which is everywhere. Flag it only on
+            # Path-call receivers: `Path(x).replace(y)` chained, or a
+            # name bound to `Path(...)` in the same file.
+            path_names: set[str] = set()
+
+            def is_path_call(n: ast.AST) -> bool:
+                return (
+                    isinstance(n, ast.Call)
+                    and (
+                        (isinstance(n.func, ast.Name) and n.func.id == "Path")
+                        or (
+                            isinstance(n.func, ast.Attribute)
+                            and n.func.attr == "Path"
+                            and isinstance(n.func.value, ast.Name)
+                            and n.func.value.id == "pathlib"
+                        )
+                    )
+                )
+
+            for node in ast.walk(tree):
+                tgt: list[ast.AST] = []
+                if isinstance(node, ast.Assign):
+                    tgt = node.targets
+                    val = node.value
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    tgt = [node.target]
+                    val = node.value
+                else:
+                    continue
+                if is_path_call(val):
+                    for t in tgt:
+                        for x in ast.walk(t):
+                            if isinstance(x, ast.Name):
+                                path_names.add(x.id)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                hit = False
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    if func.attr in PATH_VERBS:
+                        hit = True
+                    elif func.attr == "replace" and (
+                        is_path_call(func.value)
+                        or (
+                            isinstance(func.value, ast.Name)
+                            and func.value.id in path_names
+                        )
+                    ):
+                        hit = True
+                    elif func.attr == "open" and writey_mode(node):
+                        hit = True
+                    elif (
+                        func.attr in OS_VERBS
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "os"
+                    ):
+                        hit = True
+                    elif (
+                        func.attr in TEMP_VERBS
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "tempfile"
+                    ):
+                        hit = True
+                    elif isinstance(func.value, ast.Name) and func.value.id == "shutil":
+                        hit = True
+                elif isinstance(func, ast.Name) and func.id == "open" and writey_mode(node):
+                    hit = True
+                if hit:
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f"file-mutation inventory drifted at {sites} — new writers "
+            "must be added to the catalog (and justified), removed "
+            "writers subtracted",
+        )
+
+    def test_except_handler_inventory_is_cataloged(self) -> None:
+        """Every `except` handler in production code is pinned to a per-file
+        signature inventory — the catch-all pin curates `except Exception`
+        and the broad forms (bare, BaseException, suppress), but a new
+        SPECIFIC-TYPED handler is invisible to it: `except TypeError:
+        return None` is neither bare nor Exception-wide, so it would slide
+        through lint and every gate while silently swallowing a defect
+        class. Signatures are canonical (tuple members sorted — `except
+        (A,B)` ≡ `except (B,A)`); handler bodies that silently substitute a
+        fallback (pass/continue/return of a constant, name, or empty
+        literal) are counted per file — flipping a real error path to a
+        quiet default at an existing signature site changes that count.
+        `contextlib.suppress(...)` calls are cataloged in the same
+        signature list (prefixed `suppress(...)`) — a suppress context is
+        an except-handler spelled differently and invisible to
+        ExceptHandler scanning. Today's inventory: bare `except` 0,
+        BaseException 0, one `suppress(OSError)` (best-effort chmod
+        repair), every swallow is a documented fallback (optional config
+        file -> {}, degraded LLM answer -> None/[], write attempt on a
+        gone client -> pass)."""
+        import ast
+
+        def type_name(node: ast.AST) -> str:
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                parts: list[str] = []
+                while isinstance(node, ast.Attribute):
+                    parts.append(node.attr)
+                    node = node.value  # type: ignore[assignment]
+                if isinstance(node, ast.Name):
+                    parts.append(node.id)
+                return ".".join(reversed(parts))
+            if isinstance(node, ast.Starred):
+                return "*" + type_name(node.value)
+            return ast.dump(node)
+
+        def signature(handler: ast.ExceptHandler) -> str:
+            if handler.type is None:
+                return "BARE"
+            if isinstance(handler.type, ast.Tuple):
+                return "(" + ",".join(
+                    sorted(type_name(e) for e in handler.type.elts)
+                ) + ")"
+            return type_name(handler.type)
+
+        def trivial_body(handler: ast.ExceptHandler) -> bool:
+            if len(handler.body) != 1:
+                return False
+            stmt = handler.body[0]
+            if isinstance(stmt, (ast.Pass, ast.Continue)):
+                return True
+            if isinstance(stmt, ast.Return):
+                v = stmt.value
+                if v is None or isinstance(v, (ast.Constant, ast.Name)):
+                    return True
+                if isinstance(v, ast.Dict):
+                    return not any(v.keys)
+                if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+                    return not v.elts
+            return False
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline: dict[str, list[str]] = {
+            "cli.py": [
+                "(IngestError,StoreError)",
+                "(IngestError,LLMError,StoreError)",
+                "Exception", "KeyboardInterrupt",
+                "OSError", "OSError", "OSError", "OSError",
+                "OverflowError", "ValueError", "ValueError",
+                "json.JSONDecodeError", "json.JSONDecodeError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+            ],
+            "config.py": [
+                "(TypeError,ValueError)", "(TypeError,ValueError)",
+                "(TypeError,ValueError)", "(TypeError,ValueError)",
+                "OSError", "json.JSONDecodeError",
+            ],
+            "export.py": ["(ValueError,json.JSONDecodeError)"],
+            "ingest.py": [
+                "(OSError,http.client.HTTPException)",
+                "(LookupError,UnicodeDecodeError)",
+                "Exception", "Exception", "Exception", "ImportError",
+                "OSError", "ValueError", "ValueError",
+                "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
+            ],
+            "llm.py": [
+                "(IndexError,KeyError,TypeError)",
+                "(AttributeError,KeyError,OverflowError,TypeError,ValueError)",
+                "(OSError,ValueError,http.client.HTTPException)",
+                "(OSError,ValueError,http.client.HTTPException)",
+                "(AttributeError,OSError,ValueError,http.client.HTTPException)",
+                "(IndexError,KeyError,TypeError,json.JSONDecodeError)",
+                "LLMError", "json.JSONDecodeError",
+                "urllib.error.HTTPError", "urllib.error.HTTPError",
+            ],
+            "pipeline.py": ["Exception", "Exception", "LLMError"],
+            "qa.py": [
+                "LLMError", "LLMError", "LLMError",
+                "StoreError", "sqlite3.OperationalError",
+            ],
+            "server.py": [
+                "(BrokenPipeError,ConnectionResetError,OSError)",
+                "(BrokenPipeError,ConnectionResetError,OSError)",
+                "(UnicodeDecodeError,UnicodeEncodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
+                "(ValueError,json.JSONDecodeError)",
+                "ConnectionError", "ConnectionError", "ConnectionError",
+                "ConnectionError", "ConnectionError", "ConnectionError",
+                "ConnectionError",
+                "Exception", "Exception", "Exception", "Exception",
+                "Exception", "Exception", "Exception",
+                "IngestError", "KeyboardInterrupt",
+                "LLMError", "LLMError", "StoreError",
+                "UnicodeEncodeError",
+                "ValueError", "ValueError", "ValueError",
+            ],
+            "store.py": [
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError", "sqlite3.IntegrityError",
+                "sqlite3.IntegrityError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+                "suppress(OSError)",
+            ],
+            "studio.py": [
+                "LLMError",
+                "sqlite3.OperationalError", "sqlite3.OperationalError",
+            ],
+        }
+        trivial_baseline = {
+            "config.py": 6, "export.py": 1, "ingest.py": 1, "llm.py": 2,
+            "pipeline.py": 2, "qa.py": 2, "server.py": 11, "studio.py": 1,
+        }
+        actual: dict[str, list[str]] = {}
+        trivial: dict[str, int] = {}
+        drift: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            sigs: list[str] = []
+            n_trivial = 0
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ExceptHandler):
+                    s = signature(node)
+                    sigs.append(s)
+                    drift.append(f"{path.name}:{node.lineno}:{s}")
+                    if trivial_body(node):
+                        n_trivial += 1
+                elif (
+                    isinstance(node, ast.Call)
+                    and (
+                        (
+                            isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "suppress"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == "contextlib"
+                        )
+                        or (
+                            isinstance(node.func, ast.Name)
+                            and node.func.id == "suppress"
+                        )
+                    )
+                ):
+                    s = "suppress(" + ",".join(
+                        sorted(type_name(a) for a in node.args)
+                    ) + ")"
+                    sigs.append(s)
+                    drift.append(f"{path.name}:{node.lineno}:{s}")
+            if sigs:
+                actual[path.name] = sorted(sigs)
+            if n_trivial:
+                trivial[path.name] = n_trivial
+        for name, sigs in actual.items():
+            expected = baseline.get(name)
+            if expected is None or sorted(expected) != sigs:
+                self.fail(
+                    f"except-handler inventory drifted at {drift} — "
+                    "new handlers must be added to the catalog (and "
+                    "justified); broadened or silent-swallowing handlers "
+                    "are exactly what this pin exists to catch"
+                )
+        for name in baseline:
+            if name not in actual:
+                self.fail(
+                    f"{name}: cataloged except handlers vanished — "
+                    "removed handlers must be subtracted from the catalog"
+                )
+        self.assertEqual(
+            trivial, trivial_baseline,
+            f"trivial-body (silent fallback) handler count drifted at "
+            f"{drift} — a return-error path quietly becoming a default "
+            "is the exact defect this ratchet guards",
+        )
+        self.assertEqual(
+            sum(len(v) for v in actual.values()),
+            sum(len(v) for v in baseline.values()),
+            "non-vacuous: handler totals drifted from the catalog",
+        )
+
+    def test_raise_inventory_is_cataloged(self) -> None:
+        """Every `raise` in production code is pinned to a per-file
+        type-signature inventory — the mirror of the except-handler pin.
+        The error-code pin curates the CODES inside coded domain errors
+        (StoreError/IngestError/LLMError), but the TYPE raised is a
+        separate surface: a new `raise Exception("generic")` or an uncoded
+        `raise ValueError` on the request path escapes the coded-error
+        mapping and surfaces as an unclassified 500 — while looking
+        perfectly ordinary in review. Today's inventory is fully curated:
+        coded domain errors everywhere the client can see them, builtin
+        guards only where a programmer error is the right signal
+        (ValueError in the internal validators/case-file parser, the
+        loopback-pin guard in build_server, AssertionError on a proven-
+        unreachable line, ArgumentTypeError for argparse), bare
+        re-raises in retry loops, and variable re-raises (`raise
+        last_exc`) carrying the captured exception. A generic
+        `raise Exception`/`raise RuntimeError` anywhere — or one extra
+        ValueError that escapes onto the request path — fails here."""
+        import ast
+
+        def dotted(node: ast.AST) -> str:
+            parts: list[str] = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value  # type: ignore[assignment]
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+            return ".".join(reversed(parts))
+
+        def raise_sig(node: ast.Raise) -> str:
+            if node.exc is None:
+                return "RE-RAISE"
+            exc = node.exc
+            if isinstance(exc, ast.Call):
+                return dotted(exc.func)
+            if isinstance(exc, ast.Name):
+                return f"{exc.id}(ref)"
+            return ast.dump(exc)
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline: dict[str, list[str]] = {
+            "citation.py": [
+                "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError",
+            ],
+            "cli.py": [
+                "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+            ],
+            "evaluate.py": [
+                "ValueError", "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError",
+            ],
+            "export.py": ["ValueError"],
+            "ingest.py": ["IngestError"] * 24 + ["zlib.error", "RE-RAISE"],
+            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
+            "pipeline.py": [
+                "IngestError", "IngestError", "IngestError",
+                "IngestError", "IngestError",
+                "LLMError", "LLMError", "LLMError",
+                "StoreError",
+            ],
+            "qa.py": ["StoreError"],
+            "server.py": [
+                "IngestError", "IngestError", "IngestError",
+                "IngestError", "IngestError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
+                "ValueError",
+            ],
+            "store.py": [
+                "AssertionError", "last_exc(ref)",
+                "RE-RAISE", "RE-RAISE", "RE-RAISE",
+            ] + ["StoreError"] * 47,
+            "studio.py": [
+                "LLMError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
+            ],
+        }
+        actual: dict[str, list[str]] = {}
+        drift: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            sigs: list[str] = []
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise):
+                    sigs.append(raise_sig(node))
+                    drift.append(f"{path.name}:{node.lineno}")
+            if sigs:
+                actual[path.name] = sorted(sigs)
+        for name, sigs in actual.items():
+            expected = baseline.get(name)
+            if expected is None or sorted(expected) != sigs:
+                self.fail(
+                    f"raise inventory drifted at {drift} — new raises "
+                    "must be added to the catalog (and justified): "
+                    "uncoded/generic exception types escaping onto a "
+                    "request path are exactly what this pin exists to "
+                    "catch"
+                )
+        for name in baseline:
+            if name not in actual:
+                self.fail(
+                    f"{name}: cataloged raises vanished — removed "
+                    "raises must be subtracted from the catalog"
+                )
+        self.assertEqual(
+            sum(len(v) for v in actual.values()),
+            sum(len(v) for v in baseline.values()),
+            "non-vacuous: raise totals drifted from the catalog",
+        )
+
+    def test_decorators_are_cataloged(self) -> None:
+        """Every decorator applied to a production function is pinned to the
+        allowed set — a decorator silently WRAPS its function, and the
+        dangerous members are invisible to the name-based scans: `@lru_cache`
+        (already banned by the primitives pin for unbounded growth), a custom
+        `@retry`/`@timed` that swallows exceptions before the except-handler
+        catalog ever sees them, `@contextmanager` turning a writer's body into
+        a generator whose cleanup runs at a different time. Today's inventory
+        is exactly one `@staticmethod` (store.py's lock-retry helper); the
+        stdlib-trio (staticmethod/classmethod/property) plus `functools.wraps`
+        are pre-justified — anything else must be added to the allowed set
+        with a rationale."""
+        import ast
+
+        allowed = {"staticmethod", "classmethod", "property", "wraps"}
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        problems: list[str] = []
+        n_seen = 0
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for dec in node.decorator_list:
+                        n_seen += 1
+                        name = ast.unparse(dec)
+                        if name not in allowed:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: "
+                                f"uncataloged decorator @{name}"
+                            )
+        self.assertEqual(
+            problems, [],
+            f"production decorators must come from the allowed set "
+            f"{sorted(allowed)}: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_seen, 1,
+            "non-vacuous: the store.py @staticmethod must be seen",
+        )
+
+    def test_text_folds_use_casefold_for_matching(self) -> None:
+        """v0.2.502: lexical matching folds must be `.casefold()`, not
+        `.lower()` — the Unicode fold difference ('ß'→'ss', 'ﬁ'→'fi',
+        ligatures, dotted-i) decides whether 'STRASSE' matches 'straße',
+        and `.lower()` silently misses those rows. Both sides of every
+        Python-side comparison now fold via NFKC + `.casefold()`, which
+        strictly widens recall (identical results for ASCII/CJK, extra
+        matches only where Unicode case-folding differs). The SQL LIKE
+        path is deliberately left alone: `LOWER(c.text)` and `LOWER(?)`
+        fold ASCII only, and a casefolded needle would MISS content the
+        folded form can't reproduce ('ß' content vs 'ss' needle) — the
+        one-sided fold keeps `.lower()` semantics by contract.
+        The remaining `.lower()` sites are ASCII-token compares where
+        the fold alphabet is ASCII by design: env flags, file
+        extensions, the ASCII stopword table, hostname literals,
+        charset/content-type tokens, sqlite error-message probes. They
+        are cataloged per file — any NEW `.lower()` must be justified
+        here (is the compared alphabet really ASCII-only?)."""
+        import ast
+
+        from shoin.search import lexical_overlap
+
+        # Behavioural proof the fold widens recall: fold-differing
+        # spellings match where .lower() scored 0.0.
+        self.assertGreater(
+            lexical_overlap("STRASSE", "die straße heißt"), 0.0,
+            "casefold recall: 'STRASSE' must match 'straße'",
+        )
+        self.assertGreater(
+            lexical_overlap("database", "the database is fast"), 0.0,
+            "non-vacuous: ASCII overlap still scores",
+        )
+        baseline = {
+            "config.py": 1, "ingest.py": 4, "search.py": 4,
+            "server.py": 3, "store.py": 2,
+        }
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "lower"
+                ):
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f".lower() inventory drifted at {sites} — matching folds "
+            "use .casefold(); only ASCII-token compares may keep "
+            ".lower(), cataloged here",
+        )
+        # Non-vacuous: the matching helpers must actually use casefold.
+        src = (shoin_dir / "search.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '.casefold()', src,
+            "non-vacuous: _norm_query_terms must fold via .casefold()",
+        )
+
+    def test_tls_handshake_failure_closes_raw_socket(self) -> None:
+        """v0.2.503: _PinnedHTTPSConnection.connect created the raw TCP
+        socket, then handed it to wrap_socket — if the TLS handshake
+        raised (bad cert, protocol error), the raw socket was orphaned:
+        one leaked fd per failed HTTPS attempt on a long-running server,
+        invisible to tests that never open a real socket. The wrap is
+        now paired with close() on the raw socket whenever it raises.
+        The success path must NOT close (the SSLSocket owns the fd).
+        BaseException classes (KeyboardInterrupt/SystemExit) still leak
+        by design — matching the codebase's never-catch-BaseException
+        convention."""
+        import socket as socket_mod
+        import ssl
+        import unittest.mock as mock_mod
+
+        from shoin.ingest import _PinnedHTTPSConnection
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _BoomCtx:
+            def wrap_socket(self, sock: object, server_hostname: str) -> object:
+                raise ssl.SSLError("handshake failed")
+
+        class _GoodCtx:
+            def wrap_socket(self, sock: object, server_hostname: str) -> object:
+                return object()  # the SSLSocket taking ownership
+
+        conn = _PinnedHTTPSConnection(
+            "example.com", 443, "93.184.216.34", 5.0,
+            context=_BoomCtx(),  # type: ignore[arg-type]
+        )
+        raw = _FakeSock()
+        with mock_mod.patch.object(
+            socket_mod, "create_connection", return_value=raw
+        ):
+            with self.assertRaises(ssl.SSLError):
+                conn.connect()
+        self.assertTrue(
+            raw.closed,
+            "failed TLS handshake must close the raw socket — "
+            "each unclosed attempt leaks one fd",
+        )
+
+        conn2 = _PinnedHTTPSConnection(
+            "example.com", 443, "93.184.216.34", 5.0,
+            context=_GoodCtx(),  # type: ignore[arg-type]
+        )
+        raw2 = _FakeSock()
+        with mock_mod.patch.object(
+            socket_mod, "create_connection", return_value=raw2
+        ):
+            conn2.connect()
+        self.assertFalse(
+            raw2.closed,
+            "success path must not close — SSLSocket owns the fd",
+        )
+        self.assertIsNotNone(conn2.sock)
+
+    def test_finally_blocks_never_swallow_exceptions(self) -> None:
+        """v0.2.504: `return`/`break`/`continue` inside a `finally` body
+        silently discards any in-flight exception — the exception
+        neither propagates nor logs, so a real error path becomes a
+        quiet early exit that no test catches unless an exception
+        happens to cross that finally at runtime. CPython itself
+        SyntaxWarnings `break`/`continue` there (3.14); `return` is the
+        legal form of the same defect. Zero tolerance for all three in
+        production code: cleanup belongs in the finally body, control
+        flow in the try/except/else."""
+        import ast
+
+        problems: list[str] = []
+        n_finally = 0
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Try) and node.finalbody):
+                    continue
+                n_finally += 1
+                for sub in ast.walk(
+                    ast.Module(body=node.finalbody, type_ignores=[])
+                ):
+                    if isinstance(sub, (ast.Return, ast.Break, ast.Continue)):
+                        problems.append(
+                            f"{path.name}:{sub.lineno}: "
+                            f"{type(sub).__name__} inside finally swallows "
+                            "any in-flight exception"
+                        )
+        self.assertEqual(
+            problems, [],
+            f"control-flow statements inside finally: {problems}",
+        )
+        self.assertGreaterEqual(
+            n_finally, 1,
+            "non-vacuous: the scan must see existing finally blocks",
+        )
+
+    def test_single_arg_minmax_sites_are_cataloged(self) -> None:
+        """v0.2.504: `min(seq)`/`max(seq)` on a single sequence argument
+        raises ValueError on an empty sequence — the rarest-input crash
+        class, invisible to tests that always pass non-empty data. The
+        only such call today is `_minmax`'s pair in search.py, guarded
+        by `if not values: return []` directly above. Catalog the sites
+        per file; a new single-arg min/max must be added with its
+        emptiness guard justified."""
+        import ast
+
+        baseline = {"search.py": 2}
+        actual: dict[str, int] = {}
+        sites: list[str] = []
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in ("min", "max")
+                    and len(node.args) == 1
+                    and not node.keywords
+                    and not isinstance(
+                        node.args[0],
+                        (ast.Constant, ast.List, ast.Tuple, ast.Set),
+                    )
+                ):
+                    actual[path.name] = actual.get(path.name, 0) + 1
+                    sites.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            actual, baseline,
+            f"single-arg min()/max() inventory drifted at {sites} — "
+            "unguarded empty-sequence ValueError risk",
+        )
+        self.assertEqual(
+            sum(actual.values()), 2,
+            "non-vacuous: the _minmax pair must be seen",
+        )
+
+    def test_zip_calls_require_strict(self) -> None:
+        """v0.2.505: `zip(a, b)` without `strict=` silently truncates at
+        the shorter input — a pairing corruption (chunk ids with
+        someone else's embedding, titles with the wrong source ids)
+        invisible to every test whose fixtures happen to be
+        equal-length. All production zips pair parallel lists that must
+        be equal by construction, so every call passes `strict=True` —
+        a mismatch then raises ValueError loudly instead of shipping
+        misaligned data. A new zip without strict= fails this test."""
+        import ast
+
+        problems: list[str] = []
+        n_zip = 0
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "zip"
+                ):
+                    n_zip += 1
+                    kws = {kw.arg for kw in node.keywords if kw.arg}
+                    if "strict" not in kws:
+                        problems.append(
+                            f"{path.name}:{node.lineno}: zip() without "
+                            "strict= — silently truncates on length "
+                            "mismatch"
+                        )
+        self.assertEqual(
+            problems, [], f"zip() calls missing strict=: {problems}"
+        )
+        self.assertGreaterEqual(
+            n_zip, 8,
+            "non-vacuous: the scan must see the existing zip sites",
+        )
+
+    def test_embed_count_mismatch_warns_and_keeps_prefix(self) -> None:
+        """v0.2.505: an embed batch returning fewer vectors than texts used
+        to pair silently — zip truncation assigned the first N vectors to N
+        chunk ids with no signal. Positional pairing is still correct for a
+        short list, so the fix keeps the prefix but surfaces the
+        under-delivery on stderr (stdout purity is pinned); the pairing
+        slice is strict so a longer-than-expected list still raises."""
+        import io
+        import tempfile
+        from contextlib import redirect_stderr
+
+        import shoin.pipeline as pipeline_mod
+        from shoin.store import Store
+
+        class _ShortEmbed:
+            embedding_model = "m"
+
+            def embed(self, batch: list[str]) -> list[list[float]]:
+                return [[0.1]] * (len(batch) - 1)
+
+        with tempfile.TemporaryDirectory() as d:
+            with Store(str(Path(d) / "s.db")) as store:
+                nb = store.create_notebook("nb")
+                src = store.add_source(nb.id, "txt", "t", "o", "sha")
+                cids = store.add_chunks(
+                    src.id, ["a", "b", "c"], ["a", "b", "c"]
+                )
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    done = pipeline_mod._embed_chunks(
+                        store, _ShortEmbed(), cids, ["a", "b", "c"],  # type: ignore[arg-type]
+                    )
+                self.assertEqual(
+                    done, 2,
+                    "the correctly paired prefix must still be embedded",
+                )
+                rows = store.conn.execute(
+                    "SELECT id FROM chunks WHERE embedding IS NOT NULL"
+                    " ORDER BY id"
+                ).fetchall()
+                self.assertEqual(
+                    [r[0] for r in rows], cids[:2],
+                    "embeddings must pair with the leading chunk ids "
+                    "positionally, never shifted",
+                )
+                self.assertIn(
+                    "2 vectors for 3 texts", buf.getvalue(),
+                    "the under-delivery must be surfaced, not silent",
+                )
+
+    def test_no_iteration_mutation_or_builtin_shadow(self) -> None:
+        """v0.2.506: three silent-semantics defect classes, all zero today:
+
+        1. Mutating the collection a `for` loop is iterating — the classic
+           skip-an-element bug: `for x in xs: xs.remove(x)` silently skips
+           the element after each removed one, and every test passes until
+           the input order hits the bad case. Scans for `.append/.remove/
+           .pop/...` calls, `del coll[k]` and `coll[k] = v` on the iterated
+           name inside the loop body (nested function bodies excluded —
+           a closure runs later, not during iteration).
+        2. Builtin-name shadowing inside function scope — `def f(list)`,
+           `type = ...`, `for id in ...`: later `list(x)`/`type(x)` calls
+           in the same scope now hit the local, not the builtin, and the
+           failure shows up far from the shadow site. (Class-scope field
+           names like a dataclass `id:` are attributes, not shadows — the
+           scan only descends into function bodies.)
+        3. `is`/`is not` against a non-singleton literal — `x is 5`,
+           `s is "tag"`: compares object identity, not equality; works by
+           accident under CPython interning until it doesn't. `None`/
+           `True`/`False`/`...` are the correct identity targets and are
+           exempt.
+        """
+        import ast as _ast
+        import builtins
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        mutate_methods = {
+            "append", "remove", "pop", "insert", "extend", "clear",
+            "discard", "add", "update", "popitem", "setdefault",
+        }
+        builtin_names = set(dir(builtins)) - {"self", "cls"}
+        singletons = {"None", "True", "False", "Ellipsis"}
+        problems: list[str] = []
+        n_funcs = n_fors = 0
+
+        def descend(body: list[_ast.stmt]) -> list[_ast.AST]:
+            """All nodes under `body`, never entering a nested function."""
+            out: list[_ast.AST] = []
+            stack: list[_ast.AST] = list(body)
+            while stack:
+                st = stack.pop()
+                if isinstance(
+                    st, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)
+                ):
+                    continue
+                out.append(st)
+                stack.extend(_ast.iter_child_nodes(st))
+            return out
+
+        def target_names(t: _ast.expr) -> list[str]:
+            if isinstance(t, _ast.Name):
+                return [t.id]
+            if isinstance(t, (_ast.Tuple, _ast.List)):
+                names: list[str] = []
+                for e in t.elts:
+                    names.extend(target_names(e))
+                return names
+            if isinstance(t, _ast.Starred):
+                return target_names(t.value)
+            return []
+
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    n_funcs += 1
+                    arg_names = (
+                        [a.arg for a in node.args.posonlyargs]
+                        + [a.arg for a in node.args.args]
+                        + [a.arg for a in node.args.kwonlyargs]
+                    )
+                    for _spec, a in (
+                        ("vararg", node.args.vararg),
+                        ("kwarg", node.args.kwarg),
+                    ):
+                        if a is not None:
+                            arg_names.append(a.arg)
+                    for name in arg_names:
+                        if name in builtin_names:
+                            problems.append(
+                                f"{path.name}:{node.lineno}: param {name!r} "
+                                "shadows a builtin"
+                            )
+                    for st in descend(node.body):
+                        if isinstance(st, _ast.Assign):
+                            for t in st.targets:
+                                for name in target_names(t):
+                                    if name in builtin_names:
+                                        problems.append(
+                                            f"{path.name}:{st.lineno}: "
+                                            f"assignment {name!r} shadows "
+                                            "a builtin"
+                                        )
+                        elif isinstance(st, _ast.AnnAssign):
+                            for name in target_names(st.target):
+                                if name in builtin_names:
+                                    problems.append(
+                                        f"{path.name}:{st.lineno}: "
+                                        f"annotation {name!r} shadows "
+                                        "a builtin"
+                                    )
+                        elif isinstance(st, _ast.AugAssign):
+                            for name in target_names(st.target):
+                                if name in builtin_names:
+                                    problems.append(
+                                        f"{path.name}:{st.lineno}: "
+                                        f"aug-assign {name!r} shadows "
+                                        "a builtin"
+                                    )
+                        elif isinstance(st, _ast.ExceptHandler):
+                            if st.name and st.name in builtin_names:
+                                problems.append(
+                                    f"{path.name}:{st.lineno}: "
+                                    f"except-as {st.name!r} shadows "
+                                    "a builtin"
+                                )
+                        elif isinstance(st, (_ast.For, _ast.With)):
+                            targets: list[_ast.expr] = []
+                            if isinstance(st, _ast.For):
+                                targets = [st.target]
+                            else:
+                                targets = [
+                                    i.optional_vars for i in st.items
+                                    if i.optional_vars is not None
+                                ]
+                            for t in targets:
+                                for name in target_names(t):
+                                    if name in builtin_names:
+                                        problems.append(
+                                            f"{path.name}:{st.lineno}: "
+                                            f"loop/with var {name!r} "
+                                            "shadows a builtin"
+                                        )
+                elif isinstance(node, _ast.Compare):
+                    for op in node.ops:
+                        if not isinstance(op, (_ast.Is, _ast.IsNot)):
+                            continue
+                        sides = [node.left] + list(node.comparators)
+                        for e in sides:
+                            if (
+                                isinstance(e, _ast.Constant)
+                                and repr(e.value) not in singletons
+                                and str(e.value) not in singletons
+                            ):
+                                problems.append(
+                                    f"{path.name}:{e.lineno}: `is`/`is not` "
+                                    f"against literal {e.value!r}"
+                                )
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.For):
+                    continue
+                n_fors += 1
+                iter_names = {
+                    n.id
+                    for n in _ast.walk(node.iter)
+                    if isinstance(n, _ast.Name)
+                }
+                if not iter_names:
+                    continue
+                for sub in descend(node.body):
+                    if (
+                        isinstance(sub, _ast.Call)
+                        and isinstance(sub.func, _ast.Attribute)
+                        and sub.func.attr in mutate_methods
+                        and isinstance(sub.func.value, _ast.Name)
+                        and sub.func.value.id in iter_names
+                    ):
+                        problems.append(
+                            f"{path.name}:{sub.lineno}: mutates iterated "
+                            f"{sub.func.value.id}.{sub.func.attr}()"
+                        )
+                    elif isinstance(sub, _ast.Delete):
+                        for t in sub.targets:
+                            if (
+                                isinstance(t, _ast.Subscript)
+                                and isinstance(t.value, _ast.Name)
+                                and t.value.id in iter_names
+                            ):
+                                problems.append(
+                                    f"{path.name}:{sub.lineno}: deletes "
+                                    "from iterated "
+                                    f"{t.value.id}"
+                                )
+                    elif isinstance(sub, (_ast.Assign, _ast.AnnAssign)):
+                        targets = (
+                            sub.targets
+                            if isinstance(sub, _ast.Assign)
+                            else [sub.target]
+                        )
+                        for t in targets:
+                            if (
+                                isinstance(t, _ast.Subscript)
+                                and isinstance(t.value, _ast.Name)
+                                and t.value.id in iter_names
+                            ):
+                                problems.append(
+                                    f"{path.name}:{sub.lineno}: writes "
+                                    "into iterated "
+                                    f"{t.value.id}[...]"
+                                )
+        self.assertFalse(
+            problems,
+            "silent-semantics defect(s) found:\n" + "\n".join(problems),
+        )
+        self.assertGreaterEqual(n_funcs, 200, "non-vacuous: functions seen")
+        self.assertGreaterEqual(n_fors, 50, "non-vacuous: for-loops seen")
+
+    def test_lookup_sentinels_are_cataloged(self) -> None:
+        """v0.2.507: sentinel-and-identity defect classes pinned:
+
+        1. `.find()`/`.rfind()`/`.index()` calls cataloged per file —
+           find's -1 sentinel is silent (used as a slice bound it quietly
+           truncates the last char: ``s[:s.find(x)]`` on absence gives
+           ``s[:-1]``), and index's ValueError escapes as a 500 on
+           attacker-shaped input. Every site today guards the sentinel
+           (`count()` precondition, `p < 0` return, `!= -1` check) or is a
+           deliberately-bounded call — a new site lands in this catalog
+           only by an edit that must justify its guard, same convention as
+           the file-mutations pin.
+        2. f-string debug-`=` leftovers — `f"{x=}"` renders `x=42` into
+           user-facing text (and LLM prompt strings, where a stray
+           ``foo=`` marker corrupts the framing); zero today. Detected
+           via the AST Constant that precedes each FormattedValue inside
+           a JoinedStr: the `=` marker is baked into that literal.
+        3. `type(x) == T` compares — identity compare is blind to
+           subclasses (a NamedTuple-arg is not `type(...) is tuple`);
+           `isinstance` is the codebase convention, zero sites today.
+        """
+        import ast as _ast
+
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        baseline = {"ingest.py": 2, "search.py": 1}
+        found: dict[str, int] = {}
+        problems: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr in ("find", "rfind", "index")
+                ):
+                    found[path.name] = found.get(path.name, 0) + 1
+                elif isinstance(node, _ast.JoinedStr):
+                    # `f"{expr=}"` bakes `expr=` into the Constant before
+                    # the FormattedValue; the debug marker is exactly the
+                    # case where that literal equals the formatted
+                    # expression's own source. `f"query={q}"` (label=value
+                    # output) differs — "query" != "q".
+                    vals = node.values
+                    for i in range(len(vals) - 1):
+                        c, nxt = vals[i], vals[i + 1]
+                        if (
+                            isinstance(c, _ast.Constant)
+                            and isinstance(c.value, str)
+                            and c.value.endswith("=")
+                            and isinstance(nxt, _ast.FormattedValue)
+                            and _ast.unparse(nxt.value) == c.value[:-1]
+                        ):
+                            problems.append(
+                                f"{path.name}:{c.lineno}: f-string debug "
+                                f"`=` marker renders {c.value!r} verbatim "
+                                "into output"
+                            )
+                elif isinstance(node, _ast.Compare):
+                    for e in [node.left] + list(node.comparators):
+                        if (
+                            isinstance(e, _ast.Call)
+                            and isinstance(e.func, _ast.Name)
+                            and e.func.id == "type"
+                        ):
+                            problems.append(
+                                f"{path.name}:{e.lineno}: `type()` inside "
+                                "a comparison is subclass-blind"
+                            )
+        self.assertEqual(
+            found, baseline,
+            "find/index call-site catalog drifted — new sites must guard "
+            "the -1 sentinel (or justify the bare call) like the existing "
+            "entries do",
+        )
+        self.assertFalse(
+            problems, "sentinel/identity defect(s):\n" + "\n".join(problems)
+        )
+        self.assertGreater(
+            sum(found.values()), 0, "non-vacuous: the scan must see sites"
+        )
+
+    def test_time_and_thread_calls_are_cataloged(self) -> None:
+        """The codebase's entire clock/concurrency surface is two call
+        sites — `datetime.now(timezone.utc)` in `_now` (v0.2.485 pinned it
+        as the single timestamp producer so ISO strings sort correctly)
+        and the bounded `time.sleep` backoff in the lock-retry loop, plus
+        three `threading.Lock()` constructions. Everything else would be
+        a silent defect class: `utcnow()`/`fromtimestamp()`/bare
+        `datetime.now()` produce naive datetimes that sort or compare
+        inconsistently with the stored aware-UTC ISO strings; a new
+        `threading.Thread/Timer/Event` spawns concurrency invisible to
+        every lock pin; `strftime`/`strptime`/`fromisoformat` introduce a
+        second, unpaired timestamp format. The catalog is exact-match:
+        any new time-ish or threading call drifts the baseline."""
+        import ast as _ast
+
+        time_mods = {"time", "datetime", "date", "calendar"}
+        thread_mods = {"threading"}
+        bare_names = {
+            "now", "today", "utcnow", "fromtimestamp",
+            "utcfromtimestamp", "fromisoformat", "strptime", "strftime",
+            "mktime", "localtime", "gmtime", "ctime", "sleep", "monotonic",
+            "perf_counter", "process_time", "Thread", "Timer", "Event",
+            "Condition", "Semaphore", "Barrier", "local",
+        }
+
+        baseline = {
+            "store.py": ["datetime.now", "time.sleep"],
+            "qa.py": ["threading.Lock"],
+            "server.py": ["threading.Lock", "threading.Lock"],
+        }
+        actual: dict[str, list[str]] = {}
+        sites: list[str] = []
+        naive_now: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                f = node.func
+                dotted: str | None = None
+                if (
+                    isinstance(f, _ast.Attribute)
+                    and isinstance(f.value, _ast.Name)
+                    and f.value.id in time_mods | thread_mods
+                ):
+                    dotted = f"{f.value.id}.{f.attr}"
+                elif isinstance(f, _ast.Name) and f.id in bare_names:
+                    dotted = f.id
+                elif isinstance(f, _ast.Name) and f.id in {
+                    "datetime", "date", "time",
+                }:
+                    # `from datetime import datetime` makes a bare
+                    # `datetime(y, m, d)` call the naive constructor.
+                    dotted = f.id
+                if dotted is not None:
+                    actual.setdefault(path.name, []).append(dotted)
+                    sites.append(f"{path.name}:{node.lineno} {dotted}")
+                    if (
+                        dotted == "datetime.now"
+                        and not node.args
+                        and not any(kw.arg == "tz" for kw in node.keywords)
+                    ):
+                        naive_now.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(
+            {k: sorted(v) for k, v in actual.items()}, baseline,
+            f"time/threading call inventory drifted at {sites} — new "
+            "clock or concurrency calls must be cataloged (and justified)",
+        )
+        self.assertEqual(
+            naive_now, [],
+            "datetime.now() without tz= produces naive local time — the "
+            "stored ISO strings are aware-UTC; a naive value would sort "
+            "and compare inconsistently",
+        )
+        # Every module-attribute pin in this class matches
+        # `func.value.id == "<module>"` literally — an aliased import
+        # (`import os as o` → `o.chmod(...)`, `from datetime import
+        # datetime as dt`) silently bypasses all of them. Watched
+        # modules must be imported under their canonical name; the
+        # pre-existing `_json`/`_qa_t` aliases cover only module-private
+        # names, which no pin keys on.
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        alias_violations: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Import):
+                    for a in node.names:
+                        if (
+                            a.asname
+                            and a.name.split(".")[0] in watched
+                            and a.asname != a.name
+                        ):
+                            alias_violations.append(
+                                f"{path.name}:{node.lineno} import "
+                                f"{a.name} as {a.asname}"
+                            )
+                elif isinstance(node, _ast.ImportFrom):
+                    mod = (node.module or "").split(".")[0]
+                    if node.level == 0 and mod in watched:
+                        for a in node.names:
+                            if a.asname:
+                                alias_violations.append(
+                                    f"{path.name}:{node.lineno} from "
+                                    f"{node.module} import {a.name} as "
+                                    f"{a.asname}"
+                                )
+        self.assertEqual(
+            alias_violations, [],
+            "aliased import of a watched module bypasses every "
+            "module-attribute pin:\n" + "\n".join(alias_violations),
+        )
+
+    def test_watched_module_bindings_are_cataloged(self) -> None:
+        """The alias ban (v0.2.511) closed `import os as o`, but three
+        sibling routes still rebind a watched module's verbs under a
+        bare name that no `func.value.id == "<module>"` check can see:
+
+        1. `from os import chmod` — the call site becomes `chmod(p)`,
+           a bare Name; it evades every module-attribute inventory
+           (file-mutation pin, sqlite3.connect pin, env pin...).
+           `import *` is the unlimited version of the same route.
+           The only legitimate from-imports are the ones already in
+           the tree: `pathlib.Path` and store.py's `datetime`/`UTC`
+           — cataloged here so any addition drifts loudly.
+        2. `getattr(os, "chmod")(p)` / `__import__("os")` /
+           `importlib.import_module` / `os.__dict__["chmod"]` —
+           dynamic dispatch past the same literal match. Flagged when
+           the first argument is a watched-module name; the duck-typed
+           `getattr(llm, ...)`/`getattr(exc, ...)` reads stay legal.
+        3. `f = os.chmod` — rebound into a plain name. Flagged when a
+           watched-module attribute is assigned to a Name target.
+           (`self.conn.row_factory = sqlite3.Row` binds a class into
+           an attribute, not a bare name — exempt.)"""
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        from_baseline = {
+            "cli.py": ["pathlib.Path"],
+            "config.py": ["pathlib.Path"],
+            "ingest.py": ["io.BytesIO", "pathlib.Path"],
+            "server.py": ["pathlib.Path"],
+            "store.py": ["datetime.UTC", "datetime.datetime",
+                         "pathlib.Path"],
+        }
+        from_actual: dict[str, list[str]] = {}
+        dynamic: list[str] = []
+        rebinds: list[str] = []
+        star: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.ImportFrom):
+                    if node.level != 0:
+                        continue
+                    mod = (node.module or "").split(".")[0]
+                    for a in node.names:
+                        if a.name == "*":
+                            star.append(f"{path.name}:{node.lineno}")
+                        elif mod in watched:
+                            from_actual.setdefault(path.name, []).append(
+                                f"{node.module}.{a.name}"
+                            )
+                elif isinstance(node, _ast.Attribute) and node.attr == "__dict__":
+                    dynamic.append(
+                        f"{path.name}:{node.lineno} .__dict__"
+                    )
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    if (
+                        isinstance(f, _ast.Name)
+                        and f.id in {
+                            "getattr", "setattr", "delattr",
+                            "vars", "dir", "__import__",
+                        }
+                        and node.args
+                        and isinstance(node.args[0], _ast.Name)
+                        and node.args[0].id in watched
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{f.id}({node.args[0].id}, ...)"
+                        )
+                    if (
+                        isinstance(f, _ast.Name) and f.id == "__import__"
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} __import__()"
+                        )
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and f.attr == "import_module"
+                        and isinstance(f.value, _ast.Name)
+                        and f.value.id == "importlib"
+                    ):
+                        dynamic.append(
+                            f"{path.name}:{node.lineno} "
+                            "importlib.import_module()"
+                        )
+                elif isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+                    value = (
+                        node.value
+                        if isinstance(node, _ast.AnnAssign)
+                        else node.value
+                    )
+                    targets = (
+                        [node.target]
+                        if isinstance(node, _ast.AnnAssign)
+                        else node.targets
+                    )
+                    if not (
+                        isinstance(value, _ast.Attribute)
+                        and isinstance(value.value, _ast.Name)
+                        and value.value.id in watched
+                    ):
+                        continue
+                    for tgt in targets:
+                        if isinstance(tgt, _ast.Name):
+                            rebinds.append(
+                                f"{path.name}:{node.lineno} {tgt.id} = "
+                                f"{value.value.id}.{value.attr}"
+                            )
+                        elif isinstance(tgt, _ast.Tuple):
+                            for elt in tgt.elts:
+                                if isinstance(elt, _ast.Name):
+                                    rebinds.append(
+                                        f"{path.name}:{node.lineno} "
+                                        f"{elt.id} = {value.value.id}."
+                                        f"{value.attr}"
+                                    )
+        self.assertEqual(
+            {k: sorted(v) for k, v in from_actual.items()}, from_baseline,
+            "from-import inventory of watched modules drifted — a bare "
+            "`chmod(p)`-style call site is invisible to every "
+            "module-attribute pin",
+        )
+        self.assertEqual(
+            dynamic, [],
+            "dynamic dispatch on a watched module bypasses every "
+            "module-attribute pin:\n" + "\n".join(dynamic),
+        )
+        self.assertEqual(
+            rebinds, [],
+            "watched-module attribute rebound to a bare name bypasses "
+            "every module-attribute pin:\n" + "\n".join(rebinds),
+        )
+        self.assertEqual(
+            star, [],
+            "star imports bypass every module-attribute pin:\n"
+            + "\n".join(star),
+        )
+
+    def test_watched_verbs_never_become_values(self) -> None:
+        """The binding pins (v0.2.511/512) cover *names*; this pin covers
+        the remaining route — referencing a watched module's dangerous
+        verb as a *value* rather than a call:
+
+        - `functools.partial(os.chmod, p)` / `map(os.chmod, paths)` /
+          `handler(os.chmod)`: the attribute node never sits in a call
+          `func`, so every module-attribute inventory misses it.
+          Rule: an `<watched>.<danger-verb>` Attribute may appear ONLY
+          as the direct `func` of a Call — as a value it is flagged.
+          Data attributes (`os.sep`, `sys.argv`, `signal.SIGINT`,
+          `os.path`) are not verbs and stay legal, as do pure
+          functions (`re.compile`, `json.loads` — not on the list).
+        - `sys.modules["os"].chmod(p)` / `globals()["os"].chmod(p)`:
+          the receiver is a Subscript, not a Name. Flagged.
+        - `builtins.eval(x)` / `builtins.open(p, "w")`: the attribute
+          spelling of call-banned primitives — flagged as call *and*
+          as value.
+        - `operator.methodcaller("unlink")` /
+          `operator.attrgetter("chmod")`: verb names smuggled as
+          strings — flagged when the literal names a danger verb.
+        """
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        danger_verbs = {
+            # filesystem mutation
+            "unlink", "remove", "rmdir", "rename", "replace", "mkdir",
+            "touch", "symlink_to", "hardlink_to", "write_text",
+            "write_bytes", "chmod", "lchmod", "chown", "lchown",
+            "removedirs", "renames", "utime", "mkfifo", "mknod",
+            "chflags", "lchflags", "setxattr", "removexattr",
+            "truncate", "ftruncate", "rmtree", "copy", "copy2",
+            "copytree", "copyfile", "move", "makedirs", "mktemp",
+            "mkdtemp", "NamedTemporaryFile", "TemporaryFile",
+            "TemporaryDirectory", "SpooledTemporaryFile",
+            # process / exec
+            "system", "popen", "spawnl", "spawnle", "spawnlp",
+            "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+            "execl", "execle", "execlp", "execlpe", "execv", "execve",
+            "execvp", "execvpe", "fork", "forkpty", "kill", "killpg",
+            "posix_spawn", "posix_spawnp", "startfile",
+            # process-global mutation / db handle
+            "connect", "setrecursionlimit", "settrace", "setprofile",
+            "setdefaultencoding", "setswitchinterval",
+            "set_asyncgen_hooks", "addaudithook",
+            # net
+            "socket", "create_connection", "wrap_socket", "create_server",
+            "urlopen",
+            # signal / gc / mp primitives
+            "pthread_kill", "set_wakeup_fd", "freeze", "Process",
+            "Pool",
+            # clock / concurrency
+            "sleep", "now", "utcnow", "fromtimestamp",
+            "utcfromtimestamp", "Lock", "RLock", "Thread", "Timer",
+            "Event", "Condition", "Semaphore", "Barrier", "local",
+        }
+        builtin_danger = {
+            "eval", "exec", "compile", "input", "__import__",
+            "getattr", "setattr", "delattr", "globals", "locals",
+            "vars", "open",
+        }
+        verb_values: list[str] = []
+        dyn: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            call_funcs = {
+                id(n.func)
+                for n in _ast.walk(tree)
+                if isinstance(n, _ast.Call)
+            }
+            annotation_nodes: set[int] = set()
+            for n in _ast.walk(tree):
+                if isinstance(n, _ast.AnnAssign) and n.annotation:
+                    annotation_nodes.update(
+                        id(x) for x in _ast.walk(n.annotation)
+                    )
+                elif isinstance(
+                    n, (_ast.FunctionDef, _ast.AsyncFunctionDef)
+                ):
+                    for arg in (
+                        n.args.args + n.args.kwonlyargs
+                        + n.args.posonlyargs
+                        + [a for a in (n.args.vararg, n.args.kwarg) if a]
+                    ):
+                        if arg.annotation:
+                            annotation_nodes.update(
+                                id(x) for x in _ast.walk(arg.annotation)
+                            )
+                    if n.returns:
+                        annotation_nodes.update(
+                            id(x) for x in _ast.walk(n.returns)
+                        )
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Attribute):
+                    # <watched>.<verb> used as a value (not a call func
+                    # or a type annotation — `x: threading.Lock` names
+                    # the type, it does not smuggle the callable)
+                    if (
+                        isinstance(node.value, _ast.Name)
+                        and node.value.id in watched
+                        and node.attr in danger_verbs
+                        and id(node) not in call_funcs
+                        and id(node) not in annotation_nodes
+                    ):
+                        verb_values.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{node.value.id}.{node.attr} as value"
+                        )
+                    # builtins.<danger> spelled through the module
+                    if (
+                        isinstance(node.value, _ast.Name)
+                        and node.value.id == "builtins"
+                        and node.attr in builtin_danger
+                    ):
+                        verb_values.append(
+                            f"{path.name}:{node.lineno} "
+                            f"builtins.{node.attr}"
+                        )
+                    # sys.modules["os"].<verb> / vars()["os"].<verb>
+                    if isinstance(node.value, _ast.Subscript):
+                        sub = node.value
+                        src = sub.value
+                        if (
+                            isinstance(src, _ast.Attribute)
+                            and src.attr == "modules"
+                            and isinstance(src.value, _ast.Name)
+                            and src.value.id == "sys"
+                        ):
+                            dyn.append(
+                                f"{path.name}:{node.lineno} "
+                                f"sys.modules[..].{node.attr}"
+                            )
+                        if (
+                            isinstance(src, _ast.Call)
+                            and isinstance(src.func, _ast.Name)
+                            and src.func.id in {
+                                "globals", "locals", "vars",
+                            }
+                        ):
+                            dyn.append(
+                                f"{path.name}:{node.lineno} "
+                                f"{src.func.id}()[..].{node.attr}"
+                            )
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    # operator.methodcaller("unlink") / attrgetter("chmod")
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and isinstance(f.value, _ast.Name)
+                        and f.value.id == "operator"
+                        and f.attr in {"methodcaller", "attrgetter"}
+                        and node.args
+                        and isinstance(node.args[0], _ast.Constant)
+                        and isinstance(node.args[0].value, str)
+                        and node.args[0].value in danger_verbs
+                    ):
+                        dyn.append(
+                            f"{path.name}:{node.lineno} operator."
+                            f'{f.attr}("{node.args[0].value}")'
+                        )
+        self.assertEqual(
+            verb_values, [],
+            "dangerous verb referenced as a value bypasses every "
+            "module-attribute pin:\n" + "\n".join(verb_values),
+        )
+        self.assertEqual(
+            dyn, [],
+            "indirect module access bypasses every module-attribute "
+            "pin:\n" + "\n".join(dyn),
+        )
+
+    def test_capability_imports_are_cataloged(self) -> None:
+        """Call-site pins watch *usage*; this watches the *grant*. A
+        module acquires a capability the moment it imports
+        subprocess/ctypes/pickle/mmap/signal/multiprocessing/raw-socket
+        — the import itself is the smallest, most reviewable event,
+        and none of it passes through a call-site pattern. The whole
+        capability-import surface is pinned per-file: the only live
+        grants today are ingest.py's `socket`+`ssl` for the
+        SSRF-pinned TLS connection (ADR-001). Any new grant — a new
+        `import subprocess` anywhere, or socket/ssl spreading beyond
+        ingest.py — drifts this catalog loudly instead of arriving
+        silently in a diff."""
+        import ast as _ast
+
+        capability = {
+            # process spawn / native code / deserialization
+            "subprocess", "multiprocessing", "pty", "ctypes", "_ctypes",
+            "pickle", "_pickle", "marshal", "shelve", "concurrent",
+            # raw memory / fd & signal plumbing / interpreter hooks
+            "mmap", "signal", "fcntl", "termios", "resource", "gc",
+            "code", "codeop", "ptyprocess", "winreg", "msvcrt",
+            "select", "selectors", "asyncio",
+            # raw network (http.server/urllib live outside this list —
+            # they are the sanctioned surfaces)
+            "socket", "ssl",
+            # dynamic module loading — a module that materializes other
+            # modules sidesteps this very inventory
+            "importlib", "runpy", "zipimport", "modulefinder",
+            # non-http network protocols — bypass the SSRF guard
+            # wholesale
+            "smtplib", "ftplib", "telnetlib", "poplib", "imaplib",
+            "nntplib", "xmlrpc",
+        }
+        # Dotted grants: `http.client` (direct fetch, skips the pinned
+        # connection) — `http.server` stays sanctioned.
+        capability_dotted = {"http.client"}
+        baseline = {
+            "ingest.py": ["http.client", "socket", "ssl"],
+            "llm.py": ["http.client"],
+        }
+        actual: dict[str, list[str]] = {}
+        grants: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, _ast.ImportFrom) and node.level == 0:
+                    names = [node.module or ""]
+                else:
+                    continue
+                for name in names:
+                    top = name.split(".")[0]
+                    if top in capability or name in capability_dotted:
+                        actual.setdefault(path.name, []).append(name)
+                        grants.append(
+                            f"{path.name}:{node.lineno} {name}"
+                        )
+        self.assertEqual(
+            {k: sorted(v) for k, v in actual.items()}, baseline,
+            "capability-import inventory drifted at "
+            f"{grants} — a new subprocess/ctypes/pickle/raw-socket "
+            "grant must be cataloged (and justified)",
+        )
+
+    def test_dunder_traversal_is_banned(self) -> None:
+        """The last import-free escape: object-model traversal reaches
+        arbitrary capability without a single watched-module name —
+        `f.__globals__[\"os\"].chmod`, `().__class__.__base__
+        .__subclasses__()` (the classic sandbox walk to a class that
+        holds os), `fn.__code__`/`__closure__` (bytecode and cell
+        internals), `obj.__reduce__` (the pickle-gadget protocol
+        returning callable+args), `x.__get__`/`__set__`/`__delete__`
+        (raw descriptor invocation), `mod.__builtins__` (the builtins
+        dict on every module) and `mod.__loader__`/`__spec__` (dynamic
+        loading internals). Live surface is just benign
+        `.__name__`/`.__init__`, so the dangerous set is banned
+        outright — data dunders (`__doc__`, `__file__`, `__cause__`,
+        `__version__`, ...) stay legal."""
+        import ast as _ast
+
+        banned = {
+            "__globals__", "__builtins__", "__class__", "__base__",
+            "__bases__", "__subclasses__", "__mro__", "__code__",
+            "__closure__", "__func__", "__get__", "__set__",
+            "__delete__", "__reduce__", "__reduce_ex__",
+            "__getstate__", "__setstate__", "__loader__",
+            "__spec__",
+        }
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Attribute)
+                    and node.attr in banned
+                ):
+                    hits.append(
+                        f"{path.name}:{node.lineno} .{node.attr}"
+                    )
+        self.assertEqual(
+            hits, [],
+            "dunder traversal reaches capability with no import at "
+            "all:\n" + "\n".join(hits),
+        )
+
+    def test_watched_modules_never_mutated(self) -> None:
+        """Writes *into* a watched module's namespace mutate the shared
+        interpreter state invisibly to every read-side pin:
+
+        - `os.chmod = fake` / `sys.stdout = tee` / `del os.environ` —
+          assigning or deleting a module attribute is runtime
+          monkeypatching: every later `os.chmod` call site resolves
+          to the replacement. Flagged on Assign/AnnAssign/AugAssign/
+          Delete targets that are Attributes on a watched module.
+        - `os.environ["X"] = y` / `sys.modules["os"] = fake` —
+          subscript stores into a watched module's mutable data
+          attribute inject state (or fake modules) wholesale.
+          Flagged when the subscript's value chain bottoms out at a
+          watched-module name.
+        - `sys.path.insert(0, x)` / `os.environ.update(...)` —
+          mutator methods called on watched-module data attributes
+          (import search path, process env). Flagged on the common
+          mutation verb set. `os.environ.get(...)` reads stay legal.
+
+        Live tree is clean on all three shapes — the catalog is a
+        zero-inventory, so any arrival is a loud failure."""
+        import ast as _ast
+
+        watched = {
+            "time", "datetime", "date", "calendar", "threading",
+            "os", "sys", "tempfile", "shutil", "subprocess", "socket",
+            "ssl", "urllib", "pathlib", "json", "sqlite3", "re",
+            "signal", "io", "select", "multiprocessing", "gc",
+        }
+        mut_verbs = {
+            "append", "insert", "extend", "remove", "clear",
+            "update", "setdefault", "pop", "popitem", "add",
+            "discard", "reverse", "sort",
+        }
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(
+                    node,
+                    (_ast.Assign, _ast.AnnAssign, _ast.AugAssign,
+                     _ast.Delete),
+                ):
+                    tgts = (
+                        node.targets
+                        if isinstance(node, (_ast.Assign, _ast.Delete))
+                        else [node.target]
+                    )
+                    for t in tgts:
+                        if (
+                            isinstance(t, _ast.Attribute)
+                            and isinstance(t.value, _ast.Name)
+                            and t.value.id in watched
+                        ):
+                            hits.append(
+                                f"{path.name}:{node.lineno} write "
+                                f"{t.value.id}.{t.attr}"
+                            )
+                        elif isinstance(t, _ast.Subscript):
+                            v = t.value
+                            while isinstance(v, _ast.Attribute):
+                                if (
+                                    isinstance(v.value, _ast.Name)
+                                    and v.value.id in watched
+                                ):
+                                    hits.append(
+                                        f"{path.name}:{node.lineno} "
+                                        f"{v.value.id}.{v.attr}[..] = "
+                                    )
+                                    break
+                                v = v.value
+                elif isinstance(node, _ast.Call):
+                    f = node.func
+                    if (
+                        isinstance(f, _ast.Attribute)
+                        and f.attr in mut_verbs
+                        and isinstance(f.value, _ast.Attribute)
+                        and isinstance(f.value.value, _ast.Name)
+                        and f.value.value.id in watched
+                    ):
+                        hits.append(
+                            f"{path.name}:{node.lineno} "
+                            f"{f.value.value.id}.{f.value.attr}."
+                            f"{f.attr}()"
+                        )
+        self.assertEqual(
+            hits, [],
+            "writes into a watched module's namespace mutate shared "
+            "interpreter state invisibly to every pin:\n"
+            + "\n".join(hits),
+        )
+
+    def test_dangerous_statements_are_banned(self) -> None:
+        """Statement-level surface (the assert ban, v0.2.281, is the
+        sibling pin — this one completes the family):
+
+        - `global x`/`nonlocal x`: lets a function mutate state owned
+          by an outer scope without appearing as a module-level
+          Assign — module-level mutation is already cataloged
+          (v0.2.451), but a `global` declaration is the *other* half
+          of that contract and was unpinned.
+        - `del x`/`del obj.attr`/`del lst[i]`: makes a name or slot
+          disappear — every reader-side pin assumes declared names
+          stay bound.
+        - `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:`: a block
+          that can never execute at runtime — dead code that still
+          counts toward the coverage denominator and hides paths no
+          test can reach. Prod ships none; keep it that way.
+        """
+        import ast as _ast
+
+        hits: list[str] = []
+        for path in sorted(
+            (Path(__file__).resolve().parent.parent / "shoin").glob("*.py")
+        ):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                    hits.append(
+                        f"{path.name}:{node.lineno} "
+                        f"{type(node).__name__}"
+                    )
+                elif isinstance(node, _ast.Delete):
+                    hits.append(f"{path.name}:{node.lineno} del")
+                elif isinstance(node, _ast.If):
+                    t = node.test
+                    if (
+                        isinstance(t, _ast.Name)
+                        and t.id == "TYPE_CHECKING"
+                    ) or (
+                        isinstance(t, _ast.Attribute)
+                        and t.attr == "TYPE_CHECKING"
+                    ):
+                        hits.append(
+                            f"{path.name}:{node.lineno} "
+                            "if TYPE_CHECKING"
+                        )
+        self.assertEqual(
+            hits, [],
+            "statement-level surface must stay empty — global/nonlocal"
+            "/del mutate binding state and TYPE_CHECKING blocks can "
+            "never execute:\n" + "\n".join(hits),
+        )
+
+    def test_argparse_reads_stay_declared(self) -> None:
+        """Every `args.<attr>` read in cli.py must resolve to a declared
+        argparse destination — a misspelled read (`args.noteboook_id`)
+        raises AttributeError only when that subcommand runs, and the
+        subcommand-dispatch tests may not exercise every flag-bearing
+        path. Declared dests come from three sources:
+        `add_argument` (long-option-derived + explicit dest=),
+        `add_subparsers(dest=...)`, and `set_defaults(...)`."""
+        import ast as _ast
+
+        cli = Path(__file__).resolve().parent.parent / "shoin" / "cli.py"
+        tree = _ast.parse(cli.read_text(encoding="utf-8"))
+        declared: set[str] = set()
+        reads: list[str] = []
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                if (
+                    isinstance(node, _ast.Attribute)
+                    and isinstance(node.value, _ast.Name)
+                    and node.value.id == "args"
+                ):
+                    reads.append(f"{node.lineno}:{node.attr}")
+                continue
+            f = node.func
+            if not isinstance(f, _ast.Attribute):
+                continue
+            names = [
+                a.value
+                for a in node.args
+                if isinstance(a, _ast.Constant) and isinstance(a.value, str)
+            ]
+            if f.attr == "add_argument":
+                destd = next(
+                    (
+                        k.value.value
+                        for k in node.keywords
+                        if k.arg == "dest"
+                        and isinstance(k.value, _ast.Constant)
+                    ),
+                    None,
+                )
+                if isinstance(destd, str):
+                    declared.add(destd)
+                for n in names:
+                    if n.startswith("--"):
+                        declared.add(n.lstrip("-").replace("-", "_"))
+                    elif n.startswith("-"):
+                        declared.add(n.lstrip("-"))
+                    else:
+                        declared.add(n)
+            elif f.attr == "add_subparsers":
+                for k in node.keywords:
+                    if k.arg == "dest" and isinstance(
+                        k.value, _ast.Constant
+                    ):
+                        declared.add(str(k.value.value))
+            elif f.attr == "set_defaults":
+                for k in node.keywords:
+                    if k.arg is not None:
+                        declared.add(k.arg)
+        unknown = sorted(
+            r for r in set(reads) if r.split(":")[1] not in declared
+        )
+        self.assertGreater(len(declared), 5)
+        self.assertGreater(len(reads), 5)
+        self.assertEqual(
+            unknown, [],
+            "args.<attr> reads must resolve to a declared argparse "
+            "destination (declared: " + ",".join(sorted(declared)) +
+            "):\n" + "\n".join(unknown),
+        )
+
+    def test_interpolated_regexes_are_cataloged(self) -> None:
+        """A `re.*` call whose pattern argument interpolates a
+        NON-constant value injects the caller's string into regex
+        syntax — an unescaped user term can rewrite match semantics
+        or raise re.error at runtime (and ReDoS hygiene can't be
+        verified statically). Today's 9 interpolated sites all
+        interpolate module-level constants only (character classes,
+        numeric fragments); the one runtime-term path wraps it in
+        `re.escape` (search.py). Any NEW interpolated regex is a
+        drift event: it must be justified here — either static
+        constants like today or an explicitly escaped term."""
+        import ast as _ast
+
+        baseline: dict[str, list[int]] = {
+            "chunk.py": [208],
+            "citation.py": [526, 530, 580, 892, 1271, 1485],
+            "search.py": [72, 907],
+        }
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        actual: dict[str, list[int]] = {}
+        escaped_interps: list[str] = []
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                f = node.func
+                if not (
+                    isinstance(f, _ast.Attribute)
+                    and isinstance(f.value, _ast.Name)
+                    and f.value.id == "re"
+                ):
+                    continue
+                for a in node.args:
+                    interp = any(
+                        isinstance(s, _ast.JoinedStr)
+                        or (
+                            isinstance(s, _ast.BinOp)
+                            and isinstance(s.op, _ast.Mod)
+                        )
+                        or (
+                            isinstance(s, _ast.Call)
+                            and isinstance(s.func, _ast.Attribute)
+                            and s.func.attr == "format"
+                        )
+                        for s in _ast.walk(a)
+                    )
+                    if interp:
+                        esc = any(
+                            isinstance(s, _ast.Call)
+                            and isinstance(s.func, _ast.Attribute)
+                            and s.func.attr == "escape"
+                            and isinstance(s.func.value, _ast.Name)
+                            and s.func.value.id == "re"
+                            for s in _ast.walk(a)
+                        )
+                        actual.setdefault(path.name, []).append(
+                            node.lineno
+                        )
+                        if esc:
+                            escaped_interps.append(
+                                f"{path.name}:{node.lineno}"
+                            )
+        self.assertEqual(
+            escaped_interps, ["search.py:907"],
+            "the runtime-term regex path must keep its re.escape",
+        )
+        self.assertEqual(
+            actual, baseline,
+            "interpolated re.* call sites drifted — a new interpolated "
+            "pattern must be justified (constants only, or the term "
+            "wrapped in re.escape)",
+        )
+
+    def test_unicode_predicate_calls_are_cataloged(self) -> None:
+        """`str.isdigit()`/`isnumeric()`/`isdecimal()` are Unicode-wide:
+        '１２３４'.isdigit() and '²'.isdigit() are True, so a bare call
+        on unnormalized text accepts shapes the code never intended.
+        Every call site is cataloged: today's sites are either
+        `isascii() && isdigit()` guarded (search.py — v0.2.529's
+        `isalnum` the deliberate Unicode-wide test that makes every
+        script's letters word chars, v0.2.532's `isspace` which must
+        see U+1680/U+3000 as spaces, v0.2.534's `isdecimal` whose
+        whole job is seeing every script's digit row, and v0.2.535's
+        isascii/isalpha pair that confines the accent fold to ASCII-letter
+        bases, plus v0.2.536's isalpha guard gating the stem fold to
+        letters-only terms), downstream of
+        NFKC normalization that already folded width/superscripts
+        (citation.py `_part_value`), or on export-format keys where a
+        Unicode digit still parses (export.py). A NEW predicate site
+        is a drift event: it must be justified like these."""
+        import ast as _ast
+
+        baseline: dict[str, int] = {
+            "chunk.py": 5,
+            "citation.py": 2,
+            "export.py": 3,
+            "search.py": 6,
+        }
+        preds = {
+            "isdigit", "isnumeric", "isdecimal",
+            "isspace", "isalpha", "isalnum",
+        }
+        shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
+        hits: list[str] = []
+        counts: dict[str, int] = {}
+        for path in sorted(shoin_dir.glob("*.py")):
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+            n = 0
+            for node in _ast.walk(tree):
+                if (
+                    isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr in preds
+                ):
+                    n += 1
+                    hits.append(f"{path.name}:{node.lineno}")
+            if n:
+                counts[path.name] = n
+        self.assertEqual(
+            counts, baseline,
+            "unicode-wide predicate call sites drifted — a new "
+            "isdigit/isnumeric/isalpha-family call must be justified "
+            "(isascii-guarded or post-NFKC):\n" + "\n".join(hits),
+        )
+
+    def test_ui_selectors_are_cataloged(self) -> None:
+        """`querySelector`/`querySelectorAll` literals in index.html:
+        renaming a class/attribute without updating the selector makes
+        it silently return null — the feature goes dead with no test
+        or console signal. The full literal set is cataloged; a new
+        selector or a renamed token is a drift event. Multi-line
+        literals are whitespace-normalized for stability."""
+        import re as _re
+
+        html = (
+            Path(__file__).resolve().parent.parent
+            / "shoin" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        found: set[str] = set()
+        for m in _re.finditer(
+            r"querySelector(?:All)?\s*\(\s*([\'\"`])(.+?)\1",
+            html,
+            _re.DOTALL,
+        ):
+            sel = " ".join(m.group(2).split())
+            found.add(sel)
+        baseline = {
+            ".full-body",
+            ".pane",
+            ".tabs button",
+            "[data-i18n]",
+            "[data-i18n-aria]",
+            "[data-i18n-ph]",
+            "[data-i18n-title]",
+            'button[type="submit"]',
+            'button:not([disabled]),input:not([disabled]),'
+            'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+            "input.src-rename",
+            'meta[name="shoin-lang"]',
+        }
+        # `s` is the `$` alias definition site — not a real selector
+        self.assertEqual(
+            found - {"s"}, baseline,
+            "querySelector literals drifted — a selector rename "
+            "silently kills its feature (null on every call):\n"
+            + "\n".join(sorted((found - {"s"}) ^ baseline)),
+        )
+
+    def test_css_var_refs_are_defined(self) -> None:
+        """Every `var(--x)` reference in index.html must resolve to a
+        `--x:` definition — an undefined custom property silently
+        falls back to `initial`/inherit, degrading the style with no
+        signal (the v0.2.523 `--ink` defect: the source-rename input
+        showed default text color instead of --sumi)."""
+        import re as _re
+
+        html = (
+            Path(__file__).resolve().parent.parent
+            / "shoin" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", html))
+        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", html))
+        missing = sorted(refs - defs)
+        self.assertGreater(len(defs), 5)
+        self.assertGreater(len(refs), 5)
+        self.assertEqual(
+            missing, [],
+            "var(--x) references must resolve to --x: definitions — "
+            "undefined custom properties silently fall back to "
+            "initial/inherit:\n" + "\n".join(missing),
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
