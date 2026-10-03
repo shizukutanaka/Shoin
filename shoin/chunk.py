@@ -16,17 +16,28 @@ _CJK_RANGES = (
     (0x0E80, 0x0EFF),    # Lao
     (0x1000, 0x109F),    # Myanmar
     (0x1780, 0x17FF),    # Khmer
-    # Enclosed Alphanumerics + the contiguous Enclosed CJK / CJK
-    # Compatibility blocks + Enclosed Ideographic Supplement: ①-⑳, Ⓐ-Ⓩ,
-    # ㈠-㈩, ㈱㈲, ㋿㍻㍼ (era shorthand), ㌀㌢㌔ (squared-katakana words),
-    # ㎏㎞㎟㍑㍉㎠㎡ (squared units), 🈶🈚🈸🈯🉐 — all NFKC-foldable
-    # Japanese-document characters.  Outside the ranges they silently
+    # NFKC-foldable blocks: characters that decompose to canonical
+    # Japanese/ASCII spellings.  Outside the ranges they silently
     # vanished from query_terms (a '㍻元年' query searched '元年' alone)
     # and escaped the CJK token cost; inside, term_variants' NFKC form
-    # already bridges them to canonical spellings (㍻→平成, ㎏→kg).
+    # bridges them to canonical spellings (㍻→平成, ㎏→kg, ﬁ→fi, Ⅲ→III).
+    (0x00AA, 0x00AA),    # ª feminine ordinal → a
+    (0x00B2, 0x00B3),    # ² ³ superscripts
+    (0x00B5, 0x00B5),    # µ micro sign → μ
+    (0x00B9, 0x00B9),    # ¹
+    (0x00BA, 0x00BA),    # º masculine ordinal → o
+    (0x00BC, 0x00BE),    # ¼ ½ ¾ vulgar fractions
+    (0x1100, 0x11FF),    # Hangul Jamo (decomposed — macOS NFD filenames)
+    (0x1B001, 0x1B152),  # kana supplement + ext-A hentaigana (→ katakana)
+    (0x2044, 0x2044),    # ⁄ fraction slash → /
+    (0x2070, 0x209C),    # superscript/subscript digits and letters ⁰-₉ₐ-ₜ
+    (0x2100, 0x214F),    # letterlike symbols ℃ ℉ № ℠ ㏄ (all fold)
+    (0x2160, 0x2188),    # Roman numerals Ⅰ-Ⅻ ⅰ-ⅻ ↀ-ↈ
     (0x2460, 0x24FF),    # enclosed alphanumerics ①Ⓐⓐ
     (0x3000, 0x303F),    # CJK symbols and punctuation (。、　〆々 etc.)
     (0x3040, 0x30FF),    # hiragana + katakana
+    (0x3130, 0x318F),    # Hangul compatibility jamo ㄱ-ㆎ (fold to jamo)
+    (0x31F0, 0x31FF),    # katakana phonetic extensions (Ainu kana)
     (0x3200, 0x33FF),    # enclosed CJK letters/months + compat (㈱㋿㍻㎏)
     (0x3400, 0x4DBF),    # CJK ext A
     (0x4E00, 0x9FFF),    # CJK unified ideographs
@@ -38,9 +49,13 @@ _CJK_RANGES = (
     (0xFF66, 0xFF9F),    # halfwidth katakana + voiced/semi-voiced marks ﾞﾟ
     (0xAC00, 0xD7A3),    # Hangul syllables
     (0x1F200, 0x1F2FF),  # enclosed ideographic supplement (🈶🈚🈸🈯🉐)
+    (0x1D400, 0x1D7FF),  # math alphanumeric 𝐀-𝞃 (→ ASCII letters)
     (0x20000, 0x2A6DF),  # CJK ext B (supplementary plane — rare/historical chars)
     (0x2A700, 0x2CEAF),  # CJK ext C/D/E/F
     (0x2CEB0, 0x2EBEF),  # CJK ext G/H
+    (0xFB00, 0xFB4F),    # alphabetic presentation forms ﬀ-ﬅ + Hebrew forms
+    (0xFFA0, 0xFFDC),    # halfwidth Hangul jamo (NFKC → jamo → syllables)
+    (0xFFE0, 0xFFE6),    # fullwidth currency/symbols ￠￡￥￦
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")

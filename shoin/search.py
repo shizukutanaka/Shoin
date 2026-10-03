@@ -432,7 +432,20 @@ def term_variants(term: str) -> list[str]:
     """
     norm = unicodedata.normalize("NFKC", term)
     katakana = _to_katakana(norm)
-    candidates = [term, norm, _to_hiragana(norm), katakana, _to_halfwidth(katakana)]
+    candidates = [
+        term,
+        norm,
+        # NFD is the one-directional inverse of NFKC's composition: a
+        # canonically-spelled query (한 syllable, 亀 ideograph) must
+        # still reach a document whose text is compatibility-decomposed —
+        # macOS writes filenames in NFD, and those filenames land in
+        # chunk contexts.  For terms with nothing to decompose this is
+        # identity and dedups away.
+        unicodedata.normalize("NFD", norm),
+        _to_hiragana(norm),
+        katakana,
+        _to_halfwidth(katakana),
+    ]
     candidates.append(_kanji_skeleton(norm))
     if norm.isascii():
         candidates.append(_to_fullwidth_ascii(norm))

@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.527
+## Version History: v0.1.37 → v0.2.528
+
+### v0.2.528
+
+- Same defect class as v0.2.527, completed: the rest of the
+  NFKC-foldable blocks — Hangul Jamo + compatibility/halfwidth jamo
+  (the macOS NFD filename spelling), Roman numerals, super/subscript
+  digits and letters, vulgar fractions, letterlike symbols (℃ ℉ №
+  ㏄), alphabetic presentation forms (ﬀ-ﬅ), kana-supplement
+  hentaigana, math alphanumerics, fullwidth currency — silently
+  vanished from query_terms.  Added the remaining foldable ranges so
+  'Ⅲ章', 'x²', '気温30℃', '한문서' all keep their terms.
+- term_variants now also emits the NFD form: a composed query (한
+  syllable) reaches documents whose text is decomposed — macOS
+  writes filenames NFD and breadcrumbs carry them.  Combined with
+  NFKC the bridge runs both directions (한 ⇄ 한).
+- `test_foldable_blocks_are_cjk_terms` pins classification,
+  retention and the composed↔decomposed variants;
+  `test_hangul_composed_query_retrieves_nfd_docs` proves a '한' query
+  reaches NFD documents and a '한' query reaches composed ones.
 
 ### v0.2.527
 

@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.527")
+        self.assertEqual(VERSION, "0.2.528")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1882,6 +1882,30 @@ class TestChunk(unittest.TestCase):
         # free — cost 0 each before they classified as CJK.
         self.assertEqual(estimate_tokens("㍻"), 1)
         self.assertEqual(estimate_tokens("㍻元年"), 3)
+
+    def test_foldable_blocks_are_cjk_terms(self) -> None:
+        """v0.2.528: the remaining NFKC-foldable blocks — Hangul Jamo
+        (decomposed syllables, the macOS NFD filename spelling), Roman
+        numerals, super/subscript digits, vulgar fractions, letterlike
+        symbols, ligature presentation forms, kana-supplement
+        hentaigana, math alphanumerics, fullwidth currency — must
+        classify and survive query_terms like the enclosed blocks."""
+        for ch in ("ᄒ", "ᅡ", "Ⅲ", "²", "¼", "ﬁ", "℃", "№", "𛁂", "￦", "𝐀", "µ"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        for q in ("한문서", "Ⅲ章", "x²+y²", "½カップ", "気温30℃", "￦100"):
+            terms = query_terms(q)
+            self.assertTrue(
+                any(t[0] in "ᄒⅢx½気￦" for t in terms),
+                f"{q!r} dropped its foldable char: {terms}",
+            )
+        # term_variants' NFKC form composes decomposed jamo both ways:
+        # a composed query emits the NFD variant (macOS filenames are
+        # NFD), a jamo query emits the composed syllable.
+        from shoin.search import term_variants
+        self.assertIn("한", term_variants("한"))
+        self.assertIn("한", term_variants("한"))
+        self.assertIn("III", term_variants("Ⅲ"))
+        self.assertIn("fi", term_variants("ﬁ"))
 
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
@@ -3903,6 +3927,21 @@ class TestSearch(unittest.TestCase):
             self.assertIn("㍻元年の記録", texts)
             self.assertIn("平成元年の記録", texts)
             self.assertNotIn("関係ない文", texts)
+
+    def test_hangul_composed_query_retrieves_nfd_docs(self) -> None:
+        """v0.2.528: composition is bridged both directions — a composed
+        '한' query reaches an NFD (macOS filename) document via the new
+        NFD variant, and a decomposed '한' query reaches the composed
+        document via NFKC.  Before the fix the jamo spelling wasn't a
+        term at all and the composed query missed NFD text entirely."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["한の資料", "한の資料", "関係ない文"])
+            texts_c = {h.text for h in bm25_search(s, nb.id, "한", 5)}
+            texts_d = {h.text for h in bm25_search(s, nb.id, "한", 5)}
+            self.assertEqual(texts_c, {"한の資料", "한の資料"})
+            self.assertEqual(texts_d, {"한の資料", "한の資料"})
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
@@ -11457,7 +11496,12 @@ class TestWidthVariants(unittest.TestCase):
         self.assertEqual(strip_neg_terms("Python -ﾃﾞｰﾀ"), "Python")
 
     def test_term_variants_shapes(self) -> None:
-        self.assertEqual(term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "でーた"])
+        # v0.2.528: the NFD variant bridges canonically-decomposed text
+        # (macOS NFD filenames; a dakuten spelled base+゙) — 'データ' is
+        # テ + combining voiced mark, a legitimate extra recall channel.
+        self.assertEqual(
+            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた"]
+        )
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
         # Control: a term whose spellings all coincide yields only itself, so
@@ -14298,11 +14342,11 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:111",
+            "chunk.py:126",
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:767",
+            "search.py:65", "search.py:780",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14736,7 +14780,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:569"],
+            sites, ["search.py:582"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -16951,9 +16995,9 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [111],
+            "chunk.py": [126],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 767],
+            "search.py": [65, 780],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17001,7 +17045,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:767"],
+            escaped_interps, ["search.py:780"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
