@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.596
+## Version History: v0.1.37 → v0.2.597
+
+### v0.2.597
+- spec.mdを実装v0.2.597時点へ同期: 引用検証へマーカー帰属規約
+  (v0.2.576-583)・SSEエラーフレーム+永続化契約(v0.2.592)・eval baseline
+  スキーマ厳格性(v0.2.562/595)・LLM全経路Request構築try内化(v0.2.594)
+  を追記。品質行の実測値を更新(テスト1206→1256件、未カバー4行→
+  23行=防御分岐)。
 
 ### v0.2.596
 - product-review台帳をv0.2.595時点へ同期: 「入出力境界の防衛深化——
