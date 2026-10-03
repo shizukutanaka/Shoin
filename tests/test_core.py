@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.539")
+        self.assertEqual(VERSION, "0.2.540")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2132,6 +2132,37 @@ class TestChunk(unittest.TestCase):
         terms = _norm_query_terms("documents engine")
         self.assertGreater(
             _proximity_from_norm(terms, "the document engine runs"), 0.0)
+
+
+    def test_match_fold_bridges_spellings_in_checks(self) -> None:
+        """v0.2.540: citation checks were spelling-blind — an answer
+        echoing a source word in a bridged orthography scored 0 bigram
+        overlap, so confirm/misattribute/negation/self-contradiction all
+        went silent on exactly the variants retrieval bridges.
+        _match_fold now canonicalises both sides of every comparison."""
+        from shoin.chunk import _match_fold
+        from shoin.citation import _bigrams, _overlap, verify_grounding
+
+        self.assertEqual(
+            _match_fold("caf\u00e9 \u30c7\u30fc\u30bf"),
+            "cafe \u3067\u30fc\u305f")
+        self.assertEqual(_match_fold("\u0663\u0664\u0665"), "345")
+        self.assertEqual(_match_fold("\u0153uvre"), "oeuvre")
+        self.assertEqual(_match_fold("\u5b78\u7fd2"), "\u5b66\u7fd2")
+        # format chars dropped, accent on non-ASCII base kept
+        self.assertEqual(_match_fold("sof\u00adt"), "soft")
+        self.assertEqual(_match_fold("\u0439"), "\u0439")
+        # kana echo confirms; accent echo confirms
+        src = {1: "\u30c7\u30fc\u30bf\u5206\u6790\u306e\u624b\u6cd5\u3002"}
+        conf, _ = verify_grounding(
+            "\u3067\u30fc\u305f\u5206\u6790\u306e\u624b\u6cd5\u3002[S1]", src)
+        self.assertEqual(conf, [1])
+        conf2, _ = verify_grounding("caf\u00e9 study results.[S1]",
+                                    {1: "cafe study results."})
+        self.assertEqual(conf2, [1])
+        self.assertGreater(
+            _overlap(_bigrams("\u3067\u30fc\u305f"), _bigrams("\u30c7\u30fc\u30bf")),
+            0.9)
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14385,7 +14416,7 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
-            "search.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
+            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
             "store.py": {"MIGRATIONS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
@@ -14668,11 +14699,11 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:207",
-            "citation.py:513", "citation.py:517", "citation.py:554",
-            "citation.py:567", "citation.py:879", "citation.py:1255",
-            "citation.py:1460",
-            "search.py:65", "search.py:989",
+            "chunk.py:208",
+            "citation.py:518", "citation.py:522", "citation.py:559",
+            "citation.py:572", "citation.py:884", "citation.py:1260",
+            "citation.py:1465",
+            "search.py:71", "search.py:906",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -15106,7 +15137,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:752"],
+            sites, ["search.py:669"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17321,9 +17352,9 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [207],
-            "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 989],
+            "chunk.py": [208],
+            "citation.py": [518, 522, 572, 884, 1260, 1465],
+            "search.py": [71, 906],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17371,7 +17402,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:989"],
+            escaped_interps, ["search.py:906"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17401,10 +17432,10 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, int] = {
-            "chunk.py": 1,
+            "chunk.py": 4,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 7,
+            "search.py": 6,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",

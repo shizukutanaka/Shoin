@@ -23,7 +23,13 @@ import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
-from .chunk import _CJK_RANGES, is_cjk
+from .chunk import (
+    _CJK_RANGES,
+    _KYU_TO_SHIN,
+    _SHIN_TO_KYU,
+    _ascii_fold,
+    is_cjk,
+)
 from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
 from .config import TOP_K
 from .store import Store
@@ -272,56 +278,6 @@ def _to_halfwidth(s: str) -> str:
 # common jōyō simplifications. A query or source written in pre-reform
 # orthography shares ZERO trigrams with the modern spelling — the same
 # all-or-nothing gap the kanji skeleton fixes for inflections (v0.2.224).
-# The bridge is query-side like every other variant (the index stays
-# byte-identical to the source): emit the fully-converted counterpart of
-# whichever script the term arrived in. Ambiguous simplifications (弁, 台,
-# 与…) pick the most common predecessor — an occasionally wrong old form is
-# harmless: the variant only adds an extra needle/gram and can never suppress
-# a document the term itself matched.
-_SHIN_TO_KYU: dict[str, str] = {
-    "圧": "壓", "悪": "惡", "為": "爲", "医": "醫", "壱": "壹", "隠": "隱",
-    "栄": "榮", "衛": "衞", "円": "圓", "縁": "緣", "応": "應", "欧": "歐",
-    "殴": "毆", "桜": "櫻", "温": "溫", "穏": "穩", "仮": "假", "価": "價",
-    "画": "畫", "会": "會", "懐": "懷", "壊": "壞", "概": "槪", "拡": "擴",
-    "殻": "殼", "覚": "覺", "学": "學", "楽": "樂", "缶": "罐", "関": "關",
-    "陥": "陷", "勧": "勸", "寛": "寛", "観": "觀", "気": "氣", "亀": "龜",
-    "偽": "僞", "戯": "戲", "犠": "犧", "旧": "舊", "拠": "據", "挙": "擧",
-    "虚": "虛", "峡": "峽", "狭": "狹", "郷": "鄕", "暁": "曉", "区": "區",
-    "駆": "驅", "継": "繼", "茎": "莖", "渓": "溪", "経": "經", "蛍": "螢",
-    "軽": "輕", "鶏": "鷄", "芸": "藝", "撃": "擊", "研": "硏", "県": "縣",
-    "倹": "儉", "剣": "劍", "険": "險", "献": "獻", "検": "驗", "顕": "顯",
-    "広": "廣", "効": "效", "鉱": "鑛", "号": "號", "国": "國", "穀": "榖",
-    "黒": "黑", "砕": "碎", "済": "濟", "剤": "劑", "斎": "齋", "雑": "雜",
-    "桟": "棧", "賛": "贊", "蚕": "蠶", "残": "殘", "辞": "辭", "歯": "齒",
-    "児": "兒", "湿": "濕", "実": "實", "写": "寫", "釈": "釋", "寿": "壽",
-    "収": "收", "従": "從", "渋": "澁", "獣": "獸", "縦": "縱", "粛": "肅",
-    "処": "處", "将": "將", "奨": "奬", "醤": "醬", "焼": "燒", "証": "證",
-    "条": "條", "乗": "乘", "剰": "剩", "浄": "淨", "畳": "疊", "縄": "繩",
-    "壌": "壤", "醸": "釀", "嬢": "孃", "触": "觸", "寝": "寢", "慎": "愼",
-    "真": "眞", "尽": "盡", "図": "圖", "粋": "粹", "酔": "醉", "穂": "穗",
-    "随": "隨", "髄": "髓", "枢": "樞", "数": "數", "声": "聲", "静": "靜",
-    "摂": "攝", "専": "專", "浅": "淺", "戦": "戰", "践": "踐", "銭": "錢",
-    "潜": "潛", "繊": "纖", "禅": "禪", "壮": "壯", "争": "爭", "荘": "莊",
-    "装": "裝", "捜": "搜", "挿": "插", "蔵": "藏", "臓": "臟", "増": "增",
-    "即": "卽", "属": "屬", "続": "續", "堕": "墮", "対": "對", "体": "體",
-    "帯": "帶", "滞": "滯", "台": "臺", "滝": "瀧", "択": "擇", "沢": "澤",
-    "単": "單", "胆": "膽", "団": "團", "弾": "彈", "断": "斷", "痴": "癡",
-    "虫": "蟲", "鋳": "鑄", "庁": "廳", "徴": "徵", "聴": "聽", "懲": "懲",
-    "勅": "敕", "転": "轉", "伝": "傳", "灯": "燈", "当": "當", "盗": "盜",
-    "稲": "稻", "徳": "德", "独": "獨", "読": "讀", "弐": "貳", "悩": "惱",
-    "脳": "腦", "覇": "霸", "拝": "拜", "廃": "廢", "売": "賣", "麦": "麥",
-    "発": "發", "髪": "髮", "抜": "拔", "蛮": "蠻", "秘": "祕", "浜": "濱",
-    "氷": "冰", "弁": "辯", "歩": "步", "宝": "寶", "豊": "豐", "没": "沒",
-    "万": "萬", "満": "滿", "黙": "默", "訳": "譯", "薬": "藥", "与": "與",
-    "誉": "譽", "揺": "搖", "様": "樣", "謡": "謠", "来": "來", "覧": "覽",
-    "竜": "龍", "涙": "淚", "塁": "壘", "暦": "曆", "歴": "歷", "恋": "戀",
-    "楼": "樓", "録": "錄", "練": "練", "齢": "齡", "労": "勞", "炉": "爐",
-    "禄": "祿", "乱": "亂", "湾": "灣",
-}
-
-_KYU_TO_SHIN = {v: k for k, v in _SHIN_TO_KYU.items()}
-
-
 def _kyujitai_variants(s: str) -> list[str]:
     """Fully-traditional and fully-simplified spellings of *s*.
 
@@ -404,45 +360,6 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
     tuple(chr(0x0F20 + d) for d in range(10)),   # Tibetan ༠-༩
     tuple(chr(0x1810 + d) for d in range(10)),   # Mongolian ᠐-᠙
 )
-
-
-# Latin letters NFKC does not fold to ASCII: digraphs and letters with no
-# canonical decomposition (ICU Latin-ASCII transliterator's core closed set).
-# The mark-strip half handles the composable rest (é→e, ñ→n, ü→u).
-_LATIN_SPECIALS: dict[str, str] = {
-    "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
-    "ß": "ss", "ẞ": "SS", "ø": "o", "Ø": "O",
-    "đ": "d", "Đ": "D", "þ": "th", "Þ": "TH", "ð": "d", "Ð": "D",
-    "ł": "l", "Ł": "L", "ı": "i", "ŋ": "n", "Ŋ": "N",
-    "ħ": "h", "Ħ": "H", "ə": "e", "Ə": "E",
-}
-
-
-def _ascii_fold(term: str) -> str:
-    """ASCII spelling of a Latin term: diacritics stripped, specials mapped.
-
-    The enumerable half of accent bridging (v0.2.535): a query 'café',
-    'naïve', 'œuvre', or 'Straße' should reach a document that wrote the
-    same word unaccented.  Decompose each character and drop its combining
-    marks only when the base is an ASCII letter — kana dakuten/handedakuten
-    decompose too (ド → ト + ゛) but their base is not ASCII, so 'データ'
-    stays 'データ' rather than emitting the dead 'テータ' spelling.  The
-    reverse direction (an ASCII query reaching 'café' documents) stays
-    closed: the accent spellings of 'cafe' are an open space no finite
-    variant list can enumerate — same wall the SHY position bridge hit.
-    """
-    out: list[str] = []
-    for ch in term:
-        mapped = _LATIN_SPECIALS.get(ch)
-        if mapped is not None:
-            out.append(mapped)
-            continue
-        decomp = unicodedata.normalize("NFD", ch)
-        if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
-            out.append("".join(c for c in decomp if not unicodedata.combining(c)))
-        else:
-            out.append(ch)
-    return "".join(out)
 
 
 def _stem_variants(term: str) -> list[str]:

@@ -79,7 +79,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   still holds), pool-IDF counts a doc once per group, proximity occurrences
   carry group identity + the variant's own length.  One pin + fail-direction.
 
-## Version History: v0.1.37 → v0.2.539
+### v0.2.540
+- Citation checks see variant spellings: _match_fold (chunk.py — shared
+  bottom layer) canonicalises both sides of every comparison, so an answer
+  echoing データ as でーた, café as cafe, ٣٤٥ as 345, 學 as 学, or text
+  with SHY/ZWSP no longer scores 0 bigram overlap.  confirm / misattributed
+  / negation / self-contradiction / uncited_supported all gain recall on
+  exactly the orthographies retrieval bridges.  The fold tables
+  (_SHIN_TO_KYU, _LATIN_SPECIALS, _ascii_fold) moved from search.py to
+  chunk.py — importing across would be circular.  The verbatim-quote check
+  deliberately stays literal: exactness is its evidence.  One pin +
+  fail-direction.
+
+## Version History: v0.1.37 → v0.2.540
 
 ### v0.2.534
 

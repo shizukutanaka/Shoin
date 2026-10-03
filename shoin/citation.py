@@ -62,7 +62,7 @@ import re
 import unicodedata
 from typing import NotRequired, TypedDict
 
-from .chunk import _SENTENCE_SPLIT_RE  # single source of truth for sentence boundaries
+from .chunk import _SENTENCE_SPLIT_RE, _match_fold  # single source of truth for sentence boundaries
 
 # A citation lives inside square brackets and may combine several sources:
 # [S1] / [S1, S2] / [S1; S3] / [S1 and S2] / [S1][S2]. Full-width brackets,
@@ -321,8 +321,13 @@ def validate_citations(text: str, n_sources: int) -> tuple[list[int], list[int]]
 
 
 def _bigrams(text: str) -> set[str]:
-    """Character bigrams of NFKC-normalised, whitespace-stripped text."""
-    t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).casefold())
+    """Character bigrams of spelling-folded, whitespace-stripped text.
+
+    _match_fold (v0.2.540) converges the spellings retrieval bridges —
+    kana script, accents, digit rows, kyujitai, format chars — so an
+    answer echoing a source word in a different orthography still
+    overlaps it; previously every such pair scored 0 bigram overlap."""
+    t = re.sub(r"\s+", "", _match_fold(text))
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
@@ -1298,7 +1303,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     """
     src_sents = {
         n: [
-            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).casefold().strip()
+            re.sub(r"\s+", " ", _match_fold(s)).strip()
             for s in _SENTENCE_SPLIT_RE.split(t)
             if s.strip()
         ]
@@ -1329,8 +1334,8 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
             claim_norm = re.sub(
-                r"\s+", " ", unicodedata.normalize("NFKC", segments.get(n, claim_text))
-            ).casefold().strip()
+                r"\s+", " ", _match_fold(segments.get(n, claim_text))
+            ).strip()
             cb = _bigrams(claim_norm)
             if not cb:
                 continue
@@ -1372,7 +1377,7 @@ def _claim_sents(text: str) -> list[tuple[str, str]]:
         bare = _LIST_PREFIX_RE.sub(
             "", _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence))
         )
-        norm = re.sub(r"\s+", " ", bare).casefold().strip()
+        norm = re.sub(r"\s+", " ", _match_fold(bare)).strip()
         if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
             continue
         sents.append((norm, sentence))
