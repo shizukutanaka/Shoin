@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.573")
+        self.assertEqual(VERSION, "0.2.574")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2117,6 +2117,21 @@ class TestChunk(unittest.TestCase):
         hits = bm25_search(s, nb.id, "五割の回答者", 10)
         self.assertTrue(any("50%が通過" in h.text for h in hits))
         hits = bm25_search(s, nb.id, "五割", 10)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
+
+    def test_numeric_bridged_hit_not_clipped_as_term_free(self) -> None:
+        """v0.2.574: _norm_query_terms must include _numeric_query_terms —
+        a chunk surfaced only by the '五割'->'50' bridge shares no literal
+        query term, so rerank scored it lex=0.0 and _tail_cut dropped it
+        from retrieve() output as "term-free", exactly the hit the numeric
+        bridge exists to find."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["五割の回答者は賛成した",
+                              "50%が通過を決めた",
+                              "全員が反対した"])
+        hits = retrieve(s, nb.id, "五割の回答者", None, 8)
         self.assertTrue(any("50%が通過" in h.text for h in hits))
 
 

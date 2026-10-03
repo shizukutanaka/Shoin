@@ -1238,10 +1238,13 @@ def _norm_query_terms(query: str) -> list[list[str]]:
     the hit is scored (v0.2.539): without the group a stem/accent/digit/
     kana-bridged chunk read lex=0.0 — demoted by rerank() and eligible for
     _tail_cut clipping as "term-free", the same retrieval-vs-scoring
-    blindness the width fold fixed one dimension earlier.
+    blindness the width fold fixed one dimension earlier.  The numeric
+    expansion terms count too (v0.2.574): a chunk surfaced only by the
+    '五割'->'50' bridge shares no literal query term, so it read lex=0.0
+    and _tail_cut clipped exactly the hit the bridge exists to find.
     """
     groups: list[tuple[str, ...]] = []
-    for t in query_terms(query):
+    for t in query_terms(query) + _numeric_query_terms(query):
         variants = tuple(
             dict.fromkeys(
                 unicodedata.normalize("NFKC", v).casefold()

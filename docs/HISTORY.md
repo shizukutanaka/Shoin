@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.573
+## Version History: v0.1.37 → v0.2.574
+
+### v0.2.574
+- _norm_query_terms now includes _numeric_query_terms, closing the
+  retrieval-vs-scoring gap one family over from v0.2.539: a chunk
+  surfaced only by the numeric bridge ('五割'->'50') shares no literal
+  query term, so rerank scored it lex=0.0 and _tail_cut clipped it
+  from retrieve() output as "term-free" — exactly the hit the bridge
+  exists to find.  Pinned by test_numeric_bridged_hit_not_clipped_as_
+  term_free (e2e).
 
 ### v0.2.573
 - bm25_search's early-return coverage check now counts
