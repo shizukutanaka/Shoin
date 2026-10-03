@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.584")
+        self.assertEqual(VERSION, "0.2.585")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9611,9 +9611,49 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_source(nb.id, "url", "Title\nSecond line", "http://x.com", "sha1")
             md = export_markdown(s, nb.id)
-        item_lines = [ln for ln in md.splitlines() if ln.startswith("- [S1]")]
+        item_lines = [ln for ln in md.splitlines() if ln.startswith("1. ")]
         self.assertEqual(len(item_lines), 1)
         self.assertIn("Title Second line", item_lines[0])
+
+    def test_export_markdown_sources_section_avoids_citation_syntax(self) -> None:
+        """v0.2.585: the sources listing must not reuse [S#] notation.
+
+        In one exported document the same [S1] marker meant two different
+        things: the sources section numbered sources by notebook order while
+        a chat answer's [S1] names that query's top retrieval hit. A reader
+        resolving an answer's citation against the listing above it could land
+        on a source the answer never cited. The listing is a plain numbered
+        list instead — no citation syntax outside the per-message legend.
+        """
+        import json
+
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "第一の資料", "o", "sha")
+            s.add_chunks(a.id, ["猫は液体である。"])
+            b = s.add_source(nb.id, "txt", "第二の資料", "o2", "sha2")
+            s.add_chunks(b.id, ["犬は固体である。"])
+            report = {
+                "cited": [1],
+                "invalid": [],
+                "coverage": 1.0,
+                "n_sources": 1,
+                "source_map": {"S1": "第二の資料"},
+            }
+            s.add_message(
+                nb.id, "assistant", "犬は固体である[S1]。",
+                json.dumps(report, ensure_ascii=False),
+            )
+            md = export_markdown(s, nb.id)
+
+        src_section = md.split("## チャット履歴")[0]
+        self.assertNotIn("[S", src_section)
+        self.assertIn("1. 第一の資料 (txt) — o", src_section)
+        self.assertIn("2. 第二の資料 (txt) — o2", src_section)
+        # The answer's own legend still maps S1 -> 第二の資料 (retrieval rank).
+        self.assertIn("S1=第二の資料", md)
 
     def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
         """Embedded newline in note title must not break the Markdown heading."""

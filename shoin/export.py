@@ -189,7 +189,10 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
     parts.append(f"## {_t('sources_section')}")
     for i, src in enumerate(store.sources_for_notebook(notebook_id), start=1):
-        parts.append(f"- [S{i}] {_md_line(src.title)} ({src.kind}) — {_md_line(src.origin)}")
+        # Plain numbered list, not [S#]: in the same document an answer's [S1]
+        # means "top retrieval hit for that query" while the listing order is
+        # the notebook's own — one marker for two indices invites misreading.
+        parts.append(f"{i}. {_md_line(src.title)} ({src.kind}) — {_md_line(src.origin)}")
     parts.append("")
 
     notes = store.list_notes(notebook_id)

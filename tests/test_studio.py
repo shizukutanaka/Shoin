@@ -362,7 +362,7 @@ class ExportTest(unittest.TestCase):
     def test_markdown_contains_sections(self) -> None:
         md = export(self.store, self.nb, "md")
         self.assertIn("# 研究", md)
-        self.assertIn("[S1] 資料1", md)
+        self.assertIn("1. 資料1", md)
         self.assertIn("### メモ1", md)
         self.assertIn("### briefing", md)
 

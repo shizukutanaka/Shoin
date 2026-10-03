@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.584
+## Version History: v0.1.37 → v0.2.585
+
+### v0.2.585
+- export_markdown sources-listing namespace collision: the `## ソース` section enumerated sources as `- [S1] title …` while an answer's `[S1]` names that query's top retrieval hit — one exported document carrying the same marker for two different indices. A reader resolving a citation against the listing could land on a source the answer never cited (e.g. listing S1=第一の資料 vs answer S1=第二の資料). The listing is now a plain numbered list (`1. title (kind) — origin`), so citation syntax appears only inside each message's own source_map legend. Fail-direction verified (new pin + updated newline pin both fail on the old format).
 
 ### v0.2.584
 - retrieve_multi exp mark for the rewrite VECTOR lane: rewrite BM25 hits were flagged detail["exp"] so _tail_cut never reads their lex==0-against-the-primary-query as term-free, but rewrite vector hits were not — a chunk surfaced only by the rewrite's embedding (a lexically disjoint semantic match, exactly the recall multi-query fusion exists to add) could be clipped at a score cliff. The vector lane now gets the same mark when i > 0; the primary query's own vector hits stay unmarked and clip-eligible as designed (v0.2.189). Fail-direction verified.
