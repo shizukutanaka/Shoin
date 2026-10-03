@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.526
+## Version History: v0.1.37 → v0.2.527
+
+### v0.2.527
+
+- Real defect: the NFKC-foldable enclosed/compat blocks — ①-⑳, Ⓐ-Ⓩ,
+  ㈠-㈩, ㈱㈲, ㋿㍻㍼ (era shorthand), ㌀㌢㌔ (squared-katakana words),
+  ㎏㎞㎟㍑㍉㎠㎡ (squared units), 🈶🈚🈸🈯🉐 — sat outside `_CJK_RANGES`,
+  so `query_terms` silently dropped them: a '㍻元年' query searched
+  '元年' alone, and each char rode the token budget for free.  Added
+  U+2460-24FF, U+3200-33FF (contiguous Enclosed CJK + CJK
+  Compatibility) and U+1F200-1F2FF to the table; `term_variants`' NFKC
+  form then bridges literal spellings to canonical ones (㍻→平成,
+  ㎏→kg) through the existing LIKE path, and `-㍻` negation works via
+  the auto-extended dash classes.
+- `test_enclosed_compat_chars_are_cjk_terms` pins classification,
+  query-term retention and token cost; `test_enclosed_char_query_retrieves_via_variants`
+  proves a '㍻元年' query now reaches both the literal-㍻ and
+  canonical-平成 documents end-to-end.
 
 ### v0.2.526
 

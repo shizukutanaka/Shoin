@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.526")
+        self.assertEqual(VERSION, "0.2.527")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1861,6 +1861,27 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(is_cjk("　"))   # U+3000 ideographic space
         self.assertEqual(estimate_tokens("書院。"), 3)
         self.assertEqual(estimate_tokens("猫、犬。"), 4)
+
+    def test_enclosed_compat_chars_are_cjk_terms(self) -> None:
+        """v0.2.527: the NFKC-foldable enclosed/compat blocks — ①-⑳, ㈱,
+        ㋿㍻㍼ (era shorthand), ㌀㌢ (squared-katakana words), ㎏㎞㍑㍉
+        (squared units), 🈶🈸 — must be CJK term characters.  Outside
+        _CJK_RANGES they silently vanished from query_terms ('㍻元年'
+        searched '元年' alone) and escaped CJK token cost; inside,
+        term_variants' NFKC form already bridges them to canonical
+        spellings (㍻→平成, ㎏→kg), which the LIKE fallback finds."""
+        for ch in ("㍻", "㋿", "㈱", "①", "㎏", "🈶", "㌀", "㌢"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        for q in ("㍻元年", "㋿3年", "㈱決算", "①項目", "㎏あたり"):
+            terms = query_terms(q)
+            self.assertTrue(
+                any(t[0] in "㍻㋿㈱①㎏" for t in terms),
+                f"{q!r} dropped its enclosed char: {terms}",
+            )
+        # The same omission let these characters ride the token budget for
+        # free — cost 0 each before they classified as CJK.
+        self.assertEqual(estimate_tokens("㍻"), 1)
+        self.assertEqual(estimate_tokens("㍻元年"), 3)
 
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
@@ -3867,6 +3888,21 @@ class TestSearch(unittest.TestCase):
             s.add_chunks(src.id, ["猫 猫 と犬", "猫 と鳥"])
             hits = bm25_search(s, nb.id, "猫 −犬", 5)
             self.assertEqual([h.text for h in hits], ["猫 と鳥"])
+
+    def test_enclosed_char_query_retrieves_via_variants(self) -> None:
+        """v0.2.527: a bare '㍻' query must reach documents — the term
+        produces LIKE needles for its literal self AND the NFKC variant
+        平成, so a canonically spelled doc surfaces too.  Before the fix
+        ㍻ was not a term at all and the query returned nothing."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["㍻元年の記録", "平成元年の記録", "関係ない文"])
+            hits = bm25_search(s, nb.id, "㍻", 5)
+            texts = {h.text for h in hits}
+            self.assertIn("㍻元年の記録", texts)
+            self.assertIn("平成元年の記録", texts)
+            self.assertNotIn("関係ない文", texts)
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
@@ -14262,7 +14298,7 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:100",
+            "chunk.py:111",
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
@@ -16915,7 +16951,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [100],
+            "chunk.py": [111],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
             "search.py": [65, 767],
         }

@@ -16,8 +16,18 @@ _CJK_RANGES = (
     (0x0E80, 0x0EFF),    # Lao
     (0x1000, 0x109F),    # Myanmar
     (0x1780, 0x17FF),    # Khmer
+    # Enclosed Alphanumerics + the contiguous Enclosed CJK / CJK
+    # Compatibility blocks + Enclosed Ideographic Supplement: ①-⑳, Ⓐ-Ⓩ,
+    # ㈠-㈩, ㈱㈲, ㋿㍻㍼ (era shorthand), ㌀㌢㌔ (squared-katakana words),
+    # ㎏㎞㎟㍑㍉㎠㎡ (squared units), 🈶🈚🈸🈯🉐 — all NFKC-foldable
+    # Japanese-document characters.  Outside the ranges they silently
+    # vanished from query_terms (a '㍻元年' query searched '元年' alone)
+    # and escaped the CJK token cost; inside, term_variants' NFKC form
+    # already bridges them to canonical spellings (㍻→平成, ㎏→kg).
+    (0x2460, 0x24FF),    # enclosed alphanumerics ①Ⓐⓐ
     (0x3000, 0x303F),    # CJK symbols and punctuation (。、　〆々 etc.)
     (0x3040, 0x30FF),    # hiragana + katakana
+    (0x3200, 0x33FF),    # enclosed CJK letters/months + compat (㈱㋿㍻㎏)
     (0x3400, 0x4DBF),    # CJK ext A
     (0x4E00, 0x9FFF),    # CJK unified ideographs
     (0xF900, 0xFAFF),    # CJK compat
@@ -27,6 +37,7 @@ _CJK_RANGES = (
     (0xFF61, 0xFF65),    # halfwidth CJK punctuation ｡｢｣､ and middle dot ･
     (0xFF66, 0xFF9F),    # halfwidth katakana + voiced/semi-voiced marks ﾞﾟ
     (0xAC00, 0xD7A3),    # Hangul syllables
+    (0x1F200, 0x1F2FF),  # enclosed ideographic supplement (🈶🈚🈸🈯🉐)
     (0x20000, 0x2A6DF),  # CJK ext B (supplementary plane — rare/historical chars)
     (0x2A700, 0x2CEAF),  # CJK ext C/D/E/F
     (0x2CEB0, 0x2EBEF),  # CJK ext G/H
