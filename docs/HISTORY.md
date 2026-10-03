@@ -162,7 +162,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   fail-direction; quote-doctored overlap pin added for the already-
   folded _bigrams contract.
 
-## Version History: v0.1.37 → v0.2.547
+### v0.2.548
+- _claim_sents excludes questions (looks_like_question): self_contradictions
+  treated an interrogative as a claim, so the rhetorical-lead pattern
+  "効果はあるのか？効果はない。" — and FAQ/study-guide Q→A pairs, which the
+  studio kinds emit systematically — flagged the answer as contradicting
+  its own question.  A question asserts nothing: same exclusion rule
+  uncited_sentences already applies.  Two pins (question-claim pair
+  silent, claim-question pair silent) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.548
 
 ### v0.2.534
 

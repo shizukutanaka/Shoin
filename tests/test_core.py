@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.547")
+        self.assertEqual(VERSION, "0.2.548")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -6953,6 +6953,30 @@ class TestSelfContradictions(unittest.TestCase):
 
         text = "A社の治療は効果がある。B社の治療は効果がない。"
         self.assertEqual(self_contradictions(text), [])
+
+    def test_rhetorical_question_answer_pair_stays_silent(self) -> None:
+        """v0.2.548: "効果はあるのか？効果はない。" is rhetoric, not a flip —
+        a question asserts nothing (same rule uncited_sentences applies),
+        so the answer cannot contradict it."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果はあるのか？効果はない。"), []
+        )
+        # The asymmetry cuts only toward questions: a stated claim followed
+        # by the same claim's negation still flags.
+        self.assertEqual(
+            self_contradictions("効果はある。効果はない。"), ["効果はない。"]
+        )
+
+    def test_question_vs_later_claim_stays_silent(self) -> None:
+        """Same rule in the other direction: a later claim can't contradict
+        a question that preceded it either."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果はない。効果はあるのか？"), []
+        )
 
     def test_list_prefix_stripped_before_comparing(self) -> None:
         """Numbered/bulleted lines compare on content, not the marker."""
@@ -14912,7 +14936,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py:208",
             "citation.py:526", "citation.py:530", "citation.py:567",
             "citation.py:580", "citation.py:892", "citation.py:1271",
-            "citation.py:1476",
+            "citation.py:1485",
             "search.py:72", "search.py:907",
         }
         for loc in sorted(set(dyn) - expected_dyn):
@@ -17563,7 +17587,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 580, 892, 1271, 1476],
+            "citation.py": [526, 530, 580, 892, 1271, 1485],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

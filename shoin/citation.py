@@ -1391,6 +1391,15 @@ def _claim_sents(text: str) -> list[tuple[str, str]]:
         norm = re.sub(r"\s+", " ", _match_fold(bare)).strip()
         if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
             continue
+        if looks_like_question(sentence):
+            # The uncited_sentences exclusion, applied to the claim side
+            # too (v0.2.548): a question asserts nothing, so a rhetorical-
+            # lead pattern like "効果はあるのか？効果はない。" is a
+            # single-diff flip ONLY on paper — flagging the answer as
+            # contradicting its own question is a false positive, and
+            # the faq/study_guide kinds emit question→answer pairs
+            # systematically.
+            continue
         sents.append((norm, sentence))
     return sents
 
