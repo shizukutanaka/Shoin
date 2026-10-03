@@ -2624,6 +2624,99 @@ class SSEConnectionErrorTest(unittest.TestCase):
         self.assertEqual(msgs[1]["role"], "assistant")
         self.assertEqual(msgs[1]["body"], "")
 
+    def test_stream_timeout_still_persists_assistant_row(self) -> None:
+        """A mid-stream failure that is neither LLMError nor ConnectionError —
+        socket timeout (TimeoutError is not a ConnectionError subclass) is the
+        reachable shape; a surrogate token failing the SSE UTF-8 encode is the
+        same class — must not escape to _dispatch(). Its generic-500 write
+        would inject a second HTTP status line into the already-committed SSE
+        body, and unwinding would skip the assistant persist, orphaning the
+        user turn exactly like the disconnect paths this handler compensates.
+        """
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "sse-timeout"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        def stream_timeout(messages, temperature=0.2):
+            yield "先頭の断片"
+            raise TimeoutError("simulated socket timeout mid-stream")
+
+        with patch.object(self.llm, "chat_stream", stream_timeout):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+
+        # No second HTTP response may appear inside the SSE stream body.
+        self.assertNotIn(b"HTTP/1.0 500", raw)
+        events = parse_sse(raw.decode("utf-8"))
+        kinds = [ev for ev, _ in events]
+        self.assertIn("error", kinds, "an SSE error frame must carry the failure")
+        self.assertIn("done", kinds, "the stream must still terminate cleanly")
+        self.assertIn(
+            ("error", {"code": "SYSTEM_INTERNAL_ERROR", "message": "TimeoutError"}),
+            events,
+        )
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            msgs = store.list_messages(nb_id)
+        self.assertEqual(len(msgs), 2, "user turn must still be paired")
+        self.assertEqual(msgs[1]["role"], "assistant")
+        self.assertEqual(msgs[1]["body"], "先頭の断片")
+
+    def test_stream_error_frame_failure_still_persists(self) -> None:
+        """The error frame written by the mid-stream guard is itself a socket
+        write — if it also fails (client already gone), the handler must mark
+        client_gone (skip the done frame) and still persist the assistant row.
+        """
+        from shoin.server import _Handler
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "sse-errfail"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        original_sse = _Handler._sse
+
+        def sse_fail_on_error(self_h, event: str, payload: dict) -> None:
+            if event == "error":
+                raise ConnectionError("client already gone for error frame")
+            original_sse(self_h, event, payload)
+
+        def stream_timeout(messages, temperature=0.2):
+            yield "途中までの回答"
+            raise TimeoutError("simulated socket timeout mid-stream")
+
+        with (
+            patch.object(_Handler, "_sse", sse_fail_on_error),
+            patch.object(self.llm, "chat_stream", stream_timeout),
+        ):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+
+        self.assertNotIn(b"HTTP/1.0 500", raw)
+        events = parse_sse(raw.decode("utf-8"))
+        self.assertNotIn(
+            "done", [ev for ev, _ in events],
+            "client_gone must suppress the done frame",
+        )
+        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            msgs = store.list_messages(nb_id)
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[1]["role"], "assistant")
+        self.assertEqual(msgs[1]["body"], "途中までの回答")
+
     def test_drain_empty_read_breaks_loop(self) -> None:
         """_drain must break when rfile.read() returns empty bytes (server.py 166).
 

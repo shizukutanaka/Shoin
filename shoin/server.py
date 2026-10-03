@@ -915,6 +915,31 @@ class _Handler(BaseHTTPRequestHandler):
                     client_gone = True
             except ConnectionError:
                 client_gone = True
+            except Exception as exc:
+                # Any other mid-stream failure — a socket timeout (TimeoutError
+                # is NOT a ConnectionError), a surrogate token that fails the
+                # SSE UTF-8 encode, an unexpected backend error type — must not
+                # propagate to _dispatch(): the SSE headers are already
+                # committed, so its 500 write would inject a second status
+                # line into the stream body, and unwinding would skip the
+                # persist below, orphaning the user turn exactly like the
+                # disconnect paths above are built to prevent.
+                print(
+                    f"stream failed mid-SSE: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                try:
+                    if isinstance(exc, (StoreError, IngestError)):
+                        self._sse("error", {"code": exc.code, "message": str(exc)})
+                    else:
+                        self._sse(
+                            "error",
+                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
+                        )
+                except Exception:
+                    # The error frame couldn't reach the client either —
+                    # nothing more to send; the persist below still runs.
+                    client_gone = True
             full = "".join(parts)
             report = make_report(
                 full,

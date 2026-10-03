@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.591
+## Version History: v0.1.37 → v0.2.592
+
+### v0.2.592
+- `server.py` `_h_ask_sse`のストリームブロックへ`except Exception`ガード追加: socket timeout（TimeoutErrorはConnectionError非包含）・サロゲートtokenのUTF-8 encode失敗・予期しないバックエンド例外が、SSEヘッダ確定後に`_dispatch`の500経路へ逸脱し、第二ステータス行をstream本文へ混入させる＋assistant永続化をskipしてuser turnを孤立化させる2系統の欠陥を閉塞。build_context経路と同じcoded-vs-generic方針でerror frameを送出し、frame送出自体が失敗した場合のみclient_gone化——いずれにせよpersistは必ず実行
+- 行動ピン2件: `test_stream_timeout_still_persists_assistant_row`——TimeoutError注入でHTTP/1.0 500の混入なし＋error/done frame＋部分assistant永続化を固定（旧コードでfail確認）、`test_stream_error_frame_failure_still_persists`——error frame送出自体の失敗→client_gone昇格でdone抑止＋persist維持を固定
+- カタログ追随: `except Exception`+2サイト→server.py 9/計16サイト、exceptハンドラ在庫、spec.md件数を更新
 
 ### v0.2.591
 - replace_chunks_for_source title validation parity: its sha256/title metadata path truncated to MAX_TITLE_LEN but skipped the strip+reject-empty contract the other three title writers (add_source / update_source_title / update_source_sha256) enforce — a whitespace-only or "" title persisted where the rename path itself refuses to write one. The title is now normalized up front (before any chunk is touched) and empty-after-strip raises VALIDATION_REQUIRED_FIELD_MISSING, matching the sibling contract. Fail-direction verified (whitespace title accepted on the old code).

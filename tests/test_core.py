@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.591")
+        self.assertEqual(VERSION, "0.2.592")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13521,7 +13521,7 @@ class TestCitationCoverageTail(unittest.TestCase):
 # test_doc_catalog_counts_match_spec to compare without duplicating them.
 _EXCEPT_CATALOG = {
     "ingest.py": 4,
-    "server.py": 7,
+    "server.py": 9,
     "cli.py": 1,
     "pipeline.py": 2,
 }
@@ -17101,6 +17101,7 @@ class TestResidualGuards(unittest.TestCase):
                 "ConnectionError",
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
+                "Exception", "Exception",
                 "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
                 "UnicodeEncodeError",
