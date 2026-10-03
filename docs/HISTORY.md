@@ -29,7 +29,25 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.556
+## Version History: v0.1.37 → v0.2.557
+
+### v0.2.557
+- add_source() strips + rejects blank titles: the ingest-path writer
+  truncated titles to MAX_TITLE_LEN but never stripped or validated
+  them, while update_source_title() (PATCH rename) and
+  update_source_sha256() (refresh) both strip and reject empty titles
+  with VALIDATION_REQUIRED_FIELD_MISSING. A whitespace title could
+  therefore be inserted via the ingest path — a caller-supplied
+  title= or a whitespace X-Filename on upload — persisting a blank
+  title the rename path itself refuses to write (blank in the source
+  list, blank TI in RIS export, degraded _chunk_context). add_source
+  now applies the identical strip+reject, and _h_src_upload extends
+  its sanitize chain with .strip() so a whitespace filename falls
+  back to "upload.txt" like the empty-name case. Pins:
+  test_add_source_rejects_blank_title (store, 3 blank shapes),
+  test_add_source_strips_title ("  report.pdf  " → "report.pdf"),
+  test_upload_whitespace_filename_falls_back (e2e). Fail-direction:
+  all three fail on the old code — '   ' was persisted verbatim.
 
 ### v0.2.556
 - vector_search drops non-positive cosines: heapq.nlargest() fills its
