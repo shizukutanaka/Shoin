@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.544")
+        self.assertEqual(VERSION, "0.2.545")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -12749,6 +12749,29 @@ class TestResidualGuards(unittest.TestCase):
                 return "1. x\n2. 別の言い換えです\n別の言い換えです"
 
         self.assertEqual(rewrite_queries(_Stub(), "元の質問"), ["別の言い換えです"])  # type: ignore[arg-type]
+
+    def test_rewrite_queries_dedups_variant_spellings(self) -> None:
+        """v0.2.545: a rewrite differing only in orthography retrieves the
+        identical chunk set (term_variants bridges spelling) — keeping it
+        spends a MULTI_QUERY_REWRITES slot on zero vocabulary diversity."""
+        from shoin.qa import rewrite_queries
+
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return (
+                    "データ設計はどう進めるか\n"
+                    "でーた設計はどう進めるか\n"
+                    "café の要点は何か\n"
+                    "cafe の要点は何か\n"
+                    "実装手順の確認点は何か"
+                )
+
+        self.assertEqual(
+            rewrite_queries(_Stub(), "データ設計はどう進めるか"),  # type: ignore[arg-type]
+            ["café の要点は何か", "実装手順の確認点は何か"],
+        )
 
     def test_degraded_text_caps_at_three_sources(self) -> None:
         """The degraded fallback enumerates at most 3 sources — a fourth must

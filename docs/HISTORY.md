@@ -132,7 +132,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   One e2e pin (folded gram evidence surfaces a doc no literal gram
   reached) + fail-direction.
 
-## Version History: v0.1.37 → v0.2.544
+### v0.2.545
+- Dedup keys fold orthography in rewrite_queries and suggest_questions:
+  both compared lines under NFKC + casefold, so a rewrite 'データ設計…'
+  vs 'でーた設計…' survived dedup and spent a MULTI_QUERY_REWRITES
+  slot retrieving the identical chunk set (term_variants already
+  bridges the spelling), and suggest chips differing only in kana /
+  accent / digit-row orthography rendered as duplicates.  Both sites
+  now key on _match_fold — one line per canonical content.  Two pins
+  (rewrite slot + chip e2e) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.545
 
 ### v0.2.534
 

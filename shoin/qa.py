@@ -17,7 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, estimate_tokens, is_cjk
+from .chunk import _LONG_RUN_THRESHOLD, _is_word_char, _match_fold, estimate_tokens, is_cjk
 from .citation import CitationReport, make_report
 from .config import (
     EMBED_MODEL_SETTING_KEY,
@@ -603,13 +603,17 @@ def rewrite_queries(
         )
     except LLMError:
         return []
-    seen = {unicodedata.normalize("NFKC", question).strip().casefold()}
+    seen = {_match_fold(question.strip())}
     out: list[str] = []
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
         if len(q) < 2:
             continue
-        key = q.casefold()
+        # Folded dedup (v0.2.545): a rewrite differing only in orthography
+        # (データ vs でーた, café vs cafe) retrieves the identical chunk set —
+        # term_variants bridges that spelling at search time — so keeping it
+        # wastes a rewrite slot on zero vocabulary diversity.
+        key = _match_fold(q)
         if key in seen:
             continue
         seen.add(key)

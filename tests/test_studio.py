@@ -158,6 +158,16 @@ class StudioTest(unittest.TestCase):
         qs = suggest_questions(self.store, llm, self.nb)
         self.assertEqual(qs, ["良い質問か?", "別の質問か?"])
 
+    def test_suggest_questions_dedups_variant_spellings(self) -> None:
+        """v0.2.545: chips that differ only in orthography (kana spelling,
+        accents, digit rows) answer identically — term_variants bridges
+        that spelling at ask time — so showing both is a duplicate chip."""
+        llm = FakeLLM(
+            reply="データ設計はどうか?\nでーた設計はどうか?\ncafé の要点は何か?\ncafe の要点は何か?"
+        )
+        qs = suggest_questions(self.store, llm, self.nb)
+        self.assertEqual(qs, ["データ設計はどうか?", "café の要点は何か?"])
+
     def test_suggest_questions_accepts_ka_with_trailing_period(self) -> None:
         """LLMs often append 。 even with 'no decoration' instructions — must not drop."""
         llm = FakeLLM(reply="この書院はどう動くのか。\n内容について説明します。")

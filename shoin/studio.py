@@ -12,6 +12,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
+from .chunk import _match_fold
 from .citation import CitationReport, looks_like_question, make_report
 from .config import MAX_QUESTION_LEN, ui_lang
 from .llm import LLMError
@@ -254,12 +255,15 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     seen: set[str] = set()
     for line in text.splitlines():
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
+        # Folded dedup key (v0.2.545): データ設計は? / でーた設計は? render as
+        # two chips that would answer identically.
+        key = _match_fold(q)
         if (
             len(q) >= 2
             and len(q) <= MAX_QUESTION_LEN
             and looks_like_question(q)
-            and q not in seen
+            and key not in seen
         ):
-            seen.add(q)
+            seen.add(key)
             questions.append(q)
     return questions[:n]
