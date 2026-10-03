@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.554
+## Version History: v0.1.37 → v0.2.555
+
+### v0.2.555
+- Ledger sync (recurring): product-review.md gains the v0.2.531-554
+  summary block — the orthography-folding arc's completion (comparison
+  surfaces unified onto _match_fold/_digit_fold canonical forms:
+  rerank lexical overlap, citation checks, numeric check, MMR
+  redundancy, PRF counting, rewrite/suggest dedup, degenerate_spans)
+  plus the boundary residual fixes (word-char edges, script sentence
+  terminators, digit rows, accent fold, English stems, negation
+  bridging, negation-only queries), two meta-guard pins (text-I/O
+  encoding, env/process-global centralization), three contract-symmetry
+  fixes (eval missing ids, overview equal budgets, list-cmd NOT_FOUND),
+  and the bubbled-keydown UI fix. Header version and test-count
+  markers follow (1199 tests); spec.md's measured row tracks the
+  same count and the 4 uncovered lines.
 
 ### v0.2.554
 - Row keydown handlers fire only when the row itself is the event target:
