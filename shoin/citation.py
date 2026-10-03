@@ -97,11 +97,34 @@ COVERAGE_LOW = 0.5
 _DISCLAIMER_MARKERS = (
     "記載なし",
     "記載がない",
+    "記載がありませ",
+    "記載はありませ",
     "記載は見当たら",
-    "見つかりませんでした",
+    "言及がありませ",
+    "言及はありませ",
+    "記述がありませ",
+    "記述はありませ",
+    "記述されていませ",
+    "情報がありませ",
+    "明記されていませ",
+    "述べられていませ",
+    "記されていませ",
+    "確認できませ",
+    "見つかりませ",
     "not in the source",
     "not mentioned",
     "not found in the source",
+    "not stated",
+    "not described",
+    "not specified",
+    "not documented",
+    "not provided",
+    "not covered",
+    "no information",
+    "isn't mentioned",
+    "aren't mentioned",
+    "does not mention",
+    "doesn't mention",
 )
 
 # Framing sentences describe the answer's own structure ("以下に要点を示します",
@@ -1812,7 +1835,7 @@ def uncited_sentences(text: str) -> list[str]:
             continue  # enumeration item covered by the cited lead-in
         if not has_claim:
             continue  # too short/trivial to carry a claim worth flagging
-        if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
+        if any(marker in sentence.casefold() for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
         if _FRAMING_RE.match(bare):
             continue  # describes the answer's structure, not source content

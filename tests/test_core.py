@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.578")
+        self.assertEqual(VERSION, "0.2.579")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7910,6 +7910,41 @@ class TestUncitedSentences(unittest.TestCase):
             uncited_sentences("先行情報だ。[S1]によれば中間文だ。"),
             ["先行情報だ。"],
         )
+    def test_disclaimer_negation_shapes_stay_silent(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "not in the source" said the way LLMs actually write it — these are
+        # the correct response to missing information, not uncovered claims.
+        for t in (
+            "ソースに記載がありません。",
+            "詳細な記載はありません。",
+            "言及がありません。",
+            "記述されていません。",
+            "情報がありません。",
+            "明記されていません。",
+            "確認できません。",
+            "The source does not mention it.",
+            "No information is available.",
+        ):
+            self.assertEqual(uncited_sentences(t), [], t)
+
+    def test_negation_claims_without_domain_noun_still_flag(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # The disclaimer stems require a document-domain noun (記載/言及/記述
+        # etc.) — a plain negation claim keeps flagging.
+        for t in ("効果はありません。", "問題はありません。", "結果は変わりませんでした。"):
+            self.assertNotEqual(uncited_sentences(t), [], t)
+
+    def test_disclaimer_tail_after_citation_stays_silent(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A disclaimer as the uncovered tail of a cited fragment is still a
+        # disclaimer — the tail evaluation must not turn it into a claim.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、ソースに記載がありません。"),
+            [],
+        )
 
 class TestStoreChunksForSource(unittest.TestCase):
     def test_chunks_for_source_returns_correct_chunks(self) -> None:
@@ -13165,9 +13200,9 @@ _EXCEPT_CATALOG = {
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
-    "citation.py:542", "citation.py:546", "citation.py:558",
-    "citation.py:559", "citation.py:596", "citation.py:609",
-    "citation.py:996", "citation.py:1379", "citation.py:1595",
+    "citation.py:565", "citation.py:569", "citation.py:581",
+    "citation.py:582", "citation.py:619", "citation.py:632",
+    "citation.py:1019", "citation.py:1402", "citation.py:1618",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18328,7 +18363,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [542, 546, 558, 559, 609, 996, 1379, 1595],
+            "citation.py": [565, 569, 581, 582, 632, 1019, 1402, 1618],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

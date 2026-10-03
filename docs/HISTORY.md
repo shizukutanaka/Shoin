@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.578
+## Version History: v0.1.37 → v0.2.579
+
+### v0.2.579
+- _DISCLAIMER_MARKERS coverage: the tuple only matched 6 exact substrings, so the canonical "not in the source" phrasings LLMs actually emit — 記載がありません / 言及がありません / 記述されていません / 情報がありません / 確認できません / does not mention / not stated / no information — were flagged as unsupported assertions, the exact class the check exists NOT to flag (a disclaimer is the correct answer to missing facts). Stems (…ませ / noun phrases) cover ません・ませんでした both, the substring check casefolds so sentence-initial capitals match, and a domain noun is still required so real negation claims ("効果はありません") keep flagging. Fail-direction verified on both new pins.
 
 ### v0.2.578
 - uncited_sentences: evaluate the claim surface after the LAST citation marker in a fragment ("claimA [S1] claimB" — claimB was invisible when the fragment carried any marker, since every marker owns only the segment before it). The uncovered tail pends like any claim, so a later citation-only fragment still resolves it; a forward-bound leading run keeps covering its bound text; clause joiners are stripped before the claim-length gate. Pins: mid-fragment tail flag, tail resolution, forward-bound coverage — fail-direction verified.
