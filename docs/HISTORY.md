@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.560
+## Version History: v0.1.37 → v0.2.561
+
+### v0.2.561
+- meta-pin: the doc sync markers in spec.md (`実装 vX.Y.Z 時点に同期`)
+  and product-review.md (`vX.Y.Z 時点`) may lag VERSION by design
+  (periodic sync) but must never name a version above it — a marker
+  claiming an unshipped release would silently falsify the doc's
+  verification claim. `test_doc_sync_markers_never_exceed_version`
+  pins the upper bound; fail-direction verified against a v0.2.999
+  marker. Doc claims audited this cycle and found accurate:
+  Plan.md (design provenance), SECURITY.md (loopback bind, SSRF
+  notes), docs/faq.md (data dir, formats, BM25-only mode),
+  docs/adr/ADR-001 (DNS pinning), and every store.py write verb
+  (notebook/source/note names strip + reject + bound symmetrically).
 
 ### v0.2.560
 - spec.md synced to the implementation: header marker v0.2.517 →

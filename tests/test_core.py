@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.560")
+        self.assertEqual(VERSION, "0.2.561")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13756,6 +13756,35 @@ class TestResidualGuards(unittest.TestCase):
             "CLAUDE.md's Current version marker drifted — "
             "the bump ritual missed the developer guide",
         )
+
+    def test_doc_sync_markers_never_exceed_version(self) -> None:
+        """spec.md and product-review.md sync on a deliberate lag — their
+        header markers name the implementation version they were verified
+        against, not VERSION (that is why they may sit behind it: spec.md
+        once drifted to v0.2.517 before a sync caught up). What they may
+        never do is claim a version ABOVE the shipped one — a typo'd or
+        hand-edited marker that reads like a newer release would silently
+        falsify the doc's verification claim."""
+        from shoin.config import VERSION
+
+        cur = tuple(int(p) for p in VERSION.split("."))
+        root = Path(__file__).resolve().parent.parent
+
+        spec = (root / "docs" / "spec.md").read_text(encoding="utf-8")
+        m = re.search(r"実装 v?(\d+)\.(\d+)\.(\d+) 時点に同期", spec)
+        if m is None:
+            self.fail("spec.md lost its '実装 vX.Y.Z 時点に同期' marker")
+        spec_v = tuple(int(g) for g in m.groups())
+        self.assertLessEqual(spec_v, cur,
+                           "spec.md claims sync to a future version")
+
+        review = (root / "docs" / "product-review.md").read_text(encoding="utf-8")
+        m2 = re.search(r"v(\d+)\.(\d+)\.(\d+) 時点", review)
+        if m2 is None:
+            self.fail("product-review.md lost its 'vX.Y.Z 時点' marker")
+        review_v = tuple(int(g) for g in m2.groups())
+        self.assertLessEqual(review_v, cur,
+                             "product-review.md claims a future version")
 
     def test_sql_literals_stay_interpolation_free(self) -> None:
         """User-controlled strings (notebook names, source titles,
