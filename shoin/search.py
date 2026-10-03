@@ -951,7 +951,11 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
     (the codebase's existing LIKE/FTS granularity); ASCII candidates are whole
     words >= 3 chars, matching fts_query's whole-term threshold.  Exclusion
     uses each gram's full spelling-variant set, so a katakana gram in the docs
-    is not re-added against a hiragana query (and vice-versa).
+    is not re-added against a hiragana query (and vice-versa).  Doc-frequency
+    counts by the FOLDED gram (v0.2.544): データベース in one feedback hit
+    and でーたべーす in another is one topical term — literal keys split the
+    evidence across spellings, dropping a term both docs share below
+    PRF_MIN_DOCS and listing variant grams of it twice.
     """
     docs = hits[:PRF_DOCS]
     if len(docs) < PRF_MIN_DOCS:
@@ -959,6 +963,7 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
     norm_q = unicodedata.normalize("NFKC", query).casefold()
     query_vocab = {v.casefold() for t in query_terms(query) for v in term_variants(t)}
     counts: dict[str, int] = {}
+    reps: dict[str, str] = {}
     for h in docs:
         seen_in_doc: set[str] = set()
         for term in query_terms(f"{h.text} {h.context}"):
@@ -968,18 +973,20 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
             elif len(term) >= 3:
                 seen_in_doc.add(term.casefold())
         for g in seen_in_doc:
-            counts[g] = counts.get(g, 0) + 1
+            kf = _match_fold(g)
+            counts[kf] = counts.get(kf, 0) + 1
+            reps.setdefault(kf, g)
     cands = [
-        g
-        for g, c in counts.items()
+        reps[kf]
+        for kf, c in counts.items()
         if c >= PRF_MIN_DOCS
         and all(
             v.casefold() not in query_vocab and v.casefold() not in norm_q
-            for v in term_variants(g)
+            for v in term_variants(reps[kf])
         )
     ]
     # df desc, longer grams first (more specific), then text — deterministic.
-    cands.sort(key=lambda g: (-counts[g], -len(g), g))
+    cands.sort(key=lambda g: (-counts[_match_fold(g)], -len(g), g))
     return cands[:PRF_TERMS]
 
 

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.543")
+        self.assertEqual(VERSION, "0.2.544")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -4502,6 +4502,29 @@ class TestSearch(unittest.TestCase):
             untagged = [h for h in hits if not h.detail.get("exp")]
             self.assertTrue(untagged)
             self.assertTrue(all("書院" in h.text for h in untagged))
+
+    def test_prf_counts_variant_spellings_as_one_term(self) -> None:
+        """v0.2.544: the MIN_DOCS gate counts folded grams — a topical term
+        spelled データベース in one feedback hit and でーたべーす in another
+        is ONE term, not two half-evidences that both starve below the
+        gate."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-fold").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["猫の観察メモ。データベース設計の要点も記す。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["猫の飼育記録。でーたべーす正規化の話題あり。"])
+            b = s.add_source(nb_id, "txt", "b", "mem://b", "sha-b")
+            s.add_chunks(b.id, ["データベース移行の手順書。"])
+
+            base = bm25_search(s, nb_id, "猫", k=5)
+            self.assertFalse(any("移行" in h.text for h in base))
+            hits = bm25_prf_search(s, nb_id, "猫", k=5)
+            self.assertTrue(
+                any("移行" in h.text for h in hits),
+                "folded gram evidence must surface the topical doc")
 
     def test_prf_skips_when_fewer_than_min_feedback_docs(self) -> None:
         """Fewer than PRF_MIN_DOCS feedback hits means no expansion evidence —

@@ -120,7 +120,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   One pin (dup-vs-diverse selection + accent/digit sim probe) +
   fail-direction.
 
-## Version History: v0.1.37 → v0.2.543
+### v0.2.544
+- _prf_terms counts doc-frequency by the FOLDED gram: a topical term
+  spelled データベース in one feedback hit and でーたべーす in another
+  split its evidence across literal keys — each variant gram counted 1
+  doc, starved below PRF_MIN_DOCS, and was never proposed (or two
+  variant grams of one term each passed and burned two PRF_TERMS
+  slots).  counts/reps are now keyed by _match_fold, with the
+  first-seen spelling kept as the proposed representative — any
+  rep retrieves every variant when the expanded query is re-searched.
+  One e2e pin (folded gram evidence surfaces a doc no literal gram
+  reached) + fail-direction.
+
+## Version History: v0.1.37 → v0.2.544
 
 ### v0.2.534
 
