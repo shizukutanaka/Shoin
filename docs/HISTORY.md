@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.532
+## Version History: v0.1.37 → v0.2.533
+
+### v0.2.533
+
+- _SENTENCE_SPLIT_RE learned the terminators of the scripts v0.2.529
+  made word characters: ।॥ danda, ။ Myanmar, ។ Khmer, །༎ Tibetan,
+  ۔ Urdu/Arabic stop, ؟ Arabic question, ።፧፨ Ethiopic, ᠃ Mongolian,
+  ： Armenian, ׃ Hebrew sof pasuq.  Without them a Hindi/Urdu/
+  Amharic paragraph was one giant "sentence" — _hard_split cut at an
+  arbitrary character window and every sentence-iterating citation
+  check (uncited/negation/degen/self-contradiction) saw the whole
+  paragraph as a single unit.  All unambiguous terminators, so they
+  sit in the no-space-guard branch beside 。 (ASCII '.' still needs
+  its space — '3.14' must not split).
+- `test_sentence_split_indic_and_alphabetic_terminators` pins all
+  eleven script families; verified the fail direction on the
+  pre-change regex (every case stays one sentence).
 
 ### v0.2.532
 

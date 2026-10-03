@@ -139,7 +139,17 @@ _HEADING_RE = re.compile(r"^#{1,6}\s")
 # saw one giant "sentence" whose diluted bigram overlap hid unsupported claims.
 # (The other terminators need no halfwidth twin: ！？ fold to the ASCII !? already
 # in the class, and ． 's halfwidth is ASCII . handled by the (?<=\.)(?=\s) branch.)
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？!?\n；｡])|(?<=\.)(?=\s)")
+# v0.2.533: the scripts v0.2.529 made word characters carry their own
+# terminators, and without them a Hindi or Urdu paragraph is one giant
+# "sentence" — the same width-blind failure ｡ had, one script family wider:
+# ।॥ danda (Devanagari & friends), ။ Myanmar section, ។ Khmer khan,
+# །༎ Tibetan shad/nyis shad, 。 Urdu/Arabic full stop, ؟ Arabic question,
+# ።፧፨ Ethiopic full stop/question/paragraph, ᠃ Mongolian full stop,
+# ։ Armenian full stop, ׃ Hebrew sof pasuq.  Each is unambiguous like 。
+# (unlike ASCII '.', no space-guard needed — none appears mid-number).
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<=[。．！？!?\n；｡।॥။។།༎۔؟።፧፨᠃։׃])|(?<=\.)(?=\s)"
+)
 # A genuine ATX heading closing sequence per CommonMark: one or more '#'
 # preceded by at least one space, with optional trailing spaces only
 # (e.g. "## Heading ##" -> the " ##" suffix). Requiring the preceding space

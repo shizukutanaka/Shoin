@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.532")
+        self.assertEqual(VERSION, "0.2.533")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2322,6 +2322,30 @@ class TestChunk(unittest.TestCase):
         parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
         self.assertGreater(len(parts), 1)
         self.assertEqual(parts[0], "これは文章一。")
+
+    def test_sentence_split_indic_and_alphabetic_terminators(self) -> None:
+        """v0.2.533: the scripts v0.2.529 made word characters carry their own
+        sentence terminators.  Without them in the split class a Hindi or Urdu
+        paragraph is one giant "sentence" — the same width-blind failure ｡
+        had — so _hard_split cuts mid-sentence and every citation check that
+        iterates sentences (uncited/negation/degen/contra) sees the whole
+        paragraph as one unit."""
+        cases = [
+            "यह पहला वाक्य है। यह दूसरा वाक्य है।",   # Devanagari danda
+            "यह एक है॥ दो॥",                          # double danda
+            "ဒါက ပထမ။ ဒါက ဒုတိယ။",                  # Myanmar section
+            "នេះជាមួយ។ នេះពីរ។",                  # Khmer khan
+            "དེ་ལྟར། གཉིས།",                        # Tibetan shad
+            "یہ پہلا ہے۔ یہ دوسرا ہے۔",               # Urdu/Arabic full stop
+            "क्या यह ठीक है؟ हाँ।",                   # Arabic question mark
+            "ሰላም። ምን እንደሆነ፧",                      # Ethiopic stop/question
+            "ᠮᠣᠩᠭᠣᠯ᠃ ᠬᠣᠶᠠᠷ᠃",                    # Mongolian full stop
+            "այո։ երկու։",                            # Armenian full stop
+            "כן׃ שתיים׃",                            # Hebrew sof pasuq
+        ]
+        for text in cases:
+            parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+            self.assertGreater(len(parts), 1, f"unsplit: {text!r}")
 
     def test_sentence_split_no_split_on_decimal(self) -> None:
         """A decimal number like 3.14 must not trigger a sentence split (no space after dot)."""
@@ -14467,7 +14491,7 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:197",
+            "chunk.py:207",
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
@@ -17120,7 +17144,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [197],
+            "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
             "search.py": [65, 804],
         }
