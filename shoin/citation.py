@@ -1181,7 +1181,10 @@ def quote_mismatches(
 # not/never/no/neither/nor/without + the n't contraction.
 _NEG_JP_RUN = re.compile(r"ない|なかっ|なく|ません|未|不|無")
 _NEG_EN_RE = re.compile(
-    r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b",
+    # n['’]t: straight AND curly apostrophes — NFKC does not fold U+2019, so
+    # "can’t" (typographically correct LLM output) read as non-negated before
+    # v0.2.547.  \bcannot\b: \bnot\b never fires inside the fused form.
+    r"n['’]t|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b|\bcannot\b",
     re.IGNORECASE,
 )
 # Contrastive-negation constructions are agreement, not contradiction:

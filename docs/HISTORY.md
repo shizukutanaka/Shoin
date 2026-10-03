@@ -152,7 +152,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   span regex input) now fold.  Two pins (alternating loop flags,
   distinct content stays silent) + fail-direction.
 
-## Version History: v0.1.37 → v0.2.546
+### v0.2.547
+- _NEG_EN_RE covers 'cannot' and curly-quote contractions: \bnot\b
+  never fires inside the fused 'cannot' and NFKC does not fold
+  U+2019, so "the feature cannot process" and "it doesn’t scale"
+  both read parity 0 — can↔cannot and do↔don’t polarity flips were
+  invisible to negation_mismatches AND self_contradictions (shared
+  _neg_parity).  Now n['’]t and \bcannot\b count.  Three pins +
+  fail-direction; quote-doctored overlap pin added for the already-
+  folded _bigrams contract.
+
+## Version History: v0.1.37 → v0.2.547
 
 ### v0.2.534
 

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.546")
+        self.assertEqual(VERSION, "0.2.547")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -6731,6 +6731,27 @@ class TestQuoteMismatches(unittest.TestCase):
         text = "「重要な設計原理」が鍵だ[S1]。"  # 8 chars, near-miss of 原則 — silent
         self.assertEqual(quote_mismatches(text, sources), [])
 
+    def test_orthography_respelled_quote_flagged(self) -> None:
+        """A quote respelled in a different orthography ('すきーま' for the
+        source's 'スキーマ') is still a misquote — it asserts wording the
+        source never wrote. Verbatim containment correctly fails; the doctored
+        path's _bigrams fold orthography (v0.2.540), so the respelling
+        converges to ~full overlap and flags. Pins that contract."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "仕様はデータベーススキーマの自動移行を定めている。"}
+        text = "出典は「でーたべーすすきーまの自動移行」と明記している[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [1])
+
+    def test_verbatim_quote_still_unflagged(self) -> None:
+        """The exact-wording contract is unchanged: a truly verbatim span
+        remains a correct quote, never a doctored one."""
+        from shoin.citation import quote_mismatches
+
+        sources = {1: "データベース設計指針は冗長性を排除する原則に基づく。"}
+        text = "出典は「データベース設計指針は冗長性を排除する原則に基づく」と明記している[S1]。"
+        self.assertEqual(quote_mismatches(text, sources), [])
+
     def test_trailing_citation_fragment_inherits_claim(self) -> None:
         """"Claim. [S1]" splits to a citation-only fragment — the previous
         sentence's quotes are still checked against it."""
@@ -6818,6 +6839,24 @@ class TestNegationMismatches(unittest.TestCase):
 
         sources = {1: "the treatment does improve survival rates."}
         text = "the treatment does not improve survival rates [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_english_cannot_counts_as_negation(self) -> None:
+        """v0.2.547: 'cannot' is the fused negative — \bnot\b never fires
+        inside it, so a can/cannot polarity flip was invisible."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "the feature can process large datasets."}
+        text = "the feature cannot process large datasets [S1]."
+        self.assertEqual(negation_mismatches(text, sources), [1])
+
+    def test_english_curly_apostrophe_contraction_counts(self) -> None:
+        """v0.2.547: typographically correct LLM output uses U+2019 — NFKC
+        never folds it, so "doesn’t" read as non-negated before."""
+        from shoin.citation import negation_mismatches
+
+        sources = {1: "it does scale well."}
+        text = "it doesn\u2019t scale well [S1]."
         self.assertEqual(negation_mismatches(text, sources), [1])
 
     def test_low_overlap_claim_stays_silent(self) -> None:
@@ -14872,8 +14911,8 @@ class TestResidualGuards(unittest.TestCase):
         expected_dyn = {
             "chunk.py:208",
             "citation.py:526", "citation.py:530", "citation.py:567",
-            "citation.py:580", "citation.py:892", "citation.py:1268",
-            "citation.py:1473",
+            "citation.py:580", "citation.py:892", "citation.py:1271",
+            "citation.py:1476",
             "search.py:72", "search.py:907",
         }
         for loc in sorted(set(dyn) - expected_dyn):
@@ -17524,7 +17563,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [526, 530, 580, 892, 1268, 1473],
+            "citation.py": [526, 530, 580, 892, 1271, 1476],
             "search.py": [72, 907],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
