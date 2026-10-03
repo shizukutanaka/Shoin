@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.594")
+        self.assertEqual(VERSION, "0.2.595")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13706,6 +13706,39 @@ class TestResidualGuards(unittest.TestCase):
         rep, _ = report_from_dict({"cases": [base_case], "recall": 1.0, "mrr": 1.0})
         self.assertEqual(rep.cases[0].expected, [1])
 
+    def test_report_from_dict_rejects_nonfinite_and_bool_numbers(self) -> None:
+        """Python's json module decodes the non-standard literals NaN/Infinity
+        and bool IS an int — so {"recall": NaN}, {"rr": true} or {"k": NaN}
+        all passed the old isinstance check and either silently poisoned the
+        diff arithmetic (nan deltas) or crashed int(NaN) with a bare
+        ValueError. Every numeric field must refuse non-finite/bool values."""
+        import math
+
+        from shoin.evaluate import report_from_dict
+
+        case = {"q": "a", "expected": [1], "retrieved": [1],
+                "recall": 1.0, "rr": 1.0}
+        good = {"cases": [case], "recall": 1.0, "mrr": 1.0}
+        nan, inf, t, f = math.nan, math.inf, True, False
+        for bad in (
+            dict(good, recall=nan), dict(good, recall=inf), dict(good, recall=t),
+            dict(good, mrr=nan), dict(good, mrr=f),
+            dict(good, k=nan), dict(good, k=inf), dict(good, k=t), dict(good, k="8"),
+            dict(good, cases=[dict(case, recall=nan)]),
+            dict(good, cases=[dict(case, recall=inf)]),
+            dict(good, cases=[dict(case, recall=t)]),
+            dict(good, cases=[dict(case, rr=nan)]),
+            dict(good, cases=[dict(case, rr=inf)]),
+            dict(good, cases=[dict(case, rr=f)]),
+        ):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                report_from_dict(bad)
+        # Finite numbers (including absent k) still parse.
+        rep, k = report_from_dict(good)
+        self.assertIsNone(k)
+        rep, k = report_from_dict(dict(good, k=8))
+        self.assertEqual(k, 8)
+
     def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
         """--save → --diff fidelity: every field report_to_dict writes must be
         read back identically by report_from_dict. A writer/reader key or dtype
@@ -17294,7 +17327,7 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
             ],
-            "evaluate.py": ["ValueError"] * 13,
+            "evaluate.py": ["ValueError"] * 14,
             "export.py": ["ValueError"],
             "ingest.py": ["IngestError"] * 25 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],

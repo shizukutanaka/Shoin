@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.594
+## Version History: v0.1.37 → v0.2.595
+
+### v0.2.595
+- `evaluate.py` `report_from_dict`の数値フィールドを有限値+非boolへ矯正: Pythonの`json.loads`は非標準リテラル`NaN`/`Infinity`/`-Infinity`を受理し、boolはint subclass——`isinstance(x,(int,float))`検査だけでは手編集ベースラインの`{"recall":NaN}`/`{"rr":true}`/`{"k":NaN}`が通過し、NaNがdiff算術へ沈黙伝搬（`d_recall:nan`/`rr_after:inf`がdiff表示へ混入）あるいは`int(NaN)`の生ValueErrorでクラッシュ。`_bad_num`ヘルパーで4フィールド全てを「有限の数値かつ非bool」へ統一——同関数のrefuse-loudly契約（silently-dropped caseは捏造deltaを生む）への違反を閉塞
+- 行動ピン: `test_report_from_dict_rejects_nonfinite_and_bool_numbers`——NaN/Inf/bool/stringを14形状で拒否、有限値とk欠落は受理維持（旧コードでfail確認）
+- カタログ追随: raise在庫evaluate.py ValueError 13→14
 
 ### v0.2.594
 - `llm.py`のRequest構築をtry内へ統一: `available()`で修復済みの「Request()コンストラクタがurlsplit経由でValueErrorを投げる」欠陥が`_post`/`chat_stream`に未移植——unclosed IPv6ブラケット等のmalformed base_url（`http://[::1:11434/v1`という実在タイポ形状）がchat/chat_stream/embed全経路で生ValueErrorとして漏出し、CLI traceback/server generic-500経路へ逸脱。全経路が`available()`と同じ`SYSTEM_SERVICE_UNAVAILABLE`グレースフル劣化へ写像するよう統一

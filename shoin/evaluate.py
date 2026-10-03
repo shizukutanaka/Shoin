@@ -20,6 +20,7 @@ same principle as citation.py: report what is directly measurable, nothing more.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -246,8 +247,18 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
             not isinstance(q, str)
             or not isinstance(exp, list)
             or not isinstance(got, list)
+            # Python's json module decodes the non-standard NaN/Infinity
+            # literals, and bool is an int subclass — a plain isinstance
+            # check lets {"recall": NaN} or {"rr": true} through, where NaN
+            # then propagates silently through the diff arithmetic. The
+            # finite+non-bool conditions must stay inline so mypy narrows
+            # rec/rr for the float() calls below.
             or not isinstance(rec, (int, float))
+            or isinstance(rec, bool)
+            or not math.isfinite(float(rec))
             or not isinstance(rr, (int, float))
+            or isinstance(rr, bool)
+            or not math.isfinite(float(rr))
             or not isinstance(miss, list)
             # Element types checked like parse_cases' source ids — and like the
             # `missing` check right above (bool excluded: it is an int subclass
@@ -261,12 +272,25 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
         cases.append(CaseResult(q, exp, got, float(rec), float(rr), list(miss)))
     rec_all = data.get("recall")
     mrr_all = data.get("mrr")
-    if not isinstance(rec_all, (int, float)) or not isinstance(mrr_all, (int, float)):
+    if (
+        not isinstance(rec_all, (int, float))
+        or isinstance(rec_all, bool)
+        or not math.isfinite(float(rec_all))
+        or not isinstance(mrr_all, (int, float))
+        or isinstance(mrr_all, bool)
+        or not math.isfinite(float(mrr_all))
+    ):
         raise ValueError("baseline file has missing or non-numeric recall/mrr")
     k_raw = data.get("k")
+    if k_raw is not None and (
+        not isinstance(k_raw, (int, float))
+        or isinstance(k_raw, bool)
+        or not math.isfinite(float(k_raw))
+    ):
+        raise ValueError("baseline file has a malformed 'k'")
     return (
         EvalReport(cases=cases, recall=float(rec_all), mrr=float(mrr_all)),
-        int(k_raw) if isinstance(k_raw, (int, float)) else None,
+        int(k_raw) if k_raw is not None else None,
     )
 
 
