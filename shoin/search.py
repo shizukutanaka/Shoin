@@ -52,8 +52,19 @@ _CJK_NEG_CLASS = "".join(f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES)
 _CJK_WORD_NEG_CLASS = "".join(
     f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _CJK_RANGES if (lo, hi) != (0x3000, 0x303F)
 )
+# Every dash a keyboard or IME can emit, not just ASCII '-': the
+# U+2010-2015 dash family (hyphen, non-breaking hyphen, figure/en/em
+# dashes, horizontal bar), U+2212 minus sign, U+FE63 small
+# hyphen-minus and U+FF0D fullwidth hyphen-minus — the two most
+# common fullwidth-IME outputs for '-'. 'ー'/'ｰ' are deliberately
+# absent: prolonged-sound marks are CJK word characters (スーパー,
+# ｼﾞｰｸ), so treating them as negation syntax would misparse real
+# terms.  Before this, '猫 −犬' negated nothing and POSITIVELY
+# searched 犬 — the exact opposite of the user's exclusion.
+_NEG_DASHES = "\\-‐-―−﹣－"
 _NEG_RE = re.compile(
-    rf"(?<![A-Za-z0-9_])(?<![{_CJK_WORD_NEG_CLASS}])-([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)"
+    rf"(?<![A-Za-z0-9_])(?<![{_CJK_WORD_NEG_CLASS}])"
+    rf"[{_NEG_DASHES}]([A-Za-z0-9_]+|[{_CJK_NEG_CLASS}]+)"
 )
 
 

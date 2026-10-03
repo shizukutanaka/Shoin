@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.525")
+        self.assertEqual(VERSION, "0.2.526")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -3855,6 +3855,18 @@ class TestSearch(unittest.TestCase):
                 "[:k] slice, not after — the 猫-only chunk below the cap "
                 "is the correct hit",
             )
+
+    def test_fullwidth_dash_negates_end_to_end(self) -> None:
+        """v0.2.526: the fullwidth minus an IME emits must exclude
+        end-to-end, not invert into a positive term.  '猫 −犬' on a
+        notebook where the densest 猫 chunk carries 犬 must return the
+        猫-only chunk — before the fix the query positively searched 犬."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(src.id, ["猫 猫 と犬", "猫 と鳥"])
+            hits = bm25_search(s, nb.id, "猫 −犬", 5)
+            self.assertEqual([h.text for h in hits], ["猫 と鳥"])
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
@@ -9564,6 +9576,29 @@ class TestNegTerms(unittest.TestCase):
         # Existing space-preceded / string-start CJK negation must be unaffected.
         self.assertEqual(neg_terms("Python -日本語"), ["日本語"])
 
+    def test_neg_terms_unicode_dash_family(self) -> None:
+        """v0.2.526: a leading '-term' must negate under every Unicode dash
+        an IME or keyboard can emit — U+2212 minus sign, U+FF0D fullwidth
+        hyphen-minus (the two most common fullwidth-IME outputs), the
+        U+2010-2015 dash family, U+FE63 — not just ASCII '-'.  Before the
+        fix, '猫 −犬' negated nothing and POSITIVELY searched 犬: the exact
+        opposite of the exclusion the user typed.  'ー'/'ｰ' stay excluded —
+        prolonged-sound marks are CJK word characters (スーパー), so
+        treating them as negation syntax would misparse real terms."""
+        for dash in ("-", "‐", "‑", "‒", "–", "—", "―", "−", "﹣", "－"):
+            self.assertEqual(
+                neg_terms(f"猫 {dash}犬"), ["犬"],
+                f"U+{ord(dash):04X} must introduce negation",
+            )
+            self.assertEqual(strip_neg_terms(f"猫 {dash}犬"), "猫")
+        # Glued to a preceding CJK word char, any dash stays an ordinary
+        # in-sentence dash (same guard as ASCII 猫-犬).
+        self.assertEqual(neg_terms("猫−犬"), [])
+        # Prolonged-sound marks are word characters, never negation syntax.
+        self.assertEqual(neg_terms("猫 ー犬"), [])
+        # CJK punctuation before the dash still allows negation.
+        self.assertEqual(neg_terms("書院。−犬"), ["犬"])
+
     def test_retrieve_multi_neg_false_positive_does_not_suppress_rewrite_hits(self) -> None:
         """End-to-end: the CJK hyphen-glued false-positive negation must not
         cause retrieve_multi() to silently zero out results a rewrite would
@@ -14231,7 +14266,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:55", "search.py:756",
+            "search.py:65", "search.py:767",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -14665,7 +14700,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:558"],
+            sites, ["search.py:569"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -16882,7 +16917,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [100],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [55, 756],
+            "search.py": [65, 767],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -16930,7 +16965,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:756"],
+            escaped_interps, ["search.py:767"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

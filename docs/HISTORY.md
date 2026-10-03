@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.525
+## Version History: v0.1.37 → v0.2.526
+
+### v0.2.526
+
+- Real defect: `-term` negation only recognised ASCII '-' — every
+  other dash a keyboard or IME emits (U+2212 minus, U+FF0D fullwidth
+  hyphen-minus, the U+2010-2015 dash family, U+FE63) fell through,
+  so '猫 −犬' negated nothing and POSITIVELY searched 犬 — the
+  exact opposite of the exclusion the user typed.  `_NEG_RE` now
+  matches the full dash family while 'ー'/'ｰ' stay word characters
+  (prolonged-sound marks must never negate: スーパー is a term).
+- `test_neg_terms_unicode_dash_family` pins all ten dash spellings
+  plus the glued/prolonged-mark guards; `test_fullwidth_dash_negates_end_to_end`
+  proves the inversion is closed end-to-end through bm25_search.
 
 ### v0.2.525
 
