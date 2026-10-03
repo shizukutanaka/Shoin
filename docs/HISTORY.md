@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.550
+## Version History: v0.1.37 → v0.2.551
+
+### v0.2.551
+- evaluate() marks expected source ids absent from the notebook as
+  CaseResult.missing: a source deleted and re-added gets a NEW autoincrement
+  id, so a stale cases file referencing the old id scored 0 forever and read
+  as a retrieval regression — the "silently rekeyed" class diff_reports
+  already guards on the question side. Scoring is unchanged (a missing id
+  still counts against recall); the field only explains why the case can
+  never be won. Serialized through --save/--diff (report_from_dict tolerates
+  its absence in older baselines) and printed per-case by `shoin eval` as
+  "期待ソース {ids} はノートブックに存在しない". Three pins + fail-direction.
 
 ### v0.2.550
 - `test_env_and_process_globals_stay_centralized` — env reads are

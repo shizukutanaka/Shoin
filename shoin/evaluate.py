@@ -43,6 +43,13 @@ class CaseResult:
     retrieved: list[int]  # distinct source ids, best rank first
     recall: float  # share of `expected` present in `retrieved`
     reciprocal_rank: float  # 1/rank of the first expected source, else 0.0
+    # Expected ids that do NOT exist in the notebook (deleted or renumbered —
+    # sqlite source ids are autoincrement, so re-adding a source rekeys it).
+    # Such an id can never be retrieved, so the case is silently unwinnable:
+    # without surfacing it, a stale case file reads as a retrieval regression
+    # forever — the same "silently rekeyed" class diff_reports guards on the
+    # question side.
+    missing: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -135,6 +142,11 @@ def evaluate(
     SHOIN_MULTI_QUERY and re-running compares what they will really experience.
     """
     store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND
+    # One fetch for every case's expected-id existence check — a source deleted
+    # and re-added gets a NEW autoincrement id, so stale case files referencing
+    # the old id would otherwise score 0 with no hint that the case, not the
+    # retrieval, is what changed.
+    present = {s.id for s in store.sources_for_notebook(notebook_id)}
     results: list[CaseResult] = []
     for case in cases:
         qvec = _query_vector(llm, case.question) if _check_embed_model_ok(store, llm) else None
@@ -153,7 +165,16 @@ def evaluate(
             if sid in expected:
                 rr = 1.0 / pos
                 break
-        results.append(CaseResult(case.question, list(expected), ranked, recall, rr))
+        results.append(
+            CaseResult(
+                case.question,
+                list(expected),
+                ranked,
+                recall,
+                rr,
+                [sid for sid in expected if sid not in present],
+            )
+        )
     n = len(results)
     return EvalReport(
         cases=results,
@@ -177,6 +198,7 @@ def report_to_dict(rep: EvalReport, k: int) -> dict[str, object]:
                 "retrieved": c.retrieved,
                 "recall": c.recall,
                 "rr": c.reciprocal_rank,
+                "missing": c.missing,
             }
             for c in rep.cases
         ],
@@ -201,15 +223,18 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
         got = raw.get("retrieved")
         rec = raw.get("recall")
         rr = raw.get("rr")
+        miss = raw.get("missing", [])  # absent in pre-v0.2.551 baselines
         if (
             not isinstance(q, str)
             or not isinstance(exp, list)
             or not isinstance(got, list)
             or not isinstance(rec, (int, float))
             or not isinstance(rr, (int, float))
+            or not isinstance(miss, list)
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in miss)
         ):
             raise ValueError(f"baseline case {i}: missing or mistyped fields")
-        cases.append(CaseResult(q, exp, got, float(rec), float(rr)))
+        cases.append(CaseResult(q, exp, got, float(rec), float(rr), list(miss)))
     rec_all = data.get("recall")
     mrr_all = data.get("mrr")
     if not isinstance(rec_all, (int, float)) or not isinstance(mrr_all, (int, float)):

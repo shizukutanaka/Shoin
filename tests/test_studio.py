@@ -1133,6 +1133,77 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(rep.cases[1].reciprocal_rank, 0.0)
         self.assertAlmostEqual(rep.recall, 0.5)
 
+    def test_evaluate_flags_missing_expected_ids(self) -> None:
+        """v0.2.551: an expected source id absent from the notebook (deleted
+        and re-added gets a NEW autoincrement id) makes a case silently
+        unwinnable — surface it instead of reading it as a retrieval miss."""
+        from shoin.evaluate import EvalCase, evaluate
+
+        s, nb = self._seeded()
+        with s:
+            rep = evaluate(
+                s,
+                FakeLLM(),
+                nb,
+                [
+                    EvalCase("和紙はどう作られるか", [1, 99]),   # 99 is not a source
+                    EvalCase("活版印刷の仕組みは", [2]),          # all ids present
+                    EvalCase("和紙は楮から作られるか", [999]),    # fully missing
+                ],
+            )
+        self.assertEqual(rep.cases[0].missing, [99])
+        self.assertEqual(rep.cases[1].missing, [])
+        self.assertEqual(rep.cases[2].missing, [999])
+        # Scoring is unchanged — the missing id still counts against recall;
+        # the field only explains WHY the case can never be won.
+        self.assertLess(rep.cases[0].recall, 1.0)
+        self.assertEqual(rep.cases[2].recall, 0.0)
+
+    def test_eval_missing_ids_roundtrip(self) -> None:
+        """The warning survives --save/--diff serialization; a baseline file
+        written before the field existed loads with []."""
+        from shoin.evaluate import CaseResult, EvalReport, report_from_dict, report_to_dict
+
+        rep = EvalReport(
+            [CaseResult("q", [1, 99], [1], 0.5, 1.0, [99])], recall=0.5, mrr=1.0
+        )
+        back, _ = report_from_dict(report_to_dict(rep, 8))
+        self.assertEqual(back.cases[0].missing, [99])
+        # Pre-v0.2.551 baseline: no "missing" key at all — must still parse.
+        old = {
+            "k": 8,
+            "recall": 0.5,
+            "mrr": 1.0,
+            "cases": [{"q": "q", "expected": [1], "retrieved": [1],
+                       "recall": 1.0, "rr": 1.0}],
+        }
+        back2, _ = report_from_dict(old)
+        self.assertEqual(back2.cases[0].missing, [])
+
+    def test_eval_cli_warns_on_missing_expected(self) -> None:
+        """The CLI surfaces the unwinnable case instead of a bare ✗ line."""
+        import contextlib as _cl
+        import io as _io
+        import json as _json
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1, 99]}]),
+            encoding="utf-8",
+        )
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(["--db", db, "eval", str(nb), str(cases)], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("[99]", buf.getvalue())
+        self.assertIn("ノートブックに存在しない", buf.getvalue())
+
     def test_parse_cases_rejects_malformed_input(self) -> None:
         """A silently-skipped bad case would inflate the score, so parsing
         refuses rather than degrades."""

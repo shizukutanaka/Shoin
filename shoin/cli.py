@@ -85,6 +85,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      期待={exp} 取得={got}",
+        "eval.case_missing": (
+            "      警告: 期待ソース {ids} はノートブックに存在しない"
+            " (削除/別idの可能性)"
+        ),
         "eval.saved": "ベースライン保存: {f}",
         "eval.diff_header": "ベースライン比較 ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -156,6 +160,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      expected={exp} retrieved={got}",
+        "eval.case_missing": (
+            "      warning: expected source id(s) {ids} not in this notebook"
+            " (deleted or rekeyed?)"
+        ),
         "eval.saved": "Baseline saved: {f}",
         "eval.diff_header": "Baseline comparison ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -473,6 +481,8 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
         if not ok:
             print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
+            if c.missing:
+                print(_t("eval.case_missing", ids=str(c.missing)))
     if args.save:
         from .evaluate import report_to_dict
 
