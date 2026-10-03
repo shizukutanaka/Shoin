@@ -482,6 +482,30 @@ const fetch = async (path, opts) => {
             f"{sorted(sent_params - read_params)}",
         )
 
+    def test_route_patterns_are_fully_anchored(self) -> None:
+        """Every _ROUTES pattern must match its path and only its path.
+        `_dispatch` uses re.match (start-anchored only): a pattern missing
+        the trailing `$` would still match its intended path — passing every
+        unit test — while also accepting any longer path that starts with it
+        (e.g. `GET /api/sources/5/text/extra` reaching src_text). Pin the
+        anchors lexically AND behaviorally: build the one concrete path a
+        pattern matches, then assert junk on either side doesn't match."""
+        for _verb, pattern, name in _Handler._ROUTES:
+            self.assertTrue(pattern.startswith("^"), f"{name}: pattern not ^-anchored")
+            self.assertTrue(pattern.endswith("$"), f"{name}: pattern not $-anchored")
+            concrete = re.sub(r"\(\\d\+\)", "1", pattern.strip("^$"))
+            self.assertIsNotNone(
+                re.match(pattern, concrete), f"{name}: doesn't match {concrete!r}"
+            )
+            self.assertIsNone(
+                re.match(pattern, concrete + "/extra"),
+                f"{name}: prefix-matches a longer path ({concrete}/extra)",
+            )
+            self.assertIsNone(
+                re.match(pattern, "/x" + concrete),
+                f"{name}: matches with a leading segment (/x{concrete})",
+            )
+
     def test_template_placeholder_and_value_contracts(self) -> None:
         """Value-level contracts below the field-name layer.
 
