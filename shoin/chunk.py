@@ -108,6 +108,25 @@ _CJK_RANGES = (
     (0xAB30, 0xAB6F),    # Latin extended-E
     (0xFE20, 0xFE2F),    # combining half marks
     (0xE0100, 0xE01EF),  # variation selectors supplement
+    # Symbol/emoji closure (v0.2.530): the last invisible class — So/Sc/Sk
+    # characters and sequence gluers.  '☕' / '😀' / '✓' / '€' used to drop
+    # from query_terms entirely ('☕カフェ' searched 'カフェ' alone, an
+    # emoji-only query returned nothing) and cost 0 tokens.  Sequence
+    # joiners (ZWNJ/ZWJ, variation selectors) become word characters too so
+    # '👨‍💻' and '☕️' keep their codepoint runs — FTS5 trigram indexes
+    # them, and the LIKE needles do literal substring anyway.  Historic
+    # scripts already ride the isalnum path; these fill the So-shaped hole.
+    (0x200C, 0x200D),    # ZWNJ/ZWJ — Indic orthography + emoji sequences
+    (0x20A0, 0x20CF),    # currency symbols € ₹ ₽ ₩ (Sc — content)
+    (0x2190, 0x245F),    # arrows, math ops ∑√∫, misc technical ⌘⌚
+    (0x2500, 0x2BFF),    # box/geometric shapes, misc symbols ☕⚠★,
+                        # dingbats ✓✈✂, supplemental arrows/math
+    (0x2FF0, 0x2FFF),    # ideographic description chars ⿴
+    (0x31C0, 0x31EF),    # CJK strokes
+    (0xFE00, 0xFE0F),    # variation selectors VS1-16 (emoji text/emoji form)
+    (0x1B000, 0x1B0FF),  # kana supplement (hentaigana — whole-range)
+    (0x1F000, 0x1F1FF),  # mahjong/domino/cards + regional indicators
+    (0x1F300, 0x1FAFF),  # emoji + symbols + enclosed supplement 🄯
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")

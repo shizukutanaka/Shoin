@@ -106,7 +106,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.529")
+        self.assertEqual(VERSION, "0.2.530")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -1933,6 +1933,28 @@ class TestChunk(unittest.TestCase):
         self.assertEqual(estimate_tokens("café"), 2)
         self.assertGreater(estimate_tokens("привет"), 0)
 
+    def test_symbols_and_emoji_are_cjk_terms(self) -> None:
+        """v0.2.530: So/Sc/Sk characters and sequence joiners were the last
+        invisible class — '☕カフェ' searched 'カフェ' alone and an emoji-only
+        query returned nothing at all.  Now they classify, survive
+        query_terms (gluing into CJK runs and ZWJ/VS16 sequences), count
+        against the token budget, and negate through the extended classes."""
+        for ch in ("☕", "😀", "✓", "⚠", "€", "∑", "⌘", "♥"):
+            self.assertTrue(is_cjk(ch), f"U+{ord(ch):04X} must classify CJK")
+        # Emoji glues into the contiguous non-ASCII run like any CJK char.
+        self.assertEqual(query_terms("☕カフェ"), ["☕カフェ"])
+        self.assertEqual(query_terms("完了✓済み"), ["完了✓済み"])
+        # Sequence joiners keep their runs whole (👨‍💻, ☕️, Perso-Arabic ZWNJ).
+        self.assertEqual(query_terms("👨‍💻"), ["👨‍💻"])
+        self.assertEqual(query_terms("☕️"), ["☕️"])
+        # Currency and math symbols are terms beside the number.
+        self.assertEqual(query_terms("€50"), ["50", "€"])
+        self.assertEqual(query_terms("∑nの和"), ["n", "∑", "の和"])
+        self.assertEqual(neg_terms("x -☕"), ["☕"])
+        # And they count: an emoji run is no longer a free token ride.
+        self.assertEqual(estimate_tokens("☕😀"), 2)
+        self.assertEqual(estimate_tokens("👨‍💻"), 3)
+
     def test_is_cjk_matches_the_linear_scan_it_replaced(self) -> None:
         """is_cjk now bisects merged range boundaries instead of scanning every
         range (v0.2.165). The classification must be identical to the original
@@ -2008,8 +2030,11 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(is_cjk("\U0002A700"), "first CJK Ext C char must be CJK")
         # U+2CEB0 — first CJK Ext G
         self.assertTrue(is_cjk("\U0002CEB0"), "first CJK Ext G char must be CJK")
-        # U+1F600 (emoji, outside all CJK ranges) must NOT be CJK
-        self.assertFalse(is_cjk("\U0001F600"), "emoji outside CJK ranges must not be CJK")
+        # U+1F600 (emoji) counts as content since v0.2.530 — the emoji tail
+        # joined the ranges so emoji queries and token costs stop vanishing.
+        self.assertTrue(is_cjk("\U0001F600"), "emoji is content now")
+        # A private-use char outside every content range must stay non-CJK.
+        self.assertFalse(is_cjk(""), "private-use area must not be CJK")
 
     def test_is_cjk_fullwidth_digits_and_letters(self) -> None:
         """Fullwidth digits/letters (U+FF10-19, FF21-3A, FF41-5A) must count as CJK.
@@ -3992,6 +4017,31 @@ class TestSearch(unittest.TestCase):
             self.assertEqual(
                 {h.text for h in bm25_search(s, nb.id, "العربية", 5)},
                 {"العربية文書"},
+            )
+
+    def test_emoji_query_retrieves_emoji_documents(self) -> None:
+        """v0.2.530: an emoji-only query returned nothing — its term list was
+        empty before FTS or LIKE ever ran.  Now the emoji is a term and the
+        literal needle finds the document (inside a ZWJ sequence too)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "mem://x", "h")
+            s.add_chunks(
+                src.id,
+                ["コーヒー☕を飲む", "絵文字😀のテスト", "エンジニア👨‍💻メモ", "関係ない文"],
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "☕", 5)},
+                {"コーヒー☕を飲む"},
+            )
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "😀", 5)},
+                {"絵文字😀のテスト"},
+            )
+            # 💻 sits inside the 👨‍💻 ZWJ sequence — the needle still lands.
+            self.assertEqual(
+                {h.text for h in bm25_search(s, nb.id, "💻", 5)},
+                {"エンジニア👨‍💻メモ"},
             )
 
     def test_retrieval_sql_has_deterministic_tiebreak(self) -> None:
@@ -14393,7 +14443,7 @@ class TestResidualGuards(unittest.TestCase):
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
         expected_dyn = {
-            "chunk.py:178",
+            "chunk.py:197",
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
@@ -17046,7 +17096,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [178],
+            "chunk.py": [197],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
             "search.py": [65, 800],
         }

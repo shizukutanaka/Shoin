@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.529
+## Version History: v0.1.37 → v0.2.530
+
+### v0.2.530
+
+- Symbol/emoji closure: the last invisible class — So/Sc/Sk
+  characters (☕ 😀 ✓ ⚠ € ∑ ⌘ ♥, arrows/math/box-drawing, dingbats,
+  regional indicators, the whole emoji tail) join _CJK_RANGES.
+  '☕カフェ' searched 'カフェ' alone and an emoji-only query returned
+  nothing at all; every such char also rode the token budget at 0.
+- Sequence joiners are word characters: ZWNJ/ZWJ glue Indic
+  orthography and emoji sequences ('👨‍💻' stays one term), and
+  VS1-16 keep emoji presentation forms ('☕️') inside the run.
+  Currency symbols become terms beside their number ('€50' →
+  '50','€').
+- Historic scripts needed no work — v0.2.529's isalnum path already
+  made them terms; this closes the So-shaped hole they left.
+- `test_symbols_and_emoji_are_cjk_terms` pins classification, run
+  glue, sequence joins, negation and the new token cost;
+  `test_emoji_query_retrieves_emoji_documents` proves emoji-only and
+  inside-ZWJ-sequence queries reach their documents end-to-end.
 
 ### v0.2.529
 
