@@ -152,7 +152,14 @@ def _embed_chunks(
             store.conn.commit()  # one commit per batch, not per chunk
             done += count
     except LLMError:
-        pass  # partial embedding is fine: BM25 covers the rest
+        # Same rollback the generic branch needs: the dim check raises INSIDE
+        # the write loop, after earlier set_embedding(commit=False) calls in
+        # the same batch — set_setting()'s commit below would silently flush
+        # them (the failed batch half-persisted while done understates it).
+        try:
+            store.conn.rollback()
+        except Exception:
+            pass
     except Exception:
         # StoreError (concurrent chunk delete) or sqlite3.OperationalError
         # (busy_timeout on conn.commit()). Roll back the partial uncommitted

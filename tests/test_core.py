@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.599")
+        self.assertEqual(VERSION, "0.2.600")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9118,6 +9118,38 @@ class TestPipeline(unittest.TestCase):
                 s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
         self.assertEqual(n, 0)
 
+    def test_embed_chunks_llmerror_rollback_failure_silenced(self) -> None:
+        """The except-LLMError branch rolls back too (mid-batch dim raises);
+        a rollback that itself raises must be silenced exactly like the
+        StoreError sibling path above."""
+        from shoin.llm import LLMError
+        from shoin.pipeline import _embed_chunks
+
+        class TimeoutLLM:
+            embedding_model = "test-model"
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise LLMError("SYSTEM_LLM_TIMEOUT", "endpoint dropped")
+
+        class _FailRollback:
+            def __init__(self, real):
+                self._real = real
+            def rollback(self):
+                raise Exception("rollback failed")
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with make_store() as s:
+            nb_id = s.create_notebook("rollback-llm-err").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-rl")
+            chunk_ids = s.add_chunks(src.id, ["text chunk"])
+            s.__dict__["conn"] = _FailRollback(s.conn)
+            try:
+                n = _embed_chunks(s, TimeoutLLM(), chunk_ids, ["text chunk"])
+            finally:
+                s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
+        self.assertEqual(n, 0)
+
     def test_reindex_partial_failure_does_not_falsely_clear_mismatch_guard(self) -> None:
         """A partial reindex_notebook() failure (force=True) must NOT record
         embed_model as fully consistent — it was found to do so, silently
@@ -9603,6 +9635,48 @@ class TestPipeline(unittest.TestCase):
             n = _embed_chunks(s, MismatchEmbedLLM(), chunk_ids, texts)
         # First batch (dim=2) succeeds (16 chunks), second batch raises LLMError
         self.assertEqual(n, 16, "only first batch must be stored; second batch aborted on mismatch")
+
+    def test_embed_chunks_dim_mismatch_rolls_back_partial_batch(self) -> None:
+        """The dim-mismatch raise happens INSIDE the batch write loop — after
+        set_embedding(commit=False) for the batch's earlier chunks — leaving a
+        pending transaction the except-LLMError branch must roll back like the
+        except-Exception sibling does. Otherwise set_setting()'s commit below
+        silently flushes the failed batch's partial vectors: n_embedded
+        understates reality and force=True reindex persists a fresh-model
+        vector while the marker still names the old model."""
+        from shoin.pipeline import _embed_chunks
+
+        class MidBatchMismatchLLM:
+            embedding_model = "test-model"
+            calls = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                MidBatchMismatchLLM.calls += 1
+                if MidBatchMismatchLLM.calls == 1:
+                    return [[0.1, 0.2] for _ in texts]
+                # Vec[0] matches dim (written), vec[1] mismatches (raise) —
+                # vec[0]'s write must not survive.
+                return [[0.9, 0.8], [0.3, 0.4, 0.5]] + [[0.9, 0.8]] * (len(texts) - 2)
+
+        MidBatchMismatchLLM.calls = 0
+        with make_store() as s:
+            nb_id = s.create_notebook("dim-rollback").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-dr")
+            texts = [f"chunk {i}" for i in range(32)]
+            chunk_ids = s.add_chunks(src.id, texts)
+            n = _embed_chunks(s, MidBatchMismatchLLM(), chunk_ids, texts)
+            self.assertEqual(n, 16)
+            leaked = s.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE seq>=16 AND embedding IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(
+                leaked, 0,
+                "failed batch's writes must be rolled back, not committed later",
+            )
+            committed = s.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE seq<16 AND embedding IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(committed, 16, "batch 1's vectors stay committed")
 
     def test_refresh_source_empty_text_raises_ingest_empty(self) -> None:
         """refresh_source() must raise IngestError('INGEST_EMPTY') when the re-fetched
@@ -13623,7 +13697,7 @@ _EXCEPT_CATALOG = {
     "ingest.py": 4,
     "server.py": 9,
     "cli.py": 1,
-    "pipeline.py": 2,
+    "pipeline.py": 3,
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
@@ -17244,7 +17318,7 @@ class TestResidualGuards(unittest.TestCase):
                 "LLMError", "json.JSONDecodeError",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
-            "pipeline.py": ["Exception", "Exception", "LLMError"],
+            "pipeline.py": ["Exception", "Exception", "Exception", "LLMError"],
             "qa.py": [
                 "LLMError", "LLMError", "LLMError",
                 "StoreError", "sqlite3.OperationalError",

@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.599
+## Version History: v0.1.37 → v0.2.600
+
+### v0.2.600 — roll back the failed batch's writes in _embed_chunks
+
+The dim-mismatch raise happens INSIDE the batch write loop — after earlier
+`set_embedding(commit=False)` calls in the same batch — leaving a pending
+transaction the except-LLMError branch used to pass over (unlike its
+except-Exception sibling, whose comment documented the exact mechanism).
+`set_setting()`'s commit below then silently flushed the failed batch's
+partial vectors: `n_embedded` understated reality on index_source and, on
+force=True reindex, a fresh-model vector persisted while the marker still
+named the old model — extra mixing the mismatch guard exists to prevent.
+The branch now rolls back like its sibling. Pin:
+`test_embed_chunks_dim_mismatch_rolls_back_partial_batch` (old code leaked
+1 write; fail-verified).
 
 ### v0.2.599 — strip lone surrogates at the LLM output boundary
 
