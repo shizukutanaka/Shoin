@@ -62,7 +62,11 @@ import re
 import unicodedata
 from typing import NotRequired, TypedDict
 
-from .chunk import _SENTENCE_SPLIT_RE  # single source of truth for sentence boundaries
+from .chunk import (
+    _SENTENCE_SPLIT_RE,  # single source of truth for sentence boundaries
+    _digit_fold,
+    _match_fold,
+)
 
 # A citation lives inside square brackets and may combine several sources:
 # [S1] / [S1, S2] / [S1; S3] / [S1 and S2] / [S1][S2]. Full-width brackets,
@@ -210,7 +214,7 @@ def looks_like_question(text: str) -> bool:
         return True
     # Strip a trailing contraction ("What's", "Who'd", "What'll") before the
     # lookup — the bare frozenset entries would otherwise never match "what's".
-    first_word = norm.split()[0].lower().split("'")[0] if norm.split() else ""
+    first_word = norm.split()[0].casefold().split("'")[0] if norm.split() else ""
     return first_word in _EN_QUESTION_STARTERS
 
 
@@ -321,8 +325,13 @@ def validate_citations(text: str, n_sources: int) -> tuple[list[int], list[int]]
 
 
 def _bigrams(text: str) -> set[str]:
-    """Character bigrams of NFKC-normalised, whitespace-stripped text."""
-    t = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).lower())
+    """Character bigrams of spelling-folded, whitespace-stripped text.
+
+    _match_fold (v0.2.540) converges the spellings retrieval bridges —
+    kana script, accents, digit rows, kyujitai, format chars — so an
+    answer echoing a source word in a different orthography still
+    overlaps it; previously every such pair scored 0 bigram overlap."""
+    t = re.sub(r"\s+", "", _match_fold(text))
     if len(t) < 2:
         return set()
     return {t[i : i + 2] for i in range(len(t) - 1)}
@@ -479,8 +488,12 @@ def _numbers(text: str) -> set[str]:
     separators are stripped before matching so "1,234" and "1234" compare equal.
     """
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
+    # _NUM_TOKEN_RE's \d is Unicode-wide: '٣٤٥' or '३४५' tokenize fine but
+    # then compare verbatim — '٣٤٥' was flagged absent from a source
+    # writing '345', the same value in another digit row (v0.2.541).
+    # _digit_fold canonicalises every Nd row to ASCII before comparison.
     return {
-        m.group(0)
+        _digit_fold(m.group(0))
         for m in _NUM_TOKEN_RE.finditer(t)
         if "." in m.group(0) or len(m.group(0)) >= 2
     }
@@ -533,7 +546,7 @@ _ERAS: tuple[tuple[str, int, int], ...] = (
     ("平成", 1989, 2019),
     ("令和", 2019, 2050),  # ongoing — far-future era years aren't assertable
 )
-_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|[0-9]+|[一二三四五六七八九十百千]+)年")
+_ERA_NUM_RE = re.compile(r"(明治|大正|昭和|平成|令和)(元|\d+|[一二三四五六七八九十百千]+)年")
 _ERA_BASE_END = {name: (base, end) for name, base, end in _ERAS}
 
 # Spelled-out English numerals (v0.2.196): "three million" ↔ "3000000",
@@ -622,7 +635,7 @@ def _en_value(run: str) -> int | None:
     total = 0
     local = 0
     used = False
-    for tok in re.split(r"[ -]+", run.lower()):
+    for tok in re.split(r"[ -]+", run.casefold()):
         if tok in _EN_SMALL:
             local += _EN_SMALL[tok]
         elif tok == "hundred":
@@ -825,7 +838,9 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
             for m in _CONV_NUM_RE.finditer(claim_n):
                 ent = _UNIT_SCALE.get(m.group(2))
                 if ent is not None:
-                    conv_by_num.setdefault(m.group(1), set()).add((ent[0], float(m.group(1)) * ent[1]))
+                    conv_by_num.setdefault(m.group(1), set()).add(
+                        (ent[0], float(m.group(1)) * ent[1])
+                    )
             # Rate restatements (v0.2.214): a claim asserting "50%" matches a
             # source writing the same rate as the bare fraction "0.5", and a
             # bare-fraction claim "0.5" matches a source asserting "50%" — but
@@ -870,7 +885,10 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
 #   so checking it would be noise, not signal.
 _UNIT_ASCII = r"[a-zA-Zμµ°%]+"
 _UNIT_KANA = r"[ァ-ヶー]+"
-_UNIT_KANJI = "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸席便着足組粒錠滴羽匹杯両円倍億万千"
+_UNIT_KANJI = (
+    "人件台枚頭本冊回個歳才名位番号階話巻章節項目園校社国店軒棟戸"
+    "席便着足組粒錠滴羽匹杯両円倍億万千"
+)
 _UNIT_NUM_RE = re.compile(rf"(\d+(?:\.\d+)?)({_UNIT_ASCII}|{_UNIT_KANA}|[{_UNIT_KANJI}]+)")
 
 # Same-unit spellings across scripts (v0.2.191). NFKC already folds the
@@ -1062,7 +1080,7 @@ def _quote_spans(text: str) -> list[str]:
     out: list[str] = []
     for m in _QUOTE_RE.finditer(text):
         q = m.group(1) or m.group(2)
-        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).lower()
+        q = re.sub(r"\s+", "", unicodedata.normalize("NFKC", q)).casefold()
         if len(q) >= _QUOTE_MIN:
             out.append(q)
     return out
@@ -1099,7 +1117,7 @@ def quote_mismatches(
     the shared _segment_claims.
     """
     src_norm = {
-        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).lower()
+        n: re.sub(r"\s+", "", unicodedata.normalize("NFKC", t)).casefold()
         for n, t in source_texts.items()
     }
     src_bg = {n: _bigrams(t) for n, t in src_norm.items()}
@@ -1162,7 +1180,13 @@ def quote_mismatches(
 # "有料" is a real polarity flip worth flagging. English: word-bounded
 # not/never/no/neither/nor/without + the n't contraction.
 _NEG_JP_RUN = re.compile(r"ない|なかっ|なく|ません|未|不|無")
-_NEG_EN_RE = re.compile(r"n't|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b", re.IGNORECASE)
+_NEG_EN_RE = re.compile(
+    # n['’]t: straight AND curly apostrophes — NFKC does not fold U+2019, so
+    # "can’t" (typographically correct LLM output) read as non-negated before
+    # v0.2.547.  \bcannot\b: \bnot\b never fires inside the fused form.
+    r"n['’]t|\bnot\b|\bnever\b|\bno\b|\bneither\b|\bnor\b|\bwithout\b|\bcannot\b",
+    re.IGNORECASE,
+)
 # Contrastive-negation constructions are agreement, not contradiction:
 # "AではなくB" explicitly asserts the same B the source asserts — exempt.
 _NEG_SAFE_RE = re.compile(r"ではな|のではな|じゃな")
@@ -1216,8 +1240,17 @@ _ANT: dict[str, tuple[str, int]] = {
     **dict.fromkeys(("軽い", "軽く", "軽かっ"), ("heavy", -1)),
     **dict.fromkeys(("厚い", "厚く", "厚かっ"), ("thick", 1)),
     **dict.fromkeys(("薄い", "薄く", "薄かっ"), ("thick", -1)),
-    **dict.fromkeys(("increase", "increased", "increases", "increasing", "rose", "risen", "rises", "higher", "growth", "grew"), ("en_inc", 1)),
-    **dict.fromkeys(("decrease", "decreased", "decreases", "decreasing", "decline", "declined", "declines", "dropped", "fell", "fallen", "falls", "lower", "shrank"), ("en_inc", -1)),
+    **dict.fromkeys(
+        ("increase", "increased", "increases", "increasing", "rose",
+         "risen", "rises", "higher", "growth", "grew"),
+        ("en_inc", 1),
+    ),
+    **dict.fromkeys(
+        ("decrease", "decreased", "decreases", "decreasing", "decline",
+         "declined", "declines", "dropped", "fell", "fallen", "falls",
+         "lower", "shrank"),
+        ("en_inc", -1),
+    ),
     **dict.fromkeys(("better", "improved", "improves", "improvement"), ("en_bet", 1)),
     **dict.fromkeys(("worse", "worsened", "deteriorated"), ("en_bet", -1)),
     **dict.fromkeys(("more", "greater"), ("en_amt", 1)),
@@ -1281,7 +1314,7 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
     """
     src_sents = {
         n: [
-            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).lower().strip()
+            re.sub(r"\s+", " ", _match_fold(s)).strip()
             for s in _SENTENCE_SPLIT_RE.split(t)
             if s.strip()
         ]
@@ -1312,8 +1345,8 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
             claim_norm = re.sub(
-                r"\s+", " ", unicodedata.normalize("NFKC", segments.get(n, claim_text))
-            ).lower().strip()
+                r"\s+", " ", _match_fold(segments.get(n, claim_text))
+            ).strip()
             cb = _bigrams(claim_norm)
             if not cb:
                 continue
@@ -1355,8 +1388,17 @@ def _claim_sents(text: str) -> list[tuple[str, str]]:
         bare = _LIST_PREFIX_RE.sub(
             "", _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence))
         )
-        norm = re.sub(r"\s+", " ", bare).lower().strip()
+        norm = re.sub(r"\s+", " ", _match_fold(bare)).strip()
         if len(re.sub(r"\s+", "", norm)) < _MIN_CLAIM_CHARS:
+            continue
+        if looks_like_question(sentence):
+            # The uncited_sentences exclusion, applied to the claim side
+            # too (v0.2.548): a question asserts nothing, so a rhetorical-
+            # lead pattern like "効果はあるのか？効果はない。" is a
+            # single-diff flip ONLY on paper — flagging the answer as
+            # contradicting its own question is a false positive, and
+            # the faq/study_guide kinds emit question→answer pairs
+            # systematically.
             continue
         sents.append((norm, sentence))
     return sents
@@ -1458,20 +1500,25 @@ def degenerate_spans(text: str, *, history: str = "") -> list[str]:
     occurrence per message). Sentences in ``history`` count toward the ≥3
     threshold; only the current answer's own repeated sentences are flagged.
 
+    Repetition is counted on the _match_fold canonical form (v0.2.546): a
+    loop alternating orthography — '要点はデータです。' then '要点はでーた
+    です。' — is the same content repeated, but NFKC + casefold leaves the
+    spellings byte-distinct so each variant starves below _DEGEN_REPEAT.
+
     Deliberately asymmetric like the other checks: nothing is flagged below
     these bounds — parallel structures ("Aである。Bである。") and honest
-    emphasis repeat *differently*, never verbatim-normed ≥3 times.
+    emphasis repeat *differently*, never folded-normed ≥3 times.
     """
     text = _strip_fences(text)  # repeated statements inside code aren't degeneration
-    low = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).lower()
+    low = _match_fold(re.sub(r"\s+", "", text))
     out: set[str] = set()
     counts: dict[str, int] = {}
     for raw in _SENTENCE_SPLIT_RE.split(text):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        s = _match_fold(re.sub(r"\s+", "", raw))
         if len(s) >= _DEGEN_SENT_MIN:
             counts[s] = counts.get(s, 0) + 1
     for raw in _SENTENCE_SPLIT_RE.split(history):
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        s = _match_fold(re.sub(r"\s+", "", raw))
         if s in counts:
             counts[s] += 1
     for s, c in counts.items():

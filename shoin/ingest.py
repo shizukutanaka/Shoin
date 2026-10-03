@@ -351,7 +351,16 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         raw = socket.create_connection((self._pinned_ip, self.port), self.timeout)
-        self.sock = self._ssl_context.wrap_socket(raw, server_hostname=self.host)
+        try:
+            self.sock = self._ssl_context.wrap_socket(
+                raw, server_hostname=self.host
+            )
+        except Exception:
+            # On handshake failure the SSLSocket may never take ownership of
+            # the fd — close the raw socket so each failed TLS attempt does
+            # not leak one fd.
+            raw.close()
+            raise
 
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
@@ -400,7 +409,9 @@ def _decode_content_encoding(header: str | None, body: bytes) -> bytes:
                 try:
                     body = _inflate(body, -zlib.MAX_WBITS)
                 except zlib.error as exc:
-                    raise IngestError("INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}") from exc
+                    raise IngestError(
+                        "INGEST_FETCH_FAILED", f"corrupt deflate body: {exc}"
+                    ) from exc
         else:
             raise IngestError("INGEST_UNSUPPORTED_FORMAT", f"unsupported Content-Encoding: {enc}")
     if encodings:
@@ -437,7 +448,11 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
         else:
             conn = _PinnedHTTPConnection(host, port, pinned, URL_TIMEOUT_SEC)
         try:
-            conn.request("GET", path, headers={"User-Agent": f"shoin/{VERSION}", "Host": host_header})
+            conn.request(
+                "GET",
+                path,
+                headers={"User-Agent": f"shoin/{VERSION}", "Host": host_header},
+            )
             resp = conn.getresponse()
             if resp.status in _REDIRECT_CODES:
                 location = resp.getheader("Location")
