@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.583")
+        self.assertEqual(VERSION, "0.2.584")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -5331,6 +5331,26 @@ class TestTailCut(unittest.TestCase):
             primary_hit = [h for h in hits if "書院" in h.text]
             self.assertTrue(primary_hit)
             self.assertFalse(any(h.detail.get("exp") for h in primary_hit))
+
+    def test_retrieve_multi_marks_rewrite_vector_hits_exp(self) -> None:
+        """The rewrite's VECTOR lane gets the same exp mark as its BM25 lane:
+        a chunk surfaced only by the rewrite's embedding shares no term with
+        the primary query by design — lex==0 there is multi-query recall, not
+        a term-free tail for _tail_cut to clip."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "a", "o", "sha")
+            s.add_chunks(a.id, ["書院は近世日本の学問所である。"])
+            b = s.add_source(nb.id, "txt", "b", "o2", "sha2")
+            ids_b = s.add_chunks(b.id, ["素読と会読で経書を暗唱する授業形態。"])
+            # The rewrite vector reaches the term-disjoint chunk only.
+            s.set_embedding(ids_b[0], [1.0, 0.0])
+            hits = retrieve_multi(s, nb.id, ["書院", "儒学"], [None, [1.0, 0.0]])
+            vec_only = [h for h in hits if "素読" in h.text]
+            self.assertTrue(vec_only)
+            self.assertTrue(all(h.detail.get("exp") for h in vec_only))
 
     def test_retrieve_drops_vector_tail(self) -> None:
         """End-to-end via the vector list: semantically-near chunks sharing

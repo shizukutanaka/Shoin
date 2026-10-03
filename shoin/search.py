@@ -1644,6 +1644,12 @@ def retrieve_multi(
         total_bm25 += len(bm25_hits)
         if qv:
             vec_hits = vector_search(store, notebook_id, qv, pool)
+            if i > 0:
+                # A rewrite's vector phrasing is system-proposed just like its
+                # BM25 vocabulary — mark the lane so _tail_cut does not read
+                # lex==0 against the primary query as term-free.
+                for h in vec_hits:
+                    h.detail["exp"] = 1.0
             if negs:
                 vec_hits = _apply_neg_filter(vec_hits, negs)
             lists.append(vec_hits)

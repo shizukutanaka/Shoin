@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.583
+## Version History: v0.1.37 → v0.2.584
+
+### v0.2.584
+- retrieve_multi exp mark for the rewrite VECTOR lane: rewrite BM25 hits were flagged detail["exp"] so _tail_cut never reads their lex==0-against-the-primary-query as term-free, but rewrite vector hits were not — a chunk surfaced only by the rewrite's embedding (a lexically disjoint semantic match, exactly the recall multi-query fusion exists to add) could be clipped at a score cliff. The vector lane now gets the same mark when i > 0; the primary query's own vector hits stay unmarked and clip-eligible as designed (v0.2.189). Fail-direction verified.
 
 ### v0.2.583
 - uncited_sentences mid-fragment forward bind: the tail-scan flagged any text after the last marker as uncovered, so "A [S1]によると B" accused the idiom-bound tail — cited text — while the genuinely ambiguous pre-segment drove the verdict. A marker followed by a forward idiom now leaves the fragment silent (bound tail cited; pre-segment coverage ambiguous → stay silent per the module's asymmetry rule). Real uncovered tails after the bound segment still flag. Fail-direction verified.
