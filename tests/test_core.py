@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.580")
+        self.assertEqual(VERSION, "0.2.581")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -7271,6 +7271,35 @@ class TestSelfContradictions(unittest.TestCase):
         self.assertEqual(self_contradictions("治療の効果はない。"), [])
 
 
+    def test_single_digit_position_number_swap_flags(self) -> None:
+        """difflib minimises the differing opcode to the changed characters,
+        so "50%"→"30%" yields span "5"→"3" — the numeric check must compare
+        whole-sentence number sets or every one-digit-position swap inside a
+        longer number stays silent."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果は50%だった。効果は30%だった。"),
+            ["効果は30%だった。"],
+        )
+        self.assertEqual(
+            self_contradictions("売上は120億だった。売上は125億だった。"),
+            ["売上は125億だった。"],
+        )
+
+    def test_single_digit_only_swap_stays_silent(self) -> None:
+        """The single-digit significance rule survives whole-sentence
+        comparison — "第3版"→"第4版" asserts values the check deliberately
+        treats as ambiguous."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("第3版が使われた。第4版が使われた。"), []
+        )
+        self.assertEqual(
+            self_contradictions("効果は3.2万だった。効果は32000だった。"), []
+        )
+
 class TestDegenerateSpans(unittest.TestCase):
     """degenerate_spans() (v0.2.188): verbatim repetition signalling an LLM
     degeneration loop — the failure shape small local models are prone to and
@@ -13231,7 +13260,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:208",
     "citation.py:576", "citation.py:580", "citation.py:592",
     "citation.py:593", "citation.py:630", "citation.py:643",
-    "citation.py:1037", "citation.py:1437", "citation.py:1658",
+    "citation.py:1037", "citation.py:1437", "citation.py:1664",
     "search.py:72", "search.py:919",
 }
 _ERROR_CODE_CATALOG = {
@@ -18392,7 +18421,7 @@ class TestResidualGuards(unittest.TestCase):
 
         baseline: dict[str, list[int]] = {
             "chunk.py": [208],
-            "citation.py": [576, 580, 592, 593, 643, 1037, 1437, 1658],
+            "citation.py": [576, 580, 592, 593, 643, 1037, 1437, 1664],
             "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"

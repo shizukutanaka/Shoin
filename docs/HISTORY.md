@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.580
+## Version History: v0.1.37 → v0.2.581
+
+### v0.2.581
+- _single_diff_flip numeric arm: the check compared _numbers_expanded over the raw diff span, but difflib minimises an opcode to the changed characters — "50%"→"30%" yields span "5"→"3", a single digit that the significance rule filters, so every one-digit-position swap inside a longer number (120億→125億, 50%→30%) stayed silent. Whole-sentence number sets are compared instead — sound because ops==1 already guarantees the difference lives inside the single span — which keeps single-digit-only swaps ("第3版"→"第4版") silent and magnitude-equivalent restatements (3.2万↔32000) silent. Fail-direction verified.
 
 ### v0.2.580
 - _segment_claims per-occurrence attribution: a source cited twice in one sentence ("A.[S1] B.[S2,S1]") had its first clause overwritten by the second marker's, so verify_grounding judged the correct apple citation on the sky clause (false accusation + lost confirmed mark) and numeric/unit/quote/negation checks never inspected the earlier clause at all (missed flags — a fabricated 987円 in it escaped). The shared map now keeps a list of clause texts per S-number, and all five callers evaluate each occurrence independently — a number may land in both confirmed and misattributed, exactly as it already can across sentences. Fail-direction verified on both new pins.

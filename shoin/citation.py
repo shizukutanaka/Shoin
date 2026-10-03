@@ -1595,9 +1595,15 @@ def _single_diff_flip(a: str, b: str) -> bool:
     ant_a, ant_b = _ant_signs(a), _ant_signs(b)
     if any(ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()):
         return True
-    _, i1, i2, j1, j2 = ops[0]
-    num_a = _numbers_expanded(a[i1:i2])
-    num_b = _numbers_expanded(b[j1:j2])
+    # Compare whole-sentence number sets, not the raw diff span: difflib
+    # minimises the opcode to the differing characters, so "50%"→"30%"
+    # yields span "5"→"3" — a single digit that the significance rule
+    # filters, silencing a real value flip. With exactly one non-equal
+    # opcode any set difference must originate inside that span, so the
+    # whole-sentence sets are safe to compare; single-digit-only swaps
+    # ("第3版"→"第4版") still yield empty sets and stay silent.
+    num_a = _numbers_expanded(a)
+    num_b = _numbers_expanded(b)
     return bool(num_a) and bool(num_b) and num_a != num_b
 
 
