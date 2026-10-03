@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.590
+## Version History: v0.1.37 → v0.2.591
+
+### v0.2.591
+- replace_chunks_for_source title validation parity: its sha256/title metadata path truncated to MAX_TITLE_LEN but skipped the strip+reject-empty contract the other three title writers (add_source / update_source_title / update_source_sha256) enforce — a whitespace-only or "" title persisted where the rename path itself refuses to write one. The title is now normalized up front (before any chunk is touched) and empty-after-strip raises VALIDATION_REQUIRED_FIELD_MISSING, matching the sibling contract. Fail-direction verified (whitespace title accepted on the old code).
 
 ### v0.2.590
 - rewrite_queries dedups on the emitted (capped) string: the fold key was computed on the FULL line, then the emitted value was truncated to MAX_QUESTION_LEN — two rewrites that differ only past the 2000-char cap both survived dedup and truncated to the identical text, spending two rewrite slots on zero vocabulary diversity (the same class v0.2.545 closed for orthographic variants). The cap now runs before the fold-key computation. Fail-direction verified (the pin emits two capped dupes on the old code).

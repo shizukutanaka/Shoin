@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.590")
+        self.assertEqual(VERSION, "0.2.591")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -514,6 +514,27 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.replace_chunks_for_source(src.id, ["a", "b"], contexts=["only one"])
             self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_replace_chunks_title_validation_matches_siblings(self) -> None:
+        """v0.2.591: the sha256/title metadata path must apply the same
+        strip+reject contract as add_source / update_source_title /
+        update_source_sha256 — a whitespace-only title must fail (before any
+        chunk is touched) and padding must be stripped, not persisted."""
+        with make_store() as s:
+            nb = s.create_notebook("title-parity")
+            src = s.add_source(nb.id, "txt", "orig", "o", "sha-tp")
+            s.add_chunks(src.id, ["c1"])
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(
+                    src.id, ["new"], sha256="sha-tp2", title="   "
+                )
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+            # Rejection is pre-transaction: the original chunk survives untouched.
+            self.assertEqual(s.text_chunks_for_source(src.id), [(0, "c1")])
+            s.replace_chunks_for_source(
+                src.id, ["new"], sha256="sha-tp2", title="  padded  "
+            )
+            self.assertEqual(s.get_source(src.id).title, "padded")
 
     def test_add_source_unexpected_integrity_error_is_system_internal(self) -> None:
         """A constraint failure that is neither UNIQUE nor FOREIGN KEY (e.g. a
@@ -17239,7 +17260,7 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 48,
+            ] + ["StoreError"] * 49,
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

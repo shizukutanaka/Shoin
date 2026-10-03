@@ -710,6 +710,16 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        # Same strip+reject contract as the other three title writers
+        # (add_source / update_source_title / update_source_sha256): without
+        # it a whitespace-only title would persist — the blank title the
+        # rename path itself refuses to write. Validated up front so a bad
+        # title fails before any chunk is touched.
+        new_title = title.strip()[:MAX_TITLE_LEN] if title is not None else None
+        if title is not None and not new_title:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty"
+            )
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
@@ -730,7 +740,6 @@ class Store:
                     # stale snapshot — reintroducing exactly the bug v0.2.87 fixed (refresh
                     # overwriting a user's custom title), just via a race instead of always.
                     # Resolving the fallback in SQL reads the CURRENT row value atomically.
-                    new_title = title[:MAX_TITLE_LEN] if title is not None else None
                     meta_cur = self.conn.execute(
                         "UPDATE sources SET sha256=?, title=COALESCE(?, title) WHERE id=?",
                         (sha256, new_title, source_id),
