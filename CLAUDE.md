@@ -344,6 +344,7 @@ Update only this line's version range and the pin below.
 
 Current version: **v0.2.548** — see `docs/HISTORY.md` for what changed and why.
 
+
 ---
 
 End of guide. For detailed architecture decisions, see `Plan.md` and `docs/spec.md`. For security model, see `docs/adr/ADR-001-ssrf-ip-pinning.md`. For the full bug-by-bug changelog: `CHANGELOG.md` covers v0.1.0–v0.1.55 (frozen there deliberately, see its own header note); v0.1.56 onward lives in `docs/HISTORY.md` (linked from this file's "Version History" section above), and `git log` carries a one-line summary per version throughout.

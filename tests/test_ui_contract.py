@@ -411,6 +411,31 @@ const fetch = async (path, opts) => {
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_route_arity_matches_capture_groups(self) -> None:
+        """_dispatch invokes handler(*[int(g) for g in m.groups()]) — so each
+        capturing group must be (a) numeric, else int() ValueErrors into a
+        500 at request time, and (b) exactly as many as the handler's
+        declared parameters, else TypeError into a 500 the same way. The
+        route-integrity pin below only checks the handler name resolves —
+        not that the call signature fits the groups the pattern yields."""
+        import inspect
+
+        for _verb, pattern, name in _Handler._ROUTES:
+            fn = getattr(_Handler, f"_h_{name}")
+            n_params = len(inspect.signature(fn).parameters) - 1  # self
+            n_groups = re.compile(pattern).groups
+            self.assertEqual(
+                n_params, n_groups,
+                f"{name}: handler takes {n_params} args but "
+                f"{pattern!r} yields {n_groups} groups",
+            )
+            for g in re.findall(r"\(([^()]+)\)", pattern):
+                self.assertEqual(
+                    g, r"\d+",
+                    f"{name}: non-numeric capture ({g!r}) would "
+                    "ValueError in int(g) at request time",
+                )
+
     def test_every_api_path_matches_a_registered_route(self) -> None:
         """A path or verb the UI fetches but the server never registers is a
         404/405 in waiting. Path-only matching would let api() (GET) slip onto
@@ -482,6 +507,30 @@ const fetch = async (path, opts) => {
             f"?params the UI sends but the server never reads: "
             f"{sorted(sent_params - read_params)}",
         )
+
+    def test_route_patterns_are_fully_anchored(self) -> None:
+        """Every _ROUTES pattern must match its path and only its path.
+        `_dispatch` uses re.match (start-anchored only): a pattern missing
+        the trailing `$` would still match its intended path — passing every
+        unit test — while also accepting any longer path that starts with it
+        (e.g. `GET /api/sources/5/text/extra` reaching src_text). Pin the
+        anchors lexically AND behaviorally: build the one concrete path a
+        pattern matches, then assert junk on either side doesn't match."""
+        for _verb, pattern, name in _Handler._ROUTES:
+            self.assertTrue(pattern.startswith("^"), f"{name}: pattern not ^-anchored")
+            self.assertTrue(pattern.endswith("$"), f"{name}: pattern not $-anchored")
+            concrete = re.sub(r"\(\\d\+\)", "1", pattern.strip("^$"))
+            self.assertIsNotNone(
+                re.match(pattern, concrete), f"{name}: doesn't match {concrete!r}"
+            )
+            self.assertIsNone(
+                re.match(pattern, concrete + "/extra"),
+                f"{name}: prefix-matches a longer path ({concrete}/extra)",
+            )
+            self.assertIsNone(
+                re.match(pattern, "/x" + concrete),
+                f"{name}: matches with a leading segment (/x{concrete})",
+            )
 
     def test_template_placeholder_and_value_contracts(self) -> None:
         """Value-level contracts below the field-name layer.

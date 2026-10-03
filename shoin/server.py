@@ -840,22 +840,22 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 # Headers already committed; must not let this propagate to _dispatch
                 # (it would write a new HTTP status line into the SSE body stream).
-                # Only the exception TYPE name crosses to the client — str(exc)
-                # can carry DB paths/query fragments/LLM-internal text, the same
-                # leak the _dispatch 500 path already guards by sending
-                # type(exc).__name__ (v0.2.476). Full detail still goes to stderr.
+                # Message policy mirrors _dispatch: coded errors carry their
+                # curated (code, message); anything else leaks only the type
+                # name — str(exc) can carry internals (SQL text, paths).
+                # Full detail still goes to stderr.
                 print(
                     f"build_context failed mid-SSE: {type(exc).__name__}: {exc}",
                     file=sys.stderr,
                 )
                 try:
-                    self._sse(
-                        "error",
-                        {
-                            "code": "SYSTEM_INTERNAL_ERROR",
-                            "message": type(exc).__name__,
-                        },
-                    )
+                    if isinstance(exc, (StoreError, IngestError, LLMError)):
+                        self._sse("error", {"code": exc.code, "message": str(exc)})
+                    else:
+                        self._sse(
+                            "error",
+                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
+                        )
                 except ConnectionError:
                     pass
                 # Prevent dangling user turn: save an empty assistant message so

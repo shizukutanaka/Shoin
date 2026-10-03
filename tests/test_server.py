@@ -2708,6 +2708,58 @@ class SSEConnectionErrorTest(unittest.TestCase):
         self.assertEqual(msgs[-1]["role"], "assistant")
         self.assertEqual(msgs[-1]["body"], "")
 
+    def test_build_context_error_frame_leaks_type_name_only(self) -> None:
+        """An unhandled build_context failure must mirror _dispatch's
+        catch-all: the SSE error frame carries only type(exc).__name__,
+        never str(exc) — raw messages can contain internals (SQL text,
+        filesystem paths) that must not reach the client."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-leak"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch(
+            "shoin.server.build_context",
+            side_effect=RuntimeError("secret path /Users/x/internal.db"),
+        ):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
+        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertEqual(err_payload["message"], "RuntimeError")
+        self.assertNotIn("secret", err_payload["message"])
+
+    def test_build_context_error_frame_passes_coded_errors(self) -> None:
+        """A coded error (StoreError/IngestError/LLMError) carries its
+        curated (code, message) into the SSE error frame — mirroring the
+        _dispatch envelope mapping rather than flattening to 500."""
+        from shoin.store import StoreError
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-coded"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("テスト文書内容です。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "doc.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        with patch(
+            "shoin.server.build_context",
+            side_effect=StoreError("NOTEBOOK_NOT_FOUND", "notebook 7 not found"),
+        ):
+            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
+        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
+        self.assertEqual(err_payload["code"], "NOTEBOOK_NOT_FOUND")
+        self.assertEqual(err_payload["message"], "notebook 7 not found")
+
 
 class HostnameOfTest(unittest.TestCase):
     def test_malformed_netloc_returns_empty_string(self) -> None:
