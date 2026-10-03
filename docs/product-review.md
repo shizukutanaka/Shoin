@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.585 時点、2026-10-04 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.595 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1246件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1256件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -326,6 +326,33 @@ PYTHONHASHSEED順序非決定性がappend/extend/yield/list/tuple/join
 独自クエリ言語——引用符なし補間は`x:y`/`"`でWHERE意味を例外なしに
 改竄するため、全アトム二重引用を行動検証＋`MATCH ?`サイト1件を
 カタログ固定(v0.2.471)。v0.2.467はこの台帳自体の同期。
+
+**v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を
+コード化契約へ写像する層の閉塞」区間——実欠陥9件・台帳同期1件
+(v0.2.586は本台帳のみ)。主題は「層をまたぐ入力が想定形状を外れた時、
+その層の契約を保持するか」: pypdfはページオブジェクトを遅延解決するため
+`reader.pages[i]`のmaterialize自体がcorrupt xrefでraise——extract_text
+未到達の生例外をページ単位失敗へ降格(v0.2.587)。`_blocks()`が
+フェンス内の`# コメント`行をATX見出し・空行をブロック境界と誤認し、
+コードコメントがbreadcrumbへ混入——CommonMark規則(opener/closer対称・
+info文字列排斥)でフェンス状態を追跡(v0.2.588)。`refresh_source`の
+sha一致no-op経路が抽出済み`pages_failed`を0へ捨てる信号損失
+(v0.2.589)。`rewrite_queries`のdedup fold keyがcap切り捨て**後**の
+排出形でなく全文で計算——cap跨ぎ差異が2スロットを同一テキストで消費
+(v0.2.590)。`replace_chunks_for_source`のtitle経路のみstrip+空拒否を
+欠落——3兄弟writerの規約を第4経路へ移植(v0.2.591)。`_h_ask_sse`の
+token生成ブロックがLLMError/ConnectionErrorのみ捕捉し、TimeoutError等が
+SSEヘッダ確定後にgeneric-500として第2ステータス行を本文へ混入＋
+assistant行を孤立化——coded-vs-generic方針のerror frame+永続化保証へ
+(v0.2.592)。`_cmd_eval`両読込でUnicodeDecodeErrorが全ハンドラを潜り
+抜け非UTF-8入力で生traceback——JSONDecodeErrorとのタプル捕捉で
+VALIDATION_FIELD_FORMAT_INVALIDへ(v0.2.593)。`Request()`構築は
+コンストラクタでurlsplitを走らせるため、unclosed IPv6ブラケットが
+urlopen実行前にraise——`_post`/`chat_stream`の2サイトを`available()`
+と同じtry内構築へ(v0.2.594)。`json.loads`は非標準NaN/Infinity
+リテラルを受理しboolはintサブクラスのため、`isinstance`のみでは
+`{recall: NaN}`がdiff算術へNaN伝播——全5数値フィールドへ有限+非bool
+要求(v0.2.595)。全区間fail-then-pass規律で実証済み。
 
 **v0.2.575-585 の要約**: 「引用マーカー帰属規約の断片単位統一——
 [S#]記法の名空間一意化」区間——実欠陥10件・台帳同期1件(v0.2.575は

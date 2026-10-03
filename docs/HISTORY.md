@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.595
+## Version History: v0.1.37 → v0.2.596
+
+### v0.2.596
+- product-review台帳をv0.2.595時点へ同期: 「入出力境界の防衛深化——
+  想定外入力をコード化契約へ写像する層の閉塞」区間(v0.2.587-595の
+  実欠陥9件)を記録。ヘッダ版数・日付・テスト件数(1246→1256)同値更新。
 
 ### v0.2.595
 - `evaluate.py` `report_from_dict`の数値フィールドを有限値+非boolへ矯正: Pythonの`json.loads`は非標準リテラル`NaN`/`Infinity`/`-Infinity`を受理し、boolはint subclass——`isinstance(x,(int,float))`検査だけでは手編集ベースラインの`{"recall":NaN}`/`{"rr":true}`/`{"k":NaN}`が通過し、NaNがdiff算術へ沈黙伝搬（`d_recall:nan`/`rr_after:inf`がdiff表示へ混入）あるいは`int(NaN)`の生ValueErrorでクラッシュ。`_bad_num`ヘルパーで4フィールド全てを「有限の数値かつ非bool」へ統一——同関数のrefuse-loudly契約（silently-dropped caseは捏造deltaを生む）への違反を閉塞
