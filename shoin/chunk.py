@@ -248,11 +248,40 @@ def estimate_tokens(text: str) -> int:
     return cjk + words
 
 
+# Inside a fenced code block every structural signal is content: a
+# `# comment` line is a comment, not an ATX heading, and a blank line is
+# padding, not a block boundary. Without tracking fence state both were
+# misparsed — a fenced `#` line closed the real enclosing section and pushed
+# itself onto the breadcrumb stack, and every blank line inside the fence
+# split the code mid-block. Rules per CommonMark: an opener is a run of 3+
+# backticks or tildes indented ≤3 spaces; the closer is the same marker
+# character, at least the opener's length, with no info string. An unclosed
+# fence (CommonMark: runs to end of document) simply keeps accumulating.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
 def _blocks(text: str) -> list[str]:
     """Split into blocks at markdown headings and blank lines."""
     blocks: list[str] = []
     buf: list[str] = []
+    fence = ""
     for line in text.splitlines():
+        if fence:
+            buf.append(line)
+            m = _FENCE_RE.match(line)
+            if (
+                m
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= len(fence)
+                and not line[m.end() :].strip()
+            ):
+                fence = ""
+            continue
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = m.group(1)
+            buf.append(line)
+            continue
         if _HEADING_RE.match(line):
             if buf:
                 blocks.append("\n".join(buf).strip())
@@ -583,6 +612,16 @@ def _match_fold(text: str) -> str:
             continue
         if unicodedata.category(ch) == "Cf":
             continue  # ZWSP / SHY / ZWNJ / WJ / tag characters carry no content
+        if unicodedata.combining(ch):
+            # A mark that survived NFKC could not compose into any base char —
+            # marks that can are consumed by the composition pass above (and
+            # precomposed accents lose theirs in the decomp branch below).
+            # What reaches here is a stray diacritic glued to a non-letter or
+            # stacked behind an already-composed char (é + ◌́): it carries no
+            # glyph, and keeping it split the fold of its neighbors, making
+            # the fold non-idempotent ('é'+◌́ → 'e'+◌́ → 'e') and letting NFD
+            # fragments diverge from their NFC spellings.
+            continue
         mapped = _LATIN_SPECIALS.get(ch)
         if mapped is not None:
             out.append(mapped)

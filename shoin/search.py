@@ -363,6 +363,12 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
 )
 
 
+# Mass nouns whose final -s is not a plural: the -s drop would emit a live
+# unrelated word ('news' -> 'new') that injects high-frequency noise into
+# the OR'd variant set — not a cheap dead spelling.
+_STEM_INVARIANT = frozenset({"news"})
+
+
 def _stem_variants(term: str) -> list[str]:
     """Singular/base spellings of an English ASCII term (v0.2.536).
 
@@ -390,7 +396,7 @@ def _stem_variants(term: str) -> list[str]:
         add(low[:-3] + "y")                    # queries -> query
     if low.endswith(("sses", "shes", "ches", "xes", "zes")):
         add(low[:-2])                          # classes/wishes/watches/boxes
-    if low.endswith("s") and not low.endswith(("ss", "us", "is")):
+    if low.endswith("s") and not low.endswith(("ss", "us", "is")) and low not in _STEM_INVARIANT:
         add(low[:-1])                          # documents -> document
     if low.endswith("ing"):
         add(low[:-3])                          # hunting -> hunt
@@ -689,8 +695,14 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         # length would read "fully covered" and skip the LIKE scan, leaving every
         # fullwidth-spelled document unreachable for exactly the halfwidth queries
         # this variant machinery exists to serve.
+        # _numeric_query_terms count too: fts_query feeds them the same gram
+        # comprehension, so a short expanded value ('五割'→'50') is silently
+        # skipped there — without it in the check, an FTS-covered query never
+        # reaches its own numeric bridge.
         if fts_hits and all(
-            len(v) >= 3 for t in query_terms(clean_query) for v in term_variants(t)
+            len(v) >= 3
+            for t in query_terms(clean_query) + _numeric_query_terms(clean_query)
+            for v in term_variants(t)
         ):
             if negs:
                 fts_hits = _apply_neg_filter(fts_hits, negs)
@@ -1116,7 +1128,17 @@ def vector_search(
                 seq=int(r["seq"]),
             )
 
-    return heapq.nlargest(k, _scored(), key=lambda h: h.vec)
+    # A cosine <= 0 is "no evidence", not weak evidence — but nlargest() fills
+    # its k slots from whatever rows exist, so a vector leg with zero real
+    # signal (a degenerate/all-zero query vector, embeddings written under a
+    # different dimension after a SHOIN_EMBED_MODEL switch, or a corpus simply
+    # orthogonal to the query) used to inject k row-order-arbitrary chunks into
+    # RRF fusion as if they were ranked vector hits — silently replacing the
+    # documented BM25-only degraded mode with arbitrary-row noise. Only a
+    # positive cosine may hold a rank slot; an empty vector list is exactly
+    # what fusion treats as the BM25-only path.
+    positive = (h for h in _scored() if h.vec > 0.0)
+    return heapq.nlargest(k, positive, key=lambda h: h.vec)
 
 
 # --- fusion ---------------------------------------------------------------
@@ -1216,10 +1238,13 @@ def _norm_query_terms(query: str) -> list[list[str]]:
     the hit is scored (v0.2.539): without the group a stem/accent/digit/
     kana-bridged chunk read lex=0.0 — demoted by rerank() and eligible for
     _tail_cut clipping as "term-free", the same retrieval-vs-scoring
-    blindness the width fold fixed one dimension earlier.
+    blindness the width fold fixed one dimension earlier.  The numeric
+    expansion terms count too (v0.2.574): a chunk surfaced only by the
+    '五割'->'50' bridge shares no literal query term, so it read lex=0.0
+    and _tail_cut clipped exactly the hit the bridge exists to find.
     """
     groups: list[tuple[str, ...]] = []
-    for t in query_terms(query):
+    for t in query_terms(query) + _numeric_query_terms(query):
         variants = tuple(
             dict.fromkeys(
                 unicodedata.normalize("NFKC", v).casefold()
@@ -1619,6 +1644,12 @@ def retrieve_multi(
         total_bm25 += len(bm25_hits)
         if qv:
             vec_hits = vector_search(store, notebook_id, qv, pool)
+            if i > 0:
+                # A rewrite's vector phrasing is system-proposed just like its
+                # BM25 vocabulary — mark the lane so _tail_cut does not read
+                # lex==0 against the primary query as term-free.
+                for h in vec_hits:
+                    h.detail["exp"] = 1.0
             if negs:
                 vec_hits = _apply_neg_filter(vec_hits, negs)
             lists.append(vec_hits)

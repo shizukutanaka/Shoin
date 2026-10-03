@@ -276,7 +276,10 @@ def _sec_label(section: str) -> str:
 
 
 def build_context(
-    store: Store, hits: list[Hit], budget_tokens: int = SOURCE_TEXT_TOKENS
+    store: Store,
+    hits: list[Hit],
+    budget_tokens: int = SOURCE_TEXT_TOKENS,
+    rank_weighted: bool = True,
 ) -> GroundedContext:
     """Group hits by source (relevance order) under a rank-proportional budget.
 
@@ -285,6 +288,11 @@ def build_context(
     callers building the full ask()/SSE prompt (system prompt + source text +
     history + query) must not let source text alone consume the whole budget.
     studio.py passes its own explicit budget_tokens for its different prompt shape.
+
+    rank_weighted=False splits budget_tokens evenly across sources instead of
+    the harmonic 1/i decay — for callers whose hits carry no relevance ranking
+    (studio.py's overview_hits scores every chunk 1.0 in source-id order, so the
+    decay would otherwise weight insertion order as if it were relevance).
     """
     order: list[int] = []
     grouped: dict[int, list[Hit]] = {}
@@ -318,6 +326,10 @@ def build_context(
     n_src = len(order)
     surplus = max(budget_tokens - n_src * MIN_PER_SOURCE_TOKENS, 0)
     harmonic = sum(1 / i for i in range(1, n_src + 1))
+    # rank_weighted=False (v0.2.552): overview-style callers have no relevance
+    # ranking to honor — their order is source-id insertion order, so weighting
+    # it harmonically would give the FIRST-added source ~6x the last-added
+    # one's excerpt in outputs documented to cover all sources equally.
     titles: list[str] = []
     bodies: list[str] = []
     contexts: list[str] = []
@@ -326,7 +338,11 @@ def build_context(
     parts: list[str] = []
     snums: dict[int, int] = {}
     for idx, source_id in enumerate(order, start=1):
-        per_source = MIN_PER_SOURCE_TOKENS + int(surplus * ((1 / idx) / harmonic))
+        per_source = (
+            MIN_PER_SOURCE_TOKENS + int(surplus * ((1 / idx) / harmonic))
+            if rank_weighted
+            else budget_tokens // n_src
+        )
         try:
             title = store.get_source(source_id).title
         except StoreError:
@@ -609,6 +625,12 @@ def rewrite_queries(
         q = _LIST_PREFIX_RE.sub("", unicodedata.normalize("NFKC", line.strip())).strip()
         if len(q) < 2:
             continue
+        # Cap BEFORE dedup: the emitted string is the truncated one, so the
+        # fold key must be computed on it — two rewrites that differ only past
+        # the cap would otherwise both survive, truncate to the identical
+        # string, and spend two rewrite slots on zero vocabulary diversity
+        # (the same class v0.2.545 closed for orthographic variants).
+        q = q[:MAX_QUESTION_LEN]
         # Folded dedup (v0.2.545): a rewrite differing only in orthography
         # (データ vs でーた, café vs cafe) retrieves the identical chunk set —
         # term_variants bridges that spelling at search time — so keeping it
@@ -617,7 +639,7 @@ def rewrite_queries(
         if key in seen:
             continue
         seen.add(key)
-        out.append(q[:MAX_QUESTION_LEN])
+        out.append(q)
         if len(out) >= n:
             break
     return out

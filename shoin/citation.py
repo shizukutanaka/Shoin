@@ -97,11 +97,34 @@ COVERAGE_LOW = 0.5
 _DISCLAIMER_MARKERS = (
     "記載なし",
     "記載がない",
+    "記載がありませ",
+    "記載はありませ",
     "記載は見当たら",
-    "見つかりませんでした",
+    "言及がありませ",
+    "言及はありませ",
+    "記述がありませ",
+    "記述はありませ",
+    "記述されていませ",
+    "情報がありませ",
+    "明記されていませ",
+    "述べられていませ",
+    "記されていませ",
+    "確認できませ",
+    "見つかりませ",
     "not in the source",
     "not mentioned",
     "not found in the source",
+    "not stated",
+    "not described",
+    "not specified",
+    "not documented",
+    "not provided",
+    "not covered",
+    "no information",
+    "isn't mentioned",
+    "aren't mentioned",
+    "does not mention",
+    "doesn't mention",
 )
 
 # Framing sentences describe the answer's own structure ("以下に要点を示します",
@@ -143,8 +166,10 @@ _STRUCTURAL_LINE_RE = re.compile(
     r"^\s*(?:#{1,6}\s|\|.*\|\s*$|[\-*_~]{3,}\s*$|>)"
 )
 # Fence open/close markers. `in_fence` in uncited_sentences() toggles on these;
-# everything between a pair is code, not prose sentences.
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# everything between a pair is code, not prose sentences. 0-3 leading spaces
+# only (CommonMark): a 4-space-indented ``` is indented-code content, not a
+# fence — matching it as one flipped in_fence and swallowed real prose.
+_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
 # Indented code blocks (v0.2.217): a 4-space/tab-indented line is ALSO code —
 # but only when the previous line is blank (or the block is already open).
 # Otherwise the indent is a lazy continuation of a wrapped paragraph
@@ -342,7 +367,7 @@ def _overlap(claim: set[str], source: set[str]) -> float:
     return len(claim & source) / len(claim) if claim else 0.0
 
 
-def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
+def _segment_claims(norm: str, valid: list[int]) -> dict[int, list[str]]:
     """Attribute each citation to the clause-text that precedes it.
 
     A sentence carrying several citations makes several claims; comparing the
@@ -363,6 +388,16 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
     numeric_mismatches() (digit strings per clause) so the two can never
     diverge on WHICH text a citation is held responsible for — the
     v0.2.77-79 duplicated-heuristic drift lesson.
+
+    Each S-number maps to a LIST of clause texts, one per marker occurrence
+    that cites it: "A.[S1] B.[S2,S1]" attributes both the A-clause and the
+    B-clause to S1. Keeping every occurrence matters twice over — the first
+    citation's clause would otherwise be overwritten, so a correct citation
+    could be judged on a later co-cited clause (false accusation) and the
+    earlier clause's numbers would escape numeric_mismatches entirely
+    (missed flag). Callers evaluate each occurrence independently; a number
+    may then land in both confirmed and misattributed, exactly as it already
+    can across sentences.
     """
     spans = list(_BRACKET_RE.finditer(norm))
     cited_spans = [
@@ -372,7 +407,7 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
     cited_spans = [(m, ns) for m, ns in cited_spans if ns]
     if len(cited_spans) < 2:
         return {}
-    out: dict[int, str] = {}
+    out: dict[int, list[str]] = {}
     prev_end = 0
     for m, ns in cited_spans:
         seg = _BRACKET_RE.sub(" ", norm[prev_end : m.start()]).strip()
@@ -380,7 +415,7 @@ def _segment_claims(norm: str, valid: list[int]) -> dict[int, str]:
         if not _bigrams(seg):
             continue  # adjacent markers ("[S1][S2]") — fall back to the sentence
         for n in ns:
-            out[n] = seg
+            out.setdefault(n, []).append(seg)
     return out
 
 
@@ -433,6 +468,16 @@ def verify_grounding(
                 prev_claim = cand
             continue
         claim = _bigrams(bare)
+        # Markers leading the fragment trail the previous claim ("A. [S1] B."
+        # splits as "A." + "[S1] B.") — the shared backward convention in
+        # _leading_markers assigns them prev_claim, not this fragment's text.
+        # Snapshot before prev_claim advances to this fragment's own claim.
+        lead = (
+            _leading_markers(sentence, nums)
+            if claim and prev_claim
+            else set()
+        )
+        lead_claim = prev_claim
         if not claim:
             # Citation-only fragment after sentence boundary split (e.g. " [S1]").
             # Re-use the preceding sentence's bigrams so the citation is still
@@ -447,11 +492,16 @@ def verify_grounding(
         # sentence (see _segment_claims). Empty dict → whole-sentence behavior.
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = _bigrams(segments[n]) if n in segments else claim
-            overlap_n = _overlap(claim_n, src_bg[n])
-            if overlap_n >= CONFIRM_MIN:
-                confirmed.add(n)
-            else:
+            claims_n = (
+                [lead_claim]
+                if n in lead
+                else ([_bigrams(s) for s in segments[n]] if n in segments else [claim])
+            )
+            for claim_n in claims_n:
+                overlap_n = _overlap(claim_n, src_bg[n])
+                if overlap_n >= CONFIRM_MIN:
+                    confirmed.add(n)
+                    continue
                 # A different source — including co-cited ones — may match far better,
                 # indicating this specific S-number is wrong even if others in the same
                 # sentence are correctly cited.
@@ -528,6 +578,19 @@ _MAG_NUM_RE = re.compile(rf"({_NUM_PART})(千万|百万|億|万|千|兆)")
 # "一億2000万" — = 120,000,000. A chain is ≥2 adjacent numeral+suffix pairs;
 # the sum is added alongside the per-part values.
 _MAG_CHAIN_RE = re.compile(rf"(?:{_NUM_PART}{_MAG_SUF}){{2,}}")
+# Big-magnitude positional tokens (v0.2.568): a 億/万/兆-delimited numeral is
+# a sum of sub-10000 groups — digit strings, kanji runs, or digit+place
+# shorthand (3千) — plus an optional unsuffixed tail as the last group:
+# "一万二千三百四十五" = 一万 + 二千三百四十五 = 12345, "1億2345万6789" =
+# 1億 + 2345万 + 6789.  The suffix-pair paths cannot see this shape: the
+# tail has no suffix, so it dropped out and the truncated prefix registered
+# a wrong sum ("一万二千三百四十五" → 12000, true 12345 missing).  Group
+# segs may end in a place char only for digit parts ("3千億" = 3千 × 億);
+# kanji runs carry their own place notation.
+_MAG_BIG = r"(?:億|万|兆)"
+_SEG = rf"(?:{_NUM_PART}[十百千]?)"
+_MAG_TOKEN_RE = re.compile(rf"(?:{_SEG}{_MAG_BIG})+{_SEG}?")
+_SEG_MAG_RE = re.compile(rf"({_SEG})({_MAG_BIG})")
 # Bare kanji-numeral runs (v0.2.195): "十二人" ↔ "12人". The lookahead keeps
 # the run maximal — a run ending right before another numeral or suffix char
 # is a component of a larger form, not a standalone value.
@@ -618,7 +681,15 @@ def _conv_values(text: str) -> set[tuple[int, float]]:
         for j in range(i + 1, len(ms)):
             nxt = ms[j]
             ent2 = _UNIT_SCALE.get(nxt.group(2))
-            if ent2 is None or ent2[0] != fam or len(t[ms[j - 1].end():nxt.start()]) > 2:
+            # Only whitespace or the additive conjunction 'と' may join a
+            # same-family chain — '、', ',', '・', '/' enumerate separate
+            # values: '1時間、30分' asserts 60 and 30, never 90.
+            gap = t[ms[j - 1].end():nxt.start()]
+            if (
+                ent2 is None
+                or ent2[0] != fam
+                or not set(gap) <= {" ", "\t", "\n", "\r", "　", "と"}
+            ):
                 break
             acc += float(nxt.group(1)) * ent2[1]
             vals.add((fam, acc))
@@ -635,14 +706,32 @@ def _en_value(run: str) -> int | None:
     total = 0
     local = 0
     used = False
+    prev_small = False
+    pending_tens = False
     for tok in re.split(r"[ -]+", run.casefold()):
         if tok in _EN_SMALL:
-            local += _EN_SMALL[tok]
+            v = _EN_SMALL[tok]
+            # A small-cluster is a numeral only as tens+optional-unit —
+            # "one two", "fifteen three" enumerate, inconclusive → None.
+            if pending_tens:
+                if v >= 10:
+                    return None
+                pending_tens = False
+            elif prev_small:
+                return None
+            elif v >= 20:
+                pending_tens = True
+            local += v
+            prev_small = True
         elif tok == "hundred":
             local = (local or 1) * 100
+            prev_small = False
+            pending_tens = False
         else:
             total += (local or 1) * _EN_BIG[tok]
             local = 0
+            prev_small = False
+            pending_tens = False
         used = True
     return total + local if used else None
 
@@ -679,6 +768,16 @@ def _part_value(part: str) -> float | None:
     return float(v) if v is not None else None
 
 
+def _seg_value(seg: str) -> float | None:
+    """Value of one sub-10000 group inside a magnitude token."""
+    if seg[0].isdigit():
+        if seg[-1] in _KANJI_PLACE:
+            return float(seg[:-1]) * _KANJI_PLACE[seg[-1]]
+        return float(seg)
+    v = _kanji_value(seg)
+    return float(v) if v is not None else None
+
+
 def _numbers_expanded(text: str) -> set[str]:
     """_numbers() plus canonical values for magnitude-suffixed shorthand.
 
@@ -694,15 +793,48 @@ def _numbers_expanded(text: str) -> set[str]:
     t = _NUM_COMMA_RE.sub("", unicodedata.normalize("NFKC", text))
     nums = _numbers(t)
     suffixed: set[str] = set()
-    # Numeral+suffix pairs INSIDE a chain are components, not asserted values:
-    # "1億2000万" asserts 120,000,000 — keeping "1億"→1e8 and "2000万"→2e7 as
-    # separate members would flag a claim spelling the summed value out.
-    chain_spans = [m.span() for m in _MAG_CHAIN_RE.finditer(t)]
+    token_spans = [m.span() for m in _MAG_TOKEN_RE.finditer(t)]
+    for m in _MAG_TOKEN_RE.finditer(t):
+        total = 0.0
+        end = 0
+        for p in _SEG_MAG_RE.finditer(m.group(0)):
+            seg = p.group(1)
+            sv = _seg_value(seg)
+            if sv is None:
+                break
+            if seg[0].isdigit():
+                suffixed.add(seg.rstrip("十百千"))
+            total += sv * _MAG_SUFFIX[p.group(2)]
+            end = p.end()
+        else:
+            tail = m.group(0)[end:]
+            sv = _seg_value(tail) if tail else 0.0
+            if sv is None:
+                continue
+            if tail and tail[0].isdigit():
+                suffixed.add(tail)
+            v = total + sv
+            r = round(v)
+            if abs(v - r) < 1e-6:
+                nums.add(str(r))
+    # Numeral+suffix pairs inside a larger positional numeral are components,
+    # not asserted values: "1億2000万" asserts 120,000,000 — keeping "1億"→1e8
+    # and "2000万"→2e7 as separate members would flag a claim spelling the
+    # summed value out — and "二千一" asserts 2001 via the bare-run path, so
+    # the '二千' pair inside it must not also register 2000.
+    chain_spans = token_spans + [
+        m.span()
+        for m in _MAG_CHAIN_RE.finditer(t)
+        if not any(ts <= m.start() < te for ts, te in token_spans)
+    ]
+    bare_spans = [m.span() for m in _KANJI_BARE_RE.finditer(t)]
     for m in _MAG_NUM_RE.finditer(t):
         part, suf = m.group(1), m.group(2)
         if part[0].isdigit():
             suffixed.add(part)
-        if any(cs <= m.start() < ce for cs, ce in chain_spans):
+        if any(cs <= m.start() < ce for cs, ce in chain_spans) or any(
+            bs <= m.start() < be for bs, be in bare_spans
+        ):
             continue
         pv = _part_value(part)
         if pv is None:
@@ -712,6 +844,8 @@ def _numbers_expanded(text: str) -> set[str]:
         if abs(v - r) < 1e-6:
             nums.add(str(r))
     for m in _MAG_CHAIN_RE.finditer(t):
+        if any(ts <= m.start() < te for ts, te in token_spans):
+            continue
         total = 0.0
         for p in _MAG_NUM_RE.finditer(m.group(0)):
             pv = _part_value(p.group(1))
@@ -722,7 +856,9 @@ def _numbers_expanded(text: str) -> set[str]:
             r = round(total)
             if abs(total - r) < 1e-6:
                 nums.add(str(r))
-    for m in _KANJI_BARE_RE.finditer(t):
+    for m, (bs, be) in zip(_KANJI_BARE_RE.finditer(t), bare_spans, strict=True):
+        if any(ts <= bs and be <= te for ts, te in token_spans):
+            continue
         kv = _kanji_value(m.group(1))
         if kv is not None and kv > 0:
             nums.add(str(kv))
@@ -820,57 +956,66 @@ def numeric_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
-            # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
-            # the substring fallback preserves v0.2.184's rounding tolerance
-            # (claim "63" stays silent inside source "63.5%"); the conversion
-            # check suppresses only when the claim's OWN unit pairs with the
-            # same canonical value in the same family — "300円" against a
-            # source saying "5時間" (→300min) stays flagged because 円 is
-            # not a time unit.
-            conv_by_num: dict[str, set[tuple[int, float]]] = {}
-            for m in _CONV_NUM_RE.finditer(claim_n):
-                ent = _UNIT_SCALE.get(m.group(2))
-                if ent is not None:
-                    conv_by_num.setdefault(m.group(1), set()).add(
-                        (ent[0], float(m.group(1)) * ent[1])
-                    )
-            # Rate restatements (v0.2.214): a claim asserting "50%" matches a
-            # source writing the same rate as the bare fraction "0.5", and a
-            # bare-fraction claim "0.5" matches a source asserting "50%" — but
-            # the reverse directions stay strict: an unmarked claim "50" does
-            # NOT match a bare "0.5" (different magnitudes), and a fraction
-            # claim only bridges to a RATE-marked source value (claim "0.5" vs
-            # source "50個" keeps flagging — 50 was not asserted as a rate).
-            claim_rate = _rate_values(claim_n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                # Exact set membership catches expanded magnitudes (32000 ↔ 3.2万);
+                # the substring fallback preserves v0.2.184's rounding tolerance
+                # (claim "63" stays silent inside source "63.5%"); the conversion
+                # check suppresses only when the claim's OWN unit pairs with the
+                # same canonical value in the same family — "300円" against a
+                # source saying "5時間" (→300min) stays flagged because 円 is
+                # not a time unit.
+                conv_by_num: dict[str, set[tuple[int, float]]] = {}
+                for m in _CONV_NUM_RE.finditer(claim_n):
+                    ent = _UNIT_SCALE.get(m.group(2))
+                    if ent is not None:
+                        conv_by_num.setdefault(m.group(1), set()).add(
+                            (ent[0], float(m.group(1)) * ent[1])
+                        )
+                # Rate restatements (v0.2.214): a claim asserting "50%" matches a
+                # source writing the same rate as the bare fraction "0.5", and a
+                # bare-fraction claim "0.5" matches a source asserting "50%" — but
+                # the reverse directions stay strict: an unmarked claim "50" does
+                # NOT match a bare "0.5" (different magnitudes), and a fraction
+                # claim only bridges to a RATE-marked source value (claim "0.5" vs
+                # source "50個" keeps flagging — 50 was not asserted as a rate).
+                claim_rate = _rate_values(claim_n)
 
-            def _num_missing(
-                num: str, n: int, conv: dict[str, set[tuple[int, float]]], rate: set[str]
-            ) -> bool:
-                if (
-                    num in src_nums[n]
-                    or num in src_norm[n]
-                    or not conv.get(num, set()).isdisjoint(src_conv[n])
+                def _num_missing(
+                    num: str,
+                    n: int,
+                    conv: dict[str, set[tuple[int, float]]],
+                    rate: set[str],
+                ) -> bool:
+                    if (
+                        num in src_nums[n]
+                        or num in src_norm[n]
+                        or not conv.get(num, set()).isdisjoint(src_conv[n])
+                    ):
+                        return False
+                    f = float(num)
+                    if num in rate and _canon(f / 100) in src_nums[n]:
+                        return False
+                    if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
+                        return False
+                    return True
+
+                if any(
+                    _num_missing(num, n, conv_by_num, claim_rate)
+                    for num in _numbers_expanded(claim_n)
                 ):
-                    return False
-                f = float(num)
-                if num in rate and _canon(f / 100) in src_nums[n]:
-                    return False
-                if 0 < f < 1 and _canon(f * 100) in src_rate[n]:
-                    return False
-                return True
-
-            if any(
-                _num_missing(num, n, conv_by_num, claim_rate)
-                for num in _numbers_expanded(claim_n)
-            ):
-                out.add(n)
+                    out.add(n)
+                    break
     return sorted(out)
 
 
@@ -1036,19 +1181,28 @@ def unit_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
-            for num, unit in _unit_pairs(claim_n):
-                if num not in src_norm[n]:
-                    continue  # absent number — numeric_mismatches()' signal
-                units_n = [v for num2, v in src_units[n] if num2 == num]
-                if units_n and not any(_units_compat(unit, v) for v in units_n):
-                    out.add(n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                flagged = False
+                for num, unit in _unit_pairs(claim_n):
+                    if num not in src_norm[n]:
+                        continue  # absent number — numeric_mismatches()' signal
+                    units_n = [v for num2, v in src_units[n] if num2 == num]
+                    if units_n and not any(_units_compat(unit, v) for v in units_n):
+                        out.add(n)
+                        flagged = True
+                        break
+                if flagged:
                     break
     return sorted(out)
 
@@ -1134,40 +1288,52 @@ def quote_mismatches(
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_n = segments.get(n, claim_text)
-            for q in _quote_spans(claim_n):
-                if q in src_norm[n]:
-                    continue
-                # Verbatim location of the quote, if any — a stronger provenance
-                # signal than bigram argmax, so this assignment wins when both
-                # checks flag the same number (make_report shares one dict).
-                hit_k = next((k for k in src_norm if k != n and q in src_norm[k]), None)
-                if hit_k is not None:
-                    out.add(n)
-                    if suggested is not None:
-                        suggested[n] = hit_k
-                    break
-                if len(q) >= _DOCTORED_MIN_LEN:
-                    # Doctored shape: argmax over ALL sources — a near-verbatim of
-                    # the cited source itself flags too (paraphrase wearing
-                    # quotes: the assertive 「…」 claims wording n never wrote).
-                    # The suggestion only helps when it points elsewhere.
-                    best_k, best_o = max(
-                        ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
-                        key=lambda kv: kv[1],
-                        default=(0, 0.0),
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                flagged = False
+                for q in _quote_spans(claim_n):
+                    if q in src_norm[n]:
+                        continue
+                    # Verbatim location of the quote, if any — a stronger provenance
+                    # signal than bigram argmax, so this assignment wins when both
+                    # checks flag the same number (make_report shares one dict).
+                    hit_k = next(
+                        (k for k in src_norm if k != n and q in src_norm[k]), None
                     )
-                    if best_o >= _DOCTORED_MIN_OVERLAP:
+                    if hit_k is not None:
                         out.add(n)
-                        if suggested is not None and best_k != n:
-                            suggested[n] = best_k
+                        if suggested is not None:
+                            suggested[n] = hit_k
+                        flagged = True
                         break
+                    if len(q) >= _DOCTORED_MIN_LEN:
+                        # Doctored shape: argmax over ALL sources — a near-verbatim of
+                        # the cited source itself flags too (paraphrase wearing
+                        # quotes: the assertive 「…」 claims wording n never wrote).
+                        # The suggestion only helps when it points elsewhere.
+                        best_k, best_o = max(
+                            ((k, _overlap(_bigrams(q), src_bg[k])) for k in src_bg),
+                            key=lambda kv: kv[1],
+                            default=(0, 0.0),
+                        )
+                        if best_o >= _DOCTORED_MIN_OVERLAP:
+                            out.add(n)
+                            if suggested is not None and best_k != n:
+                                suggested[n] = best_k
+                            flagged = True
+                            break
+                if flagged:
+                    break
     return sorted(out)
 
 
@@ -1338,34 +1504,41 @@ def negation_mismatches(text: str, source_texts: dict[int, str]) -> list[int]:
                 prev_claim = bare
             continue
         claim_text = bare or prev_claim
+        lead = _leading_markers(sentence, nums) if claim_text and prev_claim else set()
+        lead_claim = prev_claim
         if bare:
             prev_claim = bare
         if not claim_text:
             continue
         segments = _segment_claims(unicodedata.normalize("NFKC", sentence), nums)
         for n in nums:
-            claim_norm = re.sub(
-                r"\s+", " ", _match_fold(segments.get(n, claim_text))
-            ).strip()
-            cb = _bigrams(claim_norm)
-            if not cb:
-                continue
-            best_i, best_o = -1, 0.0
-            for i, sb in enumerate(src_bg[n]):
-                o = _overlap(cb, sb)
-                if o > best_o:
-                    best_o, best_i = o, i
-            if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
-                continue
-            sb = src_bg[n][best_i]
-            if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
-                continue  # claim is only a subset of a longer source sentence
-            claim_ant = _ant_signs(claim_norm)
-            if _neg_parity(claim_norm) != src_par[n][best_i] or any(
-                claim_ant[c] != src_ant[n][best_i][c]
-                for c in claim_ant.keys() & src_ant[n][best_i].keys()
-            ):
-                out.add(n)
+            claims_n = (
+                [lead_claim] if n in lead else segments.get(n, [claim_text])
+            )
+            for claim_n in claims_n:
+                claim_norm = re.sub(
+                    r"\s+", " ", _match_fold(claim_n)
+                ).strip()
+                cb = _bigrams(claim_norm)
+                if not cb:
+                    continue
+                best_i, best_o = -1, 0.0
+                for i, sb in enumerate(src_bg[n]):
+                    o = _overlap(cb, sb)
+                    if o > best_o:
+                        best_o, best_i = o, i
+                if best_i < 0 or best_o < _NEG_OVERLAP_MIN:
+                    continue
+                sb = src_bg[n][best_i]
+                if sb and len(cb & sb) / len(sb) < _NEG_OVERLAP_MIN:
+                    continue  # claim is only a subset of a longer source sentence
+                claim_ant = _ant_signs(claim_norm)
+                if _neg_parity(claim_norm) != src_par[n][best_i] or any(
+                    claim_ant[c] != src_ant[n][best_i][c]
+                    for c in claim_ant.keys() & src_ant[n][best_i].keys()
+                ):
+                    out.add(n)
+                    break
     return sorted(out)
 
 
@@ -1422,9 +1595,15 @@ def _single_diff_flip(a: str, b: str) -> bool:
     ant_a, ant_b = _ant_signs(a), _ant_signs(b)
     if any(ant_a[c] != ant_b[c] for c in ant_a.keys() & ant_b.keys()):
         return True
-    _, i1, i2, j1, j2 = ops[0]
-    num_a = _numbers_expanded(a[i1:i2])
-    num_b = _numbers_expanded(b[j1:j2])
+    # Compare whole-sentence number sets, not the raw diff span: difflib
+    # minimises the opcode to the differing characters, so "50%"→"30%"
+    # yields span "5"→"3" — a single digit that the significance rule
+    # filters, silencing a real value flip. With exactly one non-equal
+    # opcode any set difference must originate inside that span, so the
+    # whole-sentence sets are safe to compare; single-digit-only swaps
+    # ("第3版"→"第4版") still yield empty sets and stay silent.
+    num_a = _numbers_expanded(a)
+    num_b = _numbers_expanded(b)
     return bool(num_a) and bool(num_b) and num_a != num_b
 
 
@@ -1536,6 +1715,31 @@ def degenerate_spans(text: str, *, history: str = "") -> list[str]:
 # purpose (a 3-char filler word already clears it).
 _MIN_CLAIM_CHARS = 5
 
+# A bracket run that OPENS a fragment trails the previous sentence
+# ("claim. [S1] next.") — the same backward convention _segment_claims()
+# uses for attribution — so it belongs to the pending claim, not the text
+# after it. _FORWARD_BIND_RE covers the forward idiom ("[S1]によると…"),
+# where the leading marker introduces its own fragment's claim instead.
+# Bounds keep every inner quantifier out of an unbounded outer repeat —
+# a citation bracket longer than 80 chars simply won't match and falls
+# back to the mid-fragment path, which is the conservative direction.
+_LEAD_CITE_RUN = re.compile(r"^(\[[^\[\]]{0,80}\](?:\s{0,4}\[[^\[\]]{0,80}\])*)")
+_FORWARD_BIND_RE = re.compile(r"^\s*(?:によると|によれば|では)")
+
+
+def _leading_markers(sentence: str, nums: list[int]) -> set[int]:
+    """Citation numbers in a fragment's leading marker run.
+
+    Every citation check must agree on which claim a marker annotates —
+    the v0.2.77-79 duplicated-heuristic drift lesson — so the backward
+    convention lives here once: a marker opening a fragment trails the
+    PREVIOUS claim ("A. [S1] B."), unless a forward idiom binds it to its
+    own fragment's text ("[S1]によると…")."""
+    lm = _LEAD_CITE_RUN.match(sentence)
+    if lm is None or _FORWARD_BIND_RE.match(sentence[lm.end() :]) is not None:
+        return set()
+    return {int(x) for x in _SNUM_RE.findall(lm.group(1)) if int(x) in nums}
+
 
 def uncited_sentences(text: str) -> list[str]:
     """Sentences that assert content with zero [S#] citations anywhere in them.
@@ -1591,7 +1795,7 @@ def uncited_sentences(text: str) -> list[str]:
             list_scope or (prev_cited and _LIST_INTRO_RE.search(prev_bare) is not None)
         )
         prev_bare, prev_cited = bare, bool(nums)
-        if _FENCE_RE.match(sentence):
+        if _FENCE_RE.match(raw):
             in_fence = not in_fence
             in_code = False
             prev_blank = False
@@ -1616,6 +1820,59 @@ def uncited_sentences(text: str) -> list[str]:
             # resolves whatever sentence it trails; that sentence is not uncited.
             pending = None
             continue
+        if nums and has_claim:
+            lm = _LEAD_CITE_RUN.match(sentence)
+            # A forward idiom ("[S1]によると…") binds the text right after the
+            # run, so that text is cited even though it follows the marker.
+            forward = (
+                lm is not None
+                and _SNUM_RE.search(lm.group(1))
+                and _FORWARD_BIND_RE.match(sentence[lm.end() :]) is not None
+            )
+            if (
+                lm is not None
+                and _SNUM_RE.search(lm.group(1))
+                and _FORWARD_BIND_RE.match(sentence[lm.end() :]) is None
+            ):
+                # "claim. [S1] next." splits into "claim." + "[S1] next." — the
+                # leading marker resolves the pending claim, and the text after
+                # it is a fresh claim evaluated on its own (still falls through
+                # to `if nums` when a later marker covers it, e.g. "[S1] x [S2]").
+                pending = None
+                sentence = sentence[lm.end() :].strip()
+                nums = extract_citations(sentence)
+                bare = _BRACKET_RE.sub(" ", unicodedata.normalize("NFKC", sentence)).strip()
+                has_claim = len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+                lm = None
+            if nums:
+                # Every marker covers only the claim segment BEFORE it, so the
+                # text after the LAST citation marker is an uncovered claim
+                # surface — "claimA [S1] claimB" leaves claimB uncited even
+                # though the fragment carries a marker. A forward-bound run is
+                # the exception: when it is the last marker its bound text is
+                # already covered, so only a later marker's tail is exposed.
+                # The same bind can open mid-fragment ("A [S1]によると B") —
+                # there the tail is cited too, and whether the marker then
+                # also covers the pre-segment is ambiguous: stay silent.
+                last_end = 0
+                for m in _BRACKET_RE.finditer(sentence):
+                    if _SNUM_RE.search(m.group(1)):
+                        last_end = m.end()
+                trailing = sentence[last_end :].strip() if last_end else ""
+                if forward and lm is not None and last_end <= lm.end():
+                    pass
+                elif trailing and _FORWARD_BIND_RE.match(trailing) is None:
+                    # A mid-fragment marker leaves its clause punctuation on
+                    # the uncovered tail ("claimA [S1]、claimB") — joiners are
+                    # not claim content, so strip them before the length gate.
+                    sentence = trailing.lstrip("、，,.．・:：;；")
+                    nums = []
+                    bare = _BRACKET_RE.sub(
+                        " ", unicodedata.normalize("NFKC", sentence)
+                    ).strip()
+                    has_claim = (
+                        len(re.sub(r"\s+", "", bare)) >= _MIN_CLAIM_CHARS
+                    )
         # Not a pure citation trailer: any still-pending sentence was never resolved
         # by a trailing citation, so it truly has no citation attached — flag it.
         if pending is not None:
@@ -1627,7 +1884,7 @@ def uncited_sentences(text: str) -> list[str]:
             continue  # enumeration item covered by the cited lead-in
         if not has_claim:
             continue  # too short/trivial to carry a claim worth flagging
-        if any(marker in sentence for marker in _DISCLAIMER_MARKERS):
+        if any(marker in sentence.casefold() for marker in _DISCLAIMER_MARKERS):
             continue  # explicit "not in source" — correct behavior, not a gap
         if _FRAMING_RE.match(bare):
             continue  # describes the answer's structure, not source content

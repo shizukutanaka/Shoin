@@ -85,6 +85,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      期待={exp} 取得={got}",
+        "eval.case_missing": (
+            "      警告: 期待ソース {ids} はノートブックに存在しない"
+            " (削除/別idの可能性)"
+        ),
         "eval.saved": "ベースライン保存: {f}",
         "eval.diff_header": "ベースライン比較 ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -156,6 +160,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      expected={exp} retrieved={got}",
+        "eval.case_missing": (
+            "      warning: expected source id(s) {ids} not in this notebook"
+            " (deleted or rekeyed?)"
+        ),
         "eval.saved": "Baseline saved: {f}",
         "eval.diff_header": "Baseline comparison ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -455,7 +463,11 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # UnicodeDecodeError comes from read_text's strict UTF-8 decode — a
+        # non-UTF-8 file is definitionally not JSON, and neither it nor
+        # JSONDecodeError is an OSError, so without this both escape main()'s
+        # handler chain as a raw traceback.
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"cases file is not valid JSON: {exc}",
@@ -473,6 +485,8 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
         if not ok:
             print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
+            if c.missing:
+                print(_t("eval.case_missing", ids=str(c.missing)))
     if args.save:
         from .evaluate import report_to_dict
 
@@ -488,7 +502,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             base_raw = json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
             ) from exc
@@ -567,6 +581,11 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
 def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "list":
+        # Every mutating sibling (add/clear/ask/studio/eval) validates the
+        # notebook up front; list_messages() does not, so a typo'd id would
+        # print "no chat history" and read as an existing-but-empty notebook —
+        # the empty-vs-nonexistent conflation the API's 404 avoids.
+        store.get_notebook(int(args.notebook_id))
         messages = store.list_messages(int(args.notebook_id))
         if not messages:
             print(_t("msg.empty"))
@@ -669,6 +688,9 @@ def _cmd_note(store: Store, args: argparse.Namespace) -> int:
         note_id = store.add_note(int(args.notebook_id), title, str(args.body))
         print(_t("note.added", id=str(note_id), title=title))
     elif action == "list":
+        # Same empty-vs-nonexistent contract as `shoin messages list` above:
+        # add_note() validates via get_notebook() but list_notes() does not.
+        store.get_notebook(int(args.notebook_id))
         notes = store.list_notes(int(args.notebook_id))
         if not notes:
             print(_t("note.empty"))

@@ -463,7 +463,14 @@ async function loadNotebooks(){
     };
     li.append(name,c,ren,del);
     li.onclick = () => openNotebook(nb.id);
-    li.tabIndex=0; li.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openNotebook(nb.id); } };
+    li.tabIndex=0; li.onkeydown=e=>{
+      // Only the row itself may trigger the row action: a keydown bubbling up
+      // from one of the row's own buttons (✎/×) must not fire it — the
+      // preventDefault() below would ALSO cancel the focused button's native
+      // Enter/Space activation, making that button keyboard-unreachable and
+      // running openNotebook when the user asked for rename/delete.
+      if (e.target!==li) return;
+      if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openNotebook(nb.id); } };
     ul.append(li);
   }
   if (!notebooks.length){
@@ -630,7 +637,14 @@ function renderNotebook(){
       row.tabIndex = 0;
       row.setAttribute("role", "button");
       row.setAttribute("aria-label", t("a11y.viewsrc") + s.title);
-      row.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showSource(s.id, s.title); } };
+      row.onkeydown = e => {
+        // Same bubbled-keydown guard as the notebook rows: a keydown from the
+        // row's own ↻/× buttons would have its native activation cancelled by
+        // preventDefault() below (button unreachable by keyboard + wrong
+        // command run), and Enter inside the in-place rename input would fire
+        // showSource mid-commit. Fire only when the row itself is the target.
+        if (e.target !== row) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showSource(s.id, s.title); } };
       list.append(row);
       // Restore an in-progress rename AFTER the row is attached to the live
       // DOM — input.focus() inside startSourceRename() is a no-op on a

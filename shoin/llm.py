@@ -49,6 +49,22 @@ class LLMError(Exception):
 Message = dict[str, str]
 
 
+def _strip_surrogates(s: str) -> str:
+    """Drop code points that cannot encode to UTF-8.
+
+    json.loads materializes *lone* surrogates from \\ud800-style escapes a
+    buggy endpoint or proxy can emit (valid pairs are already combined by
+    the decoder). A lone surrogate reaching a sqlite bind or an
+    ensure_ascii=False response encode escapes as a raw UnicodeEncodeError
+    — and text cached or persisted first (questions_cache, messages,
+    studio_outputs) re-crashes on every later read. Astral characters are
+    unaffected: the JSON decoder pairs them before we ever see the str.
+    """
+    if s.isascii():
+        return s
+    return s.encode("utf-8", "ignore").decode("utf-8")
+
+
 def _message_text(content: object) -> str:
     """Normalize an OpenAI `content` field to plain text.
 
@@ -59,14 +75,16 @@ def _message_text(content: object) -> str:
     answer text, badges and all.
     """
     if isinstance(content, str):
-        return content
+        return _strip_surrogates(content)
     if isinstance(content, list):
-        return "".join(
-            part["text"]
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
+        return _strip_surrogates(
+            "".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            )
         )
     raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "non-text content in LLM response")
 
@@ -92,13 +110,16 @@ class LLMClient:
     # --- transport ---
 
     def _post(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
-        req = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
+            # Request() itself parses base_url via urlsplit — a malformed one
+            # (unclosed IPv6 bracket) raises ValueError here, not in urlopen,
+            # so construction stays inside the try.
+            req = urllib.request.Request(
+                f"{self.base_url}{path}",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 # Read one byte beyond the limit so len > _MAX_RESPONSE is the correct
                 # truncation signal — len == _MAX_RESPONSE means the response fit exactly
@@ -190,23 +211,26 @@ class LLMClient:
 
     def chat_stream(self, messages: list[Message], temperature: float = 0.2) -> Iterator[str]:
         """Yield content deltas from an SSE streaming chat completion."""
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(
-                {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "stream": True,
-                    "max_tokens": MAX_TOKENS,
-                }
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         total_bytes = 0
         self.last_finish_reason = None
         try:
+            # Request() parses base_url eagerly — an unclosed IPv6 bracket
+            # raises ValueError here (inside the try), mapping to the same
+            # SYSTEM_SERVICE_UNAVAILABLE the unreachable-endpoint path uses.
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": self.model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "stream": True,
+                        "max_tokens": MAX_TOKENS,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
                 for raw in resp:
                     total_bytes += len(raw)
@@ -229,9 +253,16 @@ class LLMClient:
                                 "SYSTEM_LLM_BAD_RESPONSE",
                                 f"LLM stream error: {str(msg)[:200]}",
                             )
-                        # choices[0].finish_reason arrives on the final delta
-                        # chunk (None on intermediate ones); keep the last one.
+                        # choices[0].finish_reason arrives on the final chunk
+                        # (None on intermediate ones); keep the last one. A
+                        # finish chunk may omit "delta" entirely, so capture
+                        # before the delta read — the truncation signal must
+                        # not hinge on an unrelated field being present.
                         choice = obj["choices"][0]
+                        if isinstance(choice, dict) and isinstance(
+                            choice.get("finish_reason"), str
+                        ):
+                            self.last_finish_reason = choice["finish_reason"]
                         raw_delta = choice["delta"]
                         if isinstance(raw_delta, dict):
                             delta = raw_delta.get("content")
@@ -243,8 +274,6 @@ class LLMClient:
                             delta = None
                         if isinstance(delta, list):
                             delta = _message_text(delta)
-                        if isinstance(choice.get("finish_reason"), str):
-                            self.last_finish_reason = choice["finish_reason"]
                     except LLMError:
                         raise
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
@@ -252,8 +281,10 @@ class LLMClient:
                     # A malformed non-text delta is dropped rather than
                     # str()-coerced — repr garbage mid-stream would land in the
                     # persisted answer text (same shape as chat()'s fix above).
-                    if isinstance(delta, str) and delta:
-                        yield delta
+                    if isinstance(delta, str):
+                        delta = _strip_surrogates(delta)
+                        if delta:
+                            yield delta
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:
