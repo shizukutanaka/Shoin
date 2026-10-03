@@ -43,7 +43,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
   SHY bridge.  e2e: six accented queries each reach their unaccented doc;
   fail direction verified.
 
-## Version History: v0.1.37 → v0.2.535
+### v0.2.536
+- term_variants bridges English inflection: `_stem_variants` emits the closed
+  BM25-lite suffix family (final -s/-es/-ies, -ing/-ed with double-consonant
+  and silent-e handling, -ly) so 'documents' reaches 'document', 'queries'
+  reaches 'query', 'running' reaches 'run' — the English half of the
+  conjugation gap _kanji_skeleton already bridges for Japanese.  Lookalike
+  endings that are not inflections ('this', 'status', 'hiss') excluded by
+  shape; ≥3-char alphabetic stems only; casing follows the term ('Documents'
+  → 'Document').  Two pins (rule coverage + guards + per-term e2e); fail
+  direction verified.
+
+## Version History: v0.1.37 → v0.2.536
 
 ### v0.2.534
 

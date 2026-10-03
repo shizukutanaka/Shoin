@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.535")
+        self.assertEqual(VERSION, "0.2.536")
 
     def test_migration_versions_strictly_increase(self) -> None:
         """_migrate_once skips `version <= current` — so a migration added
@@ -2033,6 +2033,41 @@ class TestChunk(unittest.TestCase):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any(frag in h.text for h in hits), q)
 
+
+
+    def test_ascii_stem_variants_bridge_inflection(self) -> None:
+        """v0.2.536: English inflection gap — FTS5 trigrams and LIKE stem
+        nothing, so 'documents' could not reach 'document'. _stem_variants
+        emits the closed BM25-lite suffix family (-s/-es/-ies, -ing/-ed with
+        double-consonant and silent-e, -ly) as OR'd extras; lookalike endings
+        that are not inflections ('this', 'status', 'hiss') are excluded by
+        shape, non-ASCII/mixed-alnum terms are untouched, casing follows the
+        term's first letter."""
+        for t, want in (("documents", "document"), ("queries", "query"),
+                        ("running", "run"), ("walked", "walk"),
+                        ("achieved", "achieve"), ("dropped", "drop"),
+                        ("quickly", "quick"), ("classes", "class"),
+                        ("watches", "watch"), ("making", "make"),
+                        ("Documents", "Document")):
+            self.assertIn(want, term_variants(t), t)
+        for t in ("this", "status", "hiss", "gas", "yes", "bus", "S3"):
+            self.assertEqual(term_variants(t),
+                             [t, term_variants(t)[1]], t)
+            self.assertEqual(len(term_variants(t)), 2, t)
+
+    def test_inflected_query_retrieves_base_doc(self) -> None:
+        """e2e: every inflected query reaches its base-form doc."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["the document store design",
+                              "a quick query engine",
+                              "run and walk every day"])
+        for q, frag in (("documents", "document"), ("queries", "query"),
+                        ("running", "run"), ("walked", "walk"),
+                        ("quickly", "quick")):
+            hits = bm25_search(s, nb.id, q, 10)
+            self.assertTrue(any(frag in h.text for h in hits), q)
 
     def test_word_char_boundary_edges(self) -> None:
         """v0.2.532: two residual boundary defects in _is_cjk_word — the
@@ -14573,7 +14608,7 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py:513", "citation.py:517", "citation.py:554",
             "citation.py:567", "citation.py:879", "citation.py:1255",
             "citation.py:1460",
-            "search.py:65", "search.py:902",
+            "search.py:65", "search.py:950",
         }
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
@@ -15007,7 +15042,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:704"],
+            sites, ["search.py:752"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -15884,7 +15919,7 @@ class TestResidualGuards(unittest.TestCase):
             "non-vacuous: ASCII overlap still scores",
         )
         baseline = {
-            "config.py": 1, "ingest.py": 4, "search.py": 3,
+            "config.py": 1, "ingest.py": 4, "search.py": 4,
             "server.py": 3, "store.py": 2,
         }
         actual: dict[str, int] = {}
@@ -17224,7 +17259,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [207],
             "citation.py": [513, 517, 567, 879, 1255, 1460],
-            "search.py": [65, 902],
+            "search.py": [65, 950],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17272,7 +17307,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:902"],
+            escaped_interps, ["search.py:950"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17293,7 +17328,8 @@ class TestResidualGuards(unittest.TestCase):
         see U+1680/U+3000 as spaces, v0.2.534's `isdecimal` whose
         whole job is seeing every script's digit row, and v0.2.535's
         isascii/isalpha pair that confines the accent fold to ASCII-letter
-        bases), downstream of
+        bases, plus v0.2.536's isalpha guard gating the stem fold to
+        letters-only terms), downstream of
         NFKC normalization that already folded width/superscripts
         (citation.py `_part_value`), or on export-format keys where a
         Unicode digit still parses (export.py). A NEW predicate site
@@ -17304,7 +17340,7 @@ class TestResidualGuards(unittest.TestCase):
             "chunk.py": 1,
             "citation.py": 2,
             "export.py": 3,
-            "search.py": 6,
+            "search.py": 7,
         }
         preds = {
             "isdigit", "isnumeric", "isdecimal",

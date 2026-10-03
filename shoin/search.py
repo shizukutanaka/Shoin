@@ -445,6 +445,53 @@ def _ascii_fold(term: str) -> str:
     return "".join(out)
 
 
+def _stem_variants(term: str) -> list[str]:
+    """Singular/base spellings of an English ASCII term (v0.2.536).
+
+    Neither FTS5's trigram tokeniser nor SQL LIKE stems, so 'documents'
+    cannot reach a document that wrote 'document' — the English half of the
+    same inflection gap _kanji_skeleton bridges for Japanese conjugation.
+    The rule set is deliberately the small, closed BM25-lite family (final
+    -s/-es/-ies, -ing/-ed with double-consonant and silent-e handling, -ly):
+    every emitted stem keeps a ≥3-char alphabetic base, inflection-lookalike
+    endings that aren't ('this', 'status', 'hiss') are excluded by shape,
+    and each candidate is an OR'd extra term — a dead spelling costs one
+    pattern but can never hide a real hit.  Casing follows the term's own
+    first letter so 'Documents' yields 'Document'.  Non-ASCII and mixed
+    alphanumeric terms are untouched."""
+    if not (term.isascii() and term.isalpha() and len(term) >= 4):
+        return []
+    low = term.lower()
+    stems: list[str] = []
+
+    def add(stem: str) -> None:
+        if len(stem) >= 3 and stem != low and stem not in stems:
+            stems.append(stem)
+
+    if low.endswith("ies"):
+        add(low[:-3] + "y")                    # queries -> query
+    if low.endswith(("sses", "shes", "ches", "xes", "zes")):
+        add(low[:-2])                          # classes/wishes/watches/boxes
+    if low.endswith("s") and not low.endswith(("ss", "us", "is")):
+        add(low[:-1])                          # documents -> document
+    if low.endswith("ing"):
+        add(low[:-3])                          # hunting -> hunt
+        if len(low) >= 7 and low[-4] == low[-5]:
+            add(low[:-4])                      # running -> run
+        else:
+            add(low[:-3] + "e")                # making -> make
+    if low.endswith("ed"):
+        add(low[:-2])                          # walked -> walk
+        add(low[:-2] + "e")                    # achieved -> achieve
+        if len(low) >= 6 and low[-3] == low[-4]:
+            add(low[:-3])                      # dropped -> drop
+    if low.endswith("ly") and len(low) >= 5:
+        add(low[:-2])                          # quickly -> quick
+    if term[:1].isupper():
+        stems = [s[:1].upper() + s[1:] for s in stems]
+    return stems
+
+
 def _digit_variants(term: str) -> list[str]:
     """Script-row spellings of an all-decimal-digit term (v0.2.534).
 
@@ -573,6 +620,7 @@ def term_variants(term: str) -> list[str]:
     ascii_folded = _ascii_fold(norm)
     if ascii_folded != norm and ascii_folded.isascii():
         candidates.append(ascii_folded)
+    candidates.extend(_stem_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
