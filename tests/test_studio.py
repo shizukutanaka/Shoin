@@ -92,6 +92,30 @@ class StudioTest(unittest.TestCase):
         self.assertNotEqual(seqs, ["段落0", "段落1", "段落2"])
         store.close()
 
+    def test_overview_context_splits_budget_evenly(self) -> None:
+        """v0.2.552: overview hits have no relevance ranking (score 1.0 in
+        source-id order), so the harmonic 1/i decay would arbitrarily give the
+        FIRST-added source ~2x+ the last-added one's excerpt in an output
+        documented to cover all sources equally."""
+        from shoin.qa import build_context
+
+        store = Store(":memory:")
+        nb = store.create_notebook("n")
+        # Each source holds far more text than any plausible share.
+        text = "和紙は楮の繊維から作られる伝統的な紙である。" * 40
+        for i in range(3):
+            src = store.add_source(nb.id, "txt", f"src{i}", "/t", f"h{i}")
+            store.add_chunks(src.id, [text])
+        hits = overview_hits(store, nb.id, per_source=3)
+        ctx = build_context(store, hits, budget_tokens=900, rank_weighted=False)
+        sizes = [len(b) for b in ctx.source_bodies]
+        self.assertEqual(len(sizes), 3)
+        lo, hi = min(sizes), max(sizes)
+        # Equal shares ± truncation-boundary/label slack; harmonic would give
+        # roughly a 900*0.6 : 900*0.3 : 900*0.1 spread instead.
+        self.assertGreaterEqual(lo, (hi * 2) // 3)
+        store.close()
+
     def test_generate_persists_with_citation_report(self) -> None:
         llm = FakeLLM(reply="ブリーフィング [S1] と [S2]。")
         result = generate(self.store, llm, self.nb, "briefing")

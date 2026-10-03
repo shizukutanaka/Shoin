@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.551
+## Version History: v0.1.37 → v0.2.552
+
+### v0.2.552
+- build_context() gains rank_weighted=False and studio.py passes it: the
+  harmonic 1/i per-source budget decay exists to honor retrieval's relevance
+  ranking, but overview_hits() scores every sampled chunk 1.0 in source-id
+  order — there is no ranking to weight, so source #1 arbitrarily received
+  ~6x source #10's excerpt in Studio outputs documented to cover all sources
+  equally (measured 451:258:193 on a 3-source fixture, now 301:301:301).
+  generate() and suggest_questions() both split the budget evenly.
+  ask()/SSE keep the relevance-weighted default. One pin + fail-direction.
 
 ### v0.2.551
 - evaluate() marks expected source ids absent from the notebook as
