@@ -853,6 +853,26 @@ class CliTest(unittest.TestCase):
             rc, _, _ = self._run(["--db", db, "notebook", "delete", "1"], llm)
             self.assertEqual(rc, 0)
 
+    def test_list_commands_on_missing_notebook_error_not_empty(self) -> None:
+        """v0.2.553: `note list`/`messages list` on a nonexistent notebook
+        must fail NOTEBOOK_NOT_FOUND like every mutating sibling — printing
+        'empty' would silently report a missing notebook as an empty one."""
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            self._run(["--db", db, "notebook", "new", "x"], llm)
+            for argv in (
+                ["note", "list", "99999"],
+                ["messages", "list", "99999"],
+            ):
+                rc, out, err = self._run(["--db", db, *argv], llm)
+                self.assertEqual(rc, 1, argv)
+                self.assertIn("NOTEBOOK_NOT_FOUND", err, argv)
+            # Real empty notebook still prints the empty marker, not an error.
+            rc, out, _ = self._run(["--db", db, "note", "list", "1"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("ノートがありません", out)
+
     def test_add_missing_file_returns_error(self) -> None:
         llm = FakeLLM()
         with tempfile.TemporaryDirectory() as td:

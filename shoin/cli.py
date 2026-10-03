@@ -577,6 +577,11 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
 def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "list":
+        # Every mutating sibling (add/clear/ask/studio/eval) validates the
+        # notebook up front; list_messages() does not, so a typo'd id would
+        # print "no chat history" and read as an existing-but-empty notebook —
+        # the empty-vs-nonexistent conflation the API's 404 avoids.
+        store.get_notebook(int(args.notebook_id))
         messages = store.list_messages(int(args.notebook_id))
         if not messages:
             print(_t("msg.empty"))
@@ -679,6 +684,9 @@ def _cmd_note(store: Store, args: argparse.Namespace) -> int:
         note_id = store.add_note(int(args.notebook_id), title, str(args.body))
         print(_t("note.added", id=str(note_id), title=title))
     elif action == "list":
+        # Same empty-vs-nonexistent contract as `shoin messages list` above:
+        # add_note() validates via get_notebook() but list_notes() does not.
+        store.get_notebook(int(args.notebook_id))
         notes = store.list_notes(int(args.notebook_id))
         if not notes:
             print(_t("note.empty"))

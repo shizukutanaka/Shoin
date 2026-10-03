@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.552
+## Version History: v0.1.37 → v0.2.553
+
+### v0.2.553
+- `shoin note list` / `shoin messages list` validate the notebook id first:
+  every mutating sibling (add/clear/ask/studio/eval/export/source ops)
+  raises NOTEBOOK_NOT_FOUND, but the two read-only list paths fell through
+  to the store's tolerant getters and printed "empty" for a missing
+  notebook — silently reporting a typo'd/deleted id as an existing-but-
+  empty notebook, the same empty-vs-nonexistent conflation the API's 404
+  and the eval missing-ids warning (v0.2.551) already guard. One pin +
+  fail-direction.
 
 ### v0.2.552
 - build_context() gains rank_weighted=False and studio.py passes it: the
