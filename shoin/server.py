@@ -829,8 +829,17 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 # Headers already committed; must not let this propagate to _dispatch
                 # (it would write a new HTTP status line into the SSE body stream).
+                # Message policy mirrors _dispatch: coded errors carry their
+                # curated (code, message); anything else leaks only the type
+                # name — str(exc) can carry internals (SQL text, paths).
                 try:
-                    self._sse("error", {"code": "SYSTEM_INTERNAL_ERROR", "message": str(exc)})
+                    if isinstance(exc, (StoreError, IngestError, LLMError)):
+                        self._sse("error", {"code": exc.code, "message": str(exc)})
+                    else:
+                        self._sse(
+                            "error",
+                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
+                        )
                 except ConnectionError:
                     pass
                 # Prevent dangling user turn: save an empty assistant message so
