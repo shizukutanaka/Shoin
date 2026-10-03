@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.581")
+        self.assertEqual(VERSION, "0.2.582")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6247,6 +6247,21 @@ class TestCitation(unittest.TestCase):
         self.assertEqual(confirmed, [1, 2])
         self.assertEqual(misattributed, [1])
 
+    def test_forward_idiom_with_space_binds_own_clause(self) -> None:
+        """"[S1] によると…" (space before the idiom) binds the marker to its
+        own fragment's clause. Without whitespace tolerance the marker is
+        attributed to the PREVIOUS claim — which then misattributes when a
+        different source matches that claim — while the bound clause goes
+        unchecked: the v0.2.576 double-inversion under a one-byte shape."""
+        from shoin.citation import verify_grounding
+
+        sources = {1: "結果は良好だった。", 2: "別の主張の内容である。"}
+        confirmed, misattributed = verify_grounding(
+            "別の主張の内容である。[S1] によると結果は良好だった。", sources
+        )
+        self.assertEqual(confirmed, [1])
+        self.assertEqual(misattributed, [])
+
 class TestNumericMismatches(unittest.TestCase):
     """numeric_mismatches() (v0.2.184): a cited claim asserting a number the
     source never contains — the fabricated-statistic failure shape the
@@ -8002,6 +8017,35 @@ class TestUncitedSentences(unittest.TestCase):
         self.assertEqual(
             uncited_sentences("林檎は赤い[S1]、ソースに記載がありません。"),
             [],
+        )
+
+    def test_forward_idiom_with_whitespace_stays_cited(self) -> None:
+        """A space (or tab, or full-width space) between the marker and the
+        forward idiom must not break the bind — "[S1] によると…" cites its
+        own fragment's claim exactly like "[S1]によると…". Without whitespace
+        tolerance the bound claim is double-inverted: the marker resolves a
+        pending claim it does not cite and the bound claim is flagged uncited.
+        """
+        from shoin.citation import uncited_sentences
+
+        for text in (
+            "[S1] によると結果は良好だった。",
+            "[S1]\tによると結果は良好だった。",
+            "[S1]　によると結果は良好だった。",
+            "[S1,S2] によると結果は良好だった。",
+            "[S1] によれば結果は良好だった。",
+            "[S1] では結果は良好だった。",
+        ):
+            self.assertEqual(uncited_sentences(text), [], text)
+
+    def test_forward_idiom_punctuation_stays_backward(self) -> None:
+        """Punctuation between the marker and the idiom is a pause, not the
+        idiom — the backward convention still applies and the tail is judged
+        on its own."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(
+            uncited_sentences("前提文。[S1]、次の主張です。"), ["、次の主張です。"]
         )
 
 class TestStoreChunksForSource(unittest.TestCase):

@@ -29,7 +29,10 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.581
+## Version History: v0.1.37 → v0.2.582
+
+### v0.2.582
+- _FORWARD_BIND_RE whitespace tolerance: "[S1] によると…" (any whitespace — half/full-width space, tab — between the marker and the forward idiom) broke the bind, so the leading run was attributed backward and the bound claim was flagged uncited while an unrelated pending claim got falsely covered — the v0.2.576 double-inversion under a one-byte shape. The pattern now skips leading whitespace before によると/によれば/では, fixing both call sites (_leading_markers and uncited_sentences) at once; a comma or other punctuation still breaks the idiom as before. Fail-direction verified.
 
 ### v0.2.581
 - _single_diff_flip numeric arm: the check compared _numbers_expanded over the raw diff span, but difflib minimises an opcode to the changed characters — "50%"→"30%" yields span "5"→"3", a single digit that the significance rule filters, so every one-digit-position swap inside a longer number (120億→125億, 50%→30%) stayed silent. Whole-sentence number sets are compared instead — sound because ops==1 already guarantees the difference lives inside the single span — which keeps single-digit-only swaps ("第3版"→"第4版") silent and magnitude-equivalent restatements (3.2万↔32000) silent. Fail-direction verified.

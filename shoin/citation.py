@@ -1724,7 +1724,7 @@ _MIN_CLAIM_CHARS = 5
 # a citation bracket longer than 80 chars simply won't match and falls
 # back to the mid-fragment path, which is the conservative direction.
 _LEAD_CITE_RUN = re.compile(r"^(\[[^\[\]]{0,80}\](?:\s{0,4}\[[^\[\]]{0,80}\])*)")
-_FORWARD_BIND_RE = re.compile(r"^(?:によると|によれば|では)")
+_FORWARD_BIND_RE = re.compile(r"^\s*(?:によると|によれば|では)")
 
 
 def _leading_markers(sentence: str, nums: list[int]) -> set[int]:
