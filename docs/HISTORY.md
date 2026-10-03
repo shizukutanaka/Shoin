@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.530
+## Version History: v0.1.37 → v0.2.531
+
+### v0.2.531
+
+- Ledger sync (recurring): product-review.md gains the
+  v0.2.518-530 summary block — the meta-audit tail (suppress
+  cataloging, argparse dest contract, interpolated-regex and
+  unicode-predicate inventories, querySelector literal pinning, the
+  CSS-var fix) plus the Unicode-visibility arc's four stages
+  (enclosed compat → all foldable blocks + NFD bridge → alphabetic
+  scripts + category path → symbols/emoji/joiners).  Header version
+  and test-count markers follow (1160 tests); spec.md's measured
+  row tracks the same count and the 4 uncovered lines.
 
 ### v0.2.530
 
