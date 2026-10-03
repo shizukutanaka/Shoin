@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.598
+## Version History: v0.1.37 → v0.2.599
+
+### v0.2.599 — strip lone surrogates at the LLM output boundary
+
+json.loads materializes lone surrogates from \ud800 escapes a buggy endpoint
+or proxy can emit (valid pairs are already combined by the decoder). One
+reaching a sqlite bind or an ensure_ascii=False response encode crashed
+raw-UnicodeEncodeError — and text cached or persisted first (questions_cache,
+messages, studio_outputs) re-crashed on every later read. `_strip_surrogates`
+now runs inside `_message_text` and on every streamed delta, so ask answers,
+studio bodies, question chips and exports can never carry one downstream;
+astral characters pass through untouched. Pin:
+`test_llm_drops_lone_surrogates_from_outputs` (fail-verified).
 
 ### v0.2.598 — reject unpaired surrogates in eval case/baseline files
 

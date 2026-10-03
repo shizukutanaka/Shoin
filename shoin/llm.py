@@ -49,6 +49,22 @@ class LLMError(Exception):
 Message = dict[str, str]
 
 
+def _strip_surrogates(s: str) -> str:
+    """Drop code points that cannot encode to UTF-8.
+
+    json.loads materializes *lone* surrogates from \\ud800-style escapes a
+    buggy endpoint or proxy can emit (valid pairs are already combined by
+    the decoder). A lone surrogate reaching a sqlite bind or an
+    ensure_ascii=False response encode escapes as a raw UnicodeEncodeError
+    — and text cached or persisted first (questions_cache, messages,
+    studio_outputs) re-crashes on every later read. Astral characters are
+    unaffected: the JSON decoder pairs them before we ever see the str.
+    """
+    if s.isascii():
+        return s
+    return s.encode("utf-8", "ignore").decode("utf-8")
+
+
 def _message_text(content: object) -> str:
     """Normalize an OpenAI `content` field to plain text.
 
@@ -59,14 +75,16 @@ def _message_text(content: object) -> str:
     answer text, badges and all.
     """
     if isinstance(content, str):
-        return content
+        return _strip_surrogates(content)
     if isinstance(content, list):
-        return "".join(
-            part["text"]
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
+        return _strip_surrogates(
+            "".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            )
         )
     raise LLMError("SYSTEM_LLM_BAD_RESPONSE", "non-text content in LLM response")
 
@@ -263,8 +281,10 @@ class LLMClient:
                     # A malformed non-text delta is dropped rather than
                     # str()-coerced — repr garbage mid-stream would land in the
                     # persisted answer text (same shape as chat()'s fix above).
-                    if isinstance(delta, str) and delta:
-                        yield delta
+                    if isinstance(delta, str):
+                        delta = _strip_surrogates(delta)
+                        if delta:
+                            yield delta
         except urllib.error.HTTPError as exc:
             raise LLMError("SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} (stream)") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:

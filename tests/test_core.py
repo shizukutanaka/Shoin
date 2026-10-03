@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.598")
+        self.assertEqual(VERSION, "0.2.599")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8337,6 +8337,52 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(_chat_with("length").last_finish_reason, "length")
         self.assertEqual(_chat_with("stop").last_finish_reason, "stop")
         self.assertIsNone(_chat_with(None).last_finish_reason)
+
+    def test_llm_drops_lone_surrogates_from_outputs(self) -> None:
+        """json.loads materializes *lone* surrogates from \\ud800 escapes a
+        buggy endpoint or proxy can emit (valid pairs are already combined
+        by the decoder). One reaching a sqlite bind or an ensure_ascii=False
+        response encode escapes as a raw UnicodeEncodeError — and text cached
+        or persisted first (questions_cache, messages, studio_outputs)
+        re-crashes on every later read. Both output boundaries must strip
+        them; real astral characters pass through untouched."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        def _chat_with(content):
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read.return_value = _json.dumps(
+                {"choices": [{"message": {"content": content}}]}
+            ).encode()
+            with patch("urllib.request.urlopen", return_value=resp):
+                return LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+
+        self.assertEqual(_chat_with("a\ud800b"), "ab")
+        self.assertEqual(_chat_with([{"type": "text", "text": "p\udc00q"}]), "pq")
+        self.assertEqual(_chat_with("x\U0001F600y"), "x\U0001F600y")
+
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"s\\ud800t"}}]}',
+            b'data: {"choices":[{"delta":{"content":"\\ud800"}}]}',
+            b"data: [DONE]",
+        ])
+        with patch("urllib.request.urlopen", return_value=resp):
+            got = list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        # Lone units are stripped; a surrogate-only delta yields no token.
+        self.assertEqual(got, ["st"])
 
     def test_chat_stream_records_finish_reason(self) -> None:
         """chat_stream() must capture finish_reason from the final SSE chunk —
