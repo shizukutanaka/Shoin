@@ -1116,7 +1116,17 @@ def vector_search(
                 seq=int(r["seq"]),
             )
 
-    return heapq.nlargest(k, _scored(), key=lambda h: h.vec)
+    # A cosine <= 0 is "no evidence", not weak evidence — but nlargest() fills
+    # its k slots from whatever rows exist, so a vector leg with zero real
+    # signal (a degenerate/all-zero query vector, embeddings written under a
+    # different dimension after a SHOIN_EMBED_MODEL switch, or a corpus simply
+    # orthogonal to the query) used to inject k row-order-arbitrary chunks into
+    # RRF fusion as if they were ranked vector hits — silently replacing the
+    # documented BM25-only degraded mode with arbitrary-row noise. Only a
+    # positive cosine may hold a rank slot; an empty vector list is exactly
+    # what fusion treats as the BM25-only path.
+    positive = (h for h in _scored() if h.vec > 0.0)
+    return heapq.nlargest(k, positive, key=lambda h: h.vec)
 
 
 # --- fusion ---------------------------------------------------------------

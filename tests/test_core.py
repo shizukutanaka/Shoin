@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.555")
+        self.assertEqual(VERSION, "0.2.556")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4131,7 +4131,13 @@ class TestSearch(unittest.TestCase):
         hot path _cosine_with_norms truncated the dot product at the shorter
         vector — a 1024-dim query against 768-dim stored embeddings (user
         switched SHOIN_EMBED_MODEL without reindexing) fabricated a plausible
-        score from the leading dims instead of degrading to 0.0."""
+        score from the leading dims instead of degrading to 0.0.
+
+        v0.2.556 deepened the contract: a mismatched leg no longer emits
+        zero-scored rows at all — every row was 0.0, so nlargest() was filling
+        its k slots with row-order-arbitrary chunks that then held real RRF
+        rank positions in fusion. Only positive cosines take rank slots now;
+        an all-zero leg is the documented BM25-only degraded mode."""
         from shoin.search import vector_search
 
         with make_store() as s:
@@ -4139,8 +4145,50 @@ class TestSearch(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             hits = vector_search(s, nb_id, [0.9, 0.1, -100.0], k=5)
+            self.assertEqual(hits, [])
+
+    def test_vector_search_drops_nonpositive_cosines(self) -> None:
+        """v0.2.556: nlargest() fills k slots from any rows it is given — a
+        leg whose every cosine is <= 0 (orthogonal, anti-correlated, or
+        unscorable) used to return row-order chunks that fusion then ranked
+        as real vector hits. Only a positive cosine may hold a rank slot."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            s.set_embedding(chunks[0].id, [1.0, 0.0])   # cosine +1.0
+            s.set_embedding(chunks[1].id, [0.0, 1.0])   # cosine  0.0
+            s.set_embedding(chunks[2].id, [-1.0, 0.0])  # cosine -1.0
+            hits = vector_search(s, nb_id, [1.0, 0.0], k=5)
+            self.assertEqual([h.chunk_id for h in hits], [chunks[0].id])
+
+    def test_dim_mismatched_leg_injects_no_rows_into_retrieve(self) -> None:
+        """v0.2.556 (e2e): a chunk whose embedding cannot score — wrong
+        dimension vs the query vector — used to reach the final result list
+        anyway, because nlargest() handed it a vector rank slot and RRF
+        fusion promoted it. Every returned hit must carry real evidence from
+        at least one leg (bm25 > 0 or vec > 0); a hit with neither signal
+        is the arbitrary-row noise this fix removes."""
+        with make_store() as s:
+            nb_id = seed(s)
+            # A chunk whose text does NOT match the query term — its only path
+            # into the results is a fabricated vector rank.
+            chunk = next(
+                c for c in s.chunks_for_notebook(nb_id) if "書斎" not in c.text
+            )
+            s.set_embedding(chunk.id, [1.0, 0.0])  # 2-dim stored vs 3-dim query
+            hits = retrieve(s, nb_id, "書斎とは", query_vec=[0.9, 0.1, -100.0], k=8)
             self.assertTrue(hits)
-            self.assertEqual(hits[0].vec, 0.0)
+            self.assertNotIn(
+                chunk.id, [h.chunk_id for h in hits],
+                "dimension-mismatched chunk surfaced in retrieve() — "
+                "the dead vector leg injected an arbitrary row",
+            )
+            self.assertTrue(
+                all(h.bm25 > 0.0 or h.vec > 0.0 for h in hits),
+                "a hit reached the result list with zero evidence from both legs",
+            )
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""
@@ -9588,7 +9636,13 @@ class TestExport(unittest.TestCase):
                 s.set_embedding(cid, v)
             q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
             hits = vector_search(s, nb.id, q, k=25)
-            self.assertEqual(len(hits), len(ids))
+            # v0.2.556: non-positive cosines no longer take rank slots —
+            # compare against the positive-cosine rows only.
+            n_positive = sum(
+                1 for cid in ids
+                if cosine(q, unpack_vector(blobs[cid])) > 0.0
+            )
+            self.assertEqual(len(hits), n_positive)
             for h in hits:
                 self.assertEqual(
                     h.vec,
@@ -9801,7 +9855,11 @@ class TestExport(unittest.TestCase):
             for n, cid in enumerate(ids):
                 v = shared if n % 3 == 0 else [random.uniform(-1.0, 1.0) for _ in range(dim)]
                 s.set_embedding(cid, v)
-            q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+            # The query IS the shared direction: the tie group then scores
+            # cosine 1.0 (a positive tie exercises ordering — a non-positive
+            # tie would be filtered out entirely by the v0.2.556 rank-slot
+            # contract and exercise nothing).
+            q = list(shared)
 
             rows = s.conn.execute(
                 "SELECT c.id, c.source_id, c.text, c.context, c.embedding FROM chunks c"
@@ -9822,6 +9880,7 @@ class TestExport(unittest.TestCase):
                 for r in rows
             ]
             reference.sort(key=lambda h: h.vec, reverse=True)
+            reference = [h for h in reference if h.vec > 0.0]
 
             for k in (1, 5, 12, 40):
                 got = vector_search(s, nb.id, q, k)

@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.555
+## Version History: v0.1.37 → v0.2.556
+
+### v0.2.556
+- vector_search drops non-positive cosines: heapq.nlargest() fills its
+  k slots from ANY rows it is given, so a vector leg with zero real
+  signal (degenerate/all-zero query vector, embeddings written under a
+  different dimension after a SHOIN_EMBED_MODEL switch, or a corpus
+  orthogonal to the query) returned k row-order-arbitrary chunks
+  scored 0.0 — and RRF fusion then promoted them as if they were
+  ranked vector hits (a dim-mismatched chunk measurably reached the
+  final result list through this path). That silently replaced the
+  documented BM25-only degraded mode with arbitrary-row noise, and
+  anti-correlated (cosine < 0) chunks could hold rank slots too.
+  Only a positive cosine may now hold a rank slot; an empty vector
+  list is exactly what fusion treats as the BM25-only path. Pins:
+  `test_vector_search_drops_nonpositive_cosines` (+1/0/-1 filter),
+  `test_dim_mismatched_leg_injects_no_rows_into_retrieve` (e2e — no
+  hit may reach the result list with zero evidence from both legs);
+  the v0.2.261 pin's contract deepened from "scores 0.0" to "emits
+  no rows" (documented flip). Fail-direction: all three fail on the
+  pre-change nlargest.
 
 ### v0.2.555
 - Ledger sync (recurring): product-review.md gains the v0.2.531-554
