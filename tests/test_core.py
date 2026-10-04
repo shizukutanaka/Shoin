@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.606")
+        self.assertEqual(VERSION, "0.2.607")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -10211,6 +10211,33 @@ class TestExport(unittest.TestCase):
         from shoin.export import _status_line
 
         self.assertEqual(_status_line({}), "")
+
+    def test_status_line_no_dangling_hint_arrow_without_suggested_source(self) -> None:
+        """v0.2.607: reports carrying `uncited_supported` but missing or empty
+        `uncited_supported_source` (a shape pre-v0.2.216 reports can have)
+        rendered '⚠出典内一致=引用欠落 (1)→' — the arrow pointing at nothing.
+        The hint must only appear when a real target exists."""
+        from shoin.export import _status_line
+
+        for src_map in ({}, "bad", None):
+            line = _status_line(
+                {
+                    "uncited": ["a", "b"],
+                    "uncited_supported": ["a"],
+                    "uncited_supported_source": src_map,
+                }
+            )
+            self.assertNotIn("\u2192", line)
+        # With a real target the hint still renders (the supported bit lives
+        # inside the uncited branch, so `uncited` must be present too).
+        line = _status_line(
+            {
+                "uncited": ["a"],
+                "uncited_supported": ["a"],
+                "uncited_supported_source": {"a": "S2"},
+            }
+        )
+        self.assertIn("\u2192S2", line)
 
     def test_export_markdown_chat_message_shows_confirmed_citation(self) -> None:
         import json

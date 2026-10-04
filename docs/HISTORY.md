@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.606
+## Version History: v0.1.37 → v0.2.607
+
+### v0.2.607 — no dangling '→' in the export status line
+
+`_status_line`'s grounded-uncited hint collected `sup_src.get(s, "")` for
+every supported sentence and only checked the *type* of each value — so a
+report carrying `uncited_supported` but an empty/absent/malformed
+`uncited_supported_source` map (a shape pre-v0.2.216 reports can carry)
+produced `…(1)→` with the arrow pointing at nothing.  Targets are now
+required to be non-empty strings; no target, no arrow.
+
 
 ### v0.2.606 — sync the product-review ledger to v0.2.605
 

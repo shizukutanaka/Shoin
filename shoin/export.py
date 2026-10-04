@@ -103,7 +103,11 @@ def _status_line(report: dict[str, object]) -> str:
             # should cite (deduped, first-seen order).
             sup_raw = report.get("uncited_supported_source")
             sup_src = sup_raw if isinstance(sup_raw, dict) else {}
-            targets = [t for s in supported if isinstance((t := sup_src.get(s, "")), str)]
+            targets = [
+                t
+                for s in supported
+                if isinstance((t := sup_src.get(s, "")), str) and t
+            ]
             targets = list(dict.fromkeys(targets))
             hint = "\u2192" + ",".join(targets) if targets else ""
             bits.append(f"{_t('status_uncited_supported')} ({len(supported)}){hint}")
