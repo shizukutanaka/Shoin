@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.612")
+        self.assertEqual(VERSION, "0.2.613")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4888,6 +4888,32 @@ class TestSearch(unittest.TestCase):
         self.assertNotIn("学問", terms)
         self.assertNotIn("問所", terms)
         self.assertEqual(terms, [], "every df>=2 gram is already in the query")
+
+    def test_prf_expansion_never_evicts_first_pass_hits(self) -> None:
+        """v0.2.613: PRF may only ADD recall. When the expanded pass produces
+        more than the head-room below k, a [:k] slice of the re-sorted union
+        would evict first-pass hits — chunks that matched the user's own
+        terms — for chunks matching only system-proposed grams.  Extras are
+        capped at k - len(hits) instead."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-evict").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["検索エンジンのシステム構成。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["検索のシステム性能を測る。"])
+            for i in range(6):
+                b = s.add_source(nb_id, "txt", f"b{i}", f"mem://b{i}", f"sha-b{i}")
+                s.add_chunks(b.id, ["システム システム システム システム システム。"])
+
+            base = bm25_search(s, nb_id, "検索", k=4)
+            self.assertEqual(len(base), 2)
+            hits = bm25_prf_search(s, nb_id, "検索", k=4)
+            got = {h.chunk_id for h in hits}
+            self.assertTrue({h.chunk_id for h in base} <= got,
+                            "expansion hits must fill head-room only, never evict")
+            self.assertLessEqual(len(hits), 4)
 
     # --- term proximity (v0.2.183) -------------------------------------------
 

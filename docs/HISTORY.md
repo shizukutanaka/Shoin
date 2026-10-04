@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.612
+## Version History: v0.1.37 → v0.2.613
+
+### v0.2.613 — PRF expansion never evicts first-pass hits
+
+bm25_prf_search() re-sorted the union of first-pass and expansion hits by
+bm25 and sliced it at [:k].  When the first pass under-filled the pool and
+the expanded pass alone produced more than the head-room, a first-pass hit
+— a chunk that matched the user's own terms — could be evicted by a chunk
+matching only system-proposed grams: expansion silently trading user-term
+recall for expansion recall, the inversion the documented "only ADD
+recall" contract forbids.  Extras are now capped at k - len(hits), so
+expansion fills only the slots the first pass left empty while the merged
+re-sort still lets a denser expansion hit outrank a thin first-pass one.
+
 
 ### v0.2.612 — sync the product-review ledger to v0.2.611
 

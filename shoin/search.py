@@ -1028,9 +1028,14 @@ def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[
     extras = [h for h in extra if h.chunk_id not in seen]
     for h in extras:
         h.detail["exp"] = 1.0
+    # Extras fill only the slots the first pass left empty: a [:k] slice of the
+    # re-sorted union could evict a genuine first-pass hit when the expanded
+    # pass alone produced more than the head-room — the "only ADD recall"
+    # contract forbids trading a user-term match for an expansion match.
+    extras = extras[: max(k - len(hits), 0)]
     merged = hits + extras
     merged.sort(key=lambda h: h.bm25, reverse=True)
-    return merged[:k]
+    return merged
 
 
 _MUL = operator.mul  # bound once: map(operator.mul, ...) beats a generator expression
