@@ -772,7 +772,15 @@ class _Handler(BaseHTTPRequestHandler):
     # --- SSE ask --------------------------------------------------------
 
     def _sse(self, event: str, payload: Json) -> None:
-        data = json.dumps(payload, ensure_ascii=False)
+        # ensure_ascii=True (the json.dumps default), deliberately: a payload
+        # string carrying a lone surrogate — reachable from rows stored before
+        # the field gates landed (v0.2.430/v0.2.609), e.g. an old notebook
+        # name in a meta frame or a history sentence echoed into a report —
+        # is emitted as a \ud800 escape instead of crashing .encode(). The
+        # callers only catch ConnectionError, so an encode failure here
+        # propagated to _dispatch's 500 writer: a second HTTP status line
+        # injected into the already-committed SSE stream body.
+        data = json.dumps(payload)
         self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
         self.wfile.flush()
 

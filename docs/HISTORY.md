@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.609
+## Version History: v0.1.37 → v0.2.610
+
+### v0.2.610 — SSE frames are always ASCII on the wire
+
+_sse() now serializes with ensure_ascii=True (the json.dumps default) so a
+payload string carrying a lone surrogate is emitted as a \ud800 escape
+instead of crashing .encode(). Such strings are reachable from rows stored
+before the field gates landed (v0.2.430 server fields / v0.2.609 store
+writes): an old notebook name echoed into a meta frame's sources, or an old
+assistant message echoed into the report's degenerate/self_contradiction
+snippets. The done/meta sends catch only ConnectionError, so a
+UnicodeEncodeError propagated to _dispatch's 500 writer — a second HTTP
+status line injected into the already-committed SSE body. The client's
+JSON.parse restores the escaped char transparently.
+
 
 ### v0.2.609 — store writes reject lone surrogates with a coded error
 

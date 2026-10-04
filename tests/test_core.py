@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.609")
+        self.assertEqual(VERSION, "0.2.610")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8999,6 +8999,39 @@ class TestServerSSE(unittest.TestCase):
             self.assertEqual(msgs[1]["body"], "")
         finally:
             os.unlink(db_path)
+
+    def test_sse_frame_ascii_encodes_surrogate_payloads(self) -> None:
+        """v0.2.610: _sse() must emit an ASCII-only wire even when a payload
+        string carries a lone surrogate.
+
+        Reachability is real, not hypothetical: rows written before the field
+        gates landed (v0.2.430 server fields / v0.2.609 store writes) can
+        contain lone surrogates — an old notebook name echoed into a `meta`
+        frame's sources, or an old assistant message echoed into the report's
+        degenerate/self_contradiction snippets. The `done`/`meta` sends catch
+        only ConnectionError, so a UnicodeEncodeError from `.encode()`
+        escaped to _dispatch's 500 writer — a second HTTP status line
+        injected into the already-committed SSE body. ensure_ascii=True
+        encodes the surrogate as a \\ud800 escape instead; the client's
+        JSON.parse restores the (display-garbled but harmless) char."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        written: list[bytes] = []
+
+        class _W:
+            def write(self, b: bytes) -> int:
+                written.append(b)
+                return len(b)
+
+            def flush(self) -> None:
+                pass
+
+        handler.wfile = _W()  # type: ignore[assignment]
+        handler._sse("done", {"report": {"uncited": ["a\ud800b"]}})
+        body = written[0]
+        body.decode("ascii")  # any raw non-ASCII byte would raise here
+        self.assertIn(b"\\ud800", body)
 
     def test_safe_error_swallows_dead_connection_errors(self) -> None:
         """_safe_error() must swallow a dead-connection failure from the error
