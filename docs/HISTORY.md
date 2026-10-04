@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.613
+## Version History: v0.1.37 → v0.2.614
+
+### v0.2.614 — the JSON response writer survives surrogate payloads
+
+_json() dumped payloads with ensure_ascii=False, then strict-UTF-8 encoded
+the result.  Payload fields outside every store-bind gate can carry lone
+surrogates — a custom ChatBackend's LLMError message or model name (the
+make_server(llm=...) extension point), or an LLM-derived snippet
+materialized back out of a stored citation_report blob by _safe_report.
+On the success path a UnicodeEncodeError there surfaced as a coded 500;
+on the error-envelope path (_error/_safe_error) the same crash escaped
+_safe_error's socket-error-only except list, so the request died with no
+HTTP response at all — not even the coded 500 every other failure class
+produces.  _json() now falls back to an ensure_ascii dump: the surrogate
+leaves as a \ud800 escape and the client's JSON.parse restores it, while
+the compact ensure_ascii=False encode stays the fast path for the
+CJK-heavy payloads the hot endpoints serve.
+
 
 ### v0.2.613 — PRF expansion never evicts first-pass hits
 

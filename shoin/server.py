@@ -215,7 +215,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _json(self, payload: Json, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            # Payload fields can carry lone surrogates — a custom ChatBackend's
+            # error message or model name, an LLM-derived snippet materialized
+            # from a stored citation_report blob — and strict UTF-8 cannot
+            # encode them. On the error-envelope path a crash here would leave
+            # the request with no HTTP response at all, so emit \ud800 escapes
+            # instead; the client's JSON.parse restores them. The compact
+            # ensure_ascii=False path stays the fast path for CJK payloads.
+            body = json.dumps(payload).encode("ascii")
         self._headers(status, "application/json; charset=utf-8", {"Content-Length": str(len(body))})
         self.wfile.write(body)
 

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.613")
+        self.assertEqual(VERSION, "0.2.614")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9059,6 +9059,49 @@ class TestServerSSE(unittest.TestCase):
         body.decode("ascii")  # any raw non-ASCII byte would raise here
         self.assertIn(b"\\ud800", body)
 
+    def test_json_response_survives_surrogate_payloads(self) -> None:
+        """v0.2.614: _json() must emit an encodable body even when a payload
+        string carries a lone surrogate.
+
+        Reachability: payload fields outside every store-bind gate — a custom
+        ChatBackend's LLMError message or `model` name (the make_server(llm=...)
+        extension point), an LLM-derived snippet materialized back out of a
+        stored citation_report blob by _safe_report — reach _json()'s
+        ensure_ascii=False fast path, whose strict UTF-8 encode rejects lone
+        surrogates. On the success path that propagates to _dispatch's 500
+        writer (survivable); on the error-envelope path (_error/_safe_error)
+        the crash escapes _safe_error's socket-error-only except list — the
+        request dies with no HTTP response at all, not even the coded 500.
+        The ensure_ascii fallback escapes the surrogate as \\ud800 instead;
+        the client's JSON.parse restores it."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        written: list[bytes] = []
+
+        class _W:
+            def write(self, b: bytes) -> int:
+                written.append(b)
+                return len(b)
+
+            def flush(self) -> None:
+                pass
+
+        handler.wfile = _W()  # type: ignore[assignment]
+        handler.send_response = lambda *a, **k: None  # type: ignore[method-assign]
+        handler.send_header = lambda *a, **k: None  # type: ignore[method-assign]
+        handler.end_headers = lambda: None  # type: ignore[method-assign]
+        handler._json(
+            {"error": {"code": "LLM_UPSTREAM", "message": "bad \ud800 token"}}
+        )
+        body = written[0]
+        body.decode("ascii")  # fallback body is ASCII-pure
+        self.assertIn(b"\\ud800", body)
+        # The escaped surrogate still round-trips back to the same payload.
+        self.assertEqual(
+            json.loads(body)["error"]["message"], "bad \ud800 token"
+        )
+
     def test_safe_error_swallows_dead_connection_errors(self) -> None:
         """_safe_error() must swallow a dead-connection failure from the error
         response write itself, not propagate it.
@@ -17630,6 +17673,10 @@ class TestResidualGuards(unittest.TestCase):
                 "Exception", "Exception",
                 "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
+                "UnicodeEncodeError",
+                # v0.2.614: _json() falls back to ensure_ascii escapes when a
+                # payload field carries a lone surrogate — without it the
+                # error-envelope path itself would emit zero HTTP response.
                 "UnicodeEncodeError",
                 "ValueError", "ValueError", "ValueError",
             ],
