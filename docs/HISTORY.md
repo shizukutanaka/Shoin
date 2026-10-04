@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.625
+## Version History: v0.1.37 → v0.2.626
+
+### v0.2.626 — product-review 台帳を v0.2.625 に同期
+
+定期同期。`_one_line` の端末出力インジェクション閉塞 (v0.2.623) と
+`_window_split` の構成保証 (v0.2.624) の 2 実欠陥、および
+server.py GET 経路・evaluate.py 統合のクリーン fuzz 面を
+「境界の組立て方の欠陥族」区間として要約へ追記。
 
 ### v0.2.625 — spec.md を v0.2.624 に同期
 
