@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.620
+## Version History: v0.1.37 → v0.2.621
+
+### v0.2.621 — sync spec.md to v0.2.620
+
+Periodic spec sync: documents the export malformed-report tolerance
+(v0.2.617), the ingest stdlib-boundary coding (v0.2.619), and the
+deeply-nested LLM response coding (v0.2.620) in the hardening-contracts
+prose; refreshes the implementation marker and the measured quality line
+(1275 → 1280 tests).
 
 ### v0.2.620 — code deeply-nested LLM responses as malformed, not 500
 

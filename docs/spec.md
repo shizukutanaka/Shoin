@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.615 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.620 時点に同期)
 
 ## プロダクト定義
 
@@ -146,6 +146,24 @@ CDATAで発火しないイベントを`_live`述語(`_outside_tag`のtagfind忠�
 (未整合open毎に`</{tag}>`を`>`直後へ、未閉`<!--`は個別に空化)——
 stray `</nav>`が無関係open要素を解放する経路と早期の未整合openerが
 後続平衡要素の内容を漏洩させる経路を一括閉塞(v0.2.615)。
+格納レポートの変形フィールドはexport経路で無信号へ降格——
+`_parse_report`が任意well-formed JSONを受理する寛容契約の下、
+`_legend()`の非dict `source_detail`値と`_status_line()`の
+非hashable `cited`/`uncited_supported`要素がAttributeError/
+TypeErrorでexport文書全体をクラッシュさせる経路を、周辺の
+isinstanceガードと同一のno-signal扱いへ統一して閉塞(v0.2.617)。
+stdlib境界の非コード化漏出は全てcoded拒絶へ写像——`urlparse`が
+括弧付きホストをパース時点で検証し`http://[::1`等の未閉ブラケットで
+裸ValueErrorを送出する経路を`INGEST_URL_BLOCKED`へ(`.port`遅延
+チェックに先行して脱出していたv0.2.45同欠陥クラス)、`_decode`の
+charset候補loopがNUL混入charset名でcodec lookupの
+`ValueError("embedded null character")`を脱出させる経路を
+catch節`(ValueError, LookupError)`へ広げて閉塞(v0.2.619)。
+LLM応答の深ネストbodyはmalformed信号としてコード化——
+`json.loads`が~5k深を超えるbodyでRecursionError(JSONDecodeError
+ではない)を送出し、`_post`では全呼出し経路の500化、chat_stream
+では1フレームがSSE全体を途中abortさせる両漏出を、BAD_RESPONSE
+写像とmalformed-frame dropへそれぞれ収束(v0.2.620)。
 
 ## 検索パイプライン
 
@@ -196,7 +214,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.615時点の実測: shoin/ 99%、未カバー25行は防御分岐・到達不能tail、テスト1275件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.620時点の実測: shoin/ 99%、未カバー25行は防御分岐・到達不能tail、テスト1280件)
 
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
