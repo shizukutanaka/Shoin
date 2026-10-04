@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.605 時点、2026-10-01 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.611 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1265件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1269件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -350,6 +350,28 @@ opens−closesへ(v0.2.603)。`_HEADING_RE`はfenceと異なり0空白必須+
 末尾空白必須——CommonMark opener規則(≤3空白+#+空白/EOL)へ統一、
 indented/bare headingがbreadcrumbとheading加重BM25へ届く(v0.2.604)。
 全区間fail-then-pass規律で実証済み。
+
+
+**v0.2.606-611 の要約**: 「単独サロゲート欠陥クラスの完結——
+入出力境界全ての衛生化」区間——実欠陥4件・文書同期2件
+(v0.2.606は本台帳、v0.2.608はspec.md)。主題はv0.2.598-599で
+開いたサロゲートクラスを残りの全出力境界で閉塞する収束: store層が
+sqlite3のstrict UTF-8 bind拒絶を無防備に通していた——`_utf8`
+モジュールゲートが全バインドstrフィールド(notebook name・source
+title/origin/sha256・chunk texts/contexts・note/studio/message
+body+report・settings key/value)を書込み前検査し
+VALIDATION_FIELD_FORMAT_INVALIDを返す第4境界(v0.2.609)。
+`_sse`は`ensure_ascii=False`+`.encode()`で、サロゲート入り
+ペイロードがConnectionError捕捉を潜り抜け`_dispatch`の500書込みへ
+流出——コミット済みSSEボディへの第2HTTPステータス行注入を
+ensure_ascii=Trueで閉塞(ワイヤ上ASCII純粋・\ud800エスケープで
+クライアント側JSON.parseが透過復元、v0.2.610)。cli `main()`の
+例外分類はUnicodeEncodeErrorを捕捉せず——カスタムChatBackend
+(`main(llm=…)`/`make_server(llm=…)`拡張点)のサロゲートトークンが
+print()書込みでクラッシュし生トレースバック、OverflowErrorと同じ
+境界捕捉でerr.prefix化(v0.2.611)。併せてexportステータス行の
+uncited_supportedヒントが非空ターゲットを要求し、古いレポート形状
+での宙吊り矢印を解消(v0.2.607)。
 
 
 **v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を

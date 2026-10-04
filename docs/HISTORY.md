@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.611
+## Version History: v0.1.37 → v0.2.612
+
+### v0.2.612 — sync the product-review ledger to v0.2.611
+
+The ledger's running summary now covers v0.2.606-611, the interval where
+the lone-surrogate defect class converged across the remaining output
+boundaries: store writes gained the module-private _utf8 gate over every
+bound str field (v0.2.609), _sse switched to the ASCII-pure wire so a
+surrogate payload can no longer inject a second HTTP status line into a
+committed SSE stream (v0.2.610), and cli main() learned the
+UnicodeEncodeError boundary catch so custom ChatBackend output can never
+escape as a raw traceback (v0.2.611). The interval also carried the
+export status line's non-empty-hint-target fix (v0.2.607) and the spec.md
+contract catch-up (v0.2.608). Header marker and test count follow the
+code (1265 → 1269).
+
 
 ### v0.2.611 — cli main() catches UnicodeEncodeError from print()
 
