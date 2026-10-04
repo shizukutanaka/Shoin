@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.608")
+        self.assertEqual(VERSION, "0.2.609")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -1334,6 +1334,65 @@ class TestStore(unittest.TestCase):
                 s.add_source(nb.id, "urll", "t", "o", "sha-bad")
             self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
             self.assertEqual(s.sources_for_notebook(nb.id), [])
+
+    def test_store_writes_reject_lone_surrogates(self) -> None:
+        """v0.2.609: every bound str field rejects a lone surrogate with a
+        coded VALIDATION_FIELD_FORMAT_INVALID instead of the sqlite driver's
+        raw UnicodeEncodeError.
+
+        Reachability: POSIX argv/env decode invalid bytes via surrogateescape
+        (CLI `ask`/`notebook`/`note`/`source rename`, a `shoin add` filename
+        with non-UTF-8 bytes, SHOIN_* env vars), so the API-layer gate does
+        not cover this surface — the store write is the last boundary before
+        the bind. The same defect class as v0.2.430 (server fields), v0.2.598
+        (eval readers) and v0.2.599 (LLM output boundary)."""
+        with make_store() as s:
+            nb = s.create_notebook("surrogate-guard")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-1")
+
+            bad = "bad\ud800"
+            cases: list[tuple[Callable[[], object], str]] = [
+                (lambda: s.create_notebook(bad), "create_notebook"),
+                (lambda: s.rename_notebook(nb.id, bad), "rename_notebook"),
+                (lambda: s.add_source(nb.id, "txt", bad, "o", "sha-2"), "add_source.title"),
+                (lambda: s.add_source(nb.id, "txt", "t", bad, "sha-2"), "add_source.origin"),
+                (lambda: s.add_source(nb.id, "txt", "t", "o", bad), "add_source.sha256"),
+                (lambda: s.update_source_title(src.id, bad, "o"), "update_source_title.title"),
+                (lambda: s.update_source_title(src.id, "t2", bad), "update_source_title.origin"),
+                (lambda: s.update_source_sha256(src.id, bad, "t2"), "update_source_sha256.sha256"),
+                (
+                    lambda: s.update_source_sha256(src.id, "sha-9", bad),
+                    "update_source_sha256.title",
+                ),
+                (lambda: s.replace_chunks_for_source(src.id, [bad]), "replace_chunks.text"),
+                (
+                    lambda: s.replace_chunks_for_source(src.id, ["ok"], contexts=[bad]),
+                    "replace_chunks.context",
+                ),
+                (
+                    lambda: s.replace_chunks_for_source(src.id, ["ok"], title=bad),
+                    "replace_chunks.title",
+                ),
+                (lambda: s.add_chunks(src.id, [bad]), "add_chunks.text"),
+                (lambda: s.add_chunks(src.id, ["ok"], [bad]), "add_chunks.context"),
+                (lambda: s.add_note(nb.id, bad, "b"), "add_note.title"),
+                (lambda: s.add_note(nb.id, "t", bad), "add_note.body"),
+                (lambda: s.add_studio_output(nb.id, "faq", bad, "{}"), "add_studio_output.body"),
+                (
+                    lambda: s.add_studio_output(nb.id, "faq", "b", bad),
+                    "add_studio_output.citation_report",
+                ),
+                (lambda: s.add_message(nb.id, "user", bad), "add_message.body"),
+                (lambda: s.add_message(nb.id, "user", "b", bad), "add_message.citation_report"),
+                (lambda: s.set_setting(bad, "v"), "set_setting.key"),
+                (lambda: s.set_setting("k", bad), "set_setting.value"),
+                (lambda: s.get_setting(bad), "get_setting.key"),
+            ]
+            for fn, label in cases:
+                with self.subTest(site=label):
+                    with self.assertRaises(StoreError) as cm:
+                        fn()
+                    self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
 
     def test_source_kind_vocabulary_matches_ingest(self) -> None:
         """store.SOURCE_KINDS must exactly cover what ingest can emit —
@@ -17462,6 +17521,10 @@ class TestResidualGuards(unittest.TestCase):
                 "sqlite3.IntegrityError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
                 "suppress(OSError)",
+                # _utf8(): re-raises as coded VALIDATION_FIELD_FORMAT_INVALID —
+                # the sqlite bind's raw UnicodeEncodeError is exactly what this
+                # handler converts (same class as evaluate.py's _utf8_ok gate).
+                "UnicodeEncodeError",
             ],
             "studio.py": [
                 "LLMError",
@@ -17610,7 +17673,7 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 49,
+            ] + ["StoreError"] * 50,  # +1: _utf8's coded surrogate rejection
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.608
+## Version History: v0.1.37 → v0.2.609
+
+### v0.2.609 — store writes reject lone surrogates with a coded error
+
+Same defect class as v0.2.430 (server fields), v0.2.598 (eval readers) and
+v0.2.599 (LLM output boundary), closed at the last uncovered boundary: the
+sqlite bind itself. sqlite3 encodes bound str parameters as strict UTF-8, so
+a lone surrogate reached a write as a raw UnicodeEncodeError — bypassing
+every caller's coded-error mapping. Such strings really do arrive: POSIX
+argv/env decode invalid bytes via surrogateescape (CLI subcommands, `shoin
+add` of a filename with non-UTF-8 bytes, SHOIN_* env vars), and the API
+field gate does not cover values derived downstream (a source title taken
+from such a filename). A module-private `_utf8()` gate now runs on every
+bound str field in Store — notebook names, source title/origin/sha256, chunk
+texts and contexts, note title/body, studio output body and citation_report,
+message body and citation_report, and settings keys/values — raising
+VALIDATION_FIELD_FORMAT_INVALID ahead of the write.
+
 
 ### v0.2.608 — sync spec.md to v0.2.607
 
