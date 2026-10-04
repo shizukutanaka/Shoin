@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.618")
+        self.assertEqual(VERSION, "0.2.619")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -3298,6 +3298,20 @@ class TestIngest(unittest.TestCase):
                 validate_public_url(url)
             self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
 
+    def test_ssrf_unclosed_bracket_blocked(self) -> None:
+        """An unclosed/misplaced IPv6 bracket must raise INGEST_URL_BLOCKED.
+
+        urlparse validates bracketed hosts eagerly: 'http://[::1' raises a
+        bare ValueError inside urlparse itself — before the lazy .port check
+        below — so it escaped the coded-error path entirely and surfaced as
+        HTTP 500 SYSTEM_INTERNAL_ERROR / a raw traceback in `shoin add`
+        (the same 400-vs-500 defect class as the .port fix above and the
+        zone-scoped IPv6 fix, v0.2.45)."""
+        for url in ("http://[::1", "http://]x[/"):
+            with self.assertRaises(IngestError) as cm:
+                validate_public_url(url)
+            self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
     def test_ssrf_fetch_pins_validated_ip(self) -> None:
         """fetch_url must connect to the IP it validated with exactly one DNS call per hop.
 
@@ -3775,6 +3789,24 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(_charset_from_ctype('text/html; charset="windows-1252"'), "windows-1252")
         self.assertIsNone(_charset_from_ctype("text/html"))
         self.assertIsNone(_charset_from_ctype("application/json"))
+
+    def test_decode_malformed_charset_hint_falls_through(self) -> None:
+        """A malformed charset hint must degrade to the default chain.
+
+        A charset parameter containing an embedded NUL is reachable from a
+        hostile server's Content-Type header. Codec lookup for such a name
+        raises ValueError("embedded null character") — not the LookupError of
+        an unknown-but-wellformed name — so it escaped the candidate loop and
+        crashed extract_url with a 500-class error. The loop now degrades any
+        ValueError/LookupError to the next candidate."""
+        from shoin.ingest import _decode
+
+        data = "héllo".encode()
+        self.assertEqual(_decode(data, "\x00utf-8"), "héllo")
+        # Non-string control chars anywhere in the hint must not escape either.
+        self.assertEqual(_decode(data, "utf-8\x00"), "héllo")
+        # A normal unknown name still degrades via LookupError as before.
+        self.assertEqual(_decode(data, "bogus-charset-name"), "héllo")
 
     def test_pdf_to_text_parse_error_raises_ingest_error(self) -> None:
         """Corrupt PDF bytes must raise INGEST_PARSE_FAILED, not a bare exception."""
@@ -17723,10 +17755,17 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": ["(ValueError,json.JSONDecodeError)"],
             "ingest.py": [
                 "(OSError,http.client.HTTPException)",
-                "(LookupError,UnicodeDecodeError)",
+                # v0.2.619: _decode's candidate loop degrades malformed codec
+                # names (embedded NUL from a hostile Content-Type charset)
+                # via ValueError, which also covers UnicodeDecodeError.
+                "(LookupError,ValueError)",
                 "Exception", "Exception", "Exception", "Exception",
                 "ImportError",
-                "OSError", "ValueError", "ValueError",
+                "OSError",
+                # v0.2.619: urlparse raises ValueError on unclosed IPv6
+                # brackets eagerly (before the lazy .port check) — mapped
+                # to INGEST_URL_BLOCKED like every other malformed URL.
+                "ValueError", "ValueError", "ValueError",
                 "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
             ],
             "llm.py": [
@@ -17904,7 +17943,7 @@ class TestResidualGuards(unittest.TestCase):
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 25 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError",

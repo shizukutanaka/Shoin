@@ -29,7 +29,31 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.618
+## Version History: v0.1.37 → v0.2.619
+
+### v0.2.619 — code stdlib-boundary errors on hostile URL/charset input
+
+Two more instances of the "400-vs-500" defect class seeded-fuzz keeps
+surfacing at stdlib boundaries, both reachable from user/remote input:
+
+- `validate_public_url`: `urllib.parse.urlparse` validates bracketed hosts
+  eagerly, so `http://[::1` (unclosed) or `http://]x[/` raised a bare
+  ValueError *inside* urlparse — before the lazy `.port` check — and
+  escaped as HTTP 500 / a raw traceback in `shoin add`. Now wrapped and
+  mapped to INGEST_URL_BLOCKED, same as every other malformed URL.
+- `_decode`: a charset hint containing an embedded NUL (reachable via a
+  hostile server's `Content-Type` header) makes codec lookup raise
+  ValueError("embedded null character"), not the LookupError of a
+  well-formed unknown name — escaping the fallback loop and crashing
+  `extract_url`. The candidate loop now degrades on (ValueError,
+  LookupError), which also covers UnicodeDecodeError (a ValueError
+  subclass).
+
+Found by a 15.5k-trial seeded fuzz over `_inflate`,
+`_decode_content_encoding`, `_decode`/`_charset_from_ctype`,
+`validate_public_url` (mocked DNS), and `extract_file` — zero remaining
+non-coded escapes, output size bounds and gzip/deflate member handling
+all held.
 
 ### v0.2.618 — sync the product-review ledger to v0.2.617
 

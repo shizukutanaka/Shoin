@@ -103,7 +103,12 @@ def _decode(data: bytes, charset: str | None = None) -> str:
     for enc in candidates:
         try:
             return data.decode(enc)
-        except (UnicodeDecodeError, LookupError):
+        except (ValueError, LookupError):
+            # UnicodeDecodeError is a ValueError subclass; the plain-ValueError
+            # branch covers malformed codec names — a charset parameter with an
+            # embedded NUL (reachable via a hostile server's Content-Type
+            # header) raises ValueError("embedded null character"), not the
+            # LookupError an unknown-but-wellformed name raises.
             continue
     return data.decode("utf-8", errors="replace")
 
@@ -422,7 +427,13 @@ def validate_public_url(url: str) -> tuple[urllib.parse.ParseResult, str]:
     Returns (parsed_url, pinned_ip) so callers can connect to the validated IP
     directly without a second DNS lookup.
     """
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        # urlparse validates bracketed hosts eagerly (e.g. "http://[::1"):
+        # ValueError must not escape as a 500-class leak — map to the same
+        # coded rejection as every other malformed URL (v0.2.45 defect class).
+        raise IngestError("INGEST_URL_BLOCKED", f"invalid URL: {exc}") from exc
     if parsed.scheme not in ("http", "https"):
         raise IngestError("INGEST_URL_BLOCKED", f"scheme not allowed: {parsed.scheme!r}")
     if not parsed.hostname:
