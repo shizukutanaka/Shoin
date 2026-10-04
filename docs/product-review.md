@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.611 時点、2026-10-01 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.617 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1269件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1276件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -372,6 +372,32 @@ print()書込みでクラッシュし生トレースバック、OverflowErrorと
 境界捕捉でerr.prefix化(v0.2.611)。併せてexportステータス行の
 uncited_supportedヒントが非空ターゲットを要求し、古いレポート形状
 での宙吊り矢印を解消(v0.2.607)。
+
+
+**v0.2.612-617 の要約**: 「seeded-fuzzが拾う契約反転——
+『足すだけ』系不変条件と寛容パーサーの下流穴」区間——実欠陥3件・
+文書同期2件(v0.2.612は本台帳、v0.2.616はspec.md)。全モジュール
+1周監査の完結後、第2フェーズとしてseeded-random fuzzが読みでは
+拾えない契約の反転を検出: `bm25_prf_search`は第1パス+拡張ヒットの
+unionをbm25再ソート後`[:k]`で切詰——第1パス未充填時、システム提案
+gramのみ一致の密な拡張ヒットがユーザ用語一致ヒットを退避させ得る
+「expanded hits can only ADD recall」契約の反転。extrasを
+`k - len(hits)`ヘッドルームに上限(v0.2.613)。`_json`応答writerは
+`.encode()`がサロゲートpayloadでraise——エラーエンベロープ経路が
+HTTP応答そのものを失う経路をensure_ascii退避で閉塞(v0.2.614)。
+`html_to_text`修復パスは「パーサーが実際にイベントを発火しない領域」
+のタグ/コメント境界をペア——`_skip_depth`盲目カウンタを`_skip_stack`
+名スタック(DOM意味論pop-through+未開クローザー無視)、`<...>`属性領域・
+コメント・CDATA内イベントを`_live`述語で全消費点から除外、注入修復を
+per-opener化する3機構で一括閉塞(v0.2.615)。`_parse_report`は任意
+well-formed JSONを受理する寛容設計なのに読取3箇所が格納形状を無条件
+信頼——`_legend`の`found_bits(source_detail値)`非dict AttributeError・
+`_status_line`の`set(cited)`/`sup_src.get(文)`の非hashable
+TypeError——1行の変形レポートがexport文書全体をクラッシュさせた経路を
+「変形フィールド→no-signal」降格で閉塞(v0.2.617)。store層並行書込み・
+pipeline→build_context統合・実サーバ960リクエスト嵐の各fuzz経路は
+全てゼロ欠陥——`with self.conn`原子性・WALスナップショット・coded
+error envelope・SSE wire完全性の契約が嵐下で維持されることを実証。
 
 
 **v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を

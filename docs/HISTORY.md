@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.617
+## Version History: v0.1.37 → v0.2.618
+
+### v0.2.618 — sync the product-review ledger to v0.2.617
+
+Periodic ledger sync: the v0.2.612-617 interval — the post-clean-sweep
+seeded-fuzz phase catching contract inversions reading can't see — is now
+recorded: the PRF expansion eviction inversion (v0.2.613), the `_json`
+surrogate-payload crash (v0.2.614), the parse-level pairing rework of
+html_to_text's repair pass (v0.2.615), and the malformed stored-report
+tolerance fix in export (v0.2.617), plus the three clean fuzz surfaces
+(concurrent Store writes, pipeline→build_context integration, and the
+960-request live-server storm) that held every invariant. Header marker
+and the test count (1269 → 1276) follow the code.
 
 ### v0.2.617 — tolerate wrong-typed fields inside stored citation reports
 
