@@ -302,6 +302,35 @@ def _blocks(text: str) -> list[str]:
     return [b for b in blocks if b]
 
 
+def _window_split(text: str, limit: int) -> list[str]:
+    """Cut *text* into pieces whose own token estimates fit within *limit*.
+
+    The last-resort splitter for text that never yields at a sentence
+    boundary. A fixed character stride sized by the text's *average* token
+    density overshoots the budget whenever a window lands on a denser
+    pocket — an all-CJK run inside mostly-ASCII text costs ~1 token per
+    char where the average suggested ~5 chars per token, so a window could
+    produce a chunk several times over limit. estimate_tokens() is
+    monotonic in prefix length (each added char only adds a CJK unit or
+    extends/completes a word run's cost), so a binary search finds the
+    longest prefix that fits exactly: every emitted piece ≤ limit, with a
+    mid-run cut only where a single run cannot fit alone.
+    """
+    out: list[str] = []
+    rest = text
+    while rest:
+        lo, hi = 1, len(rest)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if estimate_tokens(rest[:mid]) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        out.append(rest[:lo])
+        rest = rest[lo:]
+    return out
+
+
 def _hard_split(block: str, limit: int) -> list[str]:
     """Split an oversize block by sentences, then by char windows as last resort."""
     parts: list[str] = []
@@ -331,13 +360,7 @@ def _hard_split(block: str, limit: int) -> list[str]:
         tok = estimate_tokens(p)
         if tok > limit:
             # Character-window fallback for pathological unbroken text.
-            # Convert the token budget to a character budget using this text's
-            # own token density (CJK ≈ 1 char/token; ASCII ≈ 5 chars/token).
-            # Using limit directly as a char index (the old code) produced chunks
-            # that were ~5× too small for ASCII text.
-            chars_per_token = len(p) / tok
-            window = max(int(limit * chars_per_token), 1)
-            out.extend(p[i : i + window] for i in range(0, len(p), window))
+            out.extend(_window_split(p, limit))
         elif tok == 0 and len(p) > limit * 5:
             # Zero-token text (Arabic, Hebrew, Cyrillic, pure punctuation) escapes
             # estimate_tokens(); a pathologically long block (> limit*5 chars) must

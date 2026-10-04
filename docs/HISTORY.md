@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.623
+## Version History: v0.1.37 → v0.2.624
+
+### v0.2.624 — window-split on token budget, not average density
+
+_hard_split's last-resort char-window sized its stride as
+`limit * (len(part) / estimate_tokens(part))` — the AVERAGE density of
+the whole sentence. On mixed-density unbroken text a window landing on a
+dense pocket (all-CJK inside ASCII prose) emitted a chunk several times
+over the limit — e.g. a 675-token chunk at limit=512 — inflating the
+index and silently spending more of the downstream token budget than the
+contract promises. New _window_split binary-searches the longest prefix
+whose own estimate fits (the estimate is prefix-monotonic: each added
+char only adds a CJK unit or extends/completes a word run's cost), so
+every emitted piece is ≤ limit by construction; runs too big to fit
+alone are cut mid-run exactly once. Found by the seeded chunk-path fuzz
+(700 hostile docs × 5 param cells) — the only real bound violation.
 
 ### v0.2.623 — escape control chars in CLI status labels
 
@@ -37,7 +52,8 @@ Every single-line status row (`✓`/`✗` results, `[id] name` lists,
 `[S{n}]` report lines, `err.prefix`-style value interpolations) embeds an
 externally-controlled string — a target path, a stored title, a notebook
 name. A control character (
-, , ESC, U+2028…) splits the row or
+, 
+, ESC, U+2028…) splits the row or
 rewrites earlier terminal output: `add` on a file named `x
 ✓ forged`
 prints a fake success line indistinguishable from a real one, and an

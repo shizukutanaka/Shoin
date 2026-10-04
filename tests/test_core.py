@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.623")
+        self.assertEqual(VERSION, "0.2.624")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2804,6 +2804,35 @@ class TestChunk(unittest.TestCase):
             self.assertGreater(
                 estimate_tokens(p), 20,
                 msg=f"non-tail chunk too small (5× penalty): {p!r:.40}",
+            )
+
+    def test_hard_split_windows_respect_limit_on_mixed_density(self) -> None:
+        """_hard_split's character-window fallback must emit pieces whose own
+        token estimate fits the limit — not fixed-width char windows.
+
+        The old stride sized each window as `limit * avg_chars_per_token` of
+        the WHOLE part. On mixed-density unbroken text (a dense CJK pocket
+        inside mostly-ASCII prose) a window landing on the pocket produced a
+        chunk several times over the limit — one observed case emitted a
+        675-token chunk at limit=512. Fix: _window_split binary-searches the
+        longest prefix whose estimate fits (estimate is prefix-monotonic),
+        so every emitted piece is ≤ limit by construction.
+        """
+        from shoin.chunk import _hard_split
+
+        # One giant sentence (no terminators): ~800 cheap ASCII tokens worth
+        # of characters carrying a dense all-CJK pocket (~450 tokens).
+        block = ("abcdefghij " * 200) + ("書院日本語検索引用検証文書分割" * 30) + (
+            "klmnopqrst " * 200
+        )
+        self.assertGreater(estimate_tokens(block), 512, "pre-condition")
+        parts = _hard_split(block, 512)
+        self.assertGreater(len(parts), 1)
+        for p in parts:
+            self.assertLessEqual(
+                estimate_tokens(p),
+                512,
+                msg=f"window piece over token budget: {estimate_tokens(p)} tokens",
             )
 
     def test_hard_split_zero_token_text_is_bounded(self) -> None:
