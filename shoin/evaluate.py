@@ -20,10 +20,11 @@ same principle as citation.py: report what is directly measurable, nothing more.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
-from .config import TOP_K
+from .config import MAX_QUESTION_LEN, TOP_K
 from .qa import ChatBackend, _check_embed_model_ok, _query_vector, retrieve_for_question
 from .store import Store
 
@@ -43,6 +44,13 @@ class CaseResult:
     retrieved: list[int]  # distinct source ids, best rank first
     recall: float  # share of `expected` present in `retrieved`
     reciprocal_rank: float  # 1/rank of the first expected source, else 0.0
+    # Expected ids that do NOT exist in the notebook (deleted or renumbered —
+    # sqlite source ids are autoincrement, so re-adding a source rekeys it).
+    # Such an id can never be retrieved, so the case is silently unwinnable:
+    # without surfacing it, a stale case file reads as a retrieval regression
+    # forever — the same "silently rekeyed" class diff_reports guards on the
+    # question side.
+    missing: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +99,23 @@ class EvalDiff:
     matched_questions: int = 0
 
 
+def _utf8_ok(s: str) -> bool:
+    """True when a decoded-JSON string can round-trip through UTF-8.
+
+    json.loads materializes lone surrogates from \\ud800-style escapes that
+    raw UTF-8 input cannot carry; one reaching a sqlite bound term (evaluate()
+    via retrieve_for_question) or stdout (diff_reports' question lists)
+    escapes every handler as a raw UnicodeEncodeError — the same defect class
+    server._check_utf8 rejects on the wire. These functions' contract is
+    ValueError, not StoreError, so the check lives here.
+    """
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def parse_cases(data: object) -> list[EvalCase]:
     """Parse the cases file's decoded JSON into EvalCase objects.
 
@@ -101,12 +126,32 @@ def parse_cases(data: object) -> list[EvalCase]:
     if not isinstance(data, list):
         raise ValueError("cases file must contain a JSON array of case objects")
     cases: list[EvalCase] = []
+    seen_qs: set[str] = set()
     for i, raw in enumerate(data):
         if not isinstance(raw, dict):
             raise ValueError(f"case {i}: expected an object, got {type(raw).__name__}")
         q = raw.get("q")
         if not isinstance(q, str) or not q.strip():
             raise ValueError(f"case {i}: 'q' must be a non-empty string")
+        q = q.strip()
+        if not _utf8_ok(q):
+            raise ValueError(f"case {i}: 'q' contains an unpaired surrogate")
+        # A case longer than the product's own input bound (the /ask and cli
+        # ask paths both reject > MAX_QUESTION_LEN) measures a question the app
+        # cannot answer — and it builds a pathological FTS5 OR-expression from
+        # thousands of terms. Same contract suggest_questions() applies to its
+        # own output ("the app would suggest a question it cannot answer").
+        if len(q) > MAX_QUESTION_LEN:
+            raise ValueError(
+                f"case {i}: 'q' exceeds MAX_QUESTION_LEN ({len(q)} > {MAX_QUESTION_LEN})"
+            )
+        # A duplicated question silently double-counts in the run's mean
+        # recall/MRR — the same question weighs twice with no marker — and a
+        # diff pairing it occurrence-by-occurrence can't tell which twin is
+        # which case. Refusing follows this function's refuse-loudly contract.
+        if q in seen_qs:
+            raise ValueError(f"case {i}: duplicate question {q!r}")
+        seen_qs.add(q)
         srcs = raw.get("sources")
         if not isinstance(srcs, list) or not srcs:
             raise ValueError(f"case {i}: 'sources' must be a non-empty array of source ids")
@@ -115,7 +160,7 @@ def parse_cases(data: object) -> list[EvalCase]:
             if isinstance(s, bool) or not isinstance(s, int):
                 raise ValueError(f"case {i}: source ids must be integers, got {s!r}")
             ids.append(s)
-        cases.append(EvalCase(q.strip(), ids))
+        cases.append(EvalCase(q, ids))
     if not cases:
         raise ValueError("cases file contains no cases")
     return cases
@@ -135,6 +180,11 @@ def evaluate(
     SHOIN_MULTI_QUERY and re-running compares what they will really experience.
     """
     store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND
+    # One fetch for every case's expected-id existence check — a source deleted
+    # and re-added gets a NEW autoincrement id, so stale case files referencing
+    # the old id would otherwise score 0 with no hint that the case, not the
+    # retrieval, is what changed.
+    present = {s.id for s in store.sources_for_notebook(notebook_id)}
     results: list[CaseResult] = []
     for case in cases:
         qvec = _query_vector(llm, case.question) if _check_embed_model_ok(store, llm) else None
@@ -153,7 +203,16 @@ def evaluate(
             if sid in expected:
                 rr = 1.0 / pos
                 break
-        results.append(CaseResult(case.question, list(expected), ranked, recall, rr))
+        results.append(
+            CaseResult(
+                case.question,
+                list(expected),
+                ranked,
+                recall,
+                rr,
+                [sid for sid in expected if sid not in present],
+            )
+        )
     n = len(results)
     return EvalReport(
         cases=results,
@@ -177,6 +236,7 @@ def report_to_dict(rep: EvalReport, k: int) -> dict[str, object]:
                 "retrieved": c.retrieved,
                 "recall": c.recall,
                 "rr": c.reciprocal_rank,
+                "missing": c.missing,
             }
             for c in rep.cases
         ],
@@ -201,23 +261,56 @@ def report_from_dict(data: object) -> tuple[EvalReport, int | None]:
         got = raw.get("retrieved")
         rec = raw.get("recall")
         rr = raw.get("rr")
+        miss = raw.get("missing", [])  # absent in pre-v0.2.551 baselines
         if (
             not isinstance(q, str)
+            or not _utf8_ok(q)
             or not isinstance(exp, list)
             or not isinstance(got, list)
+            # Python's json module decodes the non-standard NaN/Infinity
+            # literals, and bool is an int subclass — a plain isinstance
+            # check lets {"recall": NaN} or {"rr": true} through, where NaN
+            # then propagates silently through the diff arithmetic. The
+            # finite+non-bool conditions must stay inline so mypy narrows
+            # rec/rr for the float() calls below.
             or not isinstance(rec, (int, float))
+            or isinstance(rec, bool)
+            or not math.isfinite(float(rec))
             or not isinstance(rr, (int, float))
+            or isinstance(rr, bool)
+            or not math.isfinite(float(rr))
+            or not isinstance(miss, list)
+            # Element types checked like parse_cases' source ids — and like the
+            # `missing` check right above (bool excluded: it is an int subclass
+            # that never names a real source id). A string/bool id loaded from a
+            # hand-edited baseline otherwise serializes back out unchanged.
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in exp)
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in got)
+            or any(isinstance(s, bool) or not isinstance(s, int) for s in miss)
         ):
             raise ValueError(f"baseline case {i}: missing or mistyped fields")
-        cases.append(CaseResult(q, exp, got, float(rec), float(rr)))
+        cases.append(CaseResult(q, exp, got, float(rec), float(rr), list(miss)))
     rec_all = data.get("recall")
     mrr_all = data.get("mrr")
-    if not isinstance(rec_all, (int, float)) or not isinstance(mrr_all, (int, float)):
+    if (
+        not isinstance(rec_all, (int, float))
+        or isinstance(rec_all, bool)
+        or not math.isfinite(float(rec_all))
+        or not isinstance(mrr_all, (int, float))
+        or isinstance(mrr_all, bool)
+        or not math.isfinite(float(mrr_all))
+    ):
         raise ValueError("baseline file has missing or non-numeric recall/mrr")
     k_raw = data.get("k")
+    if k_raw is not None and (
+        not isinstance(k_raw, (int, float))
+        or isinstance(k_raw, bool)
+        or not math.isfinite(float(k_raw))
+    ):
+        raise ValueError("baseline file has a malformed 'k'")
     return (
         EvalReport(cases=cases, recall=float(rec_all), mrr=float(mrr_all)),
-        int(k_raw) if isinstance(k_raw, (int, float)) else None,
+        int(k_raw) if k_raw is not None else None,
     )
 
 

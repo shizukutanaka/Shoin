@@ -29,7 +29,845 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.550
+## Version History: v0.1.37 → v0.2.628
+
+### v0.2.628 — _safe_report の非 dict JSON を {} へ降格 (API/export パリティ)
+
+messages/notes API 往復 fuzz (seed=480) が検出: 格納 `citation_report`
+が *valid な* JSON でも dict でない場合 (`"[1,2]"`, `"5"`, `"true"`)、
+`_safe_report` がパース済み値をそのまま返し `GET /api/notebooks/{id}`
+が `"report": [1,2]` 等の非オブジェクトフィールドを送出していた。
+export.py の `_parse_report` は同形状を `isinstance(dict)` ガードで
+{} へ降格する —— API/export 両面の「report は常にオブジェクト」契約
+のパリティ欠落。`str(raw)` 強制も追加し、非 str 格納値 (非 STRICT 列
+の int 等) で `json.loads` が送出する TypeError の未捕捉経路も閉塞。
+
+### v0.2.627 — main() にプロセス境界の catch-all を追加 (CLI/API coded パリティ)
+
+cli.py 残存サブコマンド統合 fuzz (seed=479) が検出: `main(llm=...)` へ
+渡される外部 ChatBackend が非 LLMError 例外 (RuntimeError 等) を送出
+すると、`main()` のハンドラ鎖 (StoreError/IngestError/LLMError/
+OperationalError/OSError/UnicodeEncodeError/OverflowError/
+KeyboardInterrupt) を全て素通りして生 traceback が脱出していた。
+server.py の `_dispatch` は同じ迷入例外を coded
+`SYSTEM_INTERNAL_ERROR` エンベロープへ写像する —— CLI と API の
+「coded 応答、traceback なし」契約のパリティ欠落。
+`except Exception → SYSTEM_INTERNAL_ERROR` (type 名のみ) を main()
+末尾へ追加して閉塞。KeyboardInterrupt/SystemExit は BaseException
+系統のため影響なし。except-Exception カタログを cli.py 1→2 へ、
+spec.md の「広域捕捉は17サイト」を18へ更新。
+
+### v0.2.626 — product-review 台帳を v0.2.625 に同期
+
+定期同期。`_one_line` の端末出力インジェクション閉塞 (v0.2.623) と
+`_window_split` の構成保証 (v0.2.624) の 2 実欠陥、および
+server.py GET 経路・evaluate.py 統合のクリーン fuzz 面を
+「境界の組立て方の欠陥族」区間として要約へ追記。
+
+### v0.2.625 — spec.md を v0.2.624 に同期
+
+定期同期。`_one_line` による CLI 単一行ラベルの Cc/Zl/Zp エスケープ
+(v0.2.623) と、char-window を estimate_tokens の二分探索による最長
+適合 prefix 切出しへ置換した `_window_split` (v0.2.624) の 2 契約を
+仕様書へ追記し、品質行の版数・テスト件数を実測値へ更新。
+
+### v0.2.624 — window-split on token budget, not average density
+
+_hard_split's last-resort char-window sized its stride as
+`limit * (len(part) / estimate_tokens(part))` — the AVERAGE density of
+the whole sentence. On mixed-density unbroken text a window landing on a
+dense pocket (all-CJK inside ASCII prose) emitted a chunk several times
+over the limit — e.g. a 675-token chunk at limit=512 — inflating the
+index and silently spending more of the downstream token budget than the
+contract promises. New _window_split binary-searches the longest prefix
+whose own estimate fits (the estimate is prefix-monotonic: each added
+char only adds a CJK unit or extends/completes a word run's cost), so
+every emitted piece is ≤ limit by construction; runs too big to fit
+alone are cut mid-run exactly once. Found by the seeded chunk-path fuzz
+(700 hostile docs × 5 param cells) — the only real bound violation.
+
+### v0.2.623 — escape control chars in CLI status labels
+
+Every single-line status row (`✓`/`✗` results, `[id] name` lists,
+`[S{n}]` report lines, `err.prefix`-style value interpolations) embeds an
+externally-controlled string — a target path, a stored title, a notebook
+name. A control character (
+, 
+, ESC, U+2028…) splits the row or
+rewrites earlier terminal output: `add` on a file named `x
+✓ forged`
+prints a fake success line indistinguishable from a real one, and an
+ESC sequence can clear or overdraw previous rows. New `_one_line()`
+escapes Cc/Zl/Zp characters at every label interpolation site; block
+content (answer text, studio bodies, chat message bodies) is untouched.
+Found by the seeded CLI-dispatch fuzz (1.3k trials): status rows were the
+only non-coded output-shape leak.
+
+### v0.2.622 — sync the product-review ledger to v0.2.621
+
+Periodic ledger sync: records the v0.2.618-621 interval — the third wave
+of the "stdlib-boundary non-coded escape" defect class (urlparse bracket
+ValueError, charset-name ValueError, deeply-nested json RecursionError)
+plus the clean pipeline.py refresh/rename/reindex fuzz surface.
+
+### v0.2.621 — sync spec.md to v0.2.620
+
+Periodic spec sync: documents the export malformed-report tolerance
+(v0.2.617), the ingest stdlib-boundary coding (v0.2.619), and the
+deeply-nested LLM response coding (v0.2.620) in the hardening-contracts
+prose; refreshes the implementation marker and the measured quality line
+(1275 → 1280 tests).
+
+### v0.2.620 — code deeply-nested LLM responses as malformed, not 500
+
+`json.loads` raises RecursionError — not JSONDecodeError — when a response
+body exceeds the decoder's recursion budget (~5k-deep nesting, trivially
+emitted by a hostile or buggy endpoint). Both response-parse sites let it
+escape uncoded: `_post()` surfaced it as a 500-class error at every caller
+(chat/embed → HTTP 500), and `chat_stream()` let a single deeply nested
+`data:` frame abort the whole SSE stream mid-flight. `_post` now maps it
+to SYSTEM_LLM_BAD_RESPONSE like any other malformed body, and
+chat_stream drops the frame per the malformed-frame contract. Found by a
+seeded fuzz over the LLM hostile-response surface (7.7k trials): zero
+remaining non-coded escapes across _post/chat/embed/chat_stream,
+`_message_text`, and `_strip_surrogates`.
+
+### v0.2.619 — code stdlib-boundary errors on hostile URL/charset input
+
+Two more instances of the "400-vs-500" defect class seeded-fuzz keeps
+surfacing at stdlib boundaries, both reachable from user/remote input:
+
+- `validate_public_url`: `urllib.parse.urlparse` validates bracketed hosts
+  eagerly, so `http://[::1` (unclosed) or `http://]x[/` raised a bare
+  ValueError *inside* urlparse — before the lazy `.port` check — and
+  escaped as HTTP 500 / a raw traceback in `shoin add`. Now wrapped and
+  mapped to INGEST_URL_BLOCKED, same as every other malformed URL.
+- `_decode`: a charset hint containing an embedded NUL (reachable via a
+  hostile server's `Content-Type` header) makes codec lookup raise
+  ValueError("embedded null character"), not the LookupError of a
+  well-formed unknown name — escaping the fallback loop and crashing
+  `extract_url`. The candidate loop now degrades on (ValueError,
+  LookupError), which also covers UnicodeDecodeError (a ValueError
+  subclass).
+
+Found by a 15.5k-trial seeded fuzz over `_inflate`,
+`_decode_content_encoding`, `_decode`/`_charset_from_ctype`,
+`validate_public_url` (mocked DNS), and `extract_file` — zero remaining
+non-coded escapes, output size bounds and gzip/deflate member handling
+all held.
+
+### v0.2.618 — sync the product-review ledger to v0.2.617
+
+Periodic ledger sync: the v0.2.612-617 interval — the post-clean-sweep
+seeded-fuzz phase catching contract inversions reading can't see — is now
+recorded: the PRF expansion eviction inversion (v0.2.613), the `_json`
+surrogate-payload crash (v0.2.614), the parse-level pairing rework of
+html_to_text's repair pass (v0.2.615), and the malformed stored-report
+tolerance fix in export (v0.2.617), plus the three clean fuzz surfaces
+(concurrent Store writes, pipeline→build_context integration, and the
+960-request live-server storm) that held every invariant. Header marker
+and the test count (1269 → 1276) follow the code.
+
+### v0.2.617 — tolerate wrong-typed fields inside stored citation reports
+
+_export reads the persisted citation_report column through _parse_report,
+which deliberately accepts any well-formed JSON — old-version rows, rows
+written by custom callers, or hand-edited databases all reach the readers.
+Every field access was already isinstance-guarded for that reason, but
+three sites trusted the stored shape anyway and converted one malformed
+report row into a crashed export (a CLI traceback or a 500 on the export
+route, losing every section of the document).
+
+The three holes were the same class: _legend() passed a source_detail
+VALUE straight into found_bits() — a scalar there hit `detail.get` and
+raised AttributeError; _status_line() ran set() over `cited` and
+dict.get() over the `uncited_supported` sentences — an unhashable element
+(dict, list) raised TypeError at both. Each now degrades the malformed
+field to no-signal exactly like the sibling guards around it, and a
+store-level test drives an export over a report carrying all three
+malformed shapes at once.
+
+### v0.2.616 — sync spec.md to v0.2.615
+
+Periodic spec sync: the design-notes ledger now records the interval where
+the lone-surrogate defect class closed across every remaining boundary —
+the store-layer `_utf8` write gate on all bound string fields (v0.2.609),
+the ASCII-pure SSE wire (v0.2.610), cli main()'s UnicodeEncodeError catch
+(v0.2.611), and `_json`'s ensure_ascii fallback (v0.2.614) — plus the PRF
+expansion head-room cap (v0.2.613) and the parse-level pairing rework of
+html_to_text's malformed-markup repair: `_skip_stack` DOM-semantics
+endtags, the `_live` event filter, and per-opener closer injection
+(v0.2.615). Header marker and the quality line's measured row follow the
+code (tests 1266 → 1275, defensive tails 23 → 25).
+
+### v0.2.615 — parse-level pairing for malformed-markup neutralization
+
+The html_to_text pre-pass that repairs malformed markup was making pairing
+decisions a real parser would never make, in both directions. Seeded fuzz
+over generated malformed documents surfaced one coherent family — three
+mechanisms, one root: every regex-level scan that looked for tag or comment
+boundaries accepted matches inside constructs where the parser reads only
+inert text.
+
+The first mechanism was the skip-depth counter itself. _HTMLText kept an
+integer incremented on any skip-tag opener and decremented on any skip-tag
+closer, so a stray "</nav>" fired inside an open <noscript> or <form> ended
+THAT element's suppression and leaked the rest of its contents — fuzz
+produced it twice (</nav> inside <noscript>, </nav> inside <form>). The
+counter is now a stack of open tag names with DOM-semantics endtag
+handling: a closer pops through the matching opener (implicitly closing
+anything nested inside it, so "</nav>" in <nav><noscript> ends both) and a
+closer for an element that isn't open is ignored entirely. The </head>
+recovery keeps its _saw_head gate — a stray </head> inside an unclosed
+element can no longer zero the stack when no <head> was ever seen.
+
+The second was pairing against events that never fire. A "</nav>" written
+inside a <!-- ... --> comment or floating in <a href='x' ...> attribute
+junk is text at parse level, yet the balance pass counted it as a closer:
+a real unmatched <nav> paired with the inert token, looked balanced, and
+escaped closer injection — then swallowed the rest of the document because
+the injected closer that should have ended it never arrived. The new
+_live() predicate gates every event the pass consumes: a position is live
+only when it sits outside any <...> region AND outside any <!-- ... -->
+comment span. _outside_tag() walks back past "<"s whose following char
+can't open a tag (HTMLParser's tagfind semantics: ASCII letter, "/", "!",
+"?"), so a "</nav" inside a "<!" bogus declaration or a "<x" inside an
+attribute no longer qualifies as a boundary. _comment_spans() applies the
+same opener filter, and accepts the first "-->" unconditionally once
+inside a comment — comment content is CDATA-ish, so the closer inside a
+comment's own "<!---->" text is still a closer, and an unclosed comment
+spans to EOF exactly as the parser reads it.
+
+The third was pairing shape. The closer injection used to pair opens and
+closes per tag but treated every open uniformly; the fuzz oracle showed an
+earlier unmatched <form> could make a later balanced <form>x</form> leak
+its contents. Unmatched openers now each get "</{tag}>" injected directly
+after their own ">", and each unclosed "<!--" is emptied to "<!---->"
+individually — per-opener repair instead of whole-region teardown.
+
+Four new pins cover the family end to end: a stray endtag can't unlock an
+unrelated open element, an endtag implicitly closes nested opens
+(pop-through), a closer inside a comment can't pair a real opener, and a
+closer inside attribute junk can't either. All four fail on the pre-fix
+code and pass after.
+
+
+### v0.2.614 — the JSON response writer survives surrogate payloads
+
+_json() dumped payloads with ensure_ascii=False, then strict-UTF-8 encoded
+the result.  Payload fields outside every store-bind gate can carry lone
+surrogates — a custom ChatBackend's LLMError message or model name (the
+make_server(llm=...) extension point), or an LLM-derived snippet
+materialized back out of a stored citation_report blob by _safe_report.
+On the success path a UnicodeEncodeError there surfaced as a coded 500;
+on the error-envelope path (_error/_safe_error) the same crash escaped
+_safe_error's socket-error-only except list, so the request died with no
+HTTP response at all — not even the coded 500 every other failure class
+produces.  _json() now falls back to an ensure_ascii dump: the surrogate
+leaves as a \ud800 escape and the client's JSON.parse restores it, while
+the compact ensure_ascii=False encode stays the fast path for the
+CJK-heavy payloads the hot endpoints serve.
+
+
+### v0.2.613 — PRF expansion never evicts first-pass hits
+
+bm25_prf_search() re-sorted the union of first-pass and expansion hits by
+bm25 and sliced it at [:k].  When the first pass under-filled the pool and
+the expanded pass alone produced more than the head-room, a first-pass hit
+— a chunk that matched the user's own terms — could be evicted by a chunk
+matching only system-proposed grams: expansion silently trading user-term
+recall for expansion recall, the inversion the documented "only ADD
+recall" contract forbids.  Extras are now capped at k - len(hits), so
+expansion fills only the slots the first pass left empty while the merged
+re-sort still lets a denser expansion hit outrank a thin first-pass one.
+
+
+### v0.2.612 — sync the product-review ledger to v0.2.611
+
+The ledger's running summary now covers v0.2.606-611, the interval where
+the lone-surrogate defect class converged across the remaining output
+boundaries: store writes gained the module-private _utf8 gate over every
+bound str field (v0.2.609), _sse switched to the ASCII-pure wire so a
+surrogate payload can no longer inject a second HTTP status line into a
+committed SSE stream (v0.2.610), and cli main() learned the
+UnicodeEncodeError boundary catch so custom ChatBackend output can never
+escape as a raw traceback (v0.2.611). The interval also carried the
+export status line's non-empty-hint-target fix (v0.2.607) and the spec.md
+contract catch-up (v0.2.608). Header marker and test count follow the
+code (1265 → 1269).
+
+
+### v0.2.611 — cli main() catches UnicodeEncodeError from print()
+
+A custom ChatBackend passed via main(llm=...) can emit lone-surrogate tokens
+(LLMClient strips them since v0.2.599, but external backends are unguarded).
+print(answer.text) — or any of the module's other output writes — then
+raises UnicodeEncodeError on a strict-UTF-8 stdout, escaping every handler
+in main()'s chain as a raw traceback and breaking the "coded err.prefix,
+never a traceback" subcommand guarantee. main() now catches it at the
+boundary like OverflowError, printing SYSTEM_INTERNAL_ERROR to stderr and
+returning 1.
+
+
+### v0.2.610 — SSE frames are always ASCII on the wire
+
+_sse() now serializes with ensure_ascii=True (the json.dumps default) so a
+payload string carrying a lone surrogate is emitted as a \ud800 escape
+instead of crashing .encode(). Such strings are reachable from rows stored
+before the field gates landed (v0.2.430 server fields / v0.2.609 store
+writes): an old notebook name echoed into a meta frame's sources, or an old
+assistant message echoed into the report's degenerate/self_contradiction
+snippets. The done/meta sends catch only ConnectionError, so a
+UnicodeEncodeError propagated to _dispatch's 500 writer — a second HTTP
+status line injected into the already-committed SSE body. The client's
+JSON.parse restores the escaped char transparently.
+
+
+### v0.2.609 — store writes reject lone surrogates with a coded error
+
+Same defect class as v0.2.430 (server fields), v0.2.598 (eval readers) and
+v0.2.599 (LLM output boundary), closed at the last uncovered boundary: the
+sqlite bind itself. sqlite3 encodes bound str parameters as strict UTF-8, so
+a lone surrogate reached a write as a raw UnicodeEncodeError — bypassing
+every caller's coded-error mapping. Such strings really do arrive: POSIX
+argv/env decode invalid bytes via surrogateescape (CLI subcommands, `shoin
+add` of a filename with non-UTF-8 bytes, SHOIN_* env vars), and the API
+field gate does not cover values derived downstream (a source title taken
+from such a filename). A module-private `_utf8()` gate now runs on every
+bound str field in Store — notebook names, source title/origin/sha256, chunk
+texts and contexts, note title/body, studio output body and citation_report,
+message body and citation_report, and settings keys/values — raising
+VALIDATION_FIELD_FORMAT_INVALID ahead of the write.
+
+
+### v0.2.608 — sync spec.md to v0.2.607
+
+Recurring contract-ledger sync (10 versions since v0.2.597).  New clauses
+record the contract changes landed in the interval: rrf_fuse_lists first-wins
+merge, _embed_chunks LLMError rollback, eval _utf8_ok surrogate gates, LLM
+output _strip_surrogates boundary, html skip-tag closer count, CommonMark
+heading opener, export status-line hint targets, and the v0.2.601
+lead+segment union evaluation rule.  Header version marker and the test
+count (1256 → 1266) updated to match.
+
+
+### v0.2.607 — no dangling '→' in the export status line
+
+`_status_line`'s grounded-uncited hint collected `sup_src.get(s, "")` for
+every supported sentence and only checked the *type* of each value — so a
+report carrying `uncited_supported` but an empty/absent/malformed
+`uncited_supported_source` map (a shape pre-v0.2.216 reports can carry)
+produced `…(1)→` with the arrow pointing at nothing.  Targets are now
+required to be non-empty strings; no target, no arrow.
+
+
+### v0.2.606 — sync the product-review ledger to v0.2.605
+
+Recurring ledger sync: records the v0.2.596-605 span as one interval
+("defense-mechanism internal consistency — completing half-fixes and
+sanitizing the output boundary"): 7 real defects (eval surrogate gate,
+LLM-output _strip_surrogates incl. the poisoned questions_cache, the last
+pending-tx-leak sibling in _embed_chunks, lead+trailing same-S segment
+evaluation across all five checks, rrf_fuse_lists merge-order asymmetry,
+multi-open skip-tag closer count, CommonMark heading opener parity with
+fences) plus 3 doc syncs. Header version and test count (1256 → 1265)
+updated to match.
+
+
+### v0.2.605 — correct the rrf_fuse_lists merge-order doc claim
+
+`docs/agents/opus.md` asserted the merged-Hit contract "does not depend on
+list order" — wrong on both sides of v0.2.602: before that fix `vec` was
+last-wins and `bm25` first-wins (order-dependent in opposite directions);
+after it, both are first-wins, which makes the caller's primary-first list
+ordering itself the contract (the user's own phrasing defines the merged
+signal).  An agent guided by the stale line could have "fixed" the ordering
+back into a bug.  The note now records the first-wins-per-field contract and
+why the list order is load-bearing.  No code change — qa.py was audited the
+same cycle and is clean (orphan/empty-reply history handling, SSE degrade
+paths, expand_query cap, rewrite dedup all verified in-contract).
+
+
+### v0.2.604 — recognise indented and empty ATX headings
+
+`chunk.py`'s structural detectors applied the CommonMark indent rule
+inconsistently: `_FENCE_RE` accepts up to 3 leading spaces but the heading
+regex required `^#` at column 0 — and also required whitespace after the
+hashes, so a bare `###` (a valid empty heading) was missed too.  A document
+with `  ## Section` got no heading boundary, no breadcrumb entry, and its
+section title stayed invisible to the heading-weighted BM25 signal.  Both
+detectors now share the same CommonMark opener rule (≤3 leading spaces,
+1-6 '#', then whitespace or end-of-line).
+
+
+### v0.2.603 — inject one synthetic closer per unmatched skip-tag open
+
+The unbalanced-tag neutralization in html_to_text() inserted exactly ONE
+synthetic closer at the last unmatched opening of each skip tag (nav,
+footer, form, noscript, template). With TWO or more unclosed opens and no
+real closer — `<nav><nav>…` — _skip_depth still ended elevated, so every
+subsequent text node was silently dropped: the same swallow-the-rest-of-
+the-document defect class the single-open injection exists to prevent,
+half-fixed. The injection now emits `opens - closes` closers so the
+balanced counter returns to zero regardless of how many opens were left
+dangling. Pin: `test_html_multiple_unclosed_skip_tags_do_not_swallow_rest`
+(old code produced '' for a doubled <nav>; fail-verified).
+
+### v0.2.602 — keep the first list's vec signal in rrf_fuse_lists merges
+
+When one chunk appears in several ranked lists, rrf_fuse_lists() merges its
+per-list signal fields onto the canonical (first-seen) Hit. The `bm25` field
+already merged first-wins (`if h.bm25 and not cur.bm25`), but `vec` merged
+last-wins (`if h.vec: cur.vec = h.vec`) — so in retrieve_multi(), where
+rewrite lists follow the primary query's, a rewrite's weaker cosine overwrote
+the primary query's stronger vector signal on any chunk both vector lanes
+surfaced. The merged `.vec`/`.bm25` fields are the provenance/debugging
+record of which retrieval channel backed the hit, and the module's contract
+is that the primary query alone defines the reference signals (it owns the
+neg filter and the rerank reference); a rewrite's score overwriting the
+primary's violated the same "rephrase can't hijack the primary signal"
+asymmetry the rest of the function is built around. `vec` now merges
+first-wins symmetric with `bm25`. Pin: `test_rrf_fuse_lists_first_list_wins_each_signal`
+(fails on the old last-wins merge — vec 0.3 vs expected 0.9).
+
+### v0.2.601 — evaluate every occurrence when a citation is both lead and trailing
+
+In one fragment like "[S1] B [S1]", the same S-number is simultaneously a
+leading backward marker (claiming the PREVIOUS fragment's clause) and a
+trailing marker claiming its own segment. All five check functions
+(verify_grounding, numeric/unit/quote/negation_mismatches) short-circuited
+on `n in lead` and evaluated only the lead claim — the later occurrence's
+segment escaped every check, so a misattribution or fabricated number
+inside it stayed invisible (false silence; the _segment_claims contract
+already requires per-occurrence evaluation). Each site now unions the
+lead claim with the number's segment occurrences. Pins:
+`test_verify_grounding_lead_marker_keeps_later_occurrences` and
+`TestNumericMismatches.test_lead_marker_keeps_later_occurrences` (old
+code produced no flag; fail-verified).
+
+### v0.2.600 — roll back the failed batch's writes in _embed_chunks
+
+The dim-mismatch raise happens INSIDE the batch write loop — after earlier
+`set_embedding(commit=False)` calls in the same batch — leaving a pending
+transaction the except-LLMError branch used to pass over (unlike its
+except-Exception sibling, whose comment documented the exact mechanism).
+`set_setting()`'s commit below then silently flushed the failed batch's
+partial vectors: `n_embedded` understated reality on index_source and, on
+force=True reindex, a fresh-model vector persisted while the marker still
+named the old model — extra mixing the mismatch guard exists to prevent.
+The branch now rolls back like its sibling. Pin:
+`test_embed_chunks_dim_mismatch_rolls_back_partial_batch` (old code leaked
+1 write; fail-verified).
+
+### v0.2.599 — strip lone surrogates at the LLM output boundary
+
+json.loads materializes lone surrogates from \ud800 escapes a buggy endpoint
+or proxy can emit (valid pairs are already combined by the decoder). One
+reaching a sqlite bind or an ensure_ascii=False response encode crashed
+raw-UnicodeEncodeError — and text cached or persisted first (questions_cache,
+messages, studio_outputs) re-crashed on every later read. `_strip_surrogates`
+now runs inside `_message_text` and on every streamed delta, so ask answers,
+studio bodies, question chips and exports can never carry one downstream;
+astral characters pass through untouched. Pin:
+`test_llm_drops_lone_surrogates_from_outputs` (fail-verified).
+
+### v0.2.598 — reject unpaired surrogates in eval case/baseline files
+
+json.loads materializes lone surrogates from \ud800 escapes; a `q` containing
+one passed both readers and later crashed raw-UnicodeEncodeError out of the
+sqlite bind (evaluate via retrieve_for_question's bound terms) or stdout
+(diff's question lists) — escaping every handler mid-run. `parse_cases` and
+`report_from_dict` now refuse via `_utf8_ok()` — the same defect class
+server._check_utf8 rejects on the wire, under this module's ValueError
+contract. Pin: `test_eval_rejects_surrogate_questions_in_both_readers`
+(fail-verified against the old code).
+
+### v0.2.597
+- spec.mdを実装v0.2.597時点へ同期: 引用検証へマーカー帰属規約
+  (v0.2.576-583)・SSEエラーフレーム+永続化契約(v0.2.592)・eval baseline
+  スキーマ厳格性(v0.2.562/595)・LLM全経路Request構築try内化(v0.2.594)
+  を追記。品質行の実測値を更新(テスト1206→1256件、未カバー4行→
+  23行=防御分岐)。
+
+### v0.2.596
+- product-review台帳をv0.2.595時点へ同期: 「入出力境界の防衛深化——
+  想定外入力をコード化契約へ写像する層の閉塞」区間(v0.2.587-595の
+  実欠陥9件)を記録。ヘッダ版数・日付・テスト件数(1246→1256)同値更新。
+
+### v0.2.595
+- `evaluate.py` `report_from_dict`の数値フィールドを有限値+非boolへ矯正: Pythonの`json.loads`は非標準リテラル`NaN`/`Infinity`/`-Infinity`を受理し、boolはint subclass——`isinstance(x,(int,float))`検査だけでは手編集ベースラインの`{"recall":NaN}`/`{"rr":true}`/`{"k":NaN}`が通過し、NaNがdiff算術へ沈黙伝搬（`d_recall:nan`/`rr_after:inf`がdiff表示へ混入）あるいは`int(NaN)`の生ValueErrorでクラッシュ。`_bad_num`ヘルパーで4フィールド全てを「有限の数値かつ非bool」へ統一——同関数のrefuse-loudly契約（silently-dropped caseは捏造deltaを生む）への違反を閉塞
+- 行動ピン: `test_report_from_dict_rejects_nonfinite_and_bool_numbers`——NaN/Inf/bool/stringを14形状で拒否、有限値とk欠落は受理維持（旧コードでfail確認）
+- カタログ追随: raise在庫evaluate.py ValueError 13→14
+
+### v0.2.594
+- `llm.py`のRequest構築をtry内へ統一: `available()`で修復済みの「Request()コンストラクタがurlsplit経由でValueErrorを投げる」欠陥が`_post`/`chat_stream`に未移植——unclosed IPv6ブラケット等のmalformed base_url（`http://[::1:11434/v1`という実在タイポ形状）がchat/chat_stream/embed全経路で生ValueErrorとして漏出し、CLI traceback/server generic-500経路へ逸脱。全経路が`available()`と同じ`SYSTEM_SERVICE_UNAVAILABLE`グレースフル劣化へ写像するよう統一
+- 行動ピン: `test_malformed_base_url_raises_llmerror_on_every_path`——chat/stream/embed 3経路でのcoded error写像を固定（旧コードでfail確認）
+
+### v0.2.593
+- `cli.py` `_cmd_eval`のUTF-8 decode失敗をコード化エラーへ写像: cases/baseline読みの`read_text(encoding="utf-8")`が投げる`UnicodeDecodeError`は`json.JSONDecodeError`でも`OSError`でもなく、main()の全ハンドラ(StoreError系/OperationalError/OSError/OverflowError/KeyboardInterrupt)を潜って生tracebackとして漏出——非UTF-8ファイルを渡したユーザーへクラッシュ画面を見せる、他の全ファイル読込パスが「コード化エラー+rc=1」契約を持つ中での唯一の例外経路。2サイト(cases/baseline)を同クラスへ統一
+- 行動ピン: `test_eval_bad_utf8_files_map_to_coded_error`——不正UTF-8のcases/baselineそれぞれでrc=1+VALIDATION_FIELD_FORMAT_INVALIDを固定（旧コードでfail確認）
+- カタログ追随: exceptハンドラ在庫cli.py更新（`json.JSONDecodeError`×2→`(UnicodeDecodeError,json.JSONDecodeError)`×2）
+
+### v0.2.592
+- `server.py` `_h_ask_sse`のストリームブロックへ`except Exception`ガード追加: socket timeout（TimeoutErrorはConnectionError非包含）・サロゲートtokenのUTF-8 encode失敗・予期しないバックエンド例外が、SSEヘッダ確定後に`_dispatch`の500経路へ逸脱し、第二ステータス行をstream本文へ混入させる＋assistant永続化をskipしてuser turnを孤立化させる2系統の欠陥を閉塞。build_context経路と同じcoded-vs-generic方針でerror frameを送出し、frame送出自体が失敗した場合のみclient_gone化——いずれにせよpersistは必ず実行
+- 行動ピン2件: `test_stream_timeout_still_persists_assistant_row`——TimeoutError注入でHTTP/1.0 500の混入なし＋error/done frame＋部分assistant永続化を固定（旧コードでfail確認）、`test_stream_error_frame_failure_still_persists`——error frame送出自体の失敗→client_gone昇格でdone抑止＋persist維持を固定
+- カタログ追随: `except Exception`+2サイト→server.py 9/計16サイト、exceptハンドラ在庫、spec.md件数を更新
+
+### v0.2.591
+- replace_chunks_for_source title validation parity: its sha256/title metadata path truncated to MAX_TITLE_LEN but skipped the strip+reject-empty contract the other three title writers (add_source / update_source_title / update_source_sha256) enforce — a whitespace-only or "" title persisted where the rename path itself refuses to write one. The title is now normalized up front (before any chunk is touched) and empty-after-strip raises VALIDATION_REQUIRED_FIELD_MISSING, matching the sibling contract. Fail-direction verified (whitespace title accepted on the old code).
+
+### v0.2.590
+- rewrite_queries dedups on the emitted (capped) string: the fold key was computed on the FULL line, then the emitted value was truncated to MAX_QUESTION_LEN — two rewrites that differ only past the 2000-char cap both survived dedup and truncated to the identical text, spending two rewrite slots on zero vocabulary diversity (the same class v0.2.545 closed for orthographic variants). The cap now runs before the fold-key computation. Fail-direction verified (the pin emits two capped dupes on the old code).
+
+### v0.2.589
+- refresh_source no-op path reports pages_failed: the byte-identical early return (v0.2.243's re-chunk/embedding preservation) still ran a full extraction, but hardcoded `IndexResult(..., 0)` with `pages_failed` left at its default — a refresh that re-failed the same PDF pages reported 0 to the caller, silently dropping the "index holds less than the document" signal the dataclass field exists to surface. The early return now propagates `extracted.pages_failed`. Fail-direction verified (0 vs 2 on the old code).
+
+### v0.2.588
+- fenced code blocks carry no structure in _blocks(): a `# comment` line inside ``` fences was parsed as an ATX heading — it closed the real enclosing section AND pushed itself onto the breadcrumb stack, so retrieval breadcrumbs absorbed code comments as document headings and following content inherited the fake heading; blank lines inside the fence also split the code mid-block. _blocks() now tracks fence state per CommonMark (opener = 3+ backticks/tildes indented ≤3 spaces; closer = same marker char, ≥ opener length, no info string; unclosed fence runs to document end), so fenced lines never produce headings or block boundaries. Fail-direction verified (the new pin shows the bogus breadcrumb and split blocks on the old code).
+
+### v0.2.587
+- pdf_to_text page-object access tolerance: pypdf resolves page objects lazily, so `reader.pages[i]` itself can raise (corrupt xref entry) before `extract_text()` is ever reached — the `for page in reader.pages` loop wrapped only extract_text, so one bad page object aborted the ENTIRE document with a raw non-IngestError exception (escaping the error-code contract as a 500-class failure) instead of counting a failed page. Iterates by index now: a page that cannot even be materialized counts in `pages_failed` like any other per-page failure; a page list that cannot be enumerated at all maps to the same INGEST_PARSE_FAILED as reader construction. Fail-direction verified.
+
+### v0.2.586
+- product-review ledger synced to v0.2.585 (v0.2.575-585 summary block: citation-marker attribution unified at fragment granularity — backward/forward binding, per-occurrence clauses, tail claims, disclaimer coverage — plus the export [S#] namespace fix). Header date/test-count refreshed.
+
+### v0.2.585
+- export_markdown sources-listing namespace collision: the `## ソース` section enumerated sources as `- [S1] title …` while an answer's `[S1]` names that query's top retrieval hit — one exported document carrying the same marker for two different indices. A reader resolving a citation against the listing could land on a source the answer never cited (e.g. listing S1=第一の資料 vs answer S1=第二の資料). The listing is now a plain numbered list (`1. title (kind) — origin`), so citation syntax appears only inside each message's own source_map legend. Fail-direction verified (new pin + updated newline pin both fail on the old format).
+
+### v0.2.584
+- retrieve_multi exp mark for the rewrite VECTOR lane: rewrite BM25 hits were flagged detail["exp"] so _tail_cut never reads their lex==0-against-the-primary-query as term-free, but rewrite vector hits were not — a chunk surfaced only by the rewrite's embedding (a lexically disjoint semantic match, exactly the recall multi-query fusion exists to add) could be clipped at a score cliff. The vector lane now gets the same mark when i > 0; the primary query's own vector hits stay unmarked and clip-eligible as designed (v0.2.189). Fail-direction verified.
+
+### v0.2.583
+- uncited_sentences mid-fragment forward bind: the tail-scan flagged any text after the last marker as uncovered, so "A [S1]によると B" accused the idiom-bound tail — cited text — while the genuinely ambiguous pre-segment drove the verdict. A marker followed by a forward idiom now leaves the fragment silent (bound tail cited; pre-segment coverage ambiguous → stay silent per the module's asymmetry rule). Real uncovered tails after the bound segment still flag. Fail-direction verified.
+
+### v0.2.582
+- _FORWARD_BIND_RE whitespace tolerance: "[S1] によると…" (any whitespace — half/full-width space, tab — between the marker and the forward idiom) broke the bind, so the leading run was attributed backward and the bound claim was flagged uncited while an unrelated pending claim got falsely covered — the v0.2.576 double-inversion under a one-byte shape. The pattern now skips leading whitespace before によると/によれば/では, fixing both call sites (_leading_markers and uncited_sentences) at once; a comma or other punctuation still breaks the idiom as before. Fail-direction verified.
+
+### v0.2.581
+- _single_diff_flip numeric arm: the check compared _numbers_expanded over the raw diff span, but difflib minimises an opcode to the changed characters — "50%"→"30%" yields span "5"→"3", a single digit that the significance rule filters, so every one-digit-position swap inside a longer number (120億→125億, 50%→30%) stayed silent. Whole-sentence number sets are compared instead — sound because ops==1 already guarantees the difference lives inside the single span — which keeps single-digit-only swaps ("第3版"→"第4版") silent and magnitude-equivalent restatements (3.2万↔32000) silent. Fail-direction verified.
+
+### v0.2.580
+- _segment_claims per-occurrence attribution: a source cited twice in one sentence ("A.[S1] B.[S2,S1]") had its first clause overwritten by the second marker's, so verify_grounding judged the correct apple citation on the sky clause (false accusation + lost confirmed mark) and numeric/unit/quote/negation checks never inspected the earlier clause at all (missed flags — a fabricated 987円 in it escaped). The shared map now keeps a list of clause texts per S-number, and all five callers evaluate each occurrence independently — a number may land in both confirmed and misattributed, exactly as it already can across sentences. Fail-direction verified on both new pins.
+
+### v0.2.579
+- _DISCLAIMER_MARKERS coverage: the tuple only matched 6 exact substrings, so the canonical "not in the source" phrasings LLMs actually emit — 記載がありません / 言及がありません / 記述されていません / 情報がありません / 確認できません / does not mention / not stated / no information — were flagged as unsupported assertions, the exact class the check exists NOT to flag (a disclaimer is the correct answer to missing facts). Stems (…ませ / noun phrases) cover ません・ませんでした both, the substring check casefolds so sentence-initial capitals match, and a domain noun is still required so real negation claims ("効果はありません") keep flagging. Fail-direction verified on both new pins.
+
+### v0.2.578
+- uncited_sentences: evaluate the claim surface after the LAST citation marker in a fragment ("claimA [S1] claimB" — claimB was invisible when the fragment carried any marker, since every marker owns only the segment before it). The uncovered tail pends like any claim, so a later citation-only fragment still resolves it; a forward-bound leading run keeps covering its bound text; clause joiners are stripped before the claim-length gate. Pins: mid-fragment tail flag, tail resolution, forward-bound coverage — fail-direction verified.
+
+### v0.2.577
+- Verification-side backward attribution for fragment-leading markers (shared _leading_markers helper): the v0.2.576 fix covered uncited_sentences, but verify_grounding/numeric_mismatches/unit_mismatches/quote_mismatches/negation_mismatches still judged a leading marker against its own fragment's claim — "apples are red. [S1] bananas are yellow. [S2]" flagged the CORRECT S1 as misattributed (the v0.1.4 never-accuse-a-correct-answer class). All six checks now route leading marker runs through _leading_markers → prev_claim, with a snapshot before prev_claim advances. Fail-direction verified on both grounding and numeric pins.
+
+### v0.2.576
+- Fragment-leading citation markers resolve the previous sentence, not their own ("claim. [S1] next." convention): _SENTENCE_SPLIT_RE makes a marker head the fragment containing the NEXT claim, but uncited_sentences counted a fragment with any citation as self-covered — flagging the claim the marker actually trails and exempting the truly markerless claim after it (a double inversion on the most common multi-claim line shape). The leading-marker run now resolves the pending claim per _segment_claims' backward convention; forward-bound forms ("[S1]によると…") keep their own fragment. Behavior pins for the trailing, forward-bound, and multi-marker shapes. Fail-direction verified.
+
+### v0.2.575
+- Indented fence markers are code, not fences (_FENCE_RE → `^ {0,3}` + uncited_sentences matches `raw`, not the stripped `sentence`): a ``` line indented 4+ spaces inside an indented code block is code content per CommonMark, but `^\s*` let it toggle in_fence — every claim after it was swallowed by both _strip_fences and uncited_sentences' inline tracking, blinding the degeneration/contradiction/uncited checks to real prose. Narrowed to the CommonMark 0-3-space rule; mid-paragraph indented ``` stays a lazy continuation (prose, not a fence either). Behavior pins for the code-block, lazy-continuation, and 0-3-space fence shapes.
+- Also: product-review ledger synced to v0.2.574 (v0.2.566-574 summary block).
+
+### v0.2.574
+- _norm_query_terms now includes _numeric_query_terms, closing the
+  retrieval-vs-scoring gap one family over from v0.2.539: a chunk
+  surfaced only by the numeric bridge ('五割'->'50') shares no literal
+  query term, so rerank scored it lex=0.0 and _tail_cut clipped it
+  from retrieve() output as "term-free" — exactly the hit the bridge
+  exists to find.  Pinned by test_numeric_bridged_hit_not_clipped_as_
+  term_free (e2e).
+
+### v0.2.573
+- bm25_search's early-return coverage check now counts
+  _numeric_query_terms: fts_query silently drops expanded values
+  below the trigram floor ('五割' -> '50', len 2), and a query whose
+  CJK run is FTS-covered returned early — so the numeric bridge's own
+  LIKE needle ('%50%') never ran and '50%...' chunks stayed
+  unreachable exactly when the bridge was needed.  Short numeric
+  terms now force the LIKE path.  Pinned by
+  test_short_numeric_expansion_keeps_like_fallback (e2e).
+
+### v0.2.572
+- _stem_variants no longer stems invariant mass nouns: 'news' is not a
+  plural, but the -s rule emitted 'new' — a live, extremely frequent
+  unrelated word injected as an OR'd retrieval variant into every
+  "news" query (the contract tolerates only dead spellings that cost
+  one pattern and can never hide a hit).  Added _STEM_INVARIANT;
+  real plurals ('views'->'view', 'means'->'mean') still bridge.
+  Pinned by test_stem_variants_invariant_mass_nouns.
+
+### v0.2.571
+- _en_value now requires real numeral grammar inside a small-cluster:
+  only a tens word may take a unit successor ("twenty five").  Any
+  other consecutive small values — "one two", "fifteen three",
+  "seven eight nine", "one-one" — enumerate, and enumeration is not
+  a sum, so the run is inconclusive → None (the same silence
+  "一二三" earns from _kanji_value).  Previously every such run
+  summed ("one two" → 3, "seven eight nine" → 24), registering
+  members the text never asserted and suppressing real flags.
+  Pinned by test_en_value_enumerations_stay_silent and
+  test_enumerated_english_numerals_do_not_sum (e2e).
+
+### v0.2.570
+- _conv_values requires an additive gap for same-family chains: the
+  previous rule (any gap ≤ 2 chars joins the sum) let enumeration
+  separators merge separate values — '1時間、30分' registered
+  (time, 90), '2時間目、30分休憩' registered (time, 150), and
+  '1km、500m' registered (dist, 1500), suppressing flags for claims
+  whose value the source listed but never summed.  Now only
+  whitespace or the additive conjunction 'と' may join a chain;
+  '、', ',', '・', '/' all break it.  Pinned by
+  test_conv_values_gap_must_be_additive and
+  test_enumerated_durations_do_not_sum (e2e flag fires again).
+
+### v0.2.569
+- _numbers_expanded suppresses suffix-pair members inside bare kanji
+  runs: v0.2.568 closed the component leak for token/chain spans, but
+  the no-big-magnitude span family still leaked — '二千一' registered
+  both 2000 (the '二千' pair) and 2001 (the run's positional value),
+  so a claim asserting the component value matched a source spelling
+  the whole numeral.  Round-trip fuzz over the full _int_to_kanji
+  domain (60k+ values) found ~8,000 instances of this shape — every
+  non-round v in [2000, 9999].  Bare-run spans now join the single-
+  pair suppression set; '二千一三'-class unparsable runs also gained
+  silence (the inner pair asserted 2000 before).  Pinned by
+  test_pairs_inside_bare_kanji_runs_are_components.
+
+### v0.2.568
+- _numbers_expanded parses big-magnitude numerals as positional tokens:
+  a 億/万/兆-delimited numeral is a sum of sub-10000 groups (digits,
+  kanji runs, or digit+place shorthand like 3千) plus an optional
+  unsuffixed tail as the last group.  The suffix-pair chain could not
+  see that shape — '一万二千三百四十五' registered 12000 (一万+二千 only,
+  truncating at the last suffixed pair) plus a stray bare run 2345,
+  while the asserted 12345 was missing, so a correct digit restatement
+  was flagged by numeric_mismatches.  '1億2345万6789', '十二万三千四
+  百五十六', and full-width '九千九百九十九億…万九千九百九十九' parse
+  to their true values; digit+place groups now close at a magnitude
+  boundary ('3千億' = 3千×億 = 3e11, was {3000}).  Group members are
+  components — '五千' inside '四万五千' no longer registers a bare
+  5000.  Silence semantics preserved: ambiguous runs (二三万) still
+  expand to nothing.  Pinned by
+  test_magnitude_tokens_sum_every_group_including_tail and
+  test_positional_kanji_numeral_matches_digit_claim.
+
+### v0.2.567
+- _match_fold drops stray combining marks: a mark that survived NFKC
+  could not compose into any base char (marks that can are consumed by
+  the composition pass; precomposed accents lose theirs in the decomp
+  branch). What reached the append verbatim was a stray diacritic —
+  'é'+◌́ folded to 'e'+◌́ instead of 'e' — making the fold
+  non-idempotent and splitting NFD fragments (double accents, marks
+  glued to non-letters) from their NFC spellings in every two-sided
+  comparison: MMR bigrams (false diversity), PRF doc-frequency (term
+  split below PRF_MIN_DOCS), dedup keys, and the citation checks'
+  folded overlap. Stray marks now skip like format chars; spacing
+  marks (Devanagari matra, combining class 0) are real letters and
+  stay. Pinned by test_match_fold_drops_stray_marks_and_stays_idempotent.
+- Deep audit sweep this cycle: qa.py (context assembly, expand_query,
+  history control), evaluate.py (parse/report/diff), search.py
+  (negation classes, term_variants, PRF, RRF, rerank, tail cut),
+  studio.py (overview sampling, generation guards), ingest.py
+  (decode/BOM, HTML balance, SSRF pinning, content-encoding bounds) —
+  ~3,600 lines re-read, all invariants verified.
+
+### v0.2.566
+- product-review.md ledger sync to v0.2.565: the "**v0.2.559-565 の要約**"
+  block records the interval's arc — the audit net expanded onto the
+  documentation layer itself (lagging-marker ceiling pin v0.2.561, the
+  12→13 spec-count drift fix v0.2.563 and its recurrence prevention via
+  module-level catalogs + test_doc_catalog_counts_match_spec v0.2.564)
+  plus two real defects (baseline id-element symmetry v0.2.562, stream
+  finish_reason ordering v0.2.565). Header marker and test count
+  (1206 → 1210) updated to match.
+- Cross-file audit: the satellite test files (test_qa, test_server,
+  test_studio, test_ui_contract — 393 test methods) reference the real
+  constants (KINDS, FORMATS, _EXT_KIND) instead of duplicating literals,
+  so the v0.2.564 catalog-hoisting class has no parallel drift surface.
+
+### v0.2.565
+- chat_stream: capture finish_reason before the delta read. The final SSE
+  chunk may carry `finish_reason` with no `"delta"` key — spec-legal
+  shorthand — but the parser read `choice["delta"]` first, so that shape
+  raised KeyError→continue and the truncation signal was dropped: a
+  max_tokens-clipped answer was presented as complete (the same invisible
+  class v0.2.154/245 instrumented). Reordered to record
+  `last_finish_reason` under an `isinstance(choice, dict)` guard ahead of
+  the delta access, matching chat()'s own guard. New pin
+  `test_chat_stream_records_finish_reason_without_delta_key` fails on the
+  old order (signal lost) and passes after.
+
+### v0.2.564
+- recurrence fix for the v0.2.563 drift class: the three site catalogs
+  spec.md counts in prose (except-Exception sites, dynamic re.compile
+  sites, declared error codes) moved to module level in test_core.py —
+  `_EXCEPT_CATALOG`, `_DYNAMIC_COMPILE_CATALOG`,
+  `_ERROR_CODE_CATALOG` — and `test_doc_catalog_counts_match_spec`
+  pins spec.md's stated numbers to them. A catalog growth now fails the
+  gate until the spec count moves with it; the 60-version drift that
+  v0.2.563 caught can no longer recur silently. The three original
+  catalog tests are unchanged except for referencing the constants.
+  Fail-direction verified (spec count 99 fails the pin).
+
+### v0.2.563
+- spec.md's hardcoded except-Exception catalog count corrected 12 → 13
+  (the catalog gained its 13th site at v0.2.503 — the raw-socket close
+  on TLS handshake failure — and the prose count was not bumped
+  alongside; it was accurate at the v0.2.474 tag — the
+  other two measured counts in the same paragraph, 10 dynamic
+  re.compile sites and 32 declared error codes, re-verified accurate).
+  Same file-sweep cycle audited every remaining tracked file at least
+  once: dependabot.yml, ci/README.md, .githooks/pre-push, LICENSE,
+  export.py's `_BIB_ESC`/`_ris_escape` (brace-safe, already pinned),
+  `_h_export` (MIME/EXT maps, format validation, safe fixed filename),
+  UI export link wiring, and the embed partial-failure clip.
+
+### v0.2.562
+- `report_from_dict` validates `expected`/`retrieved` id elements as ints
+  (bool excluded — an int subclass that never names a real source), the
+  same check the `missing` field and `parse_cases`' source ids already
+  get. A string/bool/float id in a hand-edited baseline previously loaded
+  silently and round-tripped back out unchanged — inside one validation
+  block, `missing` was element-checked while its sibling id lists were
+  not. Pinned by `test_report_from_dict_rejects_nonint_id_elements`
+  (fail-direction verified: fails on the pre-change reader). The same
+  cycle audited CHANGELOG.md (frozen at v0.1.55 with a version-agnostic
+  pointer to docs/HISTORY.md — by design, not drift) and ci/README.
+
+### v0.2.561
+- meta-pin: the doc sync markers in spec.md (`実装 vX.Y.Z 時点に同期`)
+  and product-review.md (`vX.Y.Z 時点`) may lag VERSION by design
+  (periodic sync) but must never name a version above it — a marker
+  claiming an unshipped release would silently falsify the doc's
+  verification claim. `test_doc_sync_markers_never_exceed_version`
+  pins the upper bound; fail-direction verified against a v0.2.999
+  marker. Doc claims audited this cycle and found accurate:
+  Plan.md (design provenance), SECURITY.md (loopback bind, SSRF
+  notes), docs/faq.md (data dir, formats, BM25-only mode),
+  docs/adr/ADR-001 (DNS pinning), and every store.py write verb
+  (notebook/source/note names strip + reject + bound symmetrically).
+
+### v0.2.560
+- spec.md synced to the implementation: header marker v0.2.517 →
+  v0.2.559 and the quality row's measured values refreshed
+  (v0.2.554 → v0.2.559, 1199 → 1206 tests; coverage still 99% with
+  the same 4 proven-unreachable lines). Contract-level rows were
+  audited and found current.
+
+### v0.2.559
+- product-review ledger synced to v0.2.558: adds the
+  **v0.2.555-558 の要約** block covering the vector-leg dead-zone
+  close (non-positive cosines no longer take RRF rank slots), the
+  add_source title-validation symmetry (strip + empty reject across
+  all three write paths), and the parse_cases input-contract parity
+  (MAX_QUESTION_LEN bound + duplicate rejection). Header tip and
+  test-count marker (1206) updated to match.
+
+### v0.2.558
+- parse_cases() bounds 'q' to MAX_QUESTION_LEN and rejects duplicate
+  questions: a case longer than the product's own input bound (the
+  /ask and cli ask paths both reject > MAX_QUESTION_LEN) measures a
+  question the app cannot answer and builds a pathological FTS5
+  OR-expression from thousands of terms — the same contract
+  suggest_questions() already applies to its own output ("the app
+  would suggest a question it cannot itself answer"). A duplicated
+  question silently double-counts in the run's mean recall/MRR and
+  a diff pairing occurrence-by-occurrence can't tell which twin is
+  which case. Both now raise ValueError per the function's
+  refuse-loudly contract; 'q' is stripped once up-front (whitespace
+  compares equal to the stored EvalCase question).
+
+### v0.2.557
+- add_source() strips + rejects blank titles: the ingest-path writer
+  truncated titles to MAX_TITLE_LEN but never stripped or validated
+  them, while update_source_title() (PATCH rename) and
+  update_source_sha256() (refresh) both strip and reject empty titles
+  with VALIDATION_REQUIRED_FIELD_MISSING. A whitespace title could
+  therefore be inserted via the ingest path — a caller-supplied
+  title= or a whitespace X-Filename on upload — persisting a blank
+  title the rename path itself refuses to write (blank in the source
+  list, blank TI in RIS export, degraded _chunk_context). add_source
+  now applies the identical strip+reject, and _h_src_upload extends
+  its sanitize chain with .strip() so a whitespace filename falls
+  back to "upload.txt" like the empty-name case. Pins:
+  test_add_source_rejects_blank_title (store, 3 blank shapes),
+  test_add_source_strips_title ("  report.pdf  " → "report.pdf"),
+  test_upload_whitespace_filename_falls_back (e2e). Fail-direction:
+  all three fail on the old code — '   ' was persisted verbatim.
+
+### v0.2.556
+- vector_search drops non-positive cosines: heapq.nlargest() fills its
+  k slots from ANY rows it is given, so a vector leg with zero real
+  signal (degenerate/all-zero query vector, embeddings written under a
+  different dimension after a SHOIN_EMBED_MODEL switch, or a corpus
+  orthogonal to the query) returned k row-order-arbitrary chunks
+  scored 0.0 — and RRF fusion then promoted them as if they were
+  ranked vector hits (a dim-mismatched chunk measurably reached the
+  final result list through this path). That silently replaced the
+  documented BM25-only degraded mode with arbitrary-row noise, and
+  anti-correlated (cosine < 0) chunks could hold rank slots too.
+  Only a positive cosine may now hold a rank slot; an empty vector
+  list is exactly what fusion treats as the BM25-only path. Pins:
+  `test_vector_search_drops_nonpositive_cosines` (+1/0/-1 filter),
+  `test_dim_mismatched_leg_injects_no_rows_into_retrieve` (e2e — no
+  hit may reach the result list with zero evidence from both legs);
+  the v0.2.261 pin's contract deepened from "scores 0.0" to "emits
+  no rows" (documented flip). Fail-direction: all three fail on the
+  pre-change nlargest.
+
+### v0.2.555
+- Ledger sync (recurring): product-review.md gains the v0.2.531-554
+  summary block — the orthography-folding arc's completion (comparison
+  surfaces unified onto _match_fold/_digit_fold canonical forms:
+  rerank lexical overlap, citation checks, numeric check, MMR
+  redundancy, PRF counting, rewrite/suggest dedup, degenerate_spans)
+  plus the boundary residual fixes (word-char edges, script sentence
+  terminators, digit rows, accent fold, English stems, negation
+  bridging, negation-only queries), two meta-guard pins (text-I/O
+  encoding, env/process-global centralization), three contract-symmetry
+  fixes (eval missing ids, overview equal budgets, list-cmd NOT_FOUND),
+  and the bubbled-keydown UI fix. Header version and test-count
+  markers follow (1199 tests); spec.md's measured row tracks the
+  same count and the 4 uncovered lines.
+
+### v0.2.554
+- Row keydown handlers fire only when the row itself is the event target:
+  both the notebook rows and source rows ran their row action
+  (openNotebook/showSource) on ANY bubbled keydown, and the handler's
+  preventDefault() then cancelled the focused child control's native
+  Enter/Space activation — the ✎/×/↻ buttons inside a row were
+  keyboard-unreachable (pressing Enter ran the row's own command instead),
+  and Enter inside the in-place rename input both committed AND opened the
+  source viewer mid-commit. `e.target !== row` guard on both handlers;
+  two node pins + fail-direction.
+
+### v0.2.553
+- `shoin note list` / `shoin messages list` validate the notebook id first:
+  every mutating sibling (add/clear/ask/studio/eval/export/source ops)
+  raises NOTEBOOK_NOT_FOUND, but the two read-only list paths fell through
+  to the store's tolerant getters and printed "empty" for a missing
+  notebook — silently reporting a typo'd/deleted id as an existing-but-
+  empty notebook, the same empty-vs-nonexistent conflation the API's 404
+  and the eval missing-ids warning (v0.2.551) already guard. One pin +
+  fail-direction.
+
+### v0.2.552
+- build_context() gains rank_weighted=False and studio.py passes it: the
+  harmonic 1/i per-source budget decay exists to honor retrieval's relevance
+  ranking, but overview_hits() scores every sampled chunk 1.0 in source-id
+  order — there is no ranking to weight, so source #1 arbitrarily received
+  ~6x source #10's excerpt in Studio outputs documented to cover all sources
+  equally (measured 451:258:193 on a 3-source fixture, now 301:301:301).
+  generate() and suggest_questions() both split the budget evenly.
+  ask()/SSE keep the relevance-weighted default. One pin + fail-direction.
+
+### v0.2.551
+- evaluate() marks expected source ids absent from the notebook as
+  CaseResult.missing: a source deleted and re-added gets a NEW autoincrement
+  id, so a stale cases file referencing the old id scored 0 forever and read
+  as a retrieval regression — the "silently rekeyed" class diff_reports
+  already guards on the question side. Scoring is unchanged (a missing id
+  still counts against recall); the field only explains why the case can
+  never be won. Serialized through --save/--diff (report_from_dict tolerates
+  its absence in older baselines) and printed per-case by `shoin eval` as
+  "期待ソース {ids} はノートブックに存在しない". Three pins + fail-direction.
 
 ### v0.2.550
 - `test_env_and_process_globals_stay_centralized` — env reads are

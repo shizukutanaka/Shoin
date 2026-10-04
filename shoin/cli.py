@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -52,6 +53,31 @@ def _port_num(value: str) -> int:
     return n
 
 
+def _one_line(text: str) -> str:
+    """Render an externally-controlled string safe for single-line output.
+
+    Status rows and label fields are emitted one-per-line; a stored title,
+    CLI argument, or env value containing a control character (\n, \r, ESC,
+    U+2028…) would split the row or rewrite earlier terminal output — a forged
+    `✓` line is indistinguishable from a real one. Escaping preserves the row
+    shape and keeps the original bytes readable.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 _STRINGS: dict[str, dict[str, str]] = {
     "ja": {
         "nb.created": "作成: [{id}] {name}",
@@ -85,6 +111,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      期待={exp} 取得={got}",
+        "eval.case_missing": (
+            "      警告: 期待ソース {ids} はノートブックに存在しない"
+            " (削除/別idの可能性)"
+        ),
         "eval.saved": "ベースライン保存: {f}",
         "eval.diff_header": "ベースライン比較 ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -156,6 +186,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.case_ok": "  ✓ {q}",
         "eval.case_ng": "  ✗ {q}",
         "eval.case_detail": "      expected={exp} retrieved={got}",
+        "eval.case_missing": (
+            "      warning: expected source id(s) {ids} not in this notebook"
+            " (deleted or rekeyed?)"
+        ),
         "eval.saved": "Baseline saved: {f}",
         "eval.diff_header": "Baseline comparison ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
@@ -337,7 +371,7 @@ def _print_report(report: CitationReport) -> None:
             marker = _t("cite.negation")
         else:
             marker = ""
-        print(f"  [S{c}] {title}{sec}{prov}{marker}")
+        print(f"  [S{c}] {_one_line(title)}{sec}{prov}{marker}")
     uncited = report.get("uncited") or []
     if uncited:
         supported = set(report.get("uncited_supported") or [])
@@ -346,21 +380,21 @@ def _print_report(report: CitationReport) -> None:
         for sentence in uncited:
             # Grounded uncited = citation omission; ungrounded = the dangerous kind.
             mark = (
-                f" [{_t('cite.uncited_supported')}→{sup_src.get(sentence, '')}]"
+                f" [{_t('cite.uncited_supported')}→{_one_line(str(sup_src.get(sentence, '')))}]"
                 if sentence in supported
                 else ""
             )
-            print(f"  - {sentence}{mark}")
+            print(f"  - {_one_line(sentence)}{mark}")
     degenerate = report.get("degenerate") or []
     if degenerate:
         print(_t("cite.degenerate", n=str(len(degenerate))))
         for snippet in degenerate:
-            print(f"  - {snippet}")
+            print(f"  - {_one_line(snippet)}")
     contradict = report.get("self_contradiction") or []
     if contradict:
         print(_t("cite.contradict", n=str(len(contradict))))
         for sentence in contradict:
-            print(f"  - {sentence}")
+            print(f"  - {_one_line(sentence)}")
     if report.get("truncated"):
         # finish_reason "length": generation stopped at the token limit — the
         # report flag the Web badge and export status line already carry.
@@ -422,9 +456,9 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
 
     avail = getattr(llm, "available", lambda: False)()
     print(_t("health.version", v=VERSION))
-    print(_t("health.llm_url", v=llm_url()))
+    print(_t("health.llm_url", v=_one_line(llm_url())))
     print(_t("health.llm_ok", v=_t("health.yes") if avail else _t("health.no")))
-    print(_t("health.model", v=llm_model()))
+    print(_t("health.model", v=_one_line(llm_model())))
     em = embed_model()
     print(_t("health.embed_model", v=em if em.strip() else _t("health.embed_model_off")))
     mq = _t("health.yes") if multi_query_enabled() else _t("health.no")
@@ -435,7 +469,7 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     )
     print(_t("health.embed_batch", v=batch_v))
     print(_t("health.chunking", tokens=str(chunk_tokens()), overlap=str(chunk_overlap())))
-    print(_t("health.data_dir", v=db if db else str(db_path())))
+    print(_t("health.data_dir", v=_one_line(db if db else str(db_path()))))
     return 0
 
 
@@ -455,7 +489,11 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # UnicodeDecodeError comes from read_text's strict UTF-8 decode — a
+        # non-UTF-8 file is definitionally not JSON, and neither it nor
+        # JSONDecodeError is an OSError, so without this both escape main()'s
+        # handler chain as a raw traceback.
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"cases file is not valid JSON: {exc}",
@@ -470,9 +508,11 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     print(_t("eval.mrr", v=f"{rep.mrr:.3f}"))
     for c in rep.cases:
         ok = c.recall >= 1.0
-        print(_t("eval.case_ok" if ok else "eval.case_ng", q=c.question))
+        print(_t("eval.case_ok" if ok else "eval.case_ng", q=_one_line(c.question)))
         if not ok:
             print(_t("eval.case_detail", exp=str(c.expected), got=str(c.retrieved)))
+            if c.missing:
+                print(_t("eval.case_missing", ids=str(c.missing)))
     if args.save:
         from .evaluate import report_to_dict
 
@@ -480,7 +520,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
-        print(_t("eval.saved", f=str(args.save)))
+        print(_t("eval.saved", f=_one_line(str(args.save))))
     if args.diff:
         from .evaluate import diff_reports, report_from_dict
 
@@ -488,7 +528,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             base_raw = json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
             ) from exc
@@ -497,7 +537,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         except ValueError as exc:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", str(exc)) from exc
         diff = diff_reports(base, rep)
-        print(_t("eval.diff_header", f=str(args.diff)))
+        print(_t("eval.diff_header", f=_one_line(str(args.diff))))
         # The comparison rows print the means over the MATCHED questions — the
         # same population the deltas were computed on. Printing the full-run
         # means (base.recall / rep.recall) would show e.g. 0.500 → 1.000 next
@@ -524,7 +564,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             print(
                 _t(
                     "eval.diff_case",
-                    q=cd.question,
+                    q=_one_line(cd.question),
                     ro=f"{cd.recall_before:.3f}",
                     rn=f"{cd.recall_after:.3f}",
                     mo=f"{cd.rr_before:.3f}",
@@ -544,14 +584,17 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "new":
         nb = store.create_notebook(str(args.name))
-        print(_t("nb.created", id=str(nb.id), name=nb.name))
+        print(_t("nb.created", id=str(nb.id), name=_one_line(nb.name)))
     elif action == "list":
         rows = store.list_notebooks_with_counts()
         if not rows:
             print(_t("nb.empty"))
         for row in rows:
             c = row["counts"]
-            print(f"[{row['id']}] {row['name']}  sources={c['sources']} chunks={c['chunks']}")
+            print(
+                f"[{row['id']}] {_one_line(row['name'])}"
+                f"  sources={c['sources']} chunks={c['chunks']}"
+            )
     elif action == "delete":
         store.delete_notebook(int(args.notebook_id))
         print(_t("nb.deleted"))
@@ -560,13 +603,18 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
         # rename_notebook() strips whitespace before persisting — echo the same
         # stripped value here, not the raw CLI argument, matching the v0.2.93-95
         # fix already applied to this action's sibling, source rename, below.
-        print(_t("nb.renamed", id=str(args.notebook_id), name=str(args.name).strip()))
+        print(_t("nb.renamed", id=str(args.notebook_id), name=_one_line(str(args.name).strip())))
     return 0
 
 
 def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "list":
+        # Every mutating sibling (add/clear/ask/studio/eval) validates the
+        # notebook up front; list_messages() does not, so a typo'd id would
+        # print "no chat history" and read as an existing-but-empty notebook —
+        # the empty-vs-nonexistent conflation the API's 404 avoids.
+        store.get_notebook(int(args.notebook_id))
         messages = store.list_messages(int(args.notebook_id))
         if not messages:
             print(_t("msg.empty"))
@@ -591,7 +639,8 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         try:
             result = index_source(store, int(args.notebook_id), target, llm)
             print(
-                f"✓ {result.source.title}: {result.n_chunks} chunks ({result.n_embedded} embedded)"
+                f"✓ {_one_line(result.source.title)}: {result.n_chunks}"
+                f" chunks ({result.n_embedded} embedded)"
             )
             if result.pages_failed:
                 # Don't report a partial index as complete: the graceful
@@ -601,10 +650,10 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         except (IngestError, StoreError) as exc:
-            print(f"✗ {target}: [{exc.code}] {exc}", file=sys.stderr)
+            print(f"✗ {_one_line(target)}: [{exc.code}] {exc}", file=sys.stderr)
             rc = 1
         except sqlite3.OperationalError as exc:
-            print(f"✗ {target}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
+            print(f"✗ {_one_line(target)}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
             rc = 1
     return rc
 
@@ -667,13 +716,16 @@ def _cmd_note(store: Store, args: argparse.Namespace) -> int:
         # v0.2.93/94/95/99 fix applied to this codebase's other echo sites.
         title = str(args.title).strip()
         note_id = store.add_note(int(args.notebook_id), title, str(args.body))
-        print(_t("note.added", id=str(note_id), title=title))
+        print(_t("note.added", id=str(note_id), title=_one_line(title)))
     elif action == "list":
+        # Same empty-vs-nonexistent contract as `shoin messages list` above:
+        # add_note() validates via get_notebook() but list_notes() does not.
+        store.get_notebook(int(args.notebook_id))
         notes = store.list_notes(int(args.notebook_id))
         if not notes:
             print(_t("note.empty"))
         for n in notes:
-            print(f"[{n['id']}] {n['title']}")
+            print(f"[{n['id']}] {_one_line(n['title'])}")
     elif action == "delete":
         store.delete_note(int(args.note_id))
         print(_t("note.deleted"))
@@ -695,13 +747,13 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
         # the same truncated value here, not the raw CLI argument, matching
         # the v0.2.93/94 fix applied to this endpoint's Web API siblings.
         printed_title = str(args.title).strip()[:MAX_TITLE_LEN]
-        print(_t("src.renamed", id=str(src.id), title=printed_title))
+        print(_t("src.renamed", id=str(src.id), title=_one_line(printed_title)))
     elif action == "refresh":
         result = refresh_source(store, int(args.source_id), llm)
         print(
             _t(
                 "src.refreshed",
-                title=result.source.title,
+                title=_one_line(result.source.title),
                 chunks=str(result.n_chunks),
                 embedded=str(result.n_embedded),
             )
@@ -777,6 +829,17 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         # otherwise escape as a bare Python traceback.
         print(_t("err.prefix", code="SYSTEM_IO_ERROR", msg=str(exc)), file=sys.stderr)
         return 1
+    except UnicodeEncodeError as exc:
+        # A lone surrogate in printed output — e.g. from a custom ChatBackend
+        # passed to main(llm=...) emitting surrogate tokens (LLMClient strips
+        # them since v0.2.599, but external backends are unguarded) — fails
+        # every print() write on a strict-UTF-8 stdout. Same boundary catch
+        # as OverflowError below: a coded err.prefix, never a traceback.
+        print(
+            _t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=str(exc)),
+            file=sys.stderr,
+        )
+        return 1
     except OverflowError:
         print(
             _t(
@@ -790,6 +853,25 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130
+    except Exception as exc:  # noqa: BLE001 - process boundary catch-all
+        # Same parity as server.py's _dispatch, which maps any stray exception
+        # to a coded SYSTEM_INTERNAL_ERROR envelope instead of leaking a raw
+        # failure: the CLI's identical contract is "coded err.prefix line, never
+        # a traceback" (the health command's comment states it outright). A
+        # custom ChatBackend that raises a non-LLMError — RuntimeError, an
+        # SDK-specific exception — is the reachable path: every in-tree backend
+        # wraps into LLMError, but external backends are unguarded, and without
+        # this catch their exceptions escape main() as a bare traceback while
+        # the API sibling answers the same failure coded. Internal bugs are NOT
+        # silently masked: SYSTEM_INTERNAL_ERROR still signals "unexpected" to
+        # the user exactly as a traceback would, just without the stack noise —
+        # and it preserves the contract that callers parsing stderr only ever
+        # see the coded err.prefix shape.
+        print(
+            _t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=f"{type(exc).__name__}: {exc}"),
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

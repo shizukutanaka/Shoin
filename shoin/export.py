@@ -103,7 +103,13 @@ def _status_line(report: dict[str, object]) -> str:
             # should cite (deduped, first-seen order).
             sup_raw = report.get("uncited_supported_source")
             sup_src = sup_raw if isinstance(sup_raw, dict) else {}
-            targets = [t for s in supported if isinstance((t := sup_src.get(s, "")), str)]
+            targets = [
+                t
+                for s in supported
+                if isinstance(s, str)
+                and isinstance((t := sup_src.get(s, "")), str)
+                and t
+            ]
             targets = list(dict.fromkeys(targets))
             hint = "\u2192" + ",".join(targets) if targets else ""
             bits.append(f"{_t('status_uncited_supported')} ({len(supported)}){hint}")
@@ -128,7 +134,10 @@ def _status_line(report: dict[str, object]) -> str:
         and n_sources
         and cov < COVERAGE_LOW
     ):
-        bits.append(f"{_t('status_coverage_low')} ({len(set(cited))}/{n_sources})")
+        # Same malformed-report tolerance: `cited` is ints by contract, but a
+        # stored report can hold unhashable elements that break set().
+        n_cited = len({c for c in cited if isinstance(c, int)})
+        bits.append(f"{_t('status_coverage_low')} ({n_cited}/{n_sources})")
     return " / ".join(bits)
 
 
@@ -165,11 +174,15 @@ def _legend(report: dict[str, object]) -> str:
 
     def _legend_item(k: str, v: str) -> str:
         sec = f" (§ {section_map[k]})" if section_map.get(k) else ""
+        # source_detail values arrive as parsed JSON — a malformed stored
+        # report can hold a non-dict here; degrade to no-provenance like
+        # every other field guard in this function instead of crashing.
+        det = detail_map.get(k)
         bits = [
             f"{_t('found_' + kind)} #{int(val)}"
             if kind != "lex"
             else f"{_t('found_' + kind)} {val:.2f}"
-            for kind, val in found_bits(detail_map.get(k))
+            for kind, val in found_bits(det if isinstance(det, dict) else None)
         ]
         prov = f" [{_t('found_label')}{' + '.join(bits)}]" if bits else ""
         return f"{k}={v}{sec}{prov}"
@@ -189,7 +202,10 @@ def export_markdown(store: Store, notebook_id: int) -> str:
 
     parts.append(f"## {_t('sources_section')}")
     for i, src in enumerate(store.sources_for_notebook(notebook_id), start=1):
-        parts.append(f"- [S{i}] {_md_line(src.title)} ({src.kind}) — {_md_line(src.origin)}")
+        # Plain numbered list, not [S#]: in the same document an answer's [S1]
+        # means "top retrieval hit for that query" while the listing order is
+        # the notebook's own — one marker for two indices invites misreading.
+        parts.append(f"{i}. {_md_line(src.title)} ({src.kind}) — {_md_line(src.origin)}")
     parts.append("")
 
     notes = store.list_notes(notebook_id)

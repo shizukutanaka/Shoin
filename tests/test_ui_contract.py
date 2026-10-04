@@ -2723,11 +2723,19 @@ const del = row.children.find(c => c.cls === "src-act" && c.textContent === "×"
 if (!tt || !del) { console.error("row not built"); process.exit(1) }
 // (b) click + Enter/Space open the viewer; unrelated keys do not.
 row.onclick();
-row.onkeydown({key:"Enter", preventDefault(){}});
-row.onkeydown({key:" ", preventDefault(){}});
-row.onkeydown({key:"x", preventDefault(){}});
+row.onkeydown({key:"Enter", target:row, preventDefault(){}});
+row.onkeydown({key:" ", target:row, preventDefault(){}});
+row.onkeydown({key:"x", target:row, preventDefault(){}});
 if (shown.length !== 3 || shown.some(x => x !== 9))
   { console.error("row open wiring wrong: " + JSON.stringify(shown)); process.exit(1) }
+// v0.2.554: keydown bubbling from a child control (the × button here, or the
+// in-place rename input below) must not fire showSource nor preventDefault —
+// Enter there activates the child's own action, not the row's.
+let rowPd = false;
+row.onkeydown({key:"Enter", target:del, preventDefault(){ rowPd = true }});
+row.onkeydown({key:"Enter", target:mkEl(), preventDefault(){ rowPd = true }});
+if (shown.length !== 3 || rowPd)
+  { console.error("bubbled child keydown fired the row action"); process.exit(1) }
 // (b-guard) while a rename input lives in tt, clicks must not open the viewer.
 const rin = mkEl();
 tt.querySelector = sel => sel === "input.src-rename" ? rin : null;
@@ -3040,7 +3048,7 @@ function mkEl(){ return {children:[], parent:null, className:"", value:"",
   setAttribute(n,v){ this["attr_"+n]=v },
   onclick:null, onkeydown:null,
   click(){ if(this.onclick) this.onclick({stopPropagation(){}}) },
-  press(k){ if(this.onkeydown) this.onkeydown({key:k, preventDefault(){}}) } }; }
+  press(k){ if(this.onkeydown) this.onkeydown({key:k, target:this, preventDefault(){}}) } }; }
 function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
 function t(k){ return k }
@@ -3074,6 +3082,14 @@ if (lis[0].children[1].text !== "2册")
 lis[0].click(); lis[1].press("Enter"); lis[0].press(" ");
 if (JSON.stringify(opens) !== JSON.stringify([1,3,1]))
   { console.error("open wiring: " + opens); process.exit(1) }
+// v0.2.554: a keydown bubbling up from a row's OWN BUTTON must not fire the
+// row action — the handler's preventDefault() would cancel the button's
+// native Enter/Space activation (unreachable control + wrong command run).
+let pdSeen = false;
+lis[0].onkeydown({key:"Enter", target: lis[0].children[2],
+  preventDefault(){ pdSeen = true }});
+if (opens.length !== 3 || pdSeen)
+  { console.error("bubbled child keydown fired the row action"); process.exit(1) }
 
 // Rename: blank prompt -> no PATCH; valid -> PATCH + cur.name synced + reload.
 opens = []; calls = []; promptRet = "   ";

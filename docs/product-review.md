@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.530 時点、2026-10-01 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.625 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1160件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1282件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -326,6 +326,296 @@ PYTHONHASHSEED順序非決定性がappend/extend/yield/list/tuple/join
 独自クエリ言語——引用符なし補間は`x:y`/`"`でWHERE意味を例外なしに
 改竄するため、全アトム二重引用を行動検証＋`MATCH ?`サイト1件を
 カタログ固定(v0.2.471)。v0.2.467はこの台帳自体の同期。
+
+**v0.2.596-605 の要約**: 「防御機構内部の一貫性——半修正の完結と
+出力境界の衛生化」区間——実欠陥7件・文書同期3件(v0.2.596は本台帳、
+v0.2.597はspec.md、v0.2.605はagent-doc訂正)。主題は「守る側の機構
+自体が契約を半分しか満たしていない時」: `json.loads`の`\ud800`
+エスケープで物質化する単独サロゲートがeval両リーダーを通過しsqlite
+bind/encodeで生クラッシュ——`_utf8_ok`でUTF-8往復を要求(v0.2.598)。
+LLM出力の同欠陥は**全下流**(message/parts/stream-delta + 中毒化する
+questions_cache: クラッシュ前に書込されるため永続500)——デコード境界
+全出口に`_strip_surrogates`(v0.2.599)。`_embed_chunks`のLLMError枝は
+`except Exception`兄弟と違いrollbackを欠落——v0.2.419 pending-tx
+leak族の最後のsiblingを閉塞、失敗バッチの部分ベクトルが後続コミットで
+静かにflushされ旧モデル名マーカーのまま新モデルベクトルが混在する経路
+(v0.2.600)。`_segment_claims`のlead+trailing同一S出現が5検査全てで
+lead短絡——segment出現の誤帰属/捏造数値/否定反転が不可視(false
+silence方向)をunion評価で修復(v0.2.601)。`rrf_fuse_lists`のvecは
+last-wins・bm25はfirst-wins——マージ規約の非対称でrewriteの弱い
+コサインがprimaryの強いシグナルを上書き(v0.2.602)。`_SKIP_TAG_BALANCE`
+中和機構はcloserを1個だけ注入——2-open未対応タグで`_skip_depth`が
+残存し文書残部を飲込(機構が防ぐはずのクラスが半修正)、注入数を
+opens−closesへ(v0.2.603)。`_HEADING_RE`はfenceと異なり0空白必須+
+末尾空白必須——CommonMark opener規則(≤3空白+#+空白/EOL)へ統一、
+indented/bare headingがbreadcrumbとheading加重BM25へ届く(v0.2.604)。
+全区間fail-then-pass規律で実証済み。
+
+
+**v0.2.606-611 の要約**: 「単独サロゲート欠陥クラスの完結——
+入出力境界全ての衛生化」区間——実欠陥4件・文書同期2件
+(v0.2.606は本台帳、v0.2.608はspec.md)。主題はv0.2.598-599で
+開いたサロゲートクラスを残りの全出力境界で閉塞する収束: store層が
+sqlite3のstrict UTF-8 bind拒絶を無防備に通していた——`_utf8`
+モジュールゲートが全バインドstrフィールド(notebook name・source
+title/origin/sha256・chunk texts/contexts・note/studio/message
+body+report・settings key/value)を書込み前検査し
+VALIDATION_FIELD_FORMAT_INVALIDを返す第4境界(v0.2.609)。
+`_sse`は`ensure_ascii=False`+`.encode()`で、サロゲート入り
+ペイロードがConnectionError捕捉を潜り抜け`_dispatch`の500書込みへ
+流出——コミット済みSSEボディへの第2HTTPステータス行注入を
+ensure_ascii=Trueで閉塞(ワイヤ上ASCII純粋・\ud800エスケープで
+クライアント側JSON.parseが透過復元、v0.2.610)。cli `main()`の
+例外分類はUnicodeEncodeErrorを捕捉せず——カスタムChatBackend
+(`main(llm=…)`/`make_server(llm=…)`拡張点)のサロゲートトークンが
+print()書込みでクラッシュし生トレースバック、OverflowErrorと同じ
+境界捕捉でerr.prefix化(v0.2.611)。併せてexportステータス行の
+uncited_supportedヒントが非空ターゲットを要求し、古いレポート形状
+での宙吊り矢印を解消(v0.2.607)。
+
+
+**v0.2.612-617 の要約**: 「seeded-fuzzが拾う契約反転——
+『足すだけ』系不変条件と寛容パーサーの下流穴」区間——実欠陥3件・
+文書同期2件(v0.2.612は本台帳、v0.2.616はspec.md)。全モジュール
+1周監査の完結後、第2フェーズとしてseeded-random fuzzが読みでは
+拾えない契約の反転を検出: `bm25_prf_search`は第1パス+拡張ヒットの
+unionをbm25再ソート後`[:k]`で切詰——第1パス未充填時、システム提案
+gramのみ一致の密な拡張ヒットがユーザ用語一致ヒットを退避させ得る
+「expanded hits can only ADD recall」契約の反転。extrasを
+`k - len(hits)`ヘッドルームに上限(v0.2.613)。`_json`応答writerは
+`.encode()`がサロゲートpayloadでraise——エラーエンベロープ経路が
+HTTP応答そのものを失う経路をensure_ascii退避で閉塞(v0.2.614)。
+`html_to_text`修復パスは「パーサーが実際にイベントを発火しない領域」
+のタグ/コメント境界をペア——`_skip_depth`盲目カウンタを`_skip_stack`
+名スタック(DOM意味論pop-through+未開クローザー無視)、`<...>`属性領域・
+コメント・CDATA内イベントを`_live`述語で全消費点から除外、注入修復を
+per-opener化する3機構で一括閉塞(v0.2.615)。`_parse_report`は任意
+well-formed JSONを受理する寛容設計なのに読取3箇所が格納形状を無条件
+信頼——`_legend`の`found_bits(source_detail値)`非dict AttributeError・
+`_status_line`の`set(cited)`/`sup_src.get(文)`の非hashable
+TypeError——1行の変形レポートがexport文書全体をクラッシュさせた経路を
+「変形フィールド→no-signal」降格で閉塞(v0.2.617)。store層並行書込み・
+pipeline→build_context統合・実サーバ960リクエスト嵐の各fuzz経路は
+全てゼロ欠陥——`with self.conn`原子性・WALスナップショット・coded
+error envelope・SSE wire完全性の契約が嵐下で維持されることを実証。
+
+
+**v0.2.618-621 の要約**: 「stdlib境界の非コード化漏出——
+400-vs-500欠陥クラスの第3波を機械検出」区間——実欠陥3件・
+文書同期2件(v0.2.618は本台帳、v0.2.621はspec.md)。同じ
+「悪意/変形入力がstdlibの想定内エラー型ではなく別型で境界を
+突破する」クラスが2モジュールで連続検出された:
+`urlparse`は括弧付きホストをパース時点で検証するため
+`http://[::1`の未閉ブラケットが裸ValueErrorとして`.port`
+遅延チェック以前に脱出し500化(v0.2.45と同系譜)——
+`INGEST_URL_BLOCKED`へ写像。`_decode`のcharset候補loopは
+NUL混入charset名(敵対的Content-Typeヘッダ経由で到達)で
+codec lookupが`LookupError`でなく`ValueError("embedded
+null character")`を送出してfallbackを抜ける——catch節を
+`(ValueError, LookupError)`へ(v0.2.619)。`json.loads`は
+~5k超深ネストbodyでJSONDecodeErrorでなくRecursionErrorを
+送出——`_post`は全呼出し経路の500化、chat_streamは1枚の
+深い`data:`フレームがSSE全体を途中abortさせる両漏出を
+BAD_RESPONSE写像+malformed-frame dropで閉塞(v0.2.620)。
+**設計含意**: 「リモート/ユーザ制御データを渡すstdlib境界」は
+単体で監査面を構成する——各境界が送出し得る例外型の全列挙が
+必要であり、exceptインベントリカタログがこのクラスの再発を
+構造検出する。pipeline.py refresh/rename/reindex経路の
+seeded-fuzz(409試行・cap境界delta走査・embed入力同一性
+oracle)はゼロ欠陥——同一sha no-op・SOURCE_ALREADY_EXISTS・
+NOTEBOOK_FULL算術・部分force-reindexのembed_model非記録の
+全不変条件が維持されることを実証。
+
+
+**v0.2.622-625 の要約**: 「出力面と予算の構成保証——境界そのものでは
+なく境界の『組立て方』の欠陥」区間——実欠陥2件・文書同期2件。
+CLIの単一行ラベル(`✓`/`✗`・`[id] name`・`[S{n}]`行)は外部制御
+文字列を生で埋込んでいたため、`\n`入りターゲット名で行が分裂し
+偽`✓`行を、ESC系列で前行の上書きを許した(端末出力インジェクション)
+——Cc/Zl/Zp文字を`\\n`/`\\xNN`/`\\uXXXX`へ変換する
+`_one_line`を全16埋込サイトへ適用、複数行が正当なブロック内容は
+対象外(v0.2.623)。`_hard_split`の最終手段char-windowは窓幅を
+全体の平均トークン密度で逆算していたため、混合密度テキストの
+高密度ポケットでlimit超過窓を放出(実測675@512)——estimateの
+prefix単調性で最長適合prefixを二分探索する`_window_split`へ
+置換し全ピース≤limitを構成保証(v0.2.624)。
+**設計含意**: 「境界が個々に正しくても、境界を組立てる算術が
+近似を積む欠陥族」——平均×固定strideは局所ピークで破れる、
+型安全だが意味を変えるエスケープ不在の埋込みは信頼記号の偽造を
+許す。seeded-fuzzのクリーン面: server.py残存GET経路(~470req・
+エンコード数字/巨大id/format変異)、evaluate.py統合(~20k試行・
+parse/baseline/diff全てValueError契約保持)はともに欠陥ゼロ——
+初期flagは全てoracle側の契約誤認(multiset差分vs契約上のset
+membership)で、参照実装の設計通り動作。
+
+
+**v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を
+コード化契約へ写像する層の閉塞」区間——実欠陥9件・台帳同期1件
+(v0.2.586は本台帳のみ)。主題は「層をまたぐ入力が想定形状を外れた時、
+その層の契約を保持するか」: pypdfはページオブジェクトを遅延解決するため
+`reader.pages[i]`のmaterialize自体がcorrupt xrefでraise——extract_text
+未到達の生例外をページ単位失敗へ降格(v0.2.587)。`_blocks()`が
+フェンス内の`# コメント`行をATX見出し・空行をブロック境界と誤認し、
+コードコメントがbreadcrumbへ混入——CommonMark規則(opener/closer対称・
+info文字列排斥)でフェンス状態を追跡(v0.2.588)。`refresh_source`の
+sha一致no-op経路が抽出済み`pages_failed`を0へ捨てる信号損失
+(v0.2.589)。`rewrite_queries`のdedup fold keyがcap切り捨て**後**の
+排出形でなく全文で計算——cap跨ぎ差異が2スロットを同一テキストで消費
+(v0.2.590)。`replace_chunks_for_source`のtitle経路のみstrip+空拒否を
+欠落——3兄弟writerの規約を第4経路へ移植(v0.2.591)。`_h_ask_sse`の
+token生成ブロックがLLMError/ConnectionErrorのみ捕捉し、TimeoutError等が
+SSEヘッダ確定後にgeneric-500として第2ステータス行を本文へ混入＋
+assistant行を孤立化——coded-vs-generic方針のerror frame+永続化保証へ
+(v0.2.592)。`_cmd_eval`両読込でUnicodeDecodeErrorが全ハンドラを潜り
+抜け非UTF-8入力で生traceback——JSONDecodeErrorとのタプル捕捉で
+VALIDATION_FIELD_FORMAT_INVALIDへ(v0.2.593)。`Request()`構築は
+コンストラクタでurlsplitを走らせるため、unclosed IPv6ブラケットが
+urlopen実行前にraise——`_post`/`chat_stream`の2サイトを`available()`
+と同じtry内構築へ(v0.2.594)。`json.loads`は非標準NaN/Infinity
+リテラルを受理しboolはintサブクラスのため、`isinstance`のみでは
+`{recall: NaN}`がdiff算術へNaN伝播——全5数値フィールドへ有限+非bool
+要求(v0.2.595)。全区間fail-then-pass規律で実証済み。
+
+**v0.2.575-585 の要約**: 「引用マーカー帰属規約の断片単位統一——
+[S#]記法の名空間一意化」区間——実欠陥10件・台帳同期1件(v0.2.575は
+本台帳+_FENCE_RE修複)。主題は「マーカーはどのclaimを所有するか」の
+断片意味論: splitterが`'claim。[S1] next。'`を`'claim。'`+`'[S1] next。'`
+へ割るため、断片先頭マーカーの帰属が全検査で反転——uncited_sentencesが
+マーカー本体を自己被覆と誤認し直前claimをフラグ(v0.2.576の二重反転)、
+verify_grounding等6検査も先頭runを自断片で評価し正引用をmisattributed
+誤告発(v0.2.577で`_leading_markers`→prev_claim経路へ統一)。
+断片末尾の未被覆面も不可視だったため最終マーカー以降を評価対象化
+(v0.2.578)。`_segment_claims`は同一S番号の2出現を後節で上書き——
+第1節が全検査対象外かつ正当出現が誤転落、dict→出現順listへ
+(v0.2.580)。沈黙原則側の3件: `A[S1]によるとB`中断片熟語は帰属が真に
+曖昧なため断片ごと沈黙(v0.2.583)、`[S1] によると`の空白形状が熟語
+マッチを破り誤転落していたのを`^\s*`許容で修復(v0.2.582)、
+`_DISCLAIMER_MARKERS`が定型免責フレーズ9形状を見逃し正しい
+「記載なし」応答を誤フラグ——幹形+casefold+領域名詞必須で拡張
+(v0.2.579)。`self_contradictions`数値腕はdifflib最小化span(50%→30%
+が'5'→'3')上で走り全1桁swapが死域——ops==1保証下の全文数値集合比較へ
+(v0.2.581)。`retrieve_multi`のexp印をvector脚へ対称化——rewrite埋め込み
+のみで回収される意味的ヒットがlex==0切断対象だった(v0.2.584)。
+export_markdownの`## ソース`列挙が`[S#]`記法を流用し同一文書内で
+「notebook並び順」と「retrieval順位」の2名空間を衝突——番号付き
+リストへ変更し引用記法をsource_map凡例専有化(v0.2.585)。
+全区間fail-then-pass規律で実証済み。
+
+**v0.2.566-574 の要約**: 「数詞構文の実文法化——列挙と位置表記を
+『部分は主張しない』一規則へ統一」区間——実欠陥6件・メタ監査1件
+(v0.2.566は本台帳・v0.2.567はfold冪等性修復)。主題はシード乱数
+ファズによる数詞族の系統的欠落摘出: `_numbers_expanded`の接尾辞対鎖が
+「億/万/兆区切りの位置表記」を構造的に読めず'一万二千三百四十五'→
+{12000,2345}と真値を欠落させ、素run経路が群成分を漏出——実位置文法
+(seg BIG_MAG)+ seg? へ書換え、群はトークン値の成分のみを主張し
+silence契約を完全保存(v0.2.568)。往復ファズ`_int_to_kanji`全定義域
+(6万+値)で裸run spanの成分漏出~8000件を検出——'二千一'→{2000,2001}
+——3span族全てを同規則へ統一(v0.2.569)。`_conv_values`の同一単位系
+チェインがgap≤2文字の任意文字で合算し'1時間、30分'→90分の偽メンバーが
+真フラグを抑制——加算結合は空白と'と'のみへ限定(v0.2.570)。
+`_en_value`が連続small値を文法外加算('one two'→3,'fifteen two'→17)
+——tens+unit文法へ状態機械化、列挙は漢字'一二三'と同じ沈黙(v0.2.571)。
+`_stem_variants('news')`が不変化不可算名詞から生きた高頻度誤語'new'を
+OR変種へ注入——死語形許容範囲を逸脱する語彙的例外として`_STEM_INVARIANT`
+へ明文化(v0.2.572)。検索側2件: `bm25_search`早期リターンのカバレッジ
+判定が`_numeric_query_terms`を見ず、CJK-coveredクエリ'五割の回答者'で
+展開値'50'(len<3)のLIKE針が不発——検査対象を同じ項集合へ統一
+(v0.2.573)。`_norm_query_terms`も同項を見ず、ブリッジ回収チャンクが
+lex=0.0→`_tail_cut`でterm-free切断——v0.2.539の「retrievedなのに
+term-free」規則の残存族を同じ対称で閉塞(v0.2.574)。全区間
+fail-then-pass規律で実証済み、残監査面は深読クリーン確認のみ。
+
+**v0.2.559-565 の要約**: 「台帳と監査網の相互同期——文書の散文主張を
+コード計測へピン化」区間——実欠陥2件・メタピン2件・文書同期3件
+(v0.2.559は本台帳・v0.2.560はspec.md・v0.2.563はspec件数修正)。
+主題はドキュメント層への監査網拡張: 定期同期設計のためVERSIONへ
+遅れるのが正常なラグ型マーカー(spec.md「実装 vX.Y.Z 時点に同期」・
+product-review「vX.Y.Z 時点」)に唯一許されない形状——出荷版を超える
+版数の主張——を`test_doc_sync_markers_never_exceed_version`で上限
+固定(v0.2.561)。spec.md散文のハードコード件数(except-Exception
+カタログ)が実測13に対し「12サイト」のまま約60版生存したのを修正
+(v0.2.503のraw socket close追加時に記述側が未追従——git log -Sで
+帰属特定・v0.2.474タグ時点では正値を検証)(v0.2.563)し、再発防止
+として3カタログをモジュール定数へ昇格+`test_doc_catalog_counts_match_spec`
+で散文件数≡実カタログを照合(v0.2.564)。実欠陥2件: `report_from_dict`
+は`missing`のみ要素int検査(bool除外済)で`expected`/`retrieved`は
+リスト型のみ——同一検証ブロック内の兄弟idリストへ厳格さを統一し、
+手編集ベースラインの`["1"]`/`[true]`/`[1.5]`が静かに往復する経路を
+閉塞(v0.2.562)。`chat_stream`はfinish_reasonを`choice["delta"]`読取
+の後に記録——deltaキー不在のfinish chunk(仕様合法の省略形)で
+KeyError→continueが切捨て信号を消失させ、max_tokens切断回答を完了
+として提示する経路を、捕捉を`isinstance(choice, dict)`ガード下で
+前置へ移動して閉塞(v0.2.565)。全区間 fail-then-pass 規律で実証済み。
+
+**v0.2.555-558 の要約**: 「evidenceなしをweak evidenceと区別する
+検索設計対称 + 入力契約の全経路対称」区間——実欠陥3件・台帳同期1件
+(v0.2.555は前区間の本台帳同期そのもの)。検索脚の死域閉塞:
+`heapq.nlargest`は与えられた行から必ずk件を返すため、ベクトル脚が
+全く信号を持たない場合(退化クエリベクトル・SHOIN_EMBED_MODEL切替後の
+次元不一致・コーパス全直交)も行順で任意のkチャンクをvec=0.0で返却し、
+RRF融合がそれらを実順位へ昇格させていた——次元不一致チャンクが最終
+結果へ実測到達。`vec > 0`のみが順位枠を取得するよう修復し、空の
+ベクトル脚は文書化されたBM25-only退行経路そのものとなる(v0.2.556)。
+書込語彙の対称完結: `add_source`はタイトルをMAX_TITLE_LENに切詰める
+がstripも空拒否もしなかった——`update_source_title`/`update_source_sha256`
+が既に適用する検証を取込経路にも適用し、空白タイトルの永続化(空の
+ソース一覧行・空TI・パンくず劣化)を閉塞。アップロード側は`.strip()`
+追加で空白X-Filenameを`upload.txt`へフォールバック(v0.2.557)。
+評価入力の製品契約対称: `parse_cases`はケース形状を検証するが
+`MAX_QUESTION_LEN`超の質問(/ask・cli ask両経路が拒否するもの)を
+無警告受理し、「製品が答えられない質問のrecall計測」＋数千語項の
+病的FTS5 OR式を生成していた。重複質問も集計recall/MRRで二重計上
+するため、同関数のrefuse-loudly契約に従い両者を`ValueError`拒否へ
+(v0.2.558)。全区間 fail-then-pass 規律で実証済み。
+
+**v0.2.531-554 の要約**: 「綴り揺れアークの完結——検索・再採点・
+引用検証・冗長・切断・集計・重複排除まで全比較面の正準形統一」
+区間——実欠陥21件・構造ピン2件・台帳同期1件(v0.2.531は前区間
+v0.2.518-530の本台帳同期そのもの)。v0.2.526-530のUnicode可視化
+アークが「クエリ用語が文書へ到達する」ことを保証したのに対し、
+その先の全比較面がまだ生綴り(casefold/NFKCのみ)を照合していた
+非対称を系統的に閉塞した区間。前段の境界残面を完走:
+`_is_cjk_word`の残端(〠〶〷記号の可視化+Ogham空白の語分断)
+(v0.2.532)→文分割へ非ASCII終止符11文字種(danda・ミャンマー・
+クメール・チベット・アラビア・エチオピア・モンゴル・アルメニア・
+ヘブライ)——1段落が1文扱いで文反復系検査全てが機能不全だった
+構造欠陥(v0.2.533)→decimal行の双方向架橋(٣٤٥↔345、
+unicodedata.decimal経由の閉置換)(v0.2.534)→アクセント記号の
+列挙可能半分(`_ascii_fold`、café→cafe方向のみ——逆方向は開空間
+のため構造的に不可)(v0.2.535)→英語活用の閉suffix族
+(`_stem_variants`、-s/-ing/-ed/-ly——日本語側の漢字骨格と対称)
+(v0.2.536)→否定フィルタの変種貫通(`-documents`が'document'も
+落とす、取得-排除の対称契約)(v0.2.537)→否定語のみクエリの
+補集合応答('-dogs'が[]→全件マイナスdogs、正規項ゼロ時の
+静黙空返却を修復)(v0.2.538)。以後が本区間の核——比較面の
+生綴り照合を逐次正準形へ: rerank/pool-IDF/近接の語彙重なりを
+変種グループ照合へ(v0.2.539)→`_match_fold`新設で引用検証の
+全比較をカタカナ→平仮名・Cf除去・数字行・旧字体・Latin特殊字の
+正準形へ(v0.2.540)→`_digit_fold`で数値検査の同値数字行統一+
+元号アラビア数字展開(v0.2.541)→拡張由来ヒットのcliff保護
+(PRF/リライト語のみのヒットがterm-free切断されていた、拡張機構の
+成果物を切断機構が剥がす非対称)(v0.2.542)→MMR冗長判定のfold化
+(綴りのみ異なる実質重複チャンクを捕捉)(v0.2.543)→PRF集計キーの
+fold化(綴り票分散で話題語が閾値未達)(v0.2.544)→リライト/提案
+dedupのfold化(変種重複のスロット消費を解消)(v0.2.545)→
+degenerate_spansのfold化(交互綴りパロットループを捕捉)
+(v0.2.546)→英語`cannot`+curlyアポストロフィ縮約の否定検出
+(否定パリティ盲化を修復)(v0.2.547)→修辞的問いかけ→回答ペアの
+自己矛盾誤検知免除(`_claim_sents`へuncited側と同根拠の質問免除
+配線——faq/study_guide型出力の構造的偽陽性を解消)(v0.2.548)。
+メタガード2件(並行セッション作): テキストI/O全サイトの`encoding=`
+明示化AST固定(v0.2.549)・env読取のconfig集中化+プロセスグローバル
+変異動詞の全面封印(v0.2.550)。契約対称3件+UI1件: eval期待ソース
+IDの不在警告(「静かに再鍵されたID」のゴーストケース可視化——
+diff側ガードと対称)(v0.2.551)→overview文脈の等分配化(順位無し
+呼出しでの調和級数が挿入順6倍傾斜を生んでいた)(v0.2.552)→
+`note list`/`messages list`のNOTEBOOK_NOT_FOUND統一(読取系
+2経路の「空と不在の混同」閉塞)(v0.2.553)→行keydownハンドラの
+`e.target`ガード(バブルkeydownで子ボタンのネイティブ活性化を
+preventDefaultがキャンセルし、リネーム中EnterがshowSourceを
+二重発火していたキーボード操作性実害)(v0.2.554)。全区間
+fail-then-pass規律で実証済み。残る構造的制約: ASCII→アクセント
+文書方向・SHY位置方向は列挙不能の開空間として意図的に閉鎖。
 
 **v0.2.518-530 の要約**: 「Unicode不可視アークの完結——query_termsの
 静黙脱落クラスを4段階で根絶」区間——実欠陥4件(記号/文字種の不可視

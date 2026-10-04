@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.550")
+        self.assertEqual(VERSION, "0.2.628")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -317,6 +317,24 @@ class TestStore(unittest.TestCase):
                 s.add_source(nb.id, "txt", "b", "o2", "same-hash")
             self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
 
+    def test_add_source_rejects_blank_title(self) -> None:
+        """add_source must apply update_source_title's strip+reject — a
+        whitespace title could otherwise enter via the ingest path (caller
+        title=, whitespace filename) and persist a blank the rename path
+        itself refuses to write."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            for blank in ("", "   ", " \t \n "):
+                with self.assertRaises(StoreError) as cm:
+                    s.add_source(nb.id, "txt", blank, "o", f"sha-{blank!r}")
+                self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_add_source_strips_title(self) -> None:
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "  report.pdf  ", "o", "sha-strip")
+            self.assertEqual(src.title, "report.pdf")
+
     def test_get_source_returns_source_and_raises_on_missing(self) -> None:
         with make_store() as s:
             nb = s.create_notebook("n")
@@ -496,6 +514,27 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.replace_chunks_for_source(src.id, ["a", "b"], contexts=["only one"])
             self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_replace_chunks_title_validation_matches_siblings(self) -> None:
+        """v0.2.591: the sha256/title metadata path must apply the same
+        strip+reject contract as add_source / update_source_title /
+        update_source_sha256 — a whitespace-only title must fail (before any
+        chunk is touched) and padding must be stripped, not persisted."""
+        with make_store() as s:
+            nb = s.create_notebook("title-parity")
+            src = s.add_source(nb.id, "txt", "orig", "o", "sha-tp")
+            s.add_chunks(src.id, ["c1"])
+            with self.assertRaises(StoreError) as cm:
+                s.replace_chunks_for_source(
+                    src.id, ["new"], sha256="sha-tp2", title="   "
+                )
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+            # Rejection is pre-transaction: the original chunk survives untouched.
+            self.assertEqual(s.text_chunks_for_source(src.id), [(0, "c1")])
+            s.replace_chunks_for_source(
+                src.id, ["new"], sha256="sha-tp2", title="  padded  "
+            )
+            self.assertEqual(s.get_source(src.id).title, "padded")
 
     def test_add_source_unexpected_integrity_error_is_system_internal(self) -> None:
         """A constraint failure that is neither UNIQUE nor FOREIGN KEY (e.g. a
@@ -1296,6 +1335,65 @@ class TestStore(unittest.TestCase):
             self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
             self.assertEqual(s.sources_for_notebook(nb.id), [])
 
+    def test_store_writes_reject_lone_surrogates(self) -> None:
+        """v0.2.609: every bound str field rejects a lone surrogate with a
+        coded VALIDATION_FIELD_FORMAT_INVALID instead of the sqlite driver's
+        raw UnicodeEncodeError.
+
+        Reachability: POSIX argv/env decode invalid bytes via surrogateescape
+        (CLI `ask`/`notebook`/`note`/`source rename`, a `shoin add` filename
+        with non-UTF-8 bytes, SHOIN_* env vars), so the API-layer gate does
+        not cover this surface — the store write is the last boundary before
+        the bind. The same defect class as v0.2.430 (server fields), v0.2.598
+        (eval readers) and v0.2.599 (LLM output boundary)."""
+        with make_store() as s:
+            nb = s.create_notebook("surrogate-guard")
+            src = s.add_source(nb.id, "txt", "t", "o", "sha-1")
+
+            bad = "bad\ud800"
+            cases: list[tuple[Callable[[], object], str]] = [
+                (lambda: s.create_notebook(bad), "create_notebook"),
+                (lambda: s.rename_notebook(nb.id, bad), "rename_notebook"),
+                (lambda: s.add_source(nb.id, "txt", bad, "o", "sha-2"), "add_source.title"),
+                (lambda: s.add_source(nb.id, "txt", "t", bad, "sha-2"), "add_source.origin"),
+                (lambda: s.add_source(nb.id, "txt", "t", "o", bad), "add_source.sha256"),
+                (lambda: s.update_source_title(src.id, bad, "o"), "update_source_title.title"),
+                (lambda: s.update_source_title(src.id, "t2", bad), "update_source_title.origin"),
+                (lambda: s.update_source_sha256(src.id, bad, "t2"), "update_source_sha256.sha256"),
+                (
+                    lambda: s.update_source_sha256(src.id, "sha-9", bad),
+                    "update_source_sha256.title",
+                ),
+                (lambda: s.replace_chunks_for_source(src.id, [bad]), "replace_chunks.text"),
+                (
+                    lambda: s.replace_chunks_for_source(src.id, ["ok"], contexts=[bad]),
+                    "replace_chunks.context",
+                ),
+                (
+                    lambda: s.replace_chunks_for_source(src.id, ["ok"], title=bad),
+                    "replace_chunks.title",
+                ),
+                (lambda: s.add_chunks(src.id, [bad]), "add_chunks.text"),
+                (lambda: s.add_chunks(src.id, ["ok"], [bad]), "add_chunks.context"),
+                (lambda: s.add_note(nb.id, bad, "b"), "add_note.title"),
+                (lambda: s.add_note(nb.id, "t", bad), "add_note.body"),
+                (lambda: s.add_studio_output(nb.id, "faq", bad, "{}"), "add_studio_output.body"),
+                (
+                    lambda: s.add_studio_output(nb.id, "faq", "b", bad),
+                    "add_studio_output.citation_report",
+                ),
+                (lambda: s.add_message(nb.id, "user", bad), "add_message.body"),
+                (lambda: s.add_message(nb.id, "user", "b", bad), "add_message.citation_report"),
+                (lambda: s.set_setting(bad, "v"), "set_setting.key"),
+                (lambda: s.set_setting("k", bad), "set_setting.value"),
+                (lambda: s.get_setting(bad), "get_setting.key"),
+            ]
+            for fn, label in cases:
+                with self.subTest(site=label):
+                    with self.assertRaises(StoreError) as cm:
+                        fn()
+                    self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+
     def test_source_kind_vocabulary_matches_ingest(self) -> None:
         """store.SOURCE_KINDS must exactly cover what ingest can emit —
         _EXT_KIND values for files plus the 'url' kind — in both directions:
@@ -1825,6 +1923,24 @@ class TestChunk(unittest.TestCase):
         self.assertTrue(any("第一章" in c for c in chunks))
         self.assertTrue(any("第二章" in c for c in chunks))
 
+    def test_indented_and_empty_headings_are_headings(self) -> None:
+        """CommonMark allows up to 3 leading spaces on an ATX opener and a bare
+        '###' with no title; _heading_level/_blocks must agree with _FENCE_RE's
+        identical 0-3-space rule (v0.2.604 — previously both shapes were missed)."""
+        from shoin.chunk import _blocks, _context_blocks, _heading_level
+
+        self.assertEqual(_heading_level("  ## Sec"), 2)
+        self.assertEqual(_heading_level("   # A"), 1)
+        self.assertEqual(_heading_level("###"), 3)
+        self.assertEqual(_heading_level("#"), 1)
+        self.assertEqual(_heading_level("    # code"), 0)
+        self.assertEqual(_heading_level("#tag"), 0)
+        blocks = _blocks("text\n  ## H\n\nbody")
+        self.assertEqual(len(blocks), 3)
+        self.assertTrue(blocks[1].startswith("## H"))
+        ctx = _context_blocks("para\n\n  ## Indented\n\nbody text")
+        self.assertEqual(ctx[-1], ("Indented", "body text"))
+
     def test_pathological_unbroken(self) -> None:
         chunks = split_text("x" * 5000, chunk_tokens=100, overlap_tokens=10)
         self.assertGreater(len(chunks), 0)
@@ -2056,6 +2172,20 @@ class TestChunk(unittest.TestCase):
                              [t, term_variants(t)[1]], t)
             self.assertEqual(len(term_variants(t)), 2, t)
 
+    def test_stem_variants_invariant_mass_nouns(self) -> None:
+        """v0.2.572: 'news' is not a plural — dropping -s emitted 'new', a
+        live unrelated word that would inject high-frequency noise into
+        every "news" query's OR'd variant set. Invariant mass nouns keep
+        their spelling (unlike lookalikes 'views'->'view' which are real
+        plurals and must still bridge)."""
+        from shoin.search import _stem_variants
+
+        self.assertEqual(_stem_variants("news"), [])
+        self.assertEqual(_stem_variants("News"), [])
+        for t, want in (("views", "view"), ("shows", "show"),
+                        ("laws", "law"), ("means", "mean")):
+            self.assertIn(want, _stem_variants(t), t)
+
     def test_inflected_query_retrieves_base_doc(self) -> None:
         """e2e: every inflected query reaches its base-form doc."""
         s = Store(":memory:")
@@ -2069,6 +2199,38 @@ class TestChunk(unittest.TestCase):
                         ("quickly", "quick")):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any(frag in h.text for h in hits), q)
+
+    def test_short_numeric_expansion_keeps_like_fallback(self) -> None:
+        """v0.2.573: the early-return coverage check must count
+        _numeric_query_terms too — fts_query silently drops a short
+        expanded value ('五割'->'50', len<3), and a query whose CJK run is
+        FTS-covered otherwise returns early, leaving the numeric bridge's
+        own needle unrun."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["五割の回答者は賛成した",
+                              "50%が通過を決めた",   # no gram shared with the query
+                              "全員が反対した"])
+        hits = bm25_search(s, nb.id, "五割の回答者", 10)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
+        hits = bm25_search(s, nb.id, "五割", 10)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
+
+    def test_numeric_bridged_hit_not_clipped_as_term_free(self) -> None:
+        """v0.2.574: _norm_query_terms must include _numeric_query_terms —
+        a chunk surfaced only by the '五割'->'50' bridge shares no literal
+        query term, so rerank scored it lex=0.0 and _tail_cut dropped it
+        from retrieve() output as "term-free", exactly the hit the numeric
+        bridge exists to find."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+        s.add_chunks(src.id, ["五割の回答者は賛成した",
+                              "50%が通過を決めた",
+                              "全員が反対した"])
+        hits = retrieve(s, nb.id, "五割の回答者", None, 8)
+        self.assertTrue(any("50%が通過" in h.text for h in hits))
 
 
     def test_neg_filter_matches_variant_spellings(self) -> None:
@@ -2164,6 +2326,30 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(
             _overlap(_bigrams("\u3067\u30fc\u305f"), _bigrams("\u30c7\u30fc\u30bf")),
             0.9)
+
+
+    def test_match_fold_drops_stray_marks_and_stays_idempotent(self) -> None:
+        """v0.2.567: a combining mark that cannot compose into a base char
+        survived _match_fold verbatim — \u00e9+\u0301 folded to 'e'+\u0301,
+        not 'e'. Every folded comparison is two-sided, but a mark-carrying
+        fragment (NFD text, double accents, marks glued to non-letters) split
+        the fold of its neighbours: MMR counted it as diverse, PRF
+        doc-frequency split the term, dedup keys diverged, and the fold
+        itself was not even idempotent. Stray marks now drop like format
+        chars; spacing marks (Devanagari matra, combining class 0) are real
+        letters and stay."""
+        from shoin.chunk import _match_fold
+
+        self.assertEqual(_match_fold("\u00e9\u0301"), "e")
+        self.assertEqual(_match_fold("caf\u00e9"), _match_fold("cafe\u0301"))
+        self.assertEqual(_match_fold("\u30fb\u0301x"), "\u30fbx")
+        self.assertEqual(_match_fold("\u0915\u093f"), "\u0915\u093f")
+        for s in (
+            "\u30fb\u00b3\u00e9\u0301",
+            "\u0665Z \u5143\u5e74\uff70)\u00e9\u0301\u2010b",
+            "\u30c8\u3099\u30fb\u031b",
+        ):
+            self.assertEqual(_match_fold(_match_fold(s)), _match_fold(s))
 
 
     def test_numeric_check_folds_digit_rows(self) -> None:
@@ -2620,6 +2806,35 @@ class TestChunk(unittest.TestCase):
                 msg=f"non-tail chunk too small (5× penalty): {p!r:.40}",
             )
 
+    def test_hard_split_windows_respect_limit_on_mixed_density(self) -> None:
+        """_hard_split's character-window fallback must emit pieces whose own
+        token estimate fits the limit — not fixed-width char windows.
+
+        The old stride sized each window as `limit * avg_chars_per_token` of
+        the WHOLE part. On mixed-density unbroken text (a dense CJK pocket
+        inside mostly-ASCII prose) a window landing on the pocket produced a
+        chunk several times over the limit — one observed case emitted a
+        675-token chunk at limit=512. Fix: _window_split binary-searches the
+        longest prefix whose estimate fits (estimate is prefix-monotonic),
+        so every emitted piece is ≤ limit by construction.
+        """
+        from shoin.chunk import _hard_split
+
+        # One giant sentence (no terminators): ~800 cheap ASCII tokens worth
+        # of characters carrying a dense all-CJK pocket (~450 tokens).
+        block = ("abcdefghij " * 200) + ("書院日本語検索引用検証文書分割" * 30) + (
+            "klmnopqrst " * 200
+        )
+        self.assertGreater(estimate_tokens(block), 512, "pre-condition")
+        parts = _hard_split(block, 512)
+        self.assertGreater(len(parts), 1)
+        for p in parts:
+            self.assertLessEqual(
+                estimate_tokens(p),
+                512,
+                msg=f"window piece over token budget: {estimate_tokens(p)} tokens",
+            )
+
     def test_hard_split_zero_token_text_is_bounded(self) -> None:
         """_hard_split must split very long zero-token text (Arabic/Cyrillic/punctuation).
 
@@ -2854,6 +3069,25 @@ class TestIngest(unittest.TestCase):
         self.assertIn("Section 1", text)
         self.assertIn("Section 2", text, "content after the dangling <noscript> must not be lost")
 
+    def test_html_multiple_unclosed_skip_tags_do_not_swallow_rest(self) -> None:
+        """The closer-injection fix must balance EVERY unmatched open, not
+        just the last one: two (or more) unclosed <nav> still left
+        _skip_depth > 0 after one synthetic closer and swallowed the rest
+        of the document — the same silent-loss class the single-open fix
+        closed.  Checked on <nav> and <template> (independent entries in
+        _SKIP_TAG_BALANCE)."""
+        for tag in ("nav", "template"):
+            html = (
+                "<html><body><p>Before.</p>"
+                f"<{tag}><{tag}>nested menu"
+                "<p>After unclosed pair — must not be lost.</p></body></html>"
+            )
+            _, text = html_to_text(html)
+            self.assertIn(
+                "After unclosed pair", text,
+                f"two unclosed <{tag}> must not swallow the rest of the document",
+            )
+
     def test_html_unclosed_template_in_body_does_not_swallow_rest(self) -> None:
         """The same class of fix applied to <template>, the other skip-tag
         that (unlike <script>/<style>) is not a real CDATA content element
@@ -2932,6 +3166,51 @@ class TestIngest(unittest.TestCase):
         _, text = html_to_text(html)
         self.assertIn("本文", text)
         self.assertIn("SiteMenu", text)  # degradation keeps the boilerplate
+
+    def test_html_stray_endtag_does_not_unlock_unrelated_skip_element(self) -> None:
+        """A stray </nav> or </footer> inside a DIFFERENT unclosed skip
+        element must not release its suppression: the parser keeps open
+        elements as a stack, so an endtag only closes elements that are
+        actually open (pop-through to the match, ignored otherwise).
+        A bare decrement counter let "</nav>" unlock "<noscript>" or
+        "<form>", leaking everything the element was meant to hide."""
+        _, text = html_to_text("<p>pre</p><noscript></nav>SECRET_A</noscript><p>post</p>")
+        self.assertNotIn("SECRET_A", text)
+        self.assertIn("post", text)
+        _, text = html_to_text("<form>alpha</footer>SECRET_B</form><p>post</p>")
+        self.assertNotIn("SECRET_B", text)
+        self.assertIn("post", text)
+
+    def test_html_endtag_pop_through_implicitly_closes_nested_skip_elements(self) -> None:
+        """A real </nav> inside <nav><noscript> ends BOTH elements —
+        DOM semantics: an endtag implicitly closes the elements nested
+        inside its element. Keeping only the strict top-of-stack pop
+        would leave <noscript> open until its own closer arrives,
+        suppressing text the DOM puts after </nav>."""
+        _, text = html_to_text("<nav><noscript>inner</nav>AFTER</noscript><p>M</p>")
+        self.assertNotIn("inner", text)
+        self.assertIn("AFTER", text)
+        self.assertIn("M", text)
+
+    def test_html_closer_inside_comment_does_not_pair_real_opener(self) -> None:
+        """</nav> written inside a <!-- ... --> comment is comment text,
+        not a tag: it never fires at parse level. The neutralization pass
+        must apply the same liveness filter or it pairs a real unmatched
+        <nav> with an inert closer and skips injecting — leaving the nav
+        open to swallow the rest of the page."""
+        _, text = html_to_text("pre<nav>mid<!--</nav>-->post")
+        self.assertIn("pre", text)
+        self.assertIn("mid", text)
+        self.assertIn("post", text)
+
+    def test_html_closer_inside_attribute_junk_does_not_pair_real_opener(self) -> None:
+        """The same liveness rule applies inside an unterminated tag:
+        "</nav>" floating in <a href='x' ... > attribute junk is text the
+        parser never fires, so a real <nav> left open before it stays
+        unmatched — the neutralizer must inject its closer rather than
+        pairing the inert text and leaving the nav open to EOF."""
+        _, text = html_to_text("<nav>SECRET<a href='x'</nav>")
+        self.assertIn("SECRET", text)
 
     def test_html_semantic_tags_produce_newline_boundaries(self) -> None:
         """nav, aside, main, figure, figcaption, dd/dt must produce line breaks."""
@@ -3044,6 +3323,20 @@ class TestIngest(unittest.TestCase):
             "http://example.com:abc/x",
             "http://example.com:-1/x",
         ):
+            with self.assertRaises(IngestError) as cm:
+                validate_public_url(url)
+            self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
+
+    def test_ssrf_unclosed_bracket_blocked(self) -> None:
+        """An unclosed/misplaced IPv6 bracket must raise INGEST_URL_BLOCKED.
+
+        urlparse validates bracketed hosts eagerly: 'http://[::1' raises a
+        bare ValueError inside urlparse itself — before the lazy .port check
+        below — so it escaped the coded-error path entirely and surfaced as
+        HTTP 500 SYSTEM_INTERNAL_ERROR / a raw traceback in `shoin add`
+        (the same 400-vs-500 defect class as the .port fix above and the
+        zone-scoped IPv6 fix, v0.2.45)."""
+        for url in ("http://[::1", "http://]x[/"):
             with self.assertRaises(IngestError) as cm:
                 validate_public_url(url)
             self.assertEqual(cm.exception.code, "INGEST_URL_BLOCKED")
@@ -3526,6 +3819,24 @@ class TestIngest(unittest.TestCase):
         self.assertIsNone(_charset_from_ctype("text/html"))
         self.assertIsNone(_charset_from_ctype("application/json"))
 
+    def test_decode_malformed_charset_hint_falls_through(self) -> None:
+        """A malformed charset hint must degrade to the default chain.
+
+        A charset parameter containing an embedded NUL is reachable from a
+        hostile server's Content-Type header. Codec lookup for such a name
+        raises ValueError("embedded null character") — not the LookupError of
+        an unknown-but-wellformed name — so it escaped the candidate loop and
+        crashed extract_url with a 500-class error. The loop now degrades any
+        ValueError/LookupError to the next candidate."""
+        from shoin.ingest import _decode
+
+        data = "héllo".encode()
+        self.assertEqual(_decode(data, "\x00utf-8"), "héllo")
+        # Non-string control chars anywhere in the hint must not escape either.
+        self.assertEqual(_decode(data, "utf-8\x00"), "héllo")
+        # A normal unknown name still degrades via LookupError as before.
+        self.assertEqual(_decode(data, "bogus-charset-name"), "héllo")
+
     def test_pdf_to_text_parse_error_raises_ingest_error(self) -> None:
         """Corrupt PDF bytes must raise INGEST_PARSE_FAILED, not a bare exception."""
         from shoin.ingest import IngestError, pdf_to_text
@@ -3575,6 +3886,51 @@ class TestIngest(unittest.TestCase):
         # v0.2.256: the failure is COUNTED, not just tolerated — callers must
         # be able to warn that the index holds less than the document.
         self.assertEqual(pages_failed, 1)
+
+    def test_pdf_to_text_page_object_access_failure_skips_only_that_page(self) -> None:
+        """v0.2.587: pypdf resolves page objects lazily — reader.pages[i] can
+        raise (corrupt xref) before extract_text() runs. An iterator would
+        abort the whole document at that page; index iteration must skip only
+        the bad page, and an unenumerable page list maps to INGEST_PARSE_FAILED.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from shoin.ingest import IngestError, pdf_to_text
+
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+
+        good = MagicMock()
+        good.extract_text.return_value = "recoverable text on a good page"
+
+        class FlakyPages:
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, i: int) -> object:
+                if i == 0:
+                    raise ValueError("corrupt xref entry for page object")
+                return good
+
+        fake_reader = MagicMock()
+        fake_reader.pages = FlakyPages()
+        with patch("pypdf.PdfReader", return_value=fake_reader):
+            text, pages_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertIn("recoverable text on a good page", text)
+        self.assertEqual(pages_failed, 1)
+
+        class UnenumerablePages:
+            def __len__(self) -> int:
+                raise ValueError("cannot read /Pages /Count")
+
+        fake_reader2 = MagicMock()
+        fake_reader2.pages = UnenumerablePages()
+        with patch("pypdf.PdfReader", return_value=fake_reader2):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_PARSE_FAILED")
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
@@ -4131,7 +4487,13 @@ class TestSearch(unittest.TestCase):
         hot path _cosine_with_norms truncated the dot product at the shorter
         vector — a 1024-dim query against 768-dim stored embeddings (user
         switched SHOIN_EMBED_MODEL without reindexing) fabricated a plausible
-        score from the leading dims instead of degrading to 0.0."""
+        score from the leading dims instead of degrading to 0.0.
+
+        v0.2.556 deepened the contract: a mismatched leg no longer emits
+        zero-scored rows at all — every row was 0.0, so nlargest() was filling
+        its k slots with row-order-arbitrary chunks that then held real RRF
+        rank positions in fusion. Only positive cosines take rank slots now;
+        an all-zero leg is the documented BM25-only degraded mode."""
         from shoin.search import vector_search
 
         with make_store() as s:
@@ -4139,8 +4501,50 @@ class TestSearch(unittest.TestCase):
             chunk = s.chunks_for_notebook(nb_id)[0]
             s.set_embedding(chunk.id, [1.0, 0.0])
             hits = vector_search(s, nb_id, [0.9, 0.1, -100.0], k=5)
+            self.assertEqual(hits, [])
+
+    def test_vector_search_drops_nonpositive_cosines(self) -> None:
+        """v0.2.556: nlargest() fills k slots from any rows it is given — a
+        leg whose every cosine is <= 0 (orthogonal, anti-correlated, or
+        unscorable) used to return row-order chunks that fusion then ranked
+        as real vector hits. Only a positive cosine may hold a rank slot."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            s.set_embedding(chunks[0].id, [1.0, 0.0])   # cosine +1.0
+            s.set_embedding(chunks[1].id, [0.0, 1.0])   # cosine  0.0
+            s.set_embedding(chunks[2].id, [-1.0, 0.0])  # cosine -1.0
+            hits = vector_search(s, nb_id, [1.0, 0.0], k=5)
+            self.assertEqual([h.chunk_id for h in hits], [chunks[0].id])
+
+    def test_dim_mismatched_leg_injects_no_rows_into_retrieve(self) -> None:
+        """v0.2.556 (e2e): a chunk whose embedding cannot score — wrong
+        dimension vs the query vector — used to reach the final result list
+        anyway, because nlargest() handed it a vector rank slot and RRF
+        fusion promoted it. Every returned hit must carry real evidence from
+        at least one leg (bm25 > 0 or vec > 0); a hit with neither signal
+        is the arbitrary-row noise this fix removes."""
+        with make_store() as s:
+            nb_id = seed(s)
+            # A chunk whose text does NOT match the query term — its only path
+            # into the results is a fabricated vector rank.
+            chunk = next(
+                c for c in s.chunks_for_notebook(nb_id) if "書斎" not in c.text
+            )
+            s.set_embedding(chunk.id, [1.0, 0.0])  # 2-dim stored vs 3-dim query
+            hits = retrieve(s, nb_id, "書斎とは", query_vec=[0.9, 0.1, -100.0], k=8)
             self.assertTrue(hits)
-            self.assertEqual(hits[0].vec, 0.0)
+            self.assertNotIn(
+                chunk.id, [h.chunk_id for h in hits],
+                "dimension-mismatched chunk surfaced in retrieve() — "
+                "the dead vector leg injected an arbitrary row",
+            )
+            self.assertTrue(
+                all(h.bm25 > 0.0 or h.vec > 0.0 for h in hits),
+                "a hit reached the result list with zero evidence from both legs",
+            )
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""
@@ -4590,6 +4994,32 @@ class TestSearch(unittest.TestCase):
         self.assertNotIn("学問", terms)
         self.assertNotIn("問所", terms)
         self.assertEqual(terms, [], "every df>=2 gram is already in the query")
+
+    def test_prf_expansion_never_evicts_first_pass_hits(self) -> None:
+        """v0.2.613: PRF may only ADD recall. When the expanded pass produces
+        more than the head-room below k, a [:k] slice of the re-sorted union
+        would evict first-pass hits — chunks that matched the user's own
+        terms — for chunks matching only system-proposed grams.  Extras are
+        capped at k - len(hits) instead."""
+        from shoin.search import bm25_prf_search
+
+        with make_store() as s:
+            nb_id = s.create_notebook("prf-evict").id
+            a1 = s.add_source(nb_id, "txt", "a1", "mem://a1", "sha-a1")
+            s.add_chunks(a1.id, ["検索エンジンのシステム構成。"])
+            a2 = s.add_source(nb_id, "txt", "a2", "mem://a2", "sha-a2")
+            s.add_chunks(a2.id, ["検索のシステム性能を測る。"])
+            for i in range(6):
+                b = s.add_source(nb_id, "txt", f"b{i}", f"mem://b{i}", f"sha-b{i}")
+                s.add_chunks(b.id, ["システム システム システム システム システム。"])
+
+            base = bm25_search(s, nb_id, "検索", k=4)
+            self.assertEqual(len(base), 2)
+            hits = bm25_prf_search(s, nb_id, "検索", k=4)
+            got = {h.chunk_id for h in hits}
+            self.assertTrue({h.chunk_id for h in base} <= got,
+                            "expansion hits must fill head-room only, never evict")
+            self.assertLessEqual(len(hits), 4)
 
     # --- term proximity (v0.2.183) -------------------------------------------
 
@@ -5195,6 +5625,26 @@ class TestTailCut(unittest.TestCase):
             primary_hit = [h for h in hits if "書院" in h.text]
             self.assertTrue(primary_hit)
             self.assertFalse(any(h.detail.get("exp") for h in primary_hit))
+
+    def test_retrieve_multi_marks_rewrite_vector_hits_exp(self) -> None:
+        """The rewrite's VECTOR lane gets the same exp mark as its BM25 lane:
+        a chunk surfaced only by the rewrite's embedding shares no term with
+        the primary query by design — lex==0 there is multi-query recall, not
+        a term-free tail for _tail_cut to clip."""
+        from shoin.search import retrieve_multi
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "a", "o", "sha")
+            s.add_chunks(a.id, ["書院は近世日本の学問所である。"])
+            b = s.add_source(nb.id, "txt", "b", "o2", "sha2")
+            ids_b = s.add_chunks(b.id, ["素読と会読で経書を暗唱する授業形態。"])
+            # The rewrite vector reaches the term-disjoint chunk only.
+            s.set_embedding(ids_b[0], [1.0, 0.0])
+            hits = retrieve_multi(s, nb.id, ["書院", "儒学"], [None, [1.0, 0.0]])
+            vec_only = [h for h in hits if "素読" in h.text]
+            self.assertTrue(vec_only)
+            self.assertTrue(all(h.detail.get("exp") for h in vec_only))
 
     def test_retrieve_drops_vector_tail(self) -> None:
         """End-to-end via the vector list: semantically-near chunks sharing
@@ -6092,6 +6542,62 @@ class TestCitation(unittest.TestCase):
         self.assertEqual(_bigrams("ab "), {"ab"}, "trailing whitespace stripped before bigram")
 
 
+    def test_verify_grounding_twice_cited_number_keeps_every_occurrence(self) -> None:
+        """A source cited twice in one sentence is judged on EACH clause it
+        annotates — the earlier clause must not be overwritten by the later
+        marker's, or a correct citation can be accused (and its confirmed
+        mark lost) while the failing occurrence alone is what should flag."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "りんごは赤い果物であり、甘みが強い。",
+            2: "空は青く広がっており、雲が浮かぶ。",
+        }
+        text = "りんごは赤い果物である[S1]、そして空は青く広がっている[S2,S1]。"
+        confirmed, misattributed = verify_grounding(text, sources)
+        # First S1 occurrence correctly cites the apple clause -> confirmed.
+        # Second S1 occurrence (inside [S2,S1]) claims the sky clause lives
+        # in S1 -> that occurrence is genuinely misattributed.
+        self.assertEqual(confirmed, [1, 2])
+        self.assertEqual(misattributed, [1])
+
+    def test_verify_grounding_lead_marker_keeps_later_occurrences(self) -> None:
+        """A number that is BOTH a leading backward marker and a later
+        in-fragment marker ("prev. [S1] B [S1]") is judged on EACH claim:
+        the lead occurrence cites the previous clause while the trailing
+        marker's own segment must still be evaluated — the earlier code
+        short-circuited on `n in lead` and never saw the B-occurrence,
+        so a misattribution inside it stayed invisible (false silence)."""
+        from shoin.citation import verify_grounding
+
+        sources = {
+            1: "りんごは赤い果物であり、甘みが強い。",
+            2: "空は青く広がっており、雲が浮かぶ。",
+        }
+        # One fragment (comma-joined, no sentence boundary): S1 leads
+        # (backward-bound to the apple clause) AND trails the sky clause.
+        confirmed, misattributed = verify_grounding(
+            "りんごは赤い果物である。[S1] 空は青く広がっており雲が浮かぶとされる[S1]、",
+            sources,
+        )
+        self.assertEqual(confirmed, [1])
+        self.assertEqual(misattributed, [1])
+
+    def test_forward_idiom_with_space_binds_own_clause(self) -> None:
+        """"[S1] によると…" (space before the idiom) binds the marker to its
+        own fragment's clause. Without whitespace tolerance the marker is
+        attributed to the PREVIOUS claim — which then misattributes when a
+        different source matches that claim — while the bound clause goes
+        unchecked: the v0.2.576 double-inversion under a one-byte shape."""
+        from shoin.citation import verify_grounding
+
+        sources = {1: "結果は良好だった。", 2: "別の主張の内容である。"}
+        confirmed, misattributed = verify_grounding(
+            "別の主張の内容である。[S1] によると結果は良好だった。", sources
+        )
+        self.assertEqual(confirmed, [1])
+        self.assertEqual(misattributed, [])
+
 class TestNumericMismatches(unittest.TestCase):
     """numeric_mismatches() (v0.2.184): a cited claim asserting a number the
     source never contains — the fabricated-statistic failure shape the
@@ -6102,6 +6608,20 @@ class TestNumericMismatches(unittest.TestCase):
 
         text = "採用率は37%だった。[S1]"
         self.assertEqual(numeric_mismatches(text, {1: "採用率は63%だった。"}), [1])
+
+    def test_lead_marker_keeps_later_occurrences(self) -> None:
+        """Same lead+trailing shape as the grounding pin, numeric side: the
+        number's later occurrence carries its own segment — the fabricated
+        price inside it must flag even though the lead claim was clean."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches(
+                "りんごは赤い果物である。[S1] 価格は999円である[S1]、",
+                {1: "りんごは赤い果物である。価格は100円である。"},
+            ),
+            [1],
+        )
 
     def test_no_flag_when_number_present(self) -> None:
         from shoin.citation import numeric_mismatches
@@ -6123,6 +6643,16 @@ class TestNumericMismatches(unittest.TestCase):
         src = "導入数は1234件だった。"
         self.assertEqual(numeric_mismatches("導入数は1,234件だった。[S1]", {1: src}), [])
         self.assertEqual(numeric_mismatches("導入数は１２３４件だった。[S1]", {1: src}), [])
+
+    def test_positional_kanji_numeral_matches_digit_claim(self) -> None:
+        """v0.2.568: '一万二千三百四十五' asserts 12345 — the suffix-pair
+        chain dropped a token's unsuffixed tail group and registered the
+        truncated prefix (12000), so a correct digit restatement was
+        flagged. Positional tokens now sum every group."""
+        from shoin.citation import numeric_mismatches
+
+        src = "総額は一万二千三百四十五円だった。"
+        self.assertEqual(numeric_mismatches("総額は12345円だった。[S1]", {1: src}), [])
 
     def test_clause_level_attribution(self) -> None:
         """Co-cited sentence: only the citation whose clause carries the absent
@@ -6393,6 +6923,44 @@ class TestNumericMismatches(unittest.TestCase):
             [1],
         )
 
+    def test_enumerated_durations_do_not_sum(self) -> None:
+        """v0.2.570: '1時間、30分' lists two durations — the enumeration
+        separator must break the same-family chain.  Summing it registered
+        (time, 90) the source never asserted, so a claim saying '90分' was
+        suppressed instead of flagged.  Only whitespace and the additive
+        conjunction 'と' may join a chain."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches("合計は90分だった。[S1]", {1: "所要は1時間、30分だった。"}),
+            [1],
+        )
+        self.assertEqual(
+            numeric_mismatches("合計は105分だった。[S1]", {1: "所要は1時間、45分だった。"}),
+            [1],
+        )
+        # additive join still sums
+        self.assertEqual(
+            numeric_mismatches("合計は90分だった。[S1]", {1: "所要は1時間と30分だった。"}),
+            [],
+        )
+
+    def test_enumerated_english_numerals_do_not_sum(self) -> None:
+        """v0.2.571: source 'seven eight nine' lists values, not the
+        numeral 24 — a claim asserting '24' must still flag (claims check
+        only multi-digit strings, so '3'/'17' are untestable here)."""
+        from shoin.citation import numeric_mismatches
+
+        self.assertEqual(
+            numeric_mismatches("The count was 24 items.[S1]", {1: "seven eight nine rows"}),
+            [1],
+        )
+        # a true tens+unit spelling still suppresses
+        self.assertEqual(
+            numeric_mismatches("The count was 25 items.[S1]", {1: "there were twenty five"}),
+            [],
+        )
+
     def test_chained_magnitudes_sum(self) -> None:
         """"1億2000万" = 120,000,000 — chained suffixes sum to the canonical
         value, so a claim spelling it out no longer false-flags (v0.2.194)."""
@@ -6475,6 +7043,16 @@ class TestNumericMismatches(unittest.TestCase):
             [1],
         )
 
+
+    def test_twice_cited_number_first_clause_numbers_still_checked(self) -> None:
+        """When a source is cited twice in one sentence, numbers in the FIRST
+        cited clause are still checked — attribution must keep every marker
+        occurrence, not just the last."""
+        from shoin.citation import numeric_mismatches
+
+        sources = {1: "りんごは果物である。", 2: "空は青い。"}
+        text = "りんごの価格は987円である[S1]、空は青い[S2,S1]。"
+        self.assertIn(1, numeric_mismatches(text, sources))
 
 class TestUnitMismatches(unittest.TestCase):
     """unit_mismatches() (v0.2.190): a cited claim asserting a number the source
@@ -7058,6 +7636,35 @@ class TestSelfContradictions(unittest.TestCase):
         self.assertEqual(self_contradictions("治療の効果はない。"), [])
 
 
+    def test_single_digit_position_number_swap_flags(self) -> None:
+        """difflib minimises the differing opcode to the changed characters,
+        so "50%"→"30%" yields span "5"→"3" — the numeric check must compare
+        whole-sentence number sets or every one-digit-position swap inside a
+        longer number stays silent."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("効果は50%だった。効果は30%だった。"),
+            ["効果は30%だった。"],
+        )
+        self.assertEqual(
+            self_contradictions("売上は120億だった。売上は125億だった。"),
+            ["売上は125億だった。"],
+        )
+
+    def test_single_digit_only_swap_stays_silent(self) -> None:
+        """The single-digit significance rule survives whole-sentence
+        comparison — "第3版"→"第4版" asserts values the check deliberately
+        treats as ambiguous."""
+        from shoin.citation import self_contradictions
+
+        self.assertEqual(
+            self_contradictions("第3版が使われた。第4版が使われた。"), []
+        )
+        self.assertEqual(
+            self_contradictions("効果は3.2万だった。効果は32000だった。"), []
+        )
+
 class TestDegenerateSpans(unittest.TestCase):
     """degenerate_spans() (v0.2.188): verbatim repetition signalling an LLM
     degeneration loop — the failure shape small local models are prone to and
@@ -7606,6 +8213,218 @@ class TestUncitedSentences(unittest.TestCase):
         self.assertTrue(answer.degraded)
         self.assertNotIn("uncited", answer.report)
 
+    def test_indented_fence_marker_is_code_not_a_fence(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A ``` line indented 4+ spaces inside an indented code block is code
+        # content, not a fence (CommonMark: fences allow 0-3 leading spaces).
+        # Treating it as one flipped in_fence and swallowed every later claim.
+        text = "説明はここにある。\n\n    x = 1\n    ```\n根拠のない断定をする。\n"
+        self.assertTrue(any("根拠のない断定" in s for s in uncited_sentences(text)))
+
+    def test_strip_fences_keeps_prose_after_indented_fence(self) -> None:
+        from shoin.citation import _strip_fences
+
+        # Same boundary, the shared stripper: the indented ``` line is part of
+        # the indented block, so the prose following it must stay visible.
+        text = "claim one。\n\n    code:\n    ```\nclaim two。\n"
+        self.assertIn("claim two", _strip_fences(text))
+
+    def test_strip_fences_still_hides_real_fences(self) -> None:
+        from shoin.citation import _strip_fences
+
+        for sp in range(4):  # 0-3 leading spaces remain valid fences
+            text = "prose。\n" + " " * sp + "```\nhidden code\n```\n"
+            self.assertNotIn("hidden code", _strip_fences(text))
+    def test_leading_marker_resolves_the_previous_sentence(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "claim. [S1] next." splits into "claim." + "[S1] next." — the
+        # fragment-leading marker trails the previous claim (the same
+        # backward convention _segment_claims uses), so only the truly
+        # markerless claim is flagged.
+        self.assertEqual(
+            uncited_sentences("第一主張はここに。[S1] 第二主張はここに。"),
+            ["第二主張はここに。"],
+        )
+        self.assertEqual(
+            uncited_sentences("第一主張はここに。[S1] 第二主張はここに。[S2]"),
+            [],
+        )
+
+    def test_forward_bound_marker_keeps_its_own_fragment(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "[S1]によるとX" binds the marker to its own fragment's claim —
+        # nothing to flag.
+        self.assertEqual(
+            uncited_sentences("[S1]によると、報告は正しいと述べている。"),
+            [],
+        )
+
+    def test_leading_marker_run_resolves_previous_claim(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A run of adjacent leading markers all trail the previous sentence.
+        self.assertEqual(
+            uncited_sentences("前置きの主張文。[S1][S2] 二番目の断言。"),
+            ["二番目の断言。"],
+        )
+    def test_verify_grounding_attributes_leading_markers_backward(self) -> None:
+        from shoin.citation import verify_grounding
+
+        # "A. [S1] B. [S2]" — each marker trails the claim before it, the
+        # convention _segment_claims already encodes inside a fragment. A
+        # marker leading its own fragment ("[S1] B.") must not be judged
+        # against that fragment's claim: S1's claim is A.
+        conf, mis = verify_grounding(
+            "apples are red。[S1] bananas are yellow。[S2]",
+            {1: "apples are red and round", 2: "bananas are yellow fruits"},
+        )
+        self.assertEqual(conf, [1, 2])
+        self.assertEqual(mis, [])
+
+    def test_numeric_mismatches_attributes_leading_markers_backward(self) -> None:
+        from shoin.citation import numeric_mismatches
+
+        # Same convention on the numeric side: S1 must be checked against
+        # claim A's digits, not claim B's — otherwise B's number falsely
+        # flags S1 as absent-from-source.
+        self.assertEqual(
+            numeric_mismatches(
+                "参加者は100人だった。[S1] 売上は200万円だ。[S2]",
+                {1: "参加者は100人だったと報告", 2: "売上は200万円の見通し"},
+            ),
+            [],
+        )
+    def test_mid_fragment_marker_leaves_its_tail_uncited(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A marker owns only the claim segment BEFORE it — text after the
+        # LAST marker in a fragment is a fresh claim surface, so
+        # "claimA [S1] claimB" must flag claimB the same way a
+        # fragment-leading marker's tail does.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、バナナは黄色い。"),
+            ["バナナは黄色い。"],
+        )
+
+    def test_trailing_tail_is_resolved_by_a_later_citation(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # The uncovered tail pends like any claim — a trailing citation-only
+        # fragment still resolves it.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、バナナは黄色い。[S2]"),
+            [],
+        )
+
+    def test_forward_bound_run_covers_its_tail(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "[S1]によると…" binds forward — it cites the text after the run,
+        # NOT the claim it trails, so the prior claim is still uncited; the
+        # bound text itself is covered (a later [S2] trailer stays silent).
+        self.assertEqual(
+            uncited_sentences("先行情報だ。[S1]によると中間文だ。[S2]"),
+            ["先行情報だ。"],
+        )
+        self.assertEqual(
+            uncited_sentences("先行情報だ。[S1]によれば中間文だ。"),
+            ["先行情報だ。"],
+        )
+    def test_disclaimer_negation_shapes_stay_silent(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # "not in the source" said the way LLMs actually write it — these are
+        # the correct response to missing information, not uncovered claims.
+        for t in (
+            "ソースに記載がありません。",
+            "詳細な記載はありません。",
+            "言及がありません。",
+            "記述されていません。",
+            "情報がありません。",
+            "明記されていません。",
+            "確認できません。",
+            "The source does not mention it.",
+            "No information is available.",
+        ):
+            self.assertEqual(uncited_sentences(t), [], t)
+
+    def test_negation_claims_without_domain_noun_still_flag(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # The disclaimer stems require a document-domain noun (記載/言及/記述
+        # etc.) — a plain negation claim keeps flagging.
+        for t in ("効果はありません。", "問題はありません。", "結果は変わりませんでした。"):
+            self.assertNotEqual(uncited_sentences(t), [], t)
+
+    def test_disclaimer_tail_after_citation_stays_silent(self) -> None:
+        from shoin.citation import uncited_sentences
+
+        # A disclaimer as the uncovered tail of a cited fragment is still a
+        # disclaimer — the tail evaluation must not turn it into a claim.
+        self.assertEqual(
+            uncited_sentences("林檎は赤い[S1]、ソースに記載がありません。"),
+            [],
+        )
+
+    def test_forward_idiom_with_whitespace_stays_cited(self) -> None:
+        """A space (or tab, or full-width space) between the marker and the
+        forward idiom must not break the bind — "[S1] によると…" cites its
+        own fragment's claim exactly like "[S1]によると…". Without whitespace
+        tolerance the bound claim is double-inverted: the marker resolves a
+        pending claim it does not cite and the bound claim is flagged uncited.
+        """
+        from shoin.citation import uncited_sentences
+
+        for text in (
+            "[S1] によると結果は良好だった。",
+            "[S1]\tによると結果は良好だった。",
+            "[S1]　によると結果は良好だった。",
+            "[S1,S2] によると結果は良好だった。",
+            "[S1] によれば結果は良好だった。",
+            "[S1] では結果は良好だった。",
+        ):
+            self.assertEqual(uncited_sentences(text), [], text)
+
+    def test_forward_idiom_punctuation_stays_backward(self) -> None:
+        """Punctuation between the marker and the idiom is a pause, not the
+        idiom — the backward convention still applies and the tail is judged
+        on its own."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(
+            uncited_sentences("前提文。[S1]、次の主張です。"), ["、次の主張です。"]
+        )
+
+    def test_mid_fragment_forward_idiom_tail_stays_silent(self) -> None:
+        """A mid-fragment marker followed by the forward idiom ("A [S1]によると
+        B") binds the tail just like the leading-run case — flagging the bound
+        claim would accuse cited text. Whether the marker then ALSO covers the
+        pre-segment is ambiguous, so the fragment stays silent."""
+        from shoin.citation import uncited_sentences
+
+        for text in (
+            "根拠のない主張がある[S1]によると結果は良好だった。",
+            "根拠ある文[S2][S1]によると結果は良好だった。",
+            "文Aがある[S1,S2]によると文Bがある。",
+        ):
+            self.assertEqual(uncited_sentences(text), [], text)
+
+    def test_tail_after_forward_bound_segment_still_flags(self) -> None:
+        """Silence is scoped to the bound tail — a genuinely uncovered claim
+        after the idiom-bound text still flags."""
+        from shoin.citation import uncited_sentences
+
+        self.assertEqual(
+            uncited_sentences("文A[S1]によると文Bがある。別の主張もある。"),
+            ["別の主張もある。"],
+        )
+        # And the plain mid-fragment marker keeps its tail-flagging rule.
+        self.assertEqual(
+            uncited_sentences("文Aがある[S1]別の主張がある。"), ["別の主張がある。"]
+        )
 
 class TestStoreChunksForSource(unittest.TestCase):
     def test_chunks_for_source_returns_correct_chunks(self) -> None:
@@ -7680,6 +8499,26 @@ class TestLLMClient(unittest.TestCase):
         with self.assertRaises(LLMError) as cm:
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+
+    def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
+        """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
+        Request() itself raise ValueError via urlsplit — BEFORE urlopen runs.
+        available() already keeps construction inside its try; _post() and
+        chat_stream() must do the same or a plausible config typo crashes
+        chat/chat_stream/embed with a raw ValueError past every LLMError
+        handler (CLI traceback, server generic-500 path)."""
+        from shoin.llm import LLMClient, LLMError
+
+        client = LLMClient(base_url="http://[::1:11434/v1")
+        calls = (
+            lambda: client.chat([{"role": "user", "content": "hi"}]),
+            lambda: next(client.chat_stream([{"role": "user", "content": "hi"}])),
+            lambda: client.embed_one("x"),
+        )
+        for call in calls:
+            with self.assertRaises(LLMError) as cm:
+                call()
+            self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
     def test_chat_sends_max_tokens_bound(self) -> None:
         """chat() must bound generation with max_tokens (v0.2.219): without it
@@ -7763,6 +8602,52 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(_chat_with("stop").last_finish_reason, "stop")
         self.assertIsNone(_chat_with(None).last_finish_reason)
 
+    def test_llm_drops_lone_surrogates_from_outputs(self) -> None:
+        """json.loads materializes *lone* surrogates from \\ud800 escapes a
+        buggy endpoint or proxy can emit (valid pairs are already combined
+        by the decoder). One reaching a sqlite bind or an ensure_ascii=False
+        response encode escapes as a raw UnicodeEncodeError — and text cached
+        or persisted first (questions_cache, messages, studio_outputs)
+        re-crashes on every later read. Both output boundaries must strip
+        them; real astral characters pass through untouched."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        def _chat_with(content):
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read.return_value = _json.dumps(
+                {"choices": [{"message": {"content": content}}]}
+            ).encode()
+            with patch("urllib.request.urlopen", return_value=resp):
+                return LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+
+        self.assertEqual(_chat_with("a\ud800b"), "ab")
+        self.assertEqual(_chat_with([{"type": "text", "text": "p\udc00q"}]), "pq")
+        self.assertEqual(_chat_with("x\U0001F600y"), "x\U0001F600y")
+
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"s\\ud800t"}}]}',
+            b'data: {"choices":[{"delta":{"content":"\\ud800"}}]}',
+            b"data: [DONE]",
+        ])
+        with patch("urllib.request.urlopen", return_value=resp):
+            got = list(
+                LLMClient(base_url="http://localhost:11434/v1").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                )
+            )
+        # Lone units are stripped; a surrogate-only delta yields no token.
+        self.assertEqual(got, ["st"])
+
     def test_chat_stream_records_finish_reason(self) -> None:
         """chat_stream() must capture finish_reason from the final SSE chunk —
         the /ask SSE path generates through this method (v0.2.245)."""
@@ -7776,6 +8661,31 @@ class TestLLMClient(unittest.TestCase):
         mock_resp.__iter__ = lambda s: iter([
             b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}',
             b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            b"data: [DONE]",
+        ])
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertEqual(
+                list(client.chat_stream([{"role": "user", "content": "hi"}])), ["x"]
+            )
+        self.assertEqual(client.last_finish_reason, "length")
+
+    def test_chat_stream_records_finish_reason_without_delta_key(self) -> None:
+        """A final chunk may carry finish_reason with no "delta" key at all —
+        spec-legal shorthand some compatible servers emit. The truncation
+        signal must not hinge on an unrelated field's presence: previously the
+        delta read raised KeyError→continue first and the finish_reason was
+        silently dropped, so a max_tokens-clipped answer looked complete."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"x"}}]}',
+            b'data: {"choices":[{"finish_reason":"length"}]}',
             b"data: [DONE]",
         ])
         client = LLMClient(base_url="http://localhost:11434/v1")
@@ -8006,6 +8916,65 @@ class TestLLMClient(unittest.TestCase):
         self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
         self.assertLessEqual(fake_body.max_read, 300)
 
+    def test_post_deeply_nested_json_raises_llmerror(self) -> None:
+        """A deeply nested JSON body must map to SYSTEM_LLM_BAD_RESPONSE.
+
+        json.loads raises RecursionError — not JSONDecodeError — when the body
+        exceeds the decoder's recursion budget (~5k-deep nesting, trivially
+        emitted by a hostile/buggy endpoint). It escaped every coded catch and
+        surfaced as a 500-class error at request paths. _post now treats it as
+        the same malformed-response signal as JSONDecodeError."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        deep = ("[" * 10000 + "]" * 10000).encode()
+
+        class _DeepResp(io.BytesIO):
+            def __enter__(self) -> _DeepResp:
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+        with patch("urllib.request.urlopen", return_value=_DeepResp(deep)):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_chat_stream_deeply_nested_frame_is_dropped(self) -> None:
+        """A deeply nested SSE frame must be dropped, not abort the stream.
+
+        Same RecursionError class as _post: a hostile/buggy endpoint can emit
+        a data: line whose payload exceeds json.loads' recursion budget. The
+        malformed-frame contract is drop-and-continue — a single bad delta
+        must not kill the stream mid-flight (the frame parse errors already
+        covered: JSONDecodeError/KeyError/IndexError/TypeError)."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        deep = "[" * 10000 + "]" * 10000
+
+        class _DeepStreamResp:
+            def __enter__(self) -> _DeepStreamResp:
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+            def __iter__(self):  # type: ignore[override]
+                yield f"data: {deep}\n".encode()
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n'
+                yield b"data: [DONE]\n"
+
+        with patch("urllib.request.urlopen", return_value=_DeepStreamResp()):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            out = list(client.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(out, ["ok"])
+
     def test_embed_non_dict_data_items_raise_llmerror(self) -> None:
         """embed() must convert AttributeError from non-dict items in response['data']
         to LLMError('SYSTEM_LLM_BAD_RESPONSE'), not propagate AttributeError.
@@ -8221,6 +9190,82 @@ class TestServerSSE(unittest.TestCase):
             self.assertEqual(msgs[1]["body"], "")
         finally:
             os.unlink(db_path)
+
+    def test_sse_frame_ascii_encodes_surrogate_payloads(self) -> None:
+        """v0.2.610: _sse() must emit an ASCII-only wire even when a payload
+        string carries a lone surrogate.
+
+        Reachability is real, not hypothetical: rows written before the field
+        gates landed (v0.2.430 server fields / v0.2.609 store writes) can
+        contain lone surrogates — an old notebook name echoed into a `meta`
+        frame's sources, or an old assistant message echoed into the report's
+        degenerate/self_contradiction snippets. The `done`/`meta` sends catch
+        only ConnectionError, so a UnicodeEncodeError from `.encode()`
+        escaped to _dispatch's 500 writer — a second HTTP status line
+        injected into the already-committed SSE body. ensure_ascii=True
+        encodes the surrogate as a \\ud800 escape instead; the client's
+        JSON.parse restores the (display-garbled but harmless) char."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        written: list[bytes] = []
+
+        class _W:
+            def write(self, b: bytes) -> int:
+                written.append(b)
+                return len(b)
+
+            def flush(self) -> None:
+                pass
+
+        handler.wfile = _W()  # type: ignore[assignment]
+        handler._sse("done", {"report": {"uncited": ["a\ud800b"]}})
+        body = written[0]
+        body.decode("ascii")  # any raw non-ASCII byte would raise here
+        self.assertIn(b"\\ud800", body)
+
+    def test_json_response_survives_surrogate_payloads(self) -> None:
+        """v0.2.614: _json() must emit an encodable body even when a payload
+        string carries a lone surrogate.
+
+        Reachability: payload fields outside every store-bind gate — a custom
+        ChatBackend's LLMError message or `model` name (the make_server(llm=...)
+        extension point), an LLM-derived snippet materialized back out of a
+        stored citation_report blob by _safe_report — reach _json()'s
+        ensure_ascii=False fast path, whose strict UTF-8 encode rejects lone
+        surrogates. On the success path that propagates to _dispatch's 500
+        writer (survivable); on the error-envelope path (_error/_safe_error)
+        the crash escapes _safe_error's socket-error-only except list — the
+        request dies with no HTTP response at all, not even the coded 500.
+        The ensure_ascii fallback escapes the surrogate as \\ud800 instead;
+        the client's JSON.parse restores it."""
+        from shoin.server import _Handler
+
+        handler = _Handler.__new__(_Handler)
+        written: list[bytes] = []
+
+        class _W:
+            def write(self, b: bytes) -> int:
+                written.append(b)
+                return len(b)
+
+            def flush(self) -> None:
+                pass
+
+        handler.wfile = _W()  # type: ignore[assignment]
+        handler.send_response = lambda *a, **k: None  # type: ignore[method-assign]
+        handler.send_header = lambda *a, **k: None  # type: ignore[method-assign]
+        handler.end_headers = lambda: None  # type: ignore[method-assign]
+        handler._json(
+            {"error": {"code": "LLM_UPSTREAM", "message": "bad \ud800 token"}}
+        )
+        body = written[0]
+        body.decode("ascii")  # fallback body is ASCII-pure
+        self.assertIn(b"\\ud800", body)
+        # The escaped surrogate still round-trips back to the same payload.
+        self.assertEqual(
+            json.loads(body)["error"]["message"], "bad \ud800 token"
+        )
 
     def test_safe_error_swallows_dead_connection_errors(self) -> None:
         """_safe_error() must swallow a dead-connection failure from the error
@@ -8468,6 +9513,38 @@ class TestPipeline(unittest.TestCase):
                     s, "set_embedding", side_effect=StoreError("CHUNK_NOT_FOUND", "gone")
                 ):
                     n = _embed_chunks(s, BatchEmbedLLM(), chunk_ids, ["text chunk"])
+            finally:
+                s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
+        self.assertEqual(n, 0)
+
+    def test_embed_chunks_llmerror_rollback_failure_silenced(self) -> None:
+        """The except-LLMError branch rolls back too (mid-batch dim raises);
+        a rollback that itself raises must be silenced exactly like the
+        StoreError sibling path above."""
+        from shoin.llm import LLMError
+        from shoin.pipeline import _embed_chunks
+
+        class TimeoutLLM:
+            embedding_model = "test-model"
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise LLMError("SYSTEM_LLM_TIMEOUT", "endpoint dropped")
+
+        class _FailRollback:
+            def __init__(self, real):
+                self._real = real
+            def rollback(self):
+                raise Exception("rollback failed")
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with make_store() as s:
+            nb_id = s.create_notebook("rollback-llm-err").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-rl")
+            chunk_ids = s.add_chunks(src.id, ["text chunk"])
+            s.__dict__["conn"] = _FailRollback(s.conn)
+            try:
+                n = _embed_chunks(s, TimeoutLLM(), chunk_ids, ["text chunk"])
             finally:
                 s.__dict__["conn"] = s.conn._real  # type: ignore[attr-defined]
         self.assertEqual(n, 0)
@@ -8737,6 +9814,39 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res1.n_chunks, len(before))
         self.assertEqual(res1.n_embedded, 0)
 
+    def test_refresh_source_noop_still_reports_pages_failed(self) -> None:
+        """v0.2.589: the unchanged-content early return still ran a full
+        extraction — a partial one (a PDF whose page objects stay corrupt
+        across refreshes) is equally partial on the no-op path, so
+        IndexResult.pages_failed must carry extracted.pages_failed, not a
+        hardcoded 0 that silently drops the 'index holds less than the
+        document' signal the dataclass field exists to surface."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted
+        from shoin.pipeline import index_source, refresh_source
+
+        original = Extracted(
+            kind="url", title="Page", origin="http://partial.test",
+            sha256="sha-partial", text="word " * 200, pages_failed=2,
+        )
+        with make_store() as s:
+            nb_id = s.create_notebook("noop-pages-failed-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=original):
+                res0 = index_source(s, nb_id, "http://partial.test")
+            self.assertEqual(res0.pages_failed, 2)
+            again = Extracted(
+                kind="url", title="Page", origin="http://partial.test",
+                sha256="sha-partial", text="word " * 200, pages_failed=2,
+            )
+            with patch("shoin.pipeline.extract_url", return_value=again):
+                res1 = refresh_source(s, res0.source.id)
+        self.assertEqual(
+            res1.pages_failed, 2,
+            "a no-op refresh that re-failed pages must still report them",
+        )
+        self.assertEqual(res1.n_embedded, 0)
+
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
         """A user's custom rename (PATCH /api/sources/{id}) must survive a
         subsequent refresh, even when the re-fetched page has a different
@@ -8925,6 +10035,48 @@ class TestPipeline(unittest.TestCase):
         # First batch (dim=2) succeeds (16 chunks), second batch raises LLMError
         self.assertEqual(n, 16, "only first batch must be stored; second batch aborted on mismatch")
 
+    def test_embed_chunks_dim_mismatch_rolls_back_partial_batch(self) -> None:
+        """The dim-mismatch raise happens INSIDE the batch write loop — after
+        set_embedding(commit=False) for the batch's earlier chunks — leaving a
+        pending transaction the except-LLMError branch must roll back like the
+        except-Exception sibling does. Otherwise set_setting()'s commit below
+        silently flushes the failed batch's partial vectors: n_embedded
+        understates reality and force=True reindex persists a fresh-model
+        vector while the marker still names the old model."""
+        from shoin.pipeline import _embed_chunks
+
+        class MidBatchMismatchLLM:
+            embedding_model = "test-model"
+            calls = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                MidBatchMismatchLLM.calls += 1
+                if MidBatchMismatchLLM.calls == 1:
+                    return [[0.1, 0.2] for _ in texts]
+                # Vec[0] matches dim (written), vec[1] mismatches (raise) —
+                # vec[0]'s write must not survive.
+                return [[0.9, 0.8], [0.3, 0.4, 0.5]] + [[0.9, 0.8]] * (len(texts) - 2)
+
+        MidBatchMismatchLLM.calls = 0
+        with make_store() as s:
+            nb_id = s.create_notebook("dim-rollback").id
+            src = s.add_source(nb_id, "txt", "doc", "t", "sha-dr")
+            texts = [f"chunk {i}" for i in range(32)]
+            chunk_ids = s.add_chunks(src.id, texts)
+            n = _embed_chunks(s, MidBatchMismatchLLM(), chunk_ids, texts)
+            self.assertEqual(n, 16)
+            leaked = s.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE seq>=16 AND embedding IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(
+                leaked, 0,
+                "failed batch's writes must be rolled back, not committed later",
+            )
+            committed = s.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE seq<16 AND embedding IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(committed, 16, "batch 1's vectors stay committed")
+
     def test_refresh_source_empty_text_raises_ingest_empty(self) -> None:
         """refresh_source() must raise IngestError('INGEST_EMPTY') when the re-fetched
         URL returns no extractable text — matching the behavior of index_source() (v0.2.46).
@@ -9097,9 +10249,49 @@ class TestExport(unittest.TestCase):
             nb = s.create_notebook("nb")
             s.add_source(nb.id, "url", "Title\nSecond line", "http://x.com", "sha1")
             md = export_markdown(s, nb.id)
-        item_lines = [ln for ln in md.splitlines() if ln.startswith("- [S1]")]
+        item_lines = [ln for ln in md.splitlines() if ln.startswith("1. ")]
         self.assertEqual(len(item_lines), 1)
         self.assertIn("Title Second line", item_lines[0])
+
+    def test_export_markdown_sources_section_avoids_citation_syntax(self) -> None:
+        """v0.2.585: the sources listing must not reuse [S#] notation.
+
+        In one exported document the same [S1] marker meant two different
+        things: the sources section numbered sources by notebook order while
+        a chat answer's [S1] names that query's top retrieval hit. A reader
+        resolving an answer's citation against the listing above it could land
+        on a source the answer never cited. The listing is a plain numbered
+        list instead — no citation syntax outside the per-message legend.
+        """
+        import json
+
+        from shoin.export import export_markdown
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "第一の資料", "o", "sha")
+            s.add_chunks(a.id, ["猫は液体である。"])
+            b = s.add_source(nb.id, "txt", "第二の資料", "o2", "sha2")
+            s.add_chunks(b.id, ["犬は固体である。"])
+            report = {
+                "cited": [1],
+                "invalid": [],
+                "coverage": 1.0,
+                "n_sources": 1,
+                "source_map": {"S1": "第二の資料"},
+            }
+            s.add_message(
+                nb.id, "assistant", "犬は固体である[S1]。",
+                json.dumps(report, ensure_ascii=False),
+            )
+            md = export_markdown(s, nb.id)
+
+        src_section = md.split("## チャット履歴")[0]
+        self.assertNotIn("[S", src_section)
+        self.assertIn("1. 第一の資料 (txt) — o", src_section)
+        self.assertIn("2. 第二の資料 (txt) — o2", src_section)
+        # The answer's own legend still maps S1 -> 第二の資料 (retrieval rank).
+        self.assertIn("S1=第二の資料", md)
 
     def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
         """Embedded newline in note title must not break the Markdown heading."""
@@ -9289,6 +10481,46 @@ class TestExport(unittest.TestCase):
         self.assertIn("line one", user_lines[0])
         self.assertIn("line two", user_lines[0])
 
+    def test_export_markdown_tolerates_malformed_report_field_shapes(self) -> None:
+        """A stored citation_report is user-controlled JSON: _parse_report()
+        accepts any well-formed object, so a wrong-typed field must degrade
+        to no-signal, not crash the whole export document.
+
+        Three read sites trusted the stored shape: _legend() passed a
+        source_detail value into found_bits() (non-dict → AttributeError),
+        _status_line() ran set() over `cited` (unhashable element →
+        TypeError) and dict.get() over `uncited_supported` sentences
+        (unhashable sentence → TypeError). A single malformed report row
+        took down the entire export — and the server route — for the
+        notebook (v0.2.617).
+        """
+        from shoin.export import export_markdown
+
+        bad = json.dumps(
+            {
+                "cited": [{"x": 1}, 2],
+                "coverage": 0.0,
+                "n_sources": 3,
+                "uncited": ["a claim"],
+                "uncited_supported": [{"y": 2}, "a claim"],
+                "uncited_supported_source": {"a claim": "S1"},
+                "source_detail": {"S1": "scalar", "S2": {"lex": 0.5}},
+                "source_map": {"S1": "t1", "S2": "t2"},
+            },
+            ensure_ascii=False,
+        )
+        with make_store() as s:
+            nb = s.create_notebook("md-bad-report")
+            s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_message(nb.id, "assistant", "ans body [S1]", bad)
+            md = export_markdown(s, nb.id)
+        self.assertIn("ans body", md)
+        # The intact fields still render: legend from source_map, the
+        # well-shaped S2 provenance bit, and the low-coverage warning from
+        # the malformed `cited` counted over its hashable elements only.
+        self.assertIn("S1=t1", md)
+        self.assertIn("0.50", md)
+
     def test_status_line_includes_confirmed_misattributed_uncited_degraded(self) -> None:
         """_status_line() must surface every verification signal from the report.
 
@@ -9345,6 +10577,33 @@ class TestExport(unittest.TestCase):
         from shoin.export import _status_line
 
         self.assertEqual(_status_line({}), "")
+
+    def test_status_line_no_dangling_hint_arrow_without_suggested_source(self) -> None:
+        """v0.2.607: reports carrying `uncited_supported` but missing or empty
+        `uncited_supported_source` (a shape pre-v0.2.216 reports can have)
+        rendered '⚠出典内一致=引用欠落 (1)→' — the arrow pointing at nothing.
+        The hint must only appear when a real target exists."""
+        from shoin.export import _status_line
+
+        for src_map in ({}, "bad", None):
+            line = _status_line(
+                {
+                    "uncited": ["a", "b"],
+                    "uncited_supported": ["a"],
+                    "uncited_supported_source": src_map,
+                }
+            )
+            self.assertNotIn("\u2192", line)
+        # With a real target the hint still renders (the supported bit lives
+        # inside the uncited branch, so `uncited` must be present too).
+        line = _status_line(
+            {
+                "uncited": ["a"],
+                "uncited_supported": ["a"],
+                "uncited_supported_source": {"a": "S2"},
+            }
+        )
+        self.assertIn("\u2192S2", line)
 
     def test_export_markdown_chat_message_shows_confirmed_citation(self) -> None:
         import json
@@ -9588,7 +10847,13 @@ class TestExport(unittest.TestCase):
                 s.set_embedding(cid, v)
             q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
             hits = vector_search(s, nb.id, q, k=25)
-            self.assertEqual(len(hits), len(ids))
+            # v0.2.556: non-positive cosines no longer take rank slots —
+            # compare against the positive-cosine rows only.
+            n_positive = sum(
+                1 for cid in ids
+                if cosine(q, unpack_vector(blobs[cid])) > 0.0
+            )
+            self.assertEqual(len(hits), n_positive)
             for h in hits:
                 self.assertEqual(
                     h.vec,
@@ -9801,7 +11066,11 @@ class TestExport(unittest.TestCase):
             for n, cid in enumerate(ids):
                 v = shared if n % 3 == 0 else [random.uniform(-1.0, 1.0) for _ in range(dim)]
                 s.set_embedding(cid, v)
-            q = [random.uniform(-1.0, 1.0) for _ in range(dim)]
+            # The query IS the shared direction: the tie group then scores
+            # cosine 1.0 (a positive tie exercises ordering — a non-positive
+            # tie would be filtered out entirely by the v0.2.556 rank-slot
+            # contract and exercise nothing).
+            q = list(shared)
 
             rows = s.conn.execute(
                 "SELECT c.id, c.source_id, c.text, c.context, c.embedding FROM chunks c"
@@ -9822,6 +11091,7 @@ class TestExport(unittest.TestCase):
                 for r in rows
             ]
             reference.sort(key=lambda h: h.vec, reverse=True)
+            reference = [h for h in reference if h.vec > 0.0]
 
             for k in (1, 5, 12, 40):
                 got = vector_search(s, nb.id, q, k)
@@ -10528,6 +11798,40 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2, argv)
             self.assertIn("-k", err.getvalue())
 
+    def test_add_status_lines_escape_control_chars(self) -> None:
+        """v0.2.623: per-target `✗ target: [code]` status rows must stay one
+        line each — a target path containing a newline (or any control char)
+        would otherwise split the row and could forge a `✓`-looking line in
+        the stream."""
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main([
+                    "--db", db_file, "add", str(nb.id),
+                    "missing\nforged: [FAKE] ok",
+                    "tab\ttarget",
+                ])
+            self.assertEqual(rc, 1)
+            lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 2, err.getvalue())
+            for ln in lines:
+                self.assertTrue(ln.startswith("✗ "), ln)
+                self.assertIn("[", ln)
+        finally:
+            os.unlink(db_file)
+
     def test_pos_int_accepts_positive_values(self) -> None:
         """The -k validator's accept path: a valid positive integer must pass
         through unchanged (the rejection path is pinned above)."""
@@ -10638,6 +11942,40 @@ class TestCLI(unittest.TestCase):
                 else:
                     os.environ["HOME"] = home
         self.assertFalse(Path("~").exists(), "literal ~ dir must not be created in cwd")
+
+    def test_eval_bad_utf8_files_map_to_coded_error(self) -> None:
+        """A cases or baseline file that is not valid UTF-8 makes read_text()
+        raise UnicodeDecodeError — neither OSError nor JSONDecodeError — which
+        escaped every catch in main() and crashed with a raw traceback. Both
+        reads must map to VALIDATION_FIELD_FORMAT_INVALID like malformed JSON."""
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            bad = Path(td) / "bad.json"
+            bad.write_bytes(b'[{"q": "x", "sources": [\xff\xfe]')
+            good = Path(td) / "good.json"
+            good.write_text(
+                json.dumps([{"q": "q", "sources": [1]}]), encoding="utf-8"
+            )
+            for argv in (
+                ["--db", db_file, "eval", str(nb.id), str(bad)],
+                ["--db", db_file, "eval", str(nb.id), str(good), "--diff", str(bad)],
+            ):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    rc = main(argv, llm=FakeLLM())
+                self.assertEqual(rc, 1, argv)
+                self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue(), argv)
 
     def test_add_expands_quoted_tilde_target(self) -> None:
         """`add nb '~/doc.md'` (tilde inside quotes → unexpanded argv) must
@@ -11096,6 +12434,114 @@ class TestCLI(unittest.TestCase):
                         rc = main(["--db", db_file, "add", str(nb_id), "file.pdf"])
             self.assertEqual(rc, 1)
             self.assertIn("SYSTEM_DB_LOCKED", err_out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_main_surrogate_output_returns_exit_code_1(self) -> None:
+        """main() must catch UnicodeEncodeError from a print() and return 1.
+
+        v0.2.611: a custom ChatBackend passed via main(llm=...) can emit lone-
+        surrogate tokens (LLMClient strips them, but external backends are
+        unguarded). `print(answer.text)` then raises UnicodeEncodeError on a
+        strict-UTF-8 stdout — which escaped every handler in main()'s chain
+        (StoreError/IngestError/LLMError/OperationalError/OSError/
+        OverflowError/KeyboardInterrupt), producing a raw traceback and
+        breaking the "every subcommand exits with a coded err.prefix, never
+        a traceback" guarantee the health handler's comment documents.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.citation import CitationReport
+        from shoin.cli import main
+        from shoin.qa import Answer
+        from shoin.search import Hit
+        from shoin.store import Store
+
+        report: CitationReport = CitationReport(
+            cited=[], invalid=[], coverage=0.0, n_sources=1,
+            source_map={"S1": "doc"}, confirmed=[], misattributed=[],
+        )
+        fake_answer = Answer(
+            text="bad\ud800token",
+            hits=[Hit(chunk_id=1, source_id=1, text="body", score=1.0)],
+            report=report,
+            degraded=False,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("test").id
+
+            # Strict-UTF-8 stdout — io.StringIO would swallow the surrogate
+            # silently; only a real encoder reproduces the terminal failure.
+            raw_out = io.TextIOWrapper(
+                io.BytesIO(), encoding="utf-8", errors="strict", write_through=True
+            )
+            err_out = io.StringIO()
+            with patch("shoin.cli.ask", return_value=fake_answer):
+                with patch("sys.stdout", raw_out):
+                    with patch("sys.stderr", err_out):
+                        rc = main(["--db", db_file, "ask", str(nb_id), "question"])
+            self.assertEqual(rc, 1)
+            self.assertIn("SYSTEM_INTERNAL_ERROR", err_out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_main_rogue_backend_error_returns_coded_1(self) -> None:
+        """A custom ChatBackend raising a non-LLMError must exit coded, never
+        as a raw traceback.
+
+        Every in-tree backend wraps its failures into LLMError, but external
+        backends passed to main(llm=...) are unguarded — a RuntimeError from
+        one escaped main()'s whole handler chain and printed a traceback,
+        while server.py's _dispatch maps the identical stray to a coded
+        SYSTEM_INTERNAL_ERROR envelope (CLI/API parity). The process-boundary
+        catch-all added in main() now applies the same mapping.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class RogueBackend:
+            model = "rogue"
+            embedding_model = "rogue-emb"
+
+            def chat(self, messages, **kw):
+                raise RuntimeError("sdk exploded")
+
+            def chat_stream(self, messages, **kw):
+                yield "x"
+
+            def embed(self, texts, **kw):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_one(self, text, **kw):
+                return [0.2] * 8
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("test").id
+                src = s.add_source(nb_id, "txt", "doc", "o", "sha")
+                s.add_chunks(src.id, ["alpha beta content"])
+
+            out, err = io.StringIO(), io.StringIO()
+            with patch("sys.stdout", out), patch("sys.stderr", err):
+                rc = main(["--db", db_file, "ask", str(nb_id), "alpha"],
+                          llm=RogueBackend())
+            self.assertEqual(rc, 1)
+            self.assertIn("SYSTEM_INTERNAL_ERROR", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
         finally:
             os.unlink(db_file)
 
@@ -11563,6 +13009,44 @@ class TestChunkContext(unittest.TestCase):
         # still be stripped, per CommonMark.
         pairs = _context_blocks("## Heading ##\nBody.")
         self.assertEqual(pairs[0][0], "Heading")
+
+    def test_fenced_code_lines_carry_no_structure(self) -> None:
+        """v0.2.588: inside a fenced code block every structural signal is
+        content — a `# comment` line is a comment, not an ATX heading, and a
+        blank line is padding, not a block boundary. Before the fence tracking,
+        a fenced `#` line closed the real enclosing section AND pushed itself
+        onto the breadcrumb stack, while the fence's blank lines split the
+        code mid-block — retrieval breadcrumbs absorbing code comments as
+        document headings and the section content inheriting the fake one.
+        """
+        from shoin.chunk import _blocks, _context_blocks
+
+        doc = (
+            "# 実際の章\n解説テキスト。\n\n"
+            "```python\n# コメント内の偽見出し\nx = 1\n\ny = 2\n```\n"
+            "章に属する後続テキスト。\n"
+        )
+        pairs = _context_blocks(doc)
+        # The fenced comment never becomes a heading and never replaces the
+        # real enclosing section — every block stays under 実際の章.
+        self.assertTrue(all(ctx == "実際の章" for ctx, _ in pairs))
+        # One block holds the whole fence + its trailing paragraph: the
+        # blank line inside the code did not split it.
+        self.assertEqual(len(pairs), 2)
+        self.assertIn("x = 1\n\ny = 2", pairs[1][1])
+        self.assertIn("章に属する後続テキスト", pairs[1][1])
+
+        # CommonMark close rule: a closer carries no info string — a
+        # backticked line with trailing text is content, not a close, so the
+        # "# real heading" below stays fenced content, not a heading.
+        self.assertEqual(len(_blocks("```py\na\n``` extra\n# h\nb")), 1)
+        # A longer closer closes a shorter opener; the OTHER marker char
+        # cannot close at all; tildes fence the same way.
+        self.assertEqual(len(_blocks("```\na\n````\n# h\nb")), 2)
+        self.assertEqual(len(_blocks("```\na\n~~~\n# h\nb")), 1)
+        self.assertEqual(len(_blocks("~~~\na\n~~~\n# h\nb")), 2)
+        # Non-fenced structure is unchanged: heading + blank-line splits.
+        self.assertEqual(len(_blocks("# a\nt\n\n## b\nu")), 2)
 
     def test_context_capped(self) -> None:
         """A pathologically deep/long heading path is capped so it can't bloat
@@ -12661,6 +14145,21 @@ class TestSearchCoverageTail(unittest.TestCase):
         self.assertEqual(fused[0].vec, 0.9)
         self.assertEqual(fused[0].bm25, 0.8)
 
+    def test_rrf_fuse_lists_first_list_wins_each_signal(self) -> None:
+        """The canonical hit keeps the FIRST list's vec and bm25 values:
+        lists are ordered primary-query first (retrieve_multi), so the
+        user's own phrasing defines the merged signal and a rewrite's
+        different cosine/BM25 for the same chunk never overwrites it."""
+        from shoin.search import rrf_fuse_lists
+
+        fused = rrf_fuse_lists([
+            [Hit(7, 1, "t", 0.0, vec=0.9, bm25=0.9)],
+            [Hit(7, 1, "t", 0.0, vec=0.3, bm25=0.3)],
+        ])
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].vec, 0.9)
+        self.assertEqual(fused[0].bm25, 0.9)
+
     def test_retrieve_multi_empty_queries(self) -> None:
         from shoin.search import retrieve_multi
 
@@ -12690,6 +14189,51 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertEqual(_numbers_expanded("令和一二年"), set())  # era continue
         self.assertEqual(_numbers_expanded("一二割"), set())      # wari continue
 
+    def test_magnitude_tokens_sum_every_group_including_tail(self) -> None:
+        """v0.2.568: a big-magnitude token is a sum of sub-10000 groups with
+        an optional unsuffixed tail — '一万二千三百四十五' = 一万 + 二千三
+        百四十五 = 12345.  Groups are components, not asserted values: the
+        truncated-prefix sum (12000) and the tail's bare run (2345) must
+        NOT register — only the whole-token value asserts anything."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("一万二千三百四十五"), {"12345"})
+        self.assertIn("123456789", _numbers_expanded("一億二千三百四十五万六千七百八十九"))
+        self.assertIn("123456789", _numbers_expanded("1億2345万6789"))
+        self.assertIn("123456", _numbers_expanded("十二万三千四百五十六"))
+        self.assertIn("120034", _numbers_expanded("12万34"))
+        self.assertIn("999999999999", _numbers_expanded(
+            "九千九百九十九億九千九百九十九万九千九百九十九"))
+        # digit+place groups at a magnitude boundary: '3千億' = 3千 × 億
+        self.assertIn("300000000000", _numbers_expanded("3千億"))
+        self.assertIn("50000000000", _numbers_expanded("5百億"))
+        self.assertIn("1000000000000", _numbers_expanded("10千億"))
+        # components stay silent: '五千' inside '四万五千' asserts nothing
+        self.assertEqual(_numbers_expanded("四万五千"), {"45000"})
+        # previously-correct shapes preserved
+        self.assertIn("32000", _numbers_expanded("3.2万"))
+        self.assertIn("120000000", _numbers_expanded("一億二千万"))
+        self.assertIn("500000000000", _numbers_expanded("五千億"))
+        self.assertIn("10000000000", _numbers_expanded("百億"))
+
+    def test_pairs_inside_bare_kanji_runs_are_components(self) -> None:
+        """v0.2.569: a numeral+suffix pair inside a bare kanji run is a
+        component of the run's own positional value — '二千一' asserts
+        2001 via the bare path, so the '二千' pair inside it must not
+        also register 2000.  Same component-not-assertion rule as the
+        chain/token suppression, applied to the remaining span family."""
+        from shoin.citation import _numbers_expanded
+
+        self.assertEqual(_numbers_expanded("二千一"), {"2001"})
+        self.assertEqual(_numbers_expanded("二千十二"), {"2012"})
+        self.assertEqual(_numbers_expanded("三千一"), {"3001"})
+        self.assertNotIn("2000", _numbers_expanded("二千一"))
+        self.assertNotIn("3000", _numbers_expanded("三千一"))
+        # unparsable runs stay silent — the inner pair is suppressed too
+        self.assertEqual(_numbers_expanded("二千一三"), set())
+        # runs under a big-magnitude token were already covered (v0.2.568)
+        self.assertEqual(_numbers_expanded("一万二千一"), {"12001"})
+
     def test_citation_only_first_sentence_skips_claim(self) -> None:
         """'[S1]' alone carries a citation number but no text and no prior
         claim — every checker must skip it rather than fabricate a claim."""
@@ -12715,6 +14259,37 @@ class TestCitationCoverageTail(unittest.TestCase):
         self.assertIn((1, 1000.0), vals)
         self.assertNotIn((1, 1500.0), vals)
 
+    def test_conv_values_gap_must_be_additive(self) -> None:
+        """v0.2.570: enumeration separators break the same-family chain —
+        '1km、500m' asserts 1000 and 500, not 1500.  The previous gap rule
+        (any ≤2 chars) let '、', ',', '・', '/' join a sum, registering
+        canonical values the text never asserted."""
+        from shoin.citation import _conv_values
+
+        for gap in ("、", ",", "・", "/"):
+            vals = _conv_values(f"1時間{gap}30分")
+            self.assertEqual(vals, {(0, 60.0), (0, 30.0)})
+        for gap in ("", " ", "　", "と", " と ", "\n"):
+            vals = _conv_values(f"1時間{gap}30分")
+            self.assertIn((0, 90.0), vals)
+
+    def test_en_value_enumerations_stay_silent(self) -> None:
+        """v0.2.571: a small-cluster is a numeral only as tens+optional-
+        unit — 'one two', 'fifteen three' enumerate separate values, so
+        summing them registered members the run never asserted ('3', '17').
+        The same silence '一二三' earns from _kanji_value."""
+        from shoin.citation import _en_value
+
+        for run in ("one two", "one two three", "fifteen two",
+                    "seven eight nine", "one one", "one twenty",
+                    "twenty twenty", "twenty five three", "one-two"):
+            self.assertIsNone(_en_value(run))
+        for run, v in (("twenty five", 25), ("twenty-one", 21),
+                       ("three hundred fifty", 350),
+                       ("one million two thousand five hundred", 1002500),
+                       ("fifteen", 15), ("two million", 2000000)):
+            self.assertEqual(_en_value(run), v)
+
     def test_quote_mismatch_suggested_names_right_source(self) -> None:
         """When a doctored quote is flagged, `suggested` must name the source
         it actually matches — the fix is 'say [S2]', not 're-read'."""
@@ -12738,6 +14313,62 @@ class TestCitationCoverageTail(unittest.TestCase):
             make_report("x [S1].", ["t1", "t2"], source_detail=[{"bm25": 1.0}])
 
 
+# Catalogs shared between the site-pinning tests and the spec-count pin:
+# spec.md states these sizes in prose, so they must live at module level for
+# test_doc_catalog_counts_match_spec to compare without duplicating them.
+_EXCEPT_CATALOG = {
+    "ingest.py": 4,
+    "server.py": 9,
+    "cli.py": 2,
+    "pipeline.py": 3,
+}
+_DYNAMIC_COMPILE_CATALOG = {
+    "chunk.py:212",
+    "citation.py:580", "citation.py:584", "citation.py:596",
+    "citation.py:597", "citation.py:634", "citation.py:647",
+    "citation.py:1042", "citation.py:1444", "citation.py:1672",
+    "search.py:72", "search.py:919",
+}
+_ERROR_CODE_CATALOG = {
+    # store.py raises (StoreError)
+    "CHUNK_NOT_FOUND",
+    "EMBEDDING_INVALID",
+    "INGEST_REFRESH_NOT_URL",
+    "NOTEBOOK_EMPTY",
+    "NOTEBOOK_NOT_FOUND",
+    "NOTE_NOT_FOUND",
+    "SOURCE_ALREADY_EXISTS",
+    "SOURCE_NOT_FOUND",
+    "STUDIO_KIND_INVALID",
+    "SYSTEM_DB_LOCKED",
+    "SYSTEM_IO_ERROR",
+    "SYSTEM_SERVICE_UNAVAILABLE",
+    # ingest.py / pipeline.py / server.py raises (IngestError)
+    "INGEST_EMPTY",
+    "INGEST_FILE_TOO_LARGE",
+    "INGEST_NOTEBOOK_FULL",
+    "INGEST_PDF_SUPPORT_MISSING",
+    "INGEST_FETCH_FAILED",
+    "INGEST_PARSE_FAILED",
+    "INGEST_UNSUPPORTED_FORMAT",
+    "INGEST_URL_BLOCKED",
+    # llm.py raises (LLMError)
+    "SYSTEM_EMBED_DISABLED",
+    "SYSTEM_LLM_TIMEOUT",
+    "SYSTEM_LLM_BAD_RESPONSE",
+    "SYSTEM_LLM_HTTP_ERROR",
+    # server.py raises (StoreError) + emit literals
+    "METHOD_NOT_ALLOWED",
+    "ROUTE_NOT_FOUND",
+    "SECURITY_CROSS_ORIGIN_BLOCKED",
+    "SECURITY_HOST_NOT_ALLOWED",
+    "SYSTEM_INTERNAL_ERROR",
+    "VALIDATION_FIELD_FORMAT_INVALID",
+    "VALIDATION_INTEGER_OVERFLOW",
+    "VALIDATION_REQUIRED_FIELD_MISSING",
+}
+
+
 class TestResidualGuards(unittest.TestCase):
     """Pin the last reachable guard tails left by the v0.2.270-275 sweep (v0.2.277)."""
 
@@ -12757,6 +14388,37 @@ class TestResidualGuards(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_cases([42])
 
+    def test_parse_cases_rejects_oversize_question(self) -> None:
+        """A case question longer than MAX_QUESTION_LEN is one the product
+        cannot answer at all — /ask and cli ask both reject it — so measuring
+        recall against it is meaningless, and it builds a pathological FTS5
+        OR-expression from thousands of terms. parse_cases must refuse loudly
+        like it refuses every other malformed case."""
+        from shoin.config import MAX_QUESTION_LEN
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "x" * (MAX_QUESTION_LEN + 1), "sources": [1]}])
+        # The boundary itself is accepted (same contract as /ask).
+        cases = parse_cases([{"q": "x" * MAX_QUESTION_LEN, "sources": [1]}])
+        self.assertEqual(len(cases), 1)
+
+    def test_parse_cases_rejects_duplicate_question(self) -> None:
+        """A duplicated question silently double-counts in the run's mean
+        recall/MRR — same question weighed twice with no marker — and a diff
+        pairing occurrence-by-occurrence can't tell which twin is which case.
+        Refusing follows parse_cases' refuse-loudly contract (whitespace is
+        stripped before comparing, matching EvalCase's stored question)."""
+        from shoin.evaluate import parse_cases
+
+        with self.assertRaises(ValueError):
+            parse_cases(
+                [
+                    {"q": "同じ質問", "sources": [1]},
+                    {"q": "  同じ質問  ", "sources": [2]},
+                ]
+            )
+
     def test_report_from_dict_bad_case_and_missing_scores(self) -> None:
         """Baseline rebuild refuses malformed cases AND missing recall/mrr —
         a silently-dropped field would fabricate a score delta."""
@@ -12766,6 +14428,83 @@ class TestResidualGuards(unittest.TestCase):
             report_from_dict({"cases": ["x"], "recall": 0.0, "mrr": 0.0})
         with self.assertRaises(ValueError):
             report_from_dict({"cases": []})
+
+    def test_report_from_dict_rejects_nonint_id_elements(self) -> None:
+        """expected/retrieved id elements get the same check `missing` got —
+        a string or bool id (bool is an int subclass that never names a real
+        source) in a hand-edited baseline must refuse, not round-trip silently."""
+        from shoin.evaluate import report_from_dict
+
+        base_case = {"q": "a", "expected": [1], "retrieved": [1],
+                     "recall": 1.0, "rr": 1.0}
+        for bad in (
+            dict(base_case, expected=["1"]),
+            dict(base_case, expected=[True]),
+            dict(base_case, retrieved=[1.5]),
+            dict(base_case, retrieved=["x"]),
+            dict(base_case, missing=[False]),
+        ):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                report_from_dict({"cases": [bad], "recall": 1.0, "mrr": 1.0})
+        rep, _ = report_from_dict({"cases": [base_case], "recall": 1.0, "mrr": 1.0})
+        self.assertEqual(rep.cases[0].expected, [1])
+
+    def test_report_from_dict_rejects_nonfinite_and_bool_numbers(self) -> None:
+        """Python's json module decodes the non-standard literals NaN/Infinity
+        and bool IS an int — so {"recall": NaN}, {"rr": true} or {"k": NaN}
+        all passed the old isinstance check and either silently poisoned the
+        diff arithmetic (nan deltas) or crashed int(NaN) with a bare
+        ValueError. Every numeric field must refuse non-finite/bool values."""
+        import math
+
+        from shoin.evaluate import report_from_dict
+
+        case = {"q": "a", "expected": [1], "retrieved": [1],
+                "recall": 1.0, "rr": 1.0}
+        good = {"cases": [case], "recall": 1.0, "mrr": 1.0}
+        nan, inf, t, f = math.nan, math.inf, True, False
+        for bad in (
+            dict(good, recall=nan), dict(good, recall=inf), dict(good, recall=t),
+            dict(good, mrr=nan), dict(good, mrr=f),
+            dict(good, k=nan), dict(good, k=inf), dict(good, k=t), dict(good, k="8"),
+            dict(good, cases=[dict(case, recall=nan)]),
+            dict(good, cases=[dict(case, recall=inf)]),
+            dict(good, cases=[dict(case, recall=t)]),
+            dict(good, cases=[dict(case, rr=nan)]),
+            dict(good, cases=[dict(case, rr=inf)]),
+            dict(good, cases=[dict(case, rr=f)]),
+        ):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                report_from_dict(bad)
+        # Finite numbers (including absent k) still parse.
+        rep, k = report_from_dict(good)
+        self.assertIsNone(k)
+        rep, k = report_from_dict(dict(good, k=8))
+        self.assertEqual(k, 8)
+
+    def test_eval_rejects_surrogate_questions_in_both_readers(self) -> None:
+        """json.loads materializes lone surrogates from \\ud800 escapes; one
+        reaching sqlite (evaluate via retrieve_for_question's bound terms) or
+        stdout (diff's question lists) escapes every handler as a raw
+        UnicodeEncodeError — same class server._check_utf8 rejects on the
+        wire. parse_cases and report_from_dict must both refuse."""
+        from shoin.evaluate import parse_cases, report_from_dict
+
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "\ud800", "sources": [1]}])
+        with self.assertRaises(ValueError):
+            parse_cases([{"q": "ok\ud800x", "sources": [1]}])
+        with self.assertRaises(ValueError):
+            report_from_dict(
+                {
+                    "cases": [
+                        {"q": "\ud800", "expected": [1], "retrieved": [],
+                         "recall": 0.0, "rr": 0.0}
+                    ],
+                    "recall": 0.0,
+                    "mrr": 0.0,
+                }
+            )
 
     def test_eval_report_to_dict_round_trips_through_from_dict(self) -> None:
         """--save → --diff fidelity: every field report_to_dict writes must be
@@ -12857,6 +14596,26 @@ class TestResidualGuards(unittest.TestCase):
             rewrite_queries(_Stub(), "データ設計はどう進めるか"),  # type: ignore[arg-type]
             ["café の要点は何か", "実装手順の確認点は何か"],
         )
+
+    def test_rewrite_queries_dedups_on_truncated_form(self) -> None:
+        """v0.2.590: the fold key must be computed on the emitted (capped)
+        string — two rewrites that differ only past MAX_QUESTION_LEN truncate
+        to the identical text, spending two rewrite slots on zero diversity
+        (the same class v0.2.545 closed for orthographic variants)."""
+        from shoin.config import MAX_QUESTION_LEN
+        from shoin.qa import rewrite_queries
+
+        # 1999-char head: the differing suffix lands past the 2000-char cap,
+        # so both lines truncate to `head + " "` — byte-identical emissions.
+        head = "共通長文ヘッダー " + "x" * (MAX_QUESTION_LEN - 10)
+        class _Stub:
+            embedding_model = ""
+
+            def chat(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+                return f"{head} 末尾差A\n{head} 末尾差B\n別の言い換えです"
+
+        out = rewrite_queries(_Stub(), "元の質問")  # type: ignore[arg-type]
+        self.assertEqual(out, [head + " ", "別の言い換えです"])
 
     def test_degraded_text_caps_at_three_sources(self) -> None:
         """The degraded fallback enumerates at most 3 sources — a fourth must
@@ -13648,6 +15407,60 @@ class TestResidualGuards(unittest.TestCase):
             "CLAUDE.md's Current version marker drifted — "
             "the bump ritual missed the developer guide",
         )
+
+    def test_doc_sync_markers_never_exceed_version(self) -> None:
+        """spec.md and product-review.md sync on a deliberate lag — their
+        header markers name the implementation version they were verified
+        against, not VERSION (that is why they may sit behind it: spec.md
+        once drifted to v0.2.517 before a sync caught up). What they may
+        never do is claim a version ABOVE the shipped one — a typo'd or
+        hand-edited marker that reads like a newer release would silently
+        falsify the doc's verification claim."""
+        from shoin.config import VERSION
+
+        cur = tuple(int(p) for p in VERSION.split("."))
+        root = Path(__file__).resolve().parent.parent
+
+        spec = (root / "docs" / "spec.md").read_text(encoding="utf-8")
+        m = re.search(r"実装 v?(\d+)\.(\d+)\.(\d+) 時点に同期", spec)
+        if m is None:
+            self.fail("spec.md lost its '実装 vX.Y.Z 時点に同期' marker")
+        spec_v = tuple(int(g) for g in m.groups())
+        self.assertLessEqual(spec_v, cur,
+                           "spec.md claims sync to a future version")
+
+        review = (root / "docs" / "product-review.md").read_text(encoding="utf-8")
+        m2 = re.search(r"v(\d+)\.(\d+)\.(\d+) 時点", review)
+        if m2 is None:
+            self.fail("product-review.md lost its 'vX.Y.Z 時点' marker")
+        review_v = tuple(int(g) for g in m2.groups())
+        self.assertLessEqual(review_v, cur,
+                             "product-review.md claims a future version")
+
+    def test_doc_catalog_counts_match_spec(self) -> None:
+        """spec.md states each catalog's size in prose — the except-Exception
+        count drifted to "12サイト" while the real catalog held 13 for ~60
+        versions (v0.2.503→v0.2.563) precisely because nothing checked it.
+        The catalogs live at module level so this compares, not duplicates."""
+        spec = (
+            Path(__file__).resolve().parent.parent / "docs" / "spec.md"
+        ).read_text(encoding="utf-8")
+        claims = {
+            "except-Exception catalog": (
+                r"広域捕捉は(\d+)サイト", sum(_EXCEPT_CATALOG.values())),
+            "dynamic re.compile catalog": (
+                r"re\.compile`を(\d+)サイト", len(_DYNAMIC_COMPILE_CATALOG)),
+            "error-code catalog": (
+                r"全コードを(\d+)件の宣言集合", len(_ERROR_CODE_CATALOG)),
+        }
+        for label, (pat, actual) in claims.items():
+            m = re.search(pat, spec)
+            if m is None:
+                self.fail(f"spec.md lost its {label} count claim ({pat})")
+            self.assertEqual(
+                int(m.group(1)), actual,
+                f"spec.md's {label} count drifted from the real catalog",
+            )
 
     def test_sql_literals_stay_interpolation_free(self) -> None:
         """User-controlled strings (notebook names, source titles,
@@ -14559,12 +16372,7 @@ class TestResidualGuards(unittest.TestCase):
             return False
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        expected = {
-            "ingest.py": 3,
-            "server.py": 7,
-            "cli.py": 1,
-            "pipeline.py": 2,
-        }
+        expected = _EXCEPT_CATALOG
         problems: list[str] = []
         total = 0
         n_suppress = 0
@@ -14976,13 +16784,7 @@ class TestResidualGuards(unittest.TestCase):
         # constant-table alternation (citation/search builder) or an
         # re.escape'd interpolation. Adding one means deliberately
         # re-auditing the construction for injection geometry.
-        expected_dyn = {
-            "chunk.py:208",
-            "citation.py:526", "citation.py:530", "citation.py:567",
-            "citation.py:580", "citation.py:892", "citation.py:1271",
-            "citation.py:1485",
-            "search.py:72", "search.py:907",
-        }
+        expected_dyn = _DYNAMIC_COMPILE_CATALOG
         for loc in sorted(set(dyn) - expected_dyn):
             problems.append(f"{loc}: uncatalogued dynamic re.compile")
 
@@ -15033,44 +16835,7 @@ class TestResidualGuards(unittest.TestCase):
         and every code conforms to the name-family taxonomy."""
         import ast
 
-        declared = {
-            # store.py raises (StoreError)
-            "CHUNK_NOT_FOUND",
-            "EMBEDDING_INVALID",
-            "INGEST_REFRESH_NOT_URL",
-            "NOTEBOOK_EMPTY",
-            "NOTEBOOK_NOT_FOUND",
-            "NOTE_NOT_FOUND",
-            "SOURCE_ALREADY_EXISTS",
-            "SOURCE_NOT_FOUND",
-            "STUDIO_KIND_INVALID",
-            "SYSTEM_DB_LOCKED",
-            "SYSTEM_IO_ERROR",
-            "SYSTEM_SERVICE_UNAVAILABLE",
-            # ingest.py / pipeline.py / server.py raises (IngestError)
-            "INGEST_EMPTY",
-            "INGEST_FILE_TOO_LARGE",
-            "INGEST_NOTEBOOK_FULL",
-            "INGEST_PDF_SUPPORT_MISSING",
-            "INGEST_FETCH_FAILED",
-            "INGEST_PARSE_FAILED",
-            "INGEST_UNSUPPORTED_FORMAT",
-            "INGEST_URL_BLOCKED",
-            # llm.py raises (LLMError)
-            "SYSTEM_EMBED_DISABLED",
-            "SYSTEM_LLM_TIMEOUT",
-            "SYSTEM_LLM_BAD_RESPONSE",
-            "SYSTEM_LLM_HTTP_ERROR",
-            # server.py raises (StoreError) + emit literals
-            "METHOD_NOT_ALLOWED",
-            "ROUTE_NOT_FOUND",
-            "SECURITY_CROSS_ORIGIN_BLOCKED",
-            "SECURITY_HOST_NOT_ALLOWED",
-            "SYSTEM_INTERNAL_ERROR",
-            "VALIDATION_FIELD_FORMAT_INVALID",
-            "VALIDATION_INTEGER_OVERFLOW",
-            "VALIDATION_REQUIRED_FIELD_MISSING",
-        }
+        declared = _ERROR_CODE_CATALOG
         taxonomy = re.compile(
             r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
             r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
@@ -15415,7 +17180,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:670"],
+            sites, ["search.py:676"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -15867,7 +17632,7 @@ class TestResidualGuards(unittest.TestCase):
         )
         root = Path(__file__).resolve().parent.parent
         baseline = {
-            "cli.py": 2,      # noqa: BLE001 broad CLI catch + pragma on __main__
+            "cli.py": 3,      # noqa: BLE001 x2 (health + main catch-all) + pragma __main__
             "ingest.py": 2,   # type: ignore[misc] HTMLParser attr + pragma ImportError
             "pipeline.py": 1,  # noqa: E731 embed lambda
             "server.py": 5,   # noqa: N802 x4 (do_* verbs) + pragma serve loop
@@ -16144,10 +17909,21 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": [
                 "(IngestError,StoreError)",
                 "(IngestError,LLMError,StoreError)",
+                "(UnicodeDecodeError,json.JSONDecodeError)",
+                "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
+                # v0.2.627: process-boundary catch-all in main() — a custom
+                # ChatBackend raising a non-LLMError escaped every handler as
+                # a raw traceback; same coded SYSTEM_INTERNAL_ERROR mapping
+                # _dispatch applies to strays (CLI/API parity).
+                "Exception",
                 "OSError", "OSError", "OSError", "OSError",
-                "OverflowError", "ValueError", "ValueError",
-                "json.JSONDecodeError", "json.JSONDecodeError",
+                "OverflowError",
+                # v0.2.611: custom ChatBackends can emit surrogate tokens that
+                # crash print() on strict-UTF-8 stdout — boundary catch in
+                # main() like OverflowError, coded err.prefix not a traceback.
+                "UnicodeEncodeError",
+                "ValueError", "ValueError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
             ],
             "config.py": [
@@ -16155,12 +17931,21 @@ class TestResidualGuards(unittest.TestCase):
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
                 "OSError", "json.JSONDecodeError",
             ],
+            "evaluate.py": ["UnicodeEncodeError"],
             "export.py": ["(ValueError,json.JSONDecodeError)"],
             "ingest.py": [
                 "(OSError,http.client.HTTPException)",
-                "(LookupError,UnicodeDecodeError)",
-                "Exception", "Exception", "Exception", "ImportError",
-                "OSError", "ValueError", "ValueError",
+                # v0.2.619: _decode's candidate loop degrades malformed codec
+                # names (embedded NUL from a hostile Content-Type charset)
+                # via ValueError, which also covers UnicodeDecodeError.
+                "(LookupError,ValueError)",
+                "Exception", "Exception", "Exception", "Exception",
+                "ImportError",
+                "OSError",
+                # v0.2.619: urlparse raises ValueError on unclosed IPv6
+                # brackets eagerly (before the lazy .port check) — mapped
+                # to INGEST_URL_BLOCKED like every other malformed URL.
+                "ValueError", "ValueError", "ValueError",
                 "socket.gaierror", "zlib.error", "zlib.error", "zlib.error",
             ],
             "llm.py": [
@@ -16169,11 +17954,16 @@ class TestResidualGuards(unittest.TestCase):
                 "(OSError,ValueError,http.client.HTTPException)",
                 "(OSError,ValueError,http.client.HTTPException)",
                 "(AttributeError,OSError,ValueError,http.client.HTTPException)",
-                "(IndexError,KeyError,TypeError,json.JSONDecodeError)",
-                "LLMError", "json.JSONDecodeError",
+                # v0.2.620: RecursionError joins the malformed-frame drop set —
+                # a deeply nested delta is a parse failure like JSONDecodeError.
+                "(IndexError,KeyError,RecursionError,TypeError,json.JSONDecodeError)",
+                "LLMError",
+                # v0.2.620: deeply nested bodies raise RecursionError, not
+                # JSONDecodeError — same malformed-response mapping.
+                "(RecursionError,json.JSONDecodeError)",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
-            "pipeline.py": ["Exception", "Exception", "LLMError"],
+            "pipeline.py": ["Exception", "Exception", "Exception", "LLMError"],
             "qa.py": [
                 "LLMError", "LLMError", "LLMError",
                 "StoreError", "sqlite3.OperationalError",
@@ -16189,8 +17979,13 @@ class TestResidualGuards(unittest.TestCase):
                 "ConnectionError",
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
+                "Exception", "Exception",
                 "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
+                "UnicodeEncodeError",
+                # v0.2.614: _json() falls back to ensure_ascii escapes when a
+                # payload field carries a lone surrogate — without it the
+                # error-envelope path itself would emit zero HTTP response.
                 "UnicodeEncodeError",
                 "ValueError", "ValueError", "ValueError",
             ],
@@ -16201,6 +17996,10 @@ class TestResidualGuards(unittest.TestCase):
                 "sqlite3.IntegrityError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
                 "suppress(OSError)",
+                # _utf8(): re-raises as coded VALIDATION_FIELD_FORMAT_INVALID —
+                # the sqlite bind's raw UnicodeEncodeError is exactly what this
+                # handler converts (same class as evaluate.py's _utf8_ok gate).
+                "UnicodeEncodeError",
             ],
             "studio.py": [
                 "LLMError",
@@ -16208,7 +18007,8 @@ class TestResidualGuards(unittest.TestCase):
             ],
         }
         trivial_baseline = {
-            "config.py": 6, "export.py": 1, "ingest.py": 1, "llm.py": 2,
+            "config.py": 6, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
+            "llm.py": 2,
             "pipeline.py": 2, "qa.py": 2, "server.py": 11, "studio.py": 1,
         }
         actual: dict[str, list[str]] = {}
@@ -16326,13 +18126,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
             ],
-            "evaluate.py": [
-                "ValueError", "ValueError", "ValueError", "ValueError",
-                "ValueError", "ValueError", "ValueError", "ValueError",
-                "ValueError", "ValueError", "ValueError",
-            ],
+            "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 24 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError",
@@ -16352,7 +18148,7 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 47,
+            ] + ["StoreError"] * 50,  # +1: _utf8's coded surrogate rejection
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -16956,7 +18752,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        baseline = {"ingest.py": 2, "search.py": 1}
+        baseline = {"ingest.py": 4, "search.py": 1}
         found: dict[str, int] = {}
         problems: list[str] = []
         for path in sorted(shoin_dir.glob("*.py")):
@@ -17802,9 +19598,9 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [208],
-            "citation.py": [526, 530, 580, 892, 1271, 1485],
-            "search.py": [72, 907],
+            "chunk.py": [212],
+            "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
+            "search.py": [72, 919],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -17852,7 +19648,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:907"],
+            escaped_interps, ["search.py:919"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -17876,15 +19672,22 @@ class TestResidualGuards(unittest.TestCase):
         bases, plus v0.2.536's isalpha guard gating the stem fold to
         letters-only terms), downstream of
         NFKC normalization that already folded width/superscripts
-        (citation.py `_part_value`), or on export-format keys where a
-        Unicode digit still parses (export.py). A NEW predicate site
-        is a drift event: it must be justified like these."""
+        (citation.py `_part_value`/`_seg_value`/the token loop — the
+        digit-vs-kanji head test on `_NUM_PART`-matched segments, whose
+        digit class is already Unicode-wide and `float()` parses the
+        same rows), or on export-format keys where a
+        Unicode digit still parses (export.py). ingest.py's isalpha is
+        isascii()-guarded: _outside_tag decides whether the char after
+        "<" can open a tag — ASCII-letter-only per HTMLParser's tagfind
+        (a "<テ" or "<ñ" is literal text, not a tag). A NEW predicate
+        site is a drift event: it must be justified like these."""
         import ast as _ast
 
         baseline: dict[str, int] = {
             "chunk.py": 5,
-            "citation.py": 2,
+            "citation.py": 5,
             "export.py": 3,
+            "ingest.py": 1,
             "search.py": 6,
         }
         preds = {

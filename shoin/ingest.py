@@ -103,7 +103,12 @@ def _decode(data: bytes, charset: str | None = None) -> str:
     for enc in candidates:
         try:
             return data.decode(enc)
-        except (UnicodeDecodeError, LookupError):
+        except (ValueError, LookupError):
+            # UnicodeDecodeError is a ValueError subclass; the plain-ValueError
+            # branch covers malformed codec names — a charset parameter with an
+            # embedded NUL (reachable via a hostile server's Content-Type
+            # header) raises ValueError("embedded null character"), not the
+            # LookupError an unknown-but-wellformed name raises.
             continue
     return data.decode("utf-8", errors="replace")
 
@@ -124,14 +129,24 @@ class _HTMLText(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.title_parts: list[str] = []
-        self._skip_depth = 0
+        # Open skip elements by name, innermost last. A bare counter can't
+        # tell which element a stray endtag refers to: </nav> must not close
+        # an enclosing <noscript>, and </footer> must not pop a <form>.
+        self._skip_stack: list[str] = []
         self._in_title = False
+        self._saw_head = False
+
+    @property
+    def _skip_depth(self) -> int:
+        return len(self._skip_stack)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
-            self._skip_depth += 1
+            self._skip_stack.append(tag)
         elif tag == "title" and not self._skip_depth:
             self._in_title = True
+        elif tag == "head":
+            self._saw_head = True
         elif tag in _BLOCK_TAGS:
             if self._in_title:
                 self._in_title = False  # implicit close: block content can't appear inside <title>
@@ -141,15 +156,23 @@ class _HTMLText(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ("script", "style", "noscript", "template") or tag in _BOILERPLATE_TAGS:
-            self._skip_depth = max(0, self._skip_depth - 1)
+            # Pop through the matching opener, DOM-style: an endtag closes
+            # its element plus anything implicitly nested inside it; a stray
+            # endtag for a tag that isn't open is ignored entirely.
+            if tag in self._skip_stack:
+                while self._skip_stack.pop() != tag:
+                    pass
         elif tag == "title":
             self._in_title = False
-        elif tag == "head":
+        elif tag == "head" and self._saw_head:
             # An unclosed <noscript>/<script>/<style> in <head> must not leak into
             # <body> and swallow all body text.  Reset both guards at </head> so
             # malformed markup like <noscript>fallback</head><body>Content</body>
-            # still extracts "Content" rather than raising INGEST_EMPTY.
-            self._skip_depth = 0
+            # still extracts "Content" rather than raising INGEST_EMPTY. Gated on
+            # a real <head> opener: a stray </head> inside some other unclosed
+            # element would otherwise zero the skip depth mid-element and leak
+            # the rest of its text.
+            self._skip_stack.clear()
             if self._in_title:
                 self._in_title = False  # </head> without </title> implicitly closes the title
         elif tag in _BLOCK_TAGS:
@@ -187,6 +210,64 @@ _SKIP_TAG_BALANCE = (
 )
 
 
+def _outside_tag(html: str, pos: int) -> bool:
+    """True when pos is not inside a '<...>' tag region.
+
+    Regexes see tag-like text inside attribute values or malformed markup
+    (e.g. the "</nav" of "<a title='x'</nav>"), but HTMLParser never fires
+    such matches — they are attribute junk, not tags. Neutralization pairing
+    must ignore them or it simulates a different document than the parser
+    will see. A bare "<" only opens a tag when followed by a tag-start char
+    (ASCII letter, "/", "!", "?" — matching HTMLParser's tagfind); "< 2",
+    "<3", or a non-ASCII letter like "<テ" is literal text — so the scan
+    walks back to the most recent *valid* opener before comparing ">"s.
+    """
+    lt = html.rfind("<", 0, pos)
+    while lt != -1:
+        nxt = html[lt + 1 : lt + 2]
+        if nxt and ((nxt.isascii() and nxt.isalpha()) or nxt in "/!?"):
+            break
+        lt = html.rfind("<", 0, lt)
+    if lt == -1:
+        return True
+    return lt <= html.rfind(">", 0, pos)
+
+
+def _comment_spans(html: str) -> list[tuple[int, int]]:
+    """Return (start, end) spans of <!--...--> comments.
+
+    A "<!--" inside a tag's attribute region is attribute text, not a
+    comment opener, so openers are filtered; a "-->" once inside a comment
+    closes it regardless of tags. An unclosed comment runs to end-of-
+    document, matching HTMLParser's buffering behavior.
+    """
+    spans: list[tuple[int, int]] = []
+    start = -1
+    for m in re.finditer(r"<!--|-->", html):
+        if start == -1:
+            # A "<!--" inside a tag's attribute region is attribute text,
+            # not a comment opener — keep the parser-aligned filter on it.
+            if m.group() == "<!--" and _outside_tag(html, m.start()):
+                start = m.start()
+        else:
+            # Inside a comment the first "-->" is the closer at parse
+            # level — comment content is CDATA-ish and does not respect
+            # tag boundaries, so no outside-tag filter applies here.
+            if m.group() == "-->":
+                spans.append((start, m.end()))
+                start = -1
+    if start != -1:
+        spans.append((start, len(html)))
+    return spans
+
+
+def _live(html: str, pos: int, spans: list[tuple[int, int]]) -> bool:
+    """True when pos fires as markup — outside tags and outside comments."""
+    return _outside_tag(html, pos) and not any(
+        s <= pos < e for s, e in spans
+    )
+
+
 def html_to_text(html: str) -> tuple[str, str]:
     """Return (title, text) extracted from an HTML document."""
     # An unclosed <!-- comment causes stdlib html.parser.HTMLParser to buffer
@@ -199,20 +280,51 @@ def html_to_text(html: str) -> tuple[str, str]:
     # otherwise drop the rest of the document with zero indication anything
     # was lost. Neutralize a genuinely unbalanced "<!--" by closing it
     # immediately (an empty comment) so real content after it still parses.
-    if html.count("<!--") > html.count("-->"):
-        last_open = html.rfind("<!--")
-        html = html[:last_open] + "<!---->" + html[last_open + len("<!--") :]
+    # Every "<!--" that never sees a "-->" before the next "<!--" or EOF is an
+    # unclosed comment — neutralize EACH of them (right-to-left so earlier
+    # offsets stay valid). Closing only the LAST one leaves an earlier open to
+    # swallow everything up to the injected comment's own "-->".
+    opens = [m.start() for m in re.finditer(r"<!--", html) if _outside_tag(html, m.start())]
+    for i in range(len(opens) - 1, -1, -1):
+        pos = opens[i]
+        end = opens[i + 1] if i + 1 < len(opens) else len(html)
+        # The first "-->" after an opener is its closer at parse level —
+        # comment content does not respect tag regions, so no outside-tag
+        # filter applies (an "<!--" open inside a tag can't exist here:
+        # such candidates were already excluded from `opens`).
+        closed = re.search(r"-->", html[pos + 4 : end]) is not None
+        if not closed:
+            html = html[:pos] + "<!---->" + html[pos + 4 :]
     # Same neutralization technique for an unbalanced <noscript>/<template>:
     # find the last unmatched opening tag and inject a synthetic closer
     # immediately after it (converting it to an empty, already-closed
     # element), so _skip_depth doesn't stay elevated for the rest of the
     # document and swallow all subsequent body content.
     for open_re, close_re, tag in _SKIP_TAG_BALANCE:
-        opens = open_re.findall(html)
-        if len(opens) > len(close_re.findall(html)):
-            last_match = list(open_re.finditer(html))[-1]
-            gt = html.find(">", last_match.end())
+        # Pair opens/closes in document order with a stack: closer injection
+        # must target the *unmatched* opener. Putting all missing closers
+        # after the LAST opener breaks when an earlier open was left unclosed
+        # but the last one is properly paired — the injected closer converts
+        # the well-formed element into an empty one and its boilerplate text
+        # leaks into the output.
+        spans = _comment_spans(html)
+        events = sorted(
+            [(m.end(), True) for m in open_re.finditer(html) if _live(html, m.start(), spans)]
+            + [(m.end(), False) for m in close_re.finditer(html) if _live(html, m.start(), spans)]
+        )
+        unmatched: list[int] = []
+        for end, is_open in events:
+            if is_open:
+                unmatched.append(end)
+            elif unmatched:
+                unmatched.pop()
+        # Insert right-to-left so earlier offsets stay valid.
+        for end in reversed(unmatched):
+            gt = html.find(">", end)
             if gt != -1:
+                # One injected closer per unmatched open so the skip-depth
+                # counter returns to zero rather than staying elevated for
+                # the rest of the document.
                 html = html[: gt + 1] + f"</{tag}>" + html[gt + 1 :]
     parser = _HTMLText()
     parser.feed(html)
@@ -246,11 +358,21 @@ def pdf_to_text(data: bytes) -> tuple[str, int]:
     # own graceful-degradation principle (CLAUDE.md: "Studio outputs have
     # fallback text... History_messages() survives malformed chats"), already
     # applied the same way to per-batch embedding failures in pipeline.py.
+    # Iterate by index: pypdf resolves page objects lazily, so `pages[i]` itself
+    # can raise (corrupt xref entry) before extract_text() is ever reached —
+    # an iterator would abort the whole document on that page instead of
+    # skipping it. Enumerating the sequence at all is the document-level
+    # failure case and maps to the same parse error as construction.
+    try:
+        page_seq = reader.pages
+        n_pages = len(page_seq)
+    except Exception as exc:
+        raise IngestError("INGEST_PARSE_FAILED", f"PDF page list failed: {exc}") from exc
     pages: list[str] = []
     n_failed = 0
-    for page in reader.pages:
+    for i in range(n_pages):
         try:
-            pages.append(page.extract_text() or "")
+            pages.append(page_seq[i].extract_text() or "")
         except Exception:
             n_failed += 1
             continue
@@ -305,7 +427,13 @@ def validate_public_url(url: str) -> tuple[urllib.parse.ParseResult, str]:
     Returns (parsed_url, pinned_ip) so callers can connect to the validated IP
     directly without a second DNS lookup.
     """
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        # urlparse validates bracketed hosts eagerly (e.g. "http://[::1"):
+        # ValueError must not escape as a 500-class leak — map to the same
+        # coded rejection as every other malformed URL (v0.2.45 defect class).
+        raise IngestError("INGEST_URL_BLOCKED", f"invalid URL: {exc}") from exc
     if parsed.scheme not in ("http", "https"):
         raise IngestError("INGEST_URL_BLOCKED", f"scheme not allowed: {parsed.scheme!r}")
     if not parsed.hostname:

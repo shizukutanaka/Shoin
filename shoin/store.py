@@ -62,6 +62,32 @@ def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     raise last_exc
 
 
+def _utf8(value: object, field: str) -> None:
+    """Return *value* unchanged, or raise a coded StoreError when it is not
+    UTF-8 encodable.
+
+    sqlite3 encodes bound str parameters as strict UTF-8: a lone surrogate
+    reaches a write as a raw UnicodeEncodeError — not a StoreError — so it
+    bypasses every caller's coded-error mapping (HTTP 400, CLI err.prefix).
+    Such strings really do arrive: POSIX argv/env decode invalid bytes via
+    surrogateescape (CLI subcommands, `shoin add` of a filename with non-UTF-8
+    bytes, SHOIN_* env vars), and the API layer's field gate does not cover
+    values derived downstream (a source title taken from such a filename).
+    Checking at the write keeps the coded contract regardless of caller.
+    """
+    if not isinstance(value, str):
+        # Not this gate's problem — e.g. a None body is the column's own
+        # NOT NULL violation, already mapped to SYSTEM_INTERNAL_ERROR.
+        return
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"{field} is not UTF-8 encodable",
+        ) from e
+
+
 class _Counts(TypedDict):
     sources: int
     chunks: int
@@ -474,6 +500,7 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"name too long (max {MAX_NAME_LEN} chars)",
             )
+        _utf8(name, "name")
         ts = _now()
         cur = self.conn.execute(
             "INSERT INTO notebooks(name, created_at, updated_at) VALUES (?,?,?)",
@@ -503,6 +530,7 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"name too long (max {MAX_NAME_LEN} chars)",
             )
+        _utf8(name, "name")
         cur = self.conn.execute(
             "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
             (name, _now(), notebook_id),
@@ -533,7 +561,18 @@ class Store:
             # wrong citation types and renders a nonsense badge with no
             # corrective path (kind is immutable post-insert).
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown source kind: {kind!r}")
-        title = title[:MAX_TITLE_LEN]  # silently truncate; titles come from external content
+        # Silently truncate like update_source_title() — titles come from
+        # external content — but also strip + reject empty, the same validation
+        # update_source_title() and update_source_sha256() already apply. A
+        # whitespace title could otherwise enter via the ingest path (caller-
+        # supplied title=, whitespace filename) and persist a blank title the
+        # rename path itself refuses to write.
+        title = title.strip()[:MAX_TITLE_LEN]
+        if not title:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        _utf8(title, "title")
+        _utf8(origin, "origin")
+        _utf8(sha256, "sha256")
         self.get_notebook(notebook_id)
         dup = self.conn.execute(
             "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
@@ -581,6 +620,8 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        _utf8(title, "title")
+        _utf8(origin, "origin")
         src = self.get_source(source_id)  # also validates existence; notebook_id needed below
         with self.conn:
             # Re-read the title INSIDE the transaction (not src.title from the
@@ -702,6 +743,27 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        # Same strip+reject contract as the other three title writers
+        # (add_source / update_source_title / update_source_sha256): without
+        # it a whitespace-only title would persist — the blank title the
+        # rename path itself refuses to write. Validated up front so a bad
+        # title fails before any chunk is touched.
+        new_title = title.strip()[:MAX_TITLE_LEN] if title is not None else None
+        if title is not None and not new_title:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty"
+            )
+        if new_title is not None:
+            _utf8(new_title, "title")
+        if sha256 is not None:
+            _utf8(sha256, "sha256")
+        # Same up-front gate as the title check above: a bad value must fail
+        # before any chunk row is touched.
+        for text in texts:
+            _utf8(text, "chunk text")
+        if contexts is not None:
+            for ctx in contexts:
+                _utf8(ctx, "chunk context")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
@@ -722,7 +784,6 @@ class Store:
                     # stale snapshot — reintroducing exactly the bug v0.2.87 fixed (refresh
                     # overwriting a user's custom title), just via a race instead of always.
                     # Resolving the fallback in SQL reads the CURRENT row value atomically.
-                    new_title = title[:MAX_TITLE_LEN] if title is not None else None
                     meta_cur = self.conn.execute(
                         "UPDATE sources SET sha256=?, title=COALESCE(?, title) WHERE id=?",
                         (sha256, new_title, source_id),
@@ -765,6 +826,8 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        _utf8(title, "title")
+        _utf8(sha256, "sha256")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:
             with self.conn:
@@ -816,6 +879,13 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"contexts length ({len(contexts)}) must match texts ({len(texts)})",
             )
+        # Up-front like replace_chunks_for_source's gate: a bad string must
+        # fail before any chunk row is written.
+        for text in texts:
+            _utf8(text, "chunk text")
+        if contexts is not None:
+            for ctx in contexts:
+                _utf8(ctx, "chunk context")
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
@@ -979,6 +1049,8 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"title too long (max {MAX_NAME_LEN} chars)",
             )
+        _utf8(title, "title")
+        _utf8(body, "body")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
@@ -1031,6 +1103,8 @@ class Store:
             # to overwrite it. Same fail-at-the-write class as add_message()'s
             # role guard.
             raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
+        _utf8(body, "body")
+        _utf8(citation_report, "citation_report")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # `with self.conn:` commits INSERT+DELETE atomically and rolls
@@ -1086,6 +1160,8 @@ class Store:
             # typo'd literal would silently corrupt turn alternation, so fail
             # loudly at the write.
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown message role: {role!r}")
+        _utf8(body, "body")
+        _utf8(citation_report, "citation_report")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
@@ -1173,11 +1249,14 @@ class Store:
 
     def get_setting(self, key: str) -> str | None:
         """Return a stored setting value, or None if the key has never been set."""
+        _utf8(key, "key")
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
     def set_setting(self, key: str, value: str) -> None:
         """Upsert a setting key/value pair."""
+        _utf8(key, "key")
+        _utf8(value, "value")
         self.conn.execute(
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)",
             (key, value),

@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.517 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.624 時点に同期)
 
 ## プロダクト定義
 
@@ -75,7 +75,7 @@ schema_migrations(version)
 
 マイグレーション: 整数連番(1, 2, 3, ...)・append-only・up専用。全DDLは`IF NOT EXISTS`等で冪等化し、同一バージョンの重複適用や複数プロセスからの同時マイグレーションでもクラッシュしない(v0.2.33で確立)。SQLiteではdownマイグレーションは一般に危険なため意図的に非対応。
 
-語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定。studio._INSTRUCTIONSのキー集合も≡STUDIO_KINDSを固定——語彙に追加されたkindが指示欠落でハンドラ検証後にKeyError→生500化する経路を遮断(v0.2.427)——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。データ変更SQL(INSERT/DELETE/UPDATE)はstore.pyのみに存在——ハンドラからの生`conn.execute`書込みは語彙ガード・touch契約・エラー体系を黙ってバイパスするためソーススキャンで封印(v0.2.405)。`_read_json`の結果は`_require`/`_optional_str`経由でのみ読み、bound dictの直接`data.get`/`data[]`は型未検証のAttributeError→500経路として封印(v0.2.408)。出荷コードのTODO/FIXMEマーカー0件をスキャンで固定(v0.2.411)。複文書込み(INSERT/DELETE+touch等)は全て`with self.conn:`で原子化——第二文失敗時に先行文がペンディングのまま後続commitに流出する経路を閉塞し、`_RacyConn`注入テストで両方向(失敗が消去を公開/拒否行を公開)固定(v0.2.419)。LLM応答は形状を正規化して読む: chat()はKeyError/TypeError→`SYSTEM_LLM_BAD_RESPONSE`、chat_stream()はdict以外のdelta(裸文字列は本文として受理、null等他型はスキップ)を許容——未正規化の`.get`/添字アクセスが生例外として500化する経路を遮断(v0.2.259/421)。TX契約はさらに3層の構造ピンで再回帰不能化: 書込み動詞executeは全て`with self.conn:`内必須(単文writer・callee-transactedヘルパはcap付きallowlist、`_migrate_once`は独自COMMIT管理で免除)(v0.2.423)、callee-transactedヘルパ(touch_notebook等)の全呼出しサイトはwith内必須＋`_set_embedding_pair`は`set_embedding`単一caller化(v0.2.424)、`with self.conn:`内からwith所有メソッドを呼ぶ入れ子を禁止(sqlite3の`with`は__exit__でcommit=外側pending早期確定の危険経路)(v0.2.425)。Store()呼出しはASTレベルで`with`のcontext式必須——裸生成はthread-affinedな接続をclose不能でリーク(v0.2.428)。`Store.__enter__`/`__exit__`のdunder本体もexecute/commit/rollback非含有をAST固定——withブロック途中失敗のpending書込みがクリーンアップで公開される第4経路を閉塞し同欠陥クラスを完全閉鎖(v0.2.432)。受理文字列はUTF-8往復で検証——json.loadsが物質化する単独サロゲート(\ud800等)がsqlite3バインドで未捕捉UnicodeEncodeError→生500となるクライアントフォーマット欠陥を`_require`/`_optional_str`の`_check_utf8`で`VALIDATION_FIELD_FORMAT_INVALID`(400)へ写像(v0.2.430)。ハンドラスレッド共有のモジュールレベルキャッシュ(`questions_cache`/`_QUERY_VEC_CACHE`)は全アクセスを`with X_lock:`内必須——dictのcheck-then-set・LRU変異の非原子性を塞いだロックが後続の無防備アクセスで静かに無効化される経路をスキャンで封印(v0.2.433/434)。`generation_lock`配下のLLM生成呼出し(generate/suggest_questions/_stream_chat)も同型スキャンで固定——ロック無しの新呼出しサイトは正しく動作するため検出不能だった(v0.2.439)。接続生成も単一点化:`sqlite3.connect`はstore.pyのみが所有(row_factory/WAL/foreign_keys PRAGMA/0600パーミッション)——store外の接続サイトはFK=OFF・journal=DELETE・デフォルト権限の接続を静かに生成する経路をAST走査で封印(v0.2.444)。TX制御動詞(.conn.commit/rollback/executescript/executemany)のstore外使用はpipeline.py(_embed_chunksバッチTX契約)のみ許可——v0.2.405ピンはSQL文面のみ走査するためTX呼出し自体は未監視、ハンドラ中の新規`.conn.commit()`がcalleeのpending書込みを早期確定させるcaller側変種をスキャンで封印(v0.2.446)。`except Exception`広域捕捉は12サイトのカタログ化で固定——新規の無文書catch-allはBLE001警告止まりでlintを素通りし該当欠陥クラスを静かに隠蔽する経路を封印(v0.2.448)。ネットワーク呼出し(urlopen/create_connection)は全てtimeout明示必須——無指定は無期限待機でハンドラスレッドを占有しper-requestスレッドが枯渇へ蓄積する経路をAST走査で封印(v0.2.450)。モジュールレベルの可変コレクションは宣言済み(file,name)集合のみ——定数テーブル以外の唯一の真可変`_QUERY_VEC_CACHE`は`_QUERY_VEC_LOCK`下で、新規の無ロック共有可変は単一スレッドテストを素通りして並行競合する経路をAST走査で封印(v0.2.451)。動的実行・デシリアライズ・シェル実行のプリミティブ(eval/exec/compile/`__import__`/globals/locals呼出し、pickle/marshal/subprocess/ctypes/code/ptyのimport+呼出しサイト)と可変デフォルト引数をAST全面禁止——stdlib-onlyツールで正当化不能な注入シンクと全呼出し共有エイリアシング欠陥を現状ゼロのまま恒久化し、`os.system`/`os.popen`/`os.spawn*`/`os.exec*`/`os.startfile`の双子経路もexec/spawn属性族として閉塞(v0.2.454/455)。正規表現もAST+sre_parse走査で壊滅ジオメトリ(無制限repeat内の無制限グループ・先頭重複alternation)を禁止し非リテラル`re.compile`を10サイトのカタログ化で定数テーブルalternationか`re.escape`補間のみへ宣言化——敵対的入力長でしか発火しないReDoS欠陥クラスを封印(v0.2.456)。except-Exceptionカタログの見えないバイパス経路3件を同一走査で閉塞——裸`except:`・`except BaseException`(KI/SystemExitも呑込む、カタログ対象より広い)・`contextlib.suppress(Exception/BaseException)`(CM経由の同一静寂呑込み)。狭域の既存`suppress(OSError)`は許可維持＋非真空チェックのアンカー化(v0.2.460)。宣言`requires-python >=3.11`の文法フロアを全`shoin/`+`tests/`ファイルの`ast.parse(feature_version=(3,11))`リプレイで固定——devの3.12インタプリタでは緩和構文(同一引用符ネストf-string・`type`文)が静かにコンパイルされフロアユーザーで初回実行クラッシュする、ruff/mypyのAPI/型検査が文法を見ない経路を遮蔽(v0.2.461)。送出エラーコードは`_dispatch`の接尾辞/接頭辞写像(`*_NOT_FOUND`→404・`*_ALREADY_EXISTS`→409・`SYSTEM_*`→500・他→400)に委ねられるため、規約外の綴り(`NOTE_NOTFOUND`等)は静かに400バケットへ落下し検出不能——raise/emit全コードを32件の宣言集合＋名族タクソノミーでAST固定し、新コードには文書化根拠のカタログ更新を必須化(v0.2.465)。
+語彙フィールドは書込み時点で検証する(v0.2.368/386/387): `messages.role ∈ {user, assistant}`、`studio_outputs.kind ∈ store.STUDIO_KINDS`(→`STUDIO_KIND_INVALID`)、`sources.kind ∈ store.SOURCE_KINDS`(→`VALIDATION_FIELD_FORMAT_INVALID`)。語彙はstore.pyに定義し`studio.KINDS`/`ingest._EXT_KIND.values()∪{url}`と`assertIs`/集合同値で両方向固定。studio._INSTRUCTIONSのキー集合も≡STUDIO_KINDSを固定——語彙に追加されたkindが指示欠落でハンドラ検証後にKeyError→生500化する経路を遮断(v0.2.427)——typo'dリテラルがGROUP BYやエクスポートのTY写像を潜り抜けて幽霊データを永続化する経路を遮断。エラー体系: `*_NOT_FOUND`→404、`*_ALREADY_EXISTS`→409、`SYSTEM_*`→500、他→400(v0.2.371)。データ変更SQL(INSERT/DELETE/UPDATE)はstore.pyのみに存在——ハンドラからの生`conn.execute`書込みは語彙ガード・touch契約・エラー体系を黙ってバイパスするためソーススキャンで封印(v0.2.405)。`_read_json`の結果は`_require`/`_optional_str`経由でのみ読み、bound dictの直接`data.get`/`data[]`は型未検証のAttributeError→500経路として封印(v0.2.408)。出荷コードのTODO/FIXMEマーカー0件をスキャンで固定(v0.2.411)。複文書込み(INSERT/DELETE+touch等)は全て`with self.conn:`で原子化——第二文失敗時に先行文がペンディングのまま後続commitに流出する経路を閉塞し、`_RacyConn`注入テストで両方向(失敗が消去を公開/拒否行を公開)固定(v0.2.419)。LLM応答は形状を正規化して読む: chat()はKeyError/TypeError→`SYSTEM_LLM_BAD_RESPONSE`、chat_stream()はdict以外のdelta(裸文字列は本文として受理、null等他型はスキップ)を許容——未正規化の`.get`/添字アクセスが生例外として500化する経路を遮断(v0.2.259/421)。TX契約はさらに3層の構造ピンで再回帰不能化: 書込み動詞executeは全て`with self.conn:`内必須(単文writer・callee-transactedヘルパはcap付きallowlist、`_migrate_once`は独自COMMIT管理で免除)(v0.2.423)、callee-transactedヘルパ(touch_notebook等)の全呼出しサイトはwith内必須＋`_set_embedding_pair`は`set_embedding`単一caller化(v0.2.424)、`with self.conn:`内からwith所有メソッドを呼ぶ入れ子を禁止(sqlite3の`with`は__exit__でcommit=外側pending早期確定の危険経路)(v0.2.425)。Store()呼出しはASTレベルで`with`のcontext式必須——裸生成はthread-affinedな接続をclose不能でリーク(v0.2.428)。`Store.__enter__`/`__exit__`のdunder本体もexecute/commit/rollback非含有をAST固定——withブロック途中失敗のpending書込みがクリーンアップで公開される第4経路を閉塞し同欠陥クラスを完全閉鎖(v0.2.432)。受理文字列はUTF-8往復で検証——json.loadsが物質化する単独サロゲート(\ud800等)がsqlite3バインドで未捕捉UnicodeEncodeError→生500となるクライアントフォーマット欠陥を`_require`/`_optional_str`の`_check_utf8`で`VALIDATION_FIELD_FORMAT_INVALID`(400)へ写像(v0.2.430)。ハンドラスレッド共有のモジュールレベルキャッシュ(`questions_cache`/`_QUERY_VEC_CACHE`)は全アクセスを`with X_lock:`内必須——dictのcheck-then-set・LRU変異の非原子性を塞いだロックが後続の無防備アクセスで静かに無効化される経路をスキャンで封印(v0.2.433/434)。`generation_lock`配下のLLM生成呼出し(generate/suggest_questions/_stream_chat)も同型スキャンで固定——ロック無しの新呼出しサイトは正しく動作するため検出不能だった(v0.2.439)。接続生成も単一点化:`sqlite3.connect`はstore.pyのみが所有(row_factory/WAL/foreign_keys PRAGMA/0600パーミッション)——store外の接続サイトはFK=OFF・journal=DELETE・デフォルト権限の接続を静かに生成する経路をAST走査で封印(v0.2.444)。TX制御動詞(.conn.commit/rollback/executescript/executemany)のstore外使用はpipeline.py(_embed_chunksバッチTX契約)のみ許可——v0.2.405ピンはSQL文面のみ走査するためTX呼出し自体は未監視、ハンドラ中の新規`.conn.commit()`がcalleeのpending書込みを早期確定させるcaller側変種をスキャンで封印(v0.2.446)。`except Exception`広域捕捉は18サイトのカタログ化で固定——新規の無文書catch-allはBLE001警告止まりでlintを素通りし該当欠陥クラスを静かに隠蔽する経路を封印(v0.2.448)。ネットワーク呼出し(urlopen/create_connection)は全てtimeout明示必須——無指定は無期限待機でハンドラスレッドを占有しper-requestスレッドが枯渇へ蓄積する経路をAST走査で封印(v0.2.450)。モジュールレベルの可変コレクションは宣言済み(file,name)集合のみ——定数テーブル以外の唯一の真可変`_QUERY_VEC_CACHE`は`_QUERY_VEC_LOCK`下で、新規の無ロック共有可変は単一スレッドテストを素通りして並行競合する経路をAST走査で封印(v0.2.451)。動的実行・デシリアライズ・シェル実行のプリミティブ(eval/exec/compile/`__import__`/globals/locals呼出し、pickle/marshal/subprocess/ctypes/code/ptyのimport+呼出しサイト)と可変デフォルト引数をAST全面禁止——stdlib-onlyツールで正当化不能な注入シンクと全呼出し共有エイリアシング欠陥を現状ゼロのまま恒久化し、`os.system`/`os.popen`/`os.spawn*`/`os.exec*`/`os.startfile`の双子経路もexec/spawn属性族として閉塞(v0.2.454/455)。正規表現もAST+sre_parse走査で壊滅ジオメトリ(無制限repeat内の無制限グループ・先頭重複alternation)を禁止し非リテラル`re.compile`を12サイトのカタログ化で定数テーブルalternationか`re.escape`補間のみへ宣言化——敵対的入力長でしか発火しないReDoS欠陥クラスを封印(v0.2.456)。except-Exceptionカタログの見えないバイパス経路3件を同一走査で閉塞——裸`except:`・`except BaseException`(KI/SystemExitも呑込む、カタログ対象より広い)・`contextlib.suppress(Exception/BaseException)`(CM経由の同一静寂呑込み)。狭域の既存`suppress(OSError)`は許可維持＋非真空チェックのアンカー化(v0.2.460)。宣言`requires-python >=3.11`の文法フロアを全`shoin/`+`tests/`ファイルの`ast.parse(feature_version=(3,11))`リプレイで固定——devの3.12インタプリタでは緩和構文(同一引用符ネストf-string・`type`文)が静かにコンパイルされフロアユーザーで初回実行クラッシュする、ruff/mypyのAPI/型検査が文法を見ない経路を遮蔽(v0.2.461)。送出エラーコードは`_dispatch`の接尾辞/接頭辞写像(`*_NOT_FOUND`→404・`*_ALREADY_EXISTS`→409・`SYSTEM_*`→500・他→400)に委ねられるため、規約外の綴り(`NOTE_NOTFOUND`等)は静かに400バケットへ落下し検出不能——raise/emit全コードを32件の宣言集合＋名族タクソノミーでAST固定し、新コードには文書化根拠のカタログ更新を必須化(v0.2.465)。SSEエラー送出契約(v0.2.592): `/ask`のtoken生成失敗はSSEヘッダ確定後も第2ステータス行を混入せず`event: error`フレーム(コード化エラーはcode+message、genericは`SYSTEM_INTERNAL_ERROR`+type名のみ)で送出し、部分assistant行は失敗如何に関わらず永続化——error frame送出そのものの失敗のみclient_goneでdone抑止。eval baselineのスキーマ厳格性: `report_from_dict`はソースid要素をint限定(bool除外、v0.2.562)かつ全5数値フィールド(個別`recall`/`rr`・集約`recall`/`mrr`・`k`)を有限非bool必須——`json.loads`が受理する非標準NaN/Infinityリテラルとintサブクラスのboolがdiff算術へNaN伝播する経路を閉塞(v0.2.595)。`urllib.request.Request`は構築時にurlsplitを走らせるため malformed base_url(unclosed IPv6 bracket等)はurlopen前にraise——LLM全経路(chat/stream/embed/`available()`)で構築をtry内へ統一し`SYSTEM_SERVICE_UNAVAILABLE`へ写像(v0.2.594)。
 出力面も機械可読契約として4層で封印: `send_header`/`_headers`の
 値引数は定数/`str(len)`/ルート整数・閉マップ参照/`safe_lang`/
 安全f-stringのホワイトリストのみ——ユーザー文字列の流入はCRLF
@@ -95,6 +95,85 @@ yieldを持つfor本体や`list()`/`tuple()`/`join()`消費はプロセス毎に
 ——`fts_query`出力の全アトムが二重引用(内部引用は`""`にdoubling)
 であることを行動検証し、`MATCH ?`サイトをsearch.py:556の唯一1件に
 カタログ固定(v0.2.471)。
+`retrieve_multi()`の`rrf_fuse_lists`マージ規約はシグナルごとに
+first-wins——vec/bm25とも最初に出たリストの値が正準となり、呼出し側が
+primaryクエリのリストを先頭に並べることが契約の本体(v0.2.602: vecは
+以前last-winsでrewriteの弱いコサインに上書きされていた)。`_embed_chunks`の
+dim-mismatch等のバッチ内raiseは`except LLMError`枝でもrollback必須——
+同一バッチの先行`set_embedding(commit=False)`がpending txとして残存し、
+直後の`set_setting()`コミットが失敗バッチの部分ベクトルを静かに
+永続化する経路を閉塞(v0.2.600、v0.2.419 pending-tx leak族の最終sibling)。
+eval層でも受理文字列はUTF-8往復必須——`parse_cases`/`report_from_dict`の
+`_utf8_ok`が単独サロゲート(\ud800等)を`json.loads`物質化のまま受理し
+sqliteバインド/diff出力で生UnicodeEncodeErrorとなる経路を閉塞(v0.2.598、
+server._check_utf8と同欠陥クラス)。LLM出力デコード境界は全出口で
+`_strip_surrogates`——`_message_text`両経路とchat_streamのdeltaから
+単独サロゲートを除去し、sqliteバインド/`_json`応答encodeの
+UnicodeEncodeErrorとquestions_cache中毒(書込み後クラッシュで以後の
+全pollが永続500)を一括閉塞(v0.2.599)。`html_to_text`の不平衡skip-tag
+中和はopen-closes分のcloserを注入——`<nav><nav>`多重openで
+`_skip_depth`残存により後続テキスト全喪失する半修正を完結(v0.2.603)。
+`_HEADING_RE`は`_FENCE_RE`と同一のCommonMark indent規則
+(`^ {0,3}(#{1,6})(?:\s|$)`)——`  ## Sec`やbare `###`がheading境界・
+breadcrumb・heading加重BM25から不可視だった不一致適用を解消(v0.2.604)。
+`_status_line`のuncited_supportedヒントは非空strターゲットのみ——
+`uncited_supported_source`欠落/空/非dictのレポート(v0.2.216以前形状)で
+矢印が先なしに宙吊り表示される経路を閉塞(v0.2.607)。
+
+単独サロゲート欠陥クラスは残存する全境界で閉塞——store層`_utf8`が
+書込み前の全バインドstrフィールド(notebook name・source title/origin/
+sha256・chunk texts/contexts・note title/body・studio body+citation_
+report・message body+citation_report・settings key/value)を
+`VALIDATION_FIELD_FORMAT_INVALID`で拒絶し、POSIX argv/envの
+surrogateescape由来を捕捉(v0.2.609)。SSEフレームは`ensure_ascii=True`の
+ASCII純粋ワイヤ——旧行由来サロゲートがmeta/doneフレームのencodeを
+クラッシュさせコミット済みストリームへ第2HTTPステータス行を注入する
+経路を閉塞(v0.2.610)。cli `main()`はUnicodeEncodeErrorを
+`SYSTEM_INTERNAL_ERROR`+rc=1へ写像し、「全サブコマンドはerr.prefix、
+トレースバック無し」保証をカスタムChatBackendのサロゲート出力まで
+完結(v0.2.611)。`_json`応答writerはサロゲートpayloadで`ensure_ascii`
+エスケープへ退避——エラーエンベロープ経路がHTTP応答そのものを失う
+経路を閉塞(v0.2.614)。
+`bm25_prf_search`の拡張ヒットは`k - len(hits)`のヘッドルームに上限——
+第1パス未充填時、システム提案gramのみ一致の密な拡張ヒットがユーザ
+用語一致の第1パスヒットを`[:k]`切詰で退避させ得た「ADD recallのみ」
+契約の反転を閉塞(v0.2.613)。`html_to_text`の修復はパースレベル
+ペアリング——`_skip_depth`盲目カウンタを`_skip_stack`名スタックへ
+(DOM意味論のpop-through: クローザーは対応openerまでpopしネスト要素を
+暗黙終了、未開クローザーは無視)、`<...>`属性領域・`<!--...-->`内・
+CDATAで発火しないイベントを`_live`述語(`_outside_tag`のtagfind忠実
+後方走査+`_comment_spans`)で全消費点から除外、注入修復をper-opener化
+(未整合open毎に`</{tag}>`を`>`直後へ、未閉`<!--`は個別に空化)——
+stray `</nav>`が無関係open要素を解放する経路と早期の未整合openerが
+後続平衡要素の内容を漏洩させる経路を一括閉塞(v0.2.615)。
+格納レポートの変形フィールドはexport経路で無信号へ降格——
+`_parse_report`が任意well-formed JSONを受理する寛容契約の下、
+`_legend()`の非dict `source_detail`値と`_status_line()`の
+非hashable `cited`/`uncited_supported`要素がAttributeError/
+TypeErrorでexport文書全体をクラッシュさせる経路を、周辺の
+isinstanceガードと同一のno-signal扱いへ統一して閉塞(v0.2.617)。
+stdlib境界の非コード化漏出は全てcoded拒絶へ写像——`urlparse`が
+括弧付きホストをパース時点で検証し`http://[::1`等の未閉ブラケットで
+裸ValueErrorを送出する経路を`INGEST_URL_BLOCKED`へ(`.port`遅延
+チェックに先行して脱出していたv0.2.45同欠陥クラス)、`_decode`の
+charset候補loopがNUL混入charset名でcodec lookupの
+`ValueError("embedded null character")`を脱出させる経路を
+catch節`(ValueError, LookupError)`へ広げて閉塞(v0.2.619)。
+LLM応答の深ネストbodyはmalformed信号としてコード化——
+`json.loads`が~5k深を超えるbodyでRecursionError(JSONDecodeError
+ではない)を送出し、`_post`では全呼出し経路の500化、chat_stream
+では1フレームがSSE全体を途中abortさせる両漏出を、BAD_RESPONSE
+写像とmalformed-frame dropへそれぞれ収束(v0.2.620)。
+CLIステータス/リスト/レポート行への外部制御文字列(ターゲットパス・
+格納タイトル・ノートブック名)の埋込みは`_one_line`でエスケープ——
+`\n`入り文字列が行を分裂させ偽`✓`行を偽造する経路とESC系列による
+前行上書き経路を、Cc/Zl/Zp文字の`\\n`/`\\xNN`/`\\uXXXX`変換で閉塞。
+ブロック内容(回答本文・メッセージ本文)は複数行が正当なため対象外
+(v0.2.623)。
+チャンク分割の最終手段char-windowはestimate_tokensのprefix単調性を
+利用した二分探索で「最長適合prefix」を切出——平均トークン密度×
+固定strideの旧方式は混合密度テキスト(ASCII文中のCJK高密度ポケット等)
+でlimit超過窓を放出する経路を構成保証へ置換(v0.2.624)。
 
 ## 検索パイプライン
 
@@ -119,6 +198,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 2. **根拠確認**: 引用文とソース本文の文字bigram重複が閾値(0.30)以上なら `confirmed`
 3. **誤帰属検出**: 引用文が引用元ではなく**別の**ソースに強く一致(gap 0.20以上)する場合 `misattributed` としてフラグ + 最尤の正出典を `misattributed_suggested` で提示
 4. **無出典断定検出**: 引用が一切ない断定文を `uncited` としてフラグ。出典内一致する文は引用欠落 `uncited_supported` として区別し最尤出典を `uncited_supported_source` で提示。「ソースに記載なし」等の明示的免責文・構造行・列挙導入・フェンス/インデントコードは除外
+   - マーカー帰属規約(v0.2.576-583): 文splitで断片先頭に落ちた `[S#]` run は自断片でなく直前claimへ帰属(全検査で `_leading_markers` 経路に統一)、断片末尾の未被覆面(最終マーカー以降のclaim)も評価対象、前向き熟語(によると/によれば/では)は先頭空白を許容し束縛済みclaimは重複フラグしない、中断片の熟語束縛(`A[S1]によるとB`)は帰属が曖昧なため沈黙原則で断片ごと黙止。同一S番号が先行マーカーと後続マーカーの両方で出現する形状(`[S1] B [S1]`)はlead claimとsegment出現のunionで評価——`n in lead`短絡で後続出現の誤帰属・捏造数値・単位不一致・引用不一致・否定反転が全検査を回避する経路を閉塞(v0.2.601)
 5. **数値一致** `numeric_mismatch`: 出典に無い数値の主張を検出。倍率/漢数字/英数詞/歩合/率表記/同族単位換算/元号(令和6年≡2024年)を展開して等価値は非フラグ
 6. **逐語引用** `quote_mismatch`: 「…」/"…" の引用が**別の**ソースに逐語一致=誤帰属の文字列証明。引用元自身の言い換えに引用符を被せた改竄引用も検出
 7. **単位一致** `unit_mismatch`: 数値は出典にあるが単位が非互換(100km vs 100m等)
@@ -144,7 +224,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.530時点の実測: shoin/ 99%、未カバー4行は到達不能証明済み、テスト1160件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.624時点の実測: shoin/ 99%、未カバー25行は防御分岐・到達不能tail、テスト1282件)
 
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en

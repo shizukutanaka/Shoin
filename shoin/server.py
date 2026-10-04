@@ -121,10 +121,16 @@ def _safe_report(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
     try:
-        return json.loads(raw) or {}
+        parsed = json.loads(str(raw))
     except (json.JSONDecodeError, ValueError):
         print(f"Warning: corrupt citation_report in DB (ignored): {raw!r:.120}", file=sys.stderr)
         return {}
+    # A stored blob can be *valid* JSON without being a report — `"[1,2]"`,
+    # `"5"`, `"true"` all parse but emit a non-object `report` field that the
+    # response schema never produces (every reader does `report.<field>`).
+    # export.py's `_parse_report` degrades the same shapes to {}, so the API
+    # and export surfaces now degrade identically.
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _notebook_json(store: Store, nb_id: int) -> Json:
@@ -215,7 +221,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _json(self, payload: Json, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            # Payload fields can carry lone surrogates — a custom ChatBackend's
+            # error message or model name, an LLM-derived snippet materialized
+            # from a stored citation_report blob — and strict UTF-8 cannot
+            # encode them. On the error-envelope path a crash here would leave
+            # the request with no HTTP response at all, so emit \ud800 escapes
+            # instead; the client's JSON.parse restores them. The compact
+            # ensure_ascii=False path stays the fast path for CJK payloads.
+            body = json.dumps(payload).encode("ascii")
         self._headers(status, "application/json; charset=utf-8", {"Content-Length": str(len(body))})
         self.wfile.write(body)
 
@@ -569,7 +585,7 @@ class _Handler(BaseHTTPRequestHandler):
         raw_name = (
             Path(urllib.parse.unquote(header_name)).name
             or "upload.txt"
-        ).replace("\x00", "").replace("\r", "").replace("\n", "") or "upload.txt"
+        ).replace("\x00", "").replace("\r", "").replace("\n", "").strip() or "upload.txt"
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -772,7 +788,15 @@ class _Handler(BaseHTTPRequestHandler):
     # --- SSE ask --------------------------------------------------------
 
     def _sse(self, event: str, payload: Json) -> None:
-        data = json.dumps(payload, ensure_ascii=False)
+        # ensure_ascii=True (the json.dumps default), deliberately: a payload
+        # string carrying a lone surrogate — reachable from rows stored before
+        # the field gates landed (v0.2.430/v0.2.609), e.g. an old notebook
+        # name in a meta frame or a history sentence echoed into a report —
+        # is emitted as a \ud800 escape instead of crashing .encode(). The
+        # callers only catch ConnectionError, so an encode failure here
+        # propagated to _dispatch's 500 writer: a second HTTP status line
+        # injected into the already-committed SSE stream body.
+        data = json.dumps(payload)
         self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
         self.wfile.flush()
 
@@ -915,6 +939,31 @@ class _Handler(BaseHTTPRequestHandler):
                     client_gone = True
             except ConnectionError:
                 client_gone = True
+            except Exception as exc:
+                # Any other mid-stream failure — a socket timeout (TimeoutError
+                # is NOT a ConnectionError), a surrogate token that fails the
+                # SSE UTF-8 encode, an unexpected backend error type — must not
+                # propagate to _dispatch(): the SSE headers are already
+                # committed, so its 500 write would inject a second status
+                # line into the stream body, and unwinding would skip the
+                # persist below, orphaning the user turn exactly like the
+                # disconnect paths above are built to prevent.
+                print(
+                    f"stream failed mid-SSE: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                try:
+                    if isinstance(exc, (StoreError, IngestError)):
+                        self._sse("error", {"code": exc.code, "message": str(exc)})
+                    else:
+                        self._sse(
+                            "error",
+                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
+                        )
+                except Exception:
+                    # The error frame couldn't reach the client either —
+                    # nothing more to send; the persist below still runs.
+                    client_gone = True
             full = "".join(parts)
             report = make_report(
                 full,

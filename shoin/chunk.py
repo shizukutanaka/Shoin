@@ -131,7 +131,11 @@ _CJK_RANGES = (
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_HEADING_RE = re.compile(r"^#{1,6}\s")
+# ATX heading opener per CommonMark: up to 3 leading spaces (4+ is indented
+# code), 1-6 '#', then whitespace or end-of-line (a bare "###" is a valid empty
+# heading). _FENCE_RE's indent rule is the same one, so both structural
+# detectors read the same line the same way.
+_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
 # ｡ (U+FF61) is the halfwidth JIS X 0201 counterpart of 。 and terminates a
 # sentence identically — it is common in cp932 legacy text, which ingest._decode()
 # actively prefers, and NFKC folds it to 。 anyway. Without it, both this splitter's
@@ -248,11 +252,40 @@ def estimate_tokens(text: str) -> int:
     return cjk + words
 
 
+# Inside a fenced code block every structural signal is content: a
+# `# comment` line is a comment, not an ATX heading, and a blank line is
+# padding, not a block boundary. Without tracking fence state both were
+# misparsed — a fenced `#` line closed the real enclosing section and pushed
+# itself onto the breadcrumb stack, and every blank line inside the fence
+# split the code mid-block. Rules per CommonMark: an opener is a run of 3+
+# backticks or tildes indented ≤3 spaces; the closer is the same marker
+# character, at least the opener's length, with no info string. An unclosed
+# fence (CommonMark: runs to end of document) simply keeps accumulating.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
 def _blocks(text: str) -> list[str]:
     """Split into blocks at markdown headings and blank lines."""
     blocks: list[str] = []
     buf: list[str] = []
+    fence = ""
     for line in text.splitlines():
+        if fence:
+            buf.append(line)
+            m = _FENCE_RE.match(line)
+            if (
+                m
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= len(fence)
+                and not line[m.end() :].strip()
+            ):
+                fence = ""
+            continue
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = m.group(1)
+            buf.append(line)
+            continue
         if _HEADING_RE.match(line):
             if buf:
                 blocks.append("\n".join(buf).strip())
@@ -267,6 +300,35 @@ def _blocks(text: str) -> list[str]:
     if buf:
         blocks.append("\n".join(buf).strip())
     return [b for b in blocks if b]
+
+
+def _window_split(text: str, limit: int) -> list[str]:
+    """Cut *text* into pieces whose own token estimates fit within *limit*.
+
+    The last-resort splitter for text that never yields at a sentence
+    boundary. A fixed character stride sized by the text's *average* token
+    density overshoots the budget whenever a window lands on a denser
+    pocket — an all-CJK run inside mostly-ASCII text costs ~1 token per
+    char where the average suggested ~5 chars per token, so a window could
+    produce a chunk several times over limit. estimate_tokens() is
+    monotonic in prefix length (each added char only adds a CJK unit or
+    extends/completes a word run's cost), so a binary search finds the
+    longest prefix that fits exactly: every emitted piece ≤ limit, with a
+    mid-run cut only where a single run cannot fit alone.
+    """
+    out: list[str] = []
+    rest = text
+    while rest:
+        lo, hi = 1, len(rest)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if estimate_tokens(rest[:mid]) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        out.append(rest[:lo])
+        rest = rest[lo:]
+    return out
 
 
 def _hard_split(block: str, limit: int) -> list[str]:
@@ -298,13 +360,7 @@ def _hard_split(block: str, limit: int) -> list[str]:
         tok = estimate_tokens(p)
         if tok > limit:
             # Character-window fallback for pathological unbroken text.
-            # Convert the token budget to a character budget using this text's
-            # own token density (CJK ≈ 1 char/token; ASCII ≈ 5 chars/token).
-            # Using limit directly as a char index (the old code) produced chunks
-            # that were ~5× too small for ASCII text.
-            chars_per_token = len(p) / tok
-            window = max(int(limit * chars_per_token), 1)
-            out.extend(p[i : i + window] for i in range(0, len(p), window))
+            out.extend(_window_split(p, limit))
         elif tok == 0 and len(p) > limit * 5:
             # Zero-token text (Arabic, Hebrew, Cyrillic, pure punctuation) escapes
             # estimate_tokens(); a pathologically long block (> limit*5 chars) must
@@ -380,15 +436,8 @@ def _tail(text: str, tokens: int) -> str:
 
 def _heading_level(line: str) -> int:
     """ATX heading depth of *line* (number of leading '#'), or 0 if not a heading."""
-    if not _HEADING_RE.match(line):
-        return 0
-    n = 0
-    for ch in line:
-        if ch == "#":
-            n += 1
-        else:
-            break
-    return n
+    m = _HEADING_RE.match(line)
+    return len(m.group(1)) if m else 0
 
 
 def _context_blocks(text: str) -> list[tuple[str, str]]:
@@ -409,7 +458,7 @@ def _context_blocks(text: str) -> list[tuple[str, str]]:
             # A heading closes every open section at the same or deeper level.
             while stack and stack[-1][0] >= lvl:
                 stack.pop()
-            title = _ATX_CLOSING_RE.sub("", first[lvl:].strip()).strip()
+            title = _ATX_CLOSING_RE.sub("", first.lstrip(" ")[lvl:].strip()).strip()
             if title:
                 stack.append((lvl, title))
         out.append((" > ".join(t for _, t in stack), block))
@@ -583,6 +632,16 @@ def _match_fold(text: str) -> str:
             continue
         if unicodedata.category(ch) == "Cf":
             continue  # ZWSP / SHY / ZWNJ / WJ / tag characters carry no content
+        if unicodedata.combining(ch):
+            # A mark that survived NFKC could not compose into any base char —
+            # marks that can are consumed by the composition pass above (and
+            # precomposed accents lose theirs in the decomp branch below).
+            # What reaches here is a stray diacritic glued to a non-letter or
+            # stacked behind an already-composed char (é + ◌́): it carries no
+            # glyph, and keeping it split the fold of its neighbors, making
+            # the fold non-idempotent ('é'+◌́ → 'e'+◌́ → 'e') and letting NFD
+            # fragments diverge from their NFC spellings.
+            continue
         mapped = _LATIN_SPECIALS.get(ch)
         if mapped is not None:
             out.append(mapped)

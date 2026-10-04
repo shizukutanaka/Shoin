@@ -180,7 +180,13 @@ def generate(
     # dropped) instead of ask()'s clean HTTP 400 SYSTEM_DB_LOCKED with the actual
     # lock message.
     try:
-        context = build_context(store, hits, budget_tokens=STUDIO_BUDGET_TOKENS)
+        # rank_weighted=False (v0.2.552): overview hits carry no relevance
+        # ranking — every sampled chunk scores 1.0 in source-id order — so the
+        # harmonic decay would arbitrarily hand source #1 ~6x source #10's
+        # excerpt in outputs documented to cover all sources equally.
+        context = build_context(
+            store, hits, budget_tokens=STUDIO_BUDGET_TOKENS, rank_weighted=False
+        )
     except sqlite3.OperationalError as exc:
         raise StoreError(
             "SYSTEM_DB_LOCKED",
@@ -224,7 +230,9 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
     # a diagnosable SYSTEM_DB_LOCKED error instead of a silent, misleading "no
     # suggestions" result indistinguishable from "no sources".
     try:
-        context = build_context(store, hits, budget_tokens=1600)
+        context = build_context(
+            store, hits, budget_tokens=1600, rank_weighted=False
+        )
     except sqlite3.OperationalError as exc:
         raise StoreError(
             "SYSTEM_DB_LOCKED",

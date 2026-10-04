@@ -92,6 +92,30 @@ class StudioTest(unittest.TestCase):
         self.assertNotEqual(seqs, ["段落0", "段落1", "段落2"])
         store.close()
 
+    def test_overview_context_splits_budget_evenly(self) -> None:
+        """v0.2.552: overview hits have no relevance ranking (score 1.0 in
+        source-id order), so the harmonic 1/i decay would arbitrarily give the
+        FIRST-added source ~2x+ the last-added one's excerpt in an output
+        documented to cover all sources equally."""
+        from shoin.qa import build_context
+
+        store = Store(":memory:")
+        nb = store.create_notebook("n")
+        # Each source holds far more text than any plausible share.
+        text = "和紙は楮の繊維から作られる伝統的な紙である。" * 40
+        for i in range(3):
+            src = store.add_source(nb.id, "txt", f"src{i}", "/t", f"h{i}")
+            store.add_chunks(src.id, [text])
+        hits = overview_hits(store, nb.id, per_source=3)
+        ctx = build_context(store, hits, budget_tokens=900, rank_weighted=False)
+        sizes = [len(b) for b in ctx.source_bodies]
+        self.assertEqual(len(sizes), 3)
+        lo, hi = min(sizes), max(sizes)
+        # Equal shares ± truncation-boundary/label slack; harmonic would give
+        # roughly a 900*0.6 : 900*0.3 : 900*0.1 spread instead.
+        self.assertGreaterEqual(lo, (hi * 2) // 3)
+        store.close()
+
     def test_generate_persists_with_citation_report(self) -> None:
         llm = FakeLLM(reply="ブリーフィング [S1] と [S2]。")
         result = generate(self.store, llm, self.nb, "briefing")
@@ -338,7 +362,7 @@ class ExportTest(unittest.TestCase):
     def test_markdown_contains_sections(self) -> None:
         md = export(self.store, self.nb, "md")
         self.assertIn("# 研究", md)
-        self.assertIn("[S1] 資料1", md)
+        self.assertIn("1. 資料1", md)
         self.assertIn("### メモ1", md)
         self.assertIn("### briefing", md)
 
@@ -829,6 +853,26 @@ class CliTest(unittest.TestCase):
             rc, _, _ = self._run(["--db", db, "notebook", "delete", "1"], llm)
             self.assertEqual(rc, 0)
 
+    def test_list_commands_on_missing_notebook_error_not_empty(self) -> None:
+        """v0.2.553: `note list`/`messages list` on a nonexistent notebook
+        must fail NOTEBOOK_NOT_FOUND like every mutating sibling — printing
+        'empty' would silently report a missing notebook as an empty one."""
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            self._run(["--db", db, "notebook", "new", "x"], llm)
+            for argv in (
+                ["note", "list", "99999"],
+                ["messages", "list", "99999"],
+            ):
+                rc, out, err = self._run(["--db", db, *argv], llm)
+                self.assertEqual(rc, 1, argv)
+                self.assertIn("NOTEBOOK_NOT_FOUND", err, argv)
+            # Real empty notebook still prints the empty marker, not an error.
+            rc, out, _ = self._run(["--db", db, "note", "list", "1"], llm)
+            self.assertEqual(rc, 0)
+            self.assertIn("ノートがありません", out)
+
     def test_add_missing_file_returns_error(self) -> None:
         llm = FakeLLM()
         with tempfile.TemporaryDirectory() as td:
@@ -1132,6 +1176,77 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(rep.cases[1].recall, 0.0)
         self.assertEqual(rep.cases[1].reciprocal_rank, 0.0)
         self.assertAlmostEqual(rep.recall, 0.5)
+
+    def test_evaluate_flags_missing_expected_ids(self) -> None:
+        """v0.2.551: an expected source id absent from the notebook (deleted
+        and re-added gets a NEW autoincrement id) makes a case silently
+        unwinnable — surface it instead of reading it as a retrieval miss."""
+        from shoin.evaluate import EvalCase, evaluate
+
+        s, nb = self._seeded()
+        with s:
+            rep = evaluate(
+                s,
+                FakeLLM(),
+                nb,
+                [
+                    EvalCase("和紙はどう作られるか", [1, 99]),   # 99 is not a source
+                    EvalCase("活版印刷の仕組みは", [2]),          # all ids present
+                    EvalCase("和紙は楮から作られるか", [999]),    # fully missing
+                ],
+            )
+        self.assertEqual(rep.cases[0].missing, [99])
+        self.assertEqual(rep.cases[1].missing, [])
+        self.assertEqual(rep.cases[2].missing, [999])
+        # Scoring is unchanged — the missing id still counts against recall;
+        # the field only explains WHY the case can never be won.
+        self.assertLess(rep.cases[0].recall, 1.0)
+        self.assertEqual(rep.cases[2].recall, 0.0)
+
+    def test_eval_missing_ids_roundtrip(self) -> None:
+        """The warning survives --save/--diff serialization; a baseline file
+        written before the field existed loads with []."""
+        from shoin.evaluate import CaseResult, EvalReport, report_from_dict, report_to_dict
+
+        rep = EvalReport(
+            [CaseResult("q", [1, 99], [1], 0.5, 1.0, [99])], recall=0.5, mrr=1.0
+        )
+        back, _ = report_from_dict(report_to_dict(rep, 8))
+        self.assertEqual(back.cases[0].missing, [99])
+        # Pre-v0.2.551 baseline: no "missing" key at all — must still parse.
+        old = {
+            "k": 8,
+            "recall": 0.5,
+            "mrr": 1.0,
+            "cases": [{"q": "q", "expected": [1], "retrieved": [1],
+                       "recall": 1.0, "rr": 1.0}],
+        }
+        back2, _ = report_from_dict(old)
+        self.assertEqual(back2.cases[0].missing, [])
+
+    def test_eval_cli_warns_on_missing_expected(self) -> None:
+        """The CLI surfaces the unwinnable case instead of a bare ✗ line."""
+        import contextlib as _cl
+        import io as _io
+        import json as _json
+
+        from shoin.cli import main
+
+        s, nb = self._seeded()
+        db = s.conn.execute("PRAGMA database_list").fetchone()[2]
+        s.close()
+        d = tempfile.mkdtemp()
+        cases = Path(d) / "cases.json"
+        cases.write_text(
+            _json.dumps([{"q": "和紙はどう作られるか", "sources": [1, 99]}]),
+            encoding="utf-8",
+        )
+        buf = _io.StringIO()
+        with _cl.redirect_stdout(buf):
+            rc = main(["--db", db, "eval", str(nb), str(cases)], llm=FakeLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("[99]", buf.getvalue())
+        self.assertIn("ノートブックに存在しない", buf.getvalue())
 
     def test_parse_cases_rejects_malformed_input(self) -> None:
         """A silently-skipped bad case would inflate the score, so parsing
