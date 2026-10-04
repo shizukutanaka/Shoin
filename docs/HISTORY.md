@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.624
+## Version History: v0.1.37 → v0.2.625
+
+### v0.2.625 — spec.md を v0.2.624 に同期
+
+定期同期。`_one_line` による CLI 単一行ラベルの Cc/Zl/Zp エスケープ
+(v0.2.623) と、char-window を estimate_tokens の二分探索による最長
+適合 prefix 切出しへ置換した `_window_split` (v0.2.624) の 2 契約を
+仕様書へ追記し、品質行の版数・テスト件数を実測値へ更新。
 
 ### v0.2.624 — window-split on token budget, not average density
 
