@@ -1205,7 +1205,10 @@ def rrf_fuse_lists(
             if cur is not h:
                 # Merge signal fields onto the canonical Hit: a chunk seen by a
                 # vector list carries vec, by a BM25 list carries bm25 — keep both.
-                if h.vec:
+                # First writer wins on each field: callers order their lists
+                # primary-query first, so the user's own phrasing defines the
+                # merged signal (a rewrite's cosine never overwrites it).
+                if h.vec and not cur.vec:
                     cur.vec = h.vec
                 if h.bm25 and not cur.bm25:
                     cur.bm25 = h.bm25

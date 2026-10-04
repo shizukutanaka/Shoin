@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.601")
+        self.assertEqual(VERSION, "0.2.602")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13572,6 +13572,21 @@ class TestSearchCoverageTail(unittest.TestCase):
         self.assertEqual(len(fused), 1)
         self.assertEqual(fused[0].vec, 0.9)
         self.assertEqual(fused[0].bm25, 0.8)
+
+    def test_rrf_fuse_lists_first_list_wins_each_signal(self) -> None:
+        """The canonical hit keeps the FIRST list's vec and bm25 values:
+        lists are ordered primary-query first (retrieve_multi), so the
+        user's own phrasing defines the merged signal and a rewrite's
+        different cosine/BM25 for the same chunk never overwrites it."""
+        from shoin.search import rrf_fuse_lists
+
+        fused = rrf_fuse_lists([
+            [Hit(7, 1, "t", 0.0, vec=0.9, bm25=0.9)],
+            [Hit(7, 1, "t", 0.0, vec=0.3, bm25=0.3)],
+        ])
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].vec, 0.9)
+        self.assertEqual(fused[0].bm25, 0.9)
 
     def test_retrieve_multi_empty_queries(self) -> None:
         from shoin.search import retrieve_multi

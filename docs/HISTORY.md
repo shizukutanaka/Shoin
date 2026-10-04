@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.601
+## Version History: v0.1.37 → v0.2.602
+
+### v0.2.602 — keep the first list's vec signal in rrf_fuse_lists merges
+
+When one chunk appears in several ranked lists, rrf_fuse_lists() merges its
+per-list signal fields onto the canonical (first-seen) Hit. The `bm25` field
+already merged first-wins (`if h.bm25 and not cur.bm25`), but `vec` merged
+last-wins (`if h.vec: cur.vec = h.vec`) — so in retrieve_multi(), where
+rewrite lists follow the primary query's, a rewrite's weaker cosine overwrote
+the primary query's stronger vector signal on any chunk both vector lanes
+surfaced. The merged `.vec`/`.bm25` fields are the provenance/debugging
+record of which retrieval channel backed the hit, and the module's contract
+is that the primary query alone defines the reference signals (it owns the
+neg filter and the rerank reference); a rewrite's score overwriting the
+primary's violated the same "rephrase can't hijack the primary signal"
+asymmetry the rest of the function is built around. `vec` now merges
+first-wins symmetric with `bm25`. Pin: `test_rrf_fuse_lists_first_list_wins_each_signal`
+(fails on the old last-wins merge — vec 0.3 vs expected 0.9).
 
 ### v0.2.601 — evaluate every occurrence when a citation is both lead and trailing
 
