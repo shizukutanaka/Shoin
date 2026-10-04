@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.602")
+        self.assertEqual(VERSION, "0.2.603")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2962,6 +2962,25 @@ class TestIngest(unittest.TestCase):
         _, text = html_to_text(html)
         self.assertIn("Section 1", text)
         self.assertIn("Section 2", text, "content after the dangling <noscript> must not be lost")
+
+    def test_html_multiple_unclosed_skip_tags_do_not_swallow_rest(self) -> None:
+        """The closer-injection fix must balance EVERY unmatched open, not
+        just the last one: two (or more) unclosed <nav> still left
+        _skip_depth > 0 after one synthetic closer and swallowed the rest
+        of the document — the same silent-loss class the single-open fix
+        closed.  Checked on <nav> and <template> (independent entries in
+        _SKIP_TAG_BALANCE)."""
+        for tag in ("nav", "template"):
+            html = (
+                "<html><body><p>Before.</p>"
+                f"<{tag}><{tag}>nested menu"
+                "<p>After unclosed pair — must not be lost.</p></body></html>"
+            )
+            _, text = html_to_text(html)
+            self.assertIn(
+                "After unclosed pair", text,
+                f"two unclosed <{tag}> must not swallow the rest of the document",
+            )
 
     def test_html_unclosed_template_in_body_does_not_swallow_rest(self) -> None:
         """The same class of fix applied to <template>, the other skip-tag

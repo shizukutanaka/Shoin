@@ -209,11 +209,15 @@ def html_to_text(html: str) -> tuple[str, str]:
     # document and swallow all subsequent body content.
     for open_re, close_re, tag in _SKIP_TAG_BALANCE:
         opens = open_re.findall(html)
-        if len(opens) > len(close_re.findall(html)):
+        missing = len(opens) - len(close_re.findall(html))
+        if missing > 0:
             last_match = list(open_re.finditer(html))[-1]
             gt = html.find(">", last_match.end())
             if gt != -1:
-                html = html[: gt + 1] + f"</{tag}>" + html[gt + 1 :]
+                # One injected closer per unmatched open so the skip-depth
+                # counter returns to zero rather than staying elevated for
+                # the rest of the document.
+                html = html[: gt + 1] + f"</{tag}>" * missing + html[gt + 1 :]
     parser = _HTMLText()
     parser.feed(html)
     raw = "".join(parser.parts)

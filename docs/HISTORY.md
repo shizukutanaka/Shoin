@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.602
+## Version History: v0.1.37 → v0.2.603
+
+### v0.2.603 — inject one synthetic closer per unmatched skip-tag open
+
+The unbalanced-tag neutralization in html_to_text() inserted exactly ONE
+synthetic closer at the last unmatched opening of each skip tag (nav,
+footer, form, noscript, template). With TWO or more unclosed opens and no
+real closer — `<nav><nav>…` — _skip_depth still ended elevated, so every
+subsequent text node was silently dropped: the same swallow-the-rest-of-
+the-document defect class the single-open injection exists to prevent,
+half-fixed. The injection now emits `opens - closes` closers so the
+balanced counter returns to zero regardless of how many opens were left
+dangling. Pin: `test_html_multiple_unclosed_skip_tags_do_not_swallow_rest`
+(old code produced '' for a doubled <nav>; fail-verified).
 
 ### v0.2.602 — keep the first list's vec signal in rrf_fuse_lists merges
 
