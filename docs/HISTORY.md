@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.628
+## Version History: v0.1.37 → v0.2.629
+
+### v0.2.629 — spec.md を v0.2.628 に同期
+
+定期同期。main() のプロセス境界 catch-all (v0.2.627) と
+`_safe_report` の非 dict JSON 降格 (v0.2.628) —— いずれも既存面
+とのパリティ欠落クラス —— を spec の境界契約段落へ追記。
+品質行実測更新 (未カバー25→28行、テスト1282→1285件)。
 
 ### v0.2.628 — _safe_report の非 dict JSON を {} へ降格 (API/export パリティ)
 
