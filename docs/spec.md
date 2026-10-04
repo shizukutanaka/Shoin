@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.607 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.615 時点に同期)
 
 ## プロダクト定義
 
@@ -120,6 +120,33 @@ breadcrumb・heading加重BM25から不可視だった不一致適用を解消(v
 `uncited_supported_source`欠落/空/非dictのレポート(v0.2.216以前形状)で
 矢印が先なしに宙吊り表示される経路を閉塞(v0.2.607)。
 
+単独サロゲート欠陥クラスは残存する全境界で閉塞——store層`_utf8`が
+書込み前の全バインドstrフィールド(notebook name・source title/origin/
+sha256・chunk texts/contexts・note title/body・studio body+citation_
+report・message body+citation_report・settings key/value)を
+`VALIDATION_FIELD_FORMAT_INVALID`で拒絶し、POSIX argv/envの
+surrogateescape由来を捕捉(v0.2.609)。SSEフレームは`ensure_ascii=True`の
+ASCII純粋ワイヤ——旧行由来サロゲートがmeta/doneフレームのencodeを
+クラッシュさせコミット済みストリームへ第2HTTPステータス行を注入する
+経路を閉塞(v0.2.610)。cli `main()`はUnicodeEncodeErrorを
+`SYSTEM_INTERNAL_ERROR`+rc=1へ写像し、「全サブコマンドはerr.prefix、
+トレースバック無し」保証をカスタムChatBackendのサロゲート出力まで
+完結(v0.2.611)。`_json`応答writerはサロゲートpayloadで`ensure_ascii`
+エスケープへ退避——エラーエンベロープ経路がHTTP応答そのものを失う
+経路を閉塞(v0.2.614)。
+`bm25_prf_search`の拡張ヒットは`k - len(hits)`のヘッドルームに上限——
+第1パス未充填時、システム提案gramのみ一致の密な拡張ヒットがユーザ
+用語一致の第1パスヒットを`[:k]`切詰で退避させ得た「ADD recallのみ」
+契約の反転を閉塞(v0.2.613)。`html_to_text`の修復はパースレベル
+ペアリング——`_skip_depth`盲目カウンタを`_skip_stack`名スタックへ
+(DOM意味論のpop-through: クローザーは対応openerまでpopしネスト要素を
+暗黙終了、未開クローザーは無視)、`<...>`属性領域・`<!--...-->`内・
+CDATAで発火しないイベントを`_live`述語(`_outside_tag`のtagfind忠実
+後方走査+`_comment_spans`)で全消費点から除外、注入修復をper-opener化
+(未整合open毎に`</{tag}>`を`>`直後へ、未閉`<!--`は個別に空化)——
+stray `</nav>`が無関係open要素を解放する経路と早期の未整合openerが
+後続平衡要素の内容を漏洩させる経路を一括閉塞(v0.2.615)。
+
 ## 検索パイプライン
 
 ```
@@ -169,7 +196,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.607時点の実測: shoin/ 99%、未カバー23行は防御分岐・到達不能tail、テスト1266件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.615時点の実測: shoin/ 99%、未カバー25行は防御分岐・到達不能tail、テスト1275件)
 
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en

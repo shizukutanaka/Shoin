@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.615
+## Version History: v0.1.37 → v0.2.616
+
+### v0.2.616 — sync spec.md to v0.2.615
+
+Periodic spec sync: the design-notes ledger now records the interval where
+the lone-surrogate defect class closed across every remaining boundary —
+the store-layer `_utf8` write gate on all bound string fields (v0.2.609),
+the ASCII-pure SSE wire (v0.2.610), cli main()'s UnicodeEncodeError catch
+(v0.2.611), and `_json`'s ensure_ascii fallback (v0.2.614) — plus the PRF
+expansion head-room cap (v0.2.613) and the parse-level pairing rework of
+html_to_text's malformed-markup repair: `_skip_stack` DOM-semantics
+endtags, the `_live` event filter, and per-opener closer injection
+(v0.2.615). Header marker and the quality line's measured row follow the
+code (tests 1266 → 1275, defensive tails 23 → 25).
 
 ### v0.2.615 — parse-level pairing for malformed-markup neutralization
 
