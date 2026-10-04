@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.617 時点、2026-10-01 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.621 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1276件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1280件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -398,6 +398,33 @@ TypeError——1行の変形レポートがexport文書全体をクラッシュ�
 pipeline→build_context統合・実サーバ960リクエスト嵐の各fuzz経路は
 全てゼロ欠陥——`with self.conn`原子性・WALスナップショット・coded
 error envelope・SSE wire完全性の契約が嵐下で維持されることを実証。
+
+
+**v0.2.618-621 の要約**: 「stdlib境界の非コード化漏出——
+400-vs-500欠陥クラスの第3波を機械検出」区間——実欠陥3件・
+文書同期2件(v0.2.618は本台帳、v0.2.621はspec.md)。同じ
+「悪意/変形入力がstdlibの想定内エラー型ではなく別型で境界を
+突破する」クラスが2モジュールで連続検出された:
+`urlparse`は括弧付きホストをパース時点で検証するため
+`http://[::1`の未閉ブラケットが裸ValueErrorとして`.port`
+遅延チェック以前に脱出し500化(v0.2.45と同系譜)——
+`INGEST_URL_BLOCKED`へ写像。`_decode`のcharset候補loopは
+NUL混入charset名(敵対的Content-Typeヘッダ経由で到達)で
+codec lookupが`LookupError`でなく`ValueError("embedded
+null character")`を送出してfallbackを抜ける——catch節を
+`(ValueError, LookupError)`へ(v0.2.619)。`json.loads`は
+~5k超深ネストbodyでJSONDecodeErrorでなくRecursionErrorを
+送出——`_post`は全呼出し経路の500化、chat_streamは1枚の
+深い`data:`フレームがSSE全体を途中abortさせる両漏出を
+BAD_RESPONSE写像+malformed-frame dropで閉塞(v0.2.620)。
+**設計含意**: 「リモート/ユーザ制御データを渡すstdlib境界」は
+単体で監査面を構成する——各境界が送出し得る例外型の全列挙が
+必要であり、exceptインベントリカタログがこのクラスの再発を
+構造検出する。pipeline.py refresh/rename/reindex経路の
+seeded-fuzz(409試行・cap境界delta走査・embed入力同一性
+oracle)はゼロ欠陥——同一sha no-op・SOURCE_ALREADY_EXISTS・
+NOTEBOOK_FULL算術・部分force-reindexのembed_model非記録の
+全不変条件が維持されることを実証。
 
 
 **v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を

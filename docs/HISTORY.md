@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.621
+## Version History: v0.1.37 → v0.2.622
+
+### v0.2.622 — sync the product-review ledger to v0.2.621
+
+Periodic ledger sync: records the v0.2.618-621 interval — the third wave
+of the "stdlib-boundary non-coded escape" defect class (urlparse bracket
+ValueError, charset-name ValueError, deeply-nested json RecursionError)
+plus the clean pipeline.py refresh/rename/reindex fuzz surface.
 
 ### v0.2.621 — sync spec.md to v0.2.620
 
