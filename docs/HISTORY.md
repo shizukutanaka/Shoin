@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.605
+## Version History: v0.1.37 → v0.2.606
+
+### v0.2.606 — sync the product-review ledger to v0.2.605
+
+Recurring ledger sync: records the v0.2.596-605 span as one interval
+("defense-mechanism internal consistency — completing half-fixes and
+sanitizing the output boundary"): 7 real defects (eval surrogate gate,
+LLM-output _strip_surrogates incl. the poisoned questions_cache, the last
+pending-tx-leak sibling in _embed_chunks, lead+trailing same-S segment
+evaluation across all five checks, rrf_fuse_lists merge-order asymmetry,
+multi-open skip-tag closer count, CommonMark heading opener parity with
+fences) plus 3 doc syncs. Header version and test count (1256 → 1265)
+updated to match.
+
 
 ### v0.2.605 — correct the rrf_fuse_lists merge-order doc claim
 

@@ -1,7 +1,7 @@
-# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.595 時点、2026-10-01 更新)
+# Shoin プロダクトレビュー — 長所・短所・改善案 (v0.2.605 時点、2026-10-01 更新)
 
 
-shoin/ 16モジュール + 単一HTML UI・テスト1256件・ドキュメント一式の精査結果。
+shoin/ 16モジュール + 単一HTML UI・テスト1265件・ドキュメント一式の精査結果。
 
 初版は 2026-06-13 (v0.1.0)、全面更新は 2026-07-18 (v0.2.133)、以後は変更のあった項目のみ追記。
 初版の詳細な指摘→修正の往復記録は docs/HISTORY.md の Version History(v0.1.37〜、
@@ -326,6 +326,31 @@ PYTHONHASHSEED順序非決定性がappend/extend/yield/list/tuple/join
 独自クエリ言語——引用符なし補間は`x:y`/`"`でWHERE意味を例外なしに
 改竄するため、全アトム二重引用を行動検証＋`MATCH ?`サイト1件を
 カタログ固定(v0.2.471)。v0.2.467はこの台帳自体の同期。
+
+**v0.2.596-605 の要約**: 「防御機構内部の一貫性——半修正の完結と
+出力境界の衛生化」区間——実欠陥7件・文書同期3件(v0.2.596は本台帳、
+v0.2.597はspec.md、v0.2.605はagent-doc訂正)。主題は「守る側の機構
+自体が契約を半分しか満たしていない時」: `json.loads`の`\ud800`
+エスケープで物質化する単独サロゲートがeval両リーダーを通過しsqlite
+bind/encodeで生クラッシュ——`_utf8_ok`でUTF-8往復を要求(v0.2.598)。
+LLM出力の同欠陥は**全下流**(message/parts/stream-delta + 中毒化する
+questions_cache: クラッシュ前に書込されるため永続500)——デコード境界
+全出口に`_strip_surrogates`(v0.2.599)。`_embed_chunks`のLLMError枝は
+`except Exception`兄弟と違いrollbackを欠落——v0.2.419 pending-tx
+leak族の最後のsiblingを閉塞、失敗バッチの部分ベクトルが後続コミットで
+静かにflushされ旧モデル名マーカーのまま新モデルベクトルが混在する経路
+(v0.2.600)。`_segment_claims`のlead+trailing同一S出現が5検査全てで
+lead短絡——segment出現の誤帰属/捏造数値/否定反転が不可視(false
+silence方向)をunion評価で修復(v0.2.601)。`rrf_fuse_lists`のvecは
+last-wins・bm25はfirst-wins——マージ規約の非対称でrewriteの弱い
+コサインがprimaryの強いシグナルを上書き(v0.2.602)。`_SKIP_TAG_BALANCE`
+中和機構はcloserを1個だけ注入——2-open未対応タグで`_skip_depth`が
+残存し文書残部を飲込(機構が防ぐはずのクラスが半修正)、注入数を
+opens−closesへ(v0.2.603)。`_HEADING_RE`はfenceと異なり0空白必須+
+末尾空白必須——CommonMark opener規則(≤3空白+#+空白/EOL)へ統一、
+indented/bare headingがbreadcrumbとheading加重BM25へ届く(v0.2.604)。
+全区間fail-then-pass規律で実証済み。
+
 
 **v0.2.586-595 の要約**: 「入出力境界の防衛深化——想定外入力を
 コード化契約へ写像する層の閉塞」区間——実欠陥9件・台帳同期1件
