@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoin"
-version = "0.2.607"
+version = "0.2.608"
 
 description = "Local, citation-verified NotebookLM alternative for lightweight LLMs"
 readme = "README.md"

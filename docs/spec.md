@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.597 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.607 時点に同期)
 
 ## プロダクト定義
 
@@ -95,6 +95,30 @@ yieldを持つfor本体や`list()`/`tuple()`/`join()`消費はプロセス毎に
 ——`fts_query`出力の全アトムが二重引用(内部引用は`""`にdoubling)
 であることを行動検証し、`MATCH ?`サイトをsearch.py:556の唯一1件に
 カタログ固定(v0.2.471)。
+`retrieve_multi()`の`rrf_fuse_lists`マージ規約はシグナルごとに
+first-wins——vec/bm25とも最初に出たリストの値が正準となり、呼出し側が
+primaryクエリのリストを先頭に並べることが契約の本体(v0.2.602: vecは
+以前last-winsでrewriteの弱いコサインに上書きされていた)。`_embed_chunks`の
+dim-mismatch等のバッチ内raiseは`except LLMError`枝でもrollback必須——
+同一バッチの先行`set_embedding(commit=False)`がpending txとして残存し、
+直後の`set_setting()`コミットが失敗バッチの部分ベクトルを静かに
+永続化する経路を閉塞(v0.2.600、v0.2.419 pending-tx leak族の最終sibling)。
+eval層でも受理文字列はUTF-8往復必須——`parse_cases`/`report_from_dict`の
+`_utf8_ok`が単独サロゲート(\ud800等)を`json.loads`物質化のまま受理し
+sqliteバインド/diff出力で生UnicodeEncodeErrorとなる経路を閉塞(v0.2.598、
+server._check_utf8と同欠陥クラス)。LLM出力デコード境界は全出口で
+`_strip_surrogates`——`_message_text`両経路とchat_streamのdeltaから
+単独サロゲートを除去し、sqliteバインド/`_json`応答encodeの
+UnicodeEncodeErrorとquestions_cache中毒(書込み後クラッシュで以後の
+全pollが永続500)を一括閉塞(v0.2.599)。`html_to_text`の不平衡skip-tag
+中和はopen-closes分のcloserを注入——`<nav><nav>`多重openで
+`_skip_depth`残存により後続テキスト全喪失する半修正を完結(v0.2.603)。
+`_HEADING_RE`は`_FENCE_RE`と同一のCommonMark indent規則
+(`^ {0,3}(#{1,6})(?:\s|$)`)——`  ## Sec`やbare `###`がheading境界・
+breadcrumb・heading加重BM25から不可視だった不一致適用を解消(v0.2.604)。
+`_status_line`のuncited_supportedヒントは非空strターゲットのみ——
+`uncited_supported_source`欠落/空/非dictのレポート(v0.2.216以前形状)で
+矢印が先なしに宙吊り表示される経路を閉塞(v0.2.607)。
 
 ## 検索パイプライン
 
@@ -119,7 +143,7 @@ query → [BM25 (FTS5)] ─┐          ※原クエリ+LLM書換の複数phrasi
 2. **根拠確認**: 引用文とソース本文の文字bigram重複が閾値(0.30)以上なら `confirmed`
 3. **誤帰属検出**: 引用文が引用元ではなく**別の**ソースに強く一致(gap 0.20以上)する場合 `misattributed` としてフラグ + 最尤の正出典を `misattributed_suggested` で提示
 4. **無出典断定検出**: 引用が一切ない断定文を `uncited` としてフラグ。出典内一致する文は引用欠落 `uncited_supported` として区別し最尤出典を `uncited_supported_source` で提示。「ソースに記載なし」等の明示的免責文・構造行・列挙導入・フェンス/インデントコードは除外
-   - マーカー帰属規約(v0.2.576-583): 文splitで断片先頭に落ちた `[S#]` run は自断片でなく直前claimへ帰属(全検査で `_leading_markers` 経路に統一)、断片末尾の未被覆面(最終マーカー以降のclaim)も評価対象、前向き熟語(によると/によれば/では)は先頭空白を許容し束縛済みclaimは重複フラグしない、中断片の熟語束縛(`A[S1]によるとB`)は帰属が曖昧なため沈黙原則で断片ごと黙止
+   - マーカー帰属規約(v0.2.576-583): 文splitで断片先頭に落ちた `[S#]` run は自断片でなく直前claimへ帰属(全検査で `_leading_markers` 経路に統一)、断片末尾の未被覆面(最終マーカー以降のclaim)も評価対象、前向き熟語(によると/によれば/では)は先頭空白を許容し束縛済みclaimは重複フラグしない、中断片の熟語束縛(`A[S1]によるとB`)は帰属が曖昧なため沈黙原則で断片ごと黙止。同一S番号が先行マーカーと後続マーカーの両方で出現する形状(`[S1] B [S1]`)はlead claimとsegment出現のunionで評価——`n in lead`短絡で後続出現の誤帰属・捏造数値・単位不一致・引用不一致・否定反転が全検査を回避する経路を閉塞(v0.2.601)
 5. **数値一致** `numeric_mismatch`: 出典に無い数値の主張を検出。倍率/漢数字/英数詞/歩合/率表記/同族単位換算/元号(令和6年≡2024年)を展開して等価値は非フラグ
 6. **逐語引用** `quote_mismatch`: 「…」/"…" の引用が**別の**ソースに逐語一致=誤帰属の文字列証明。引用元自身の言い換えに引用符を被せた改竄引用も検出
 7. **単位一致** `unit_mismatch`: 数値は出典にあるが単位が非互換(100km vs 100m等)
@@ -145,7 +169,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 性能: 取込1MB PDF ≤10秒 / 検索 ≤200ms / 回答 p95 ≤30秒(Qwen3-4B, 8GB RAM)
   - 実測(v0.2.281, in-memory, 4.1MB/2000チャンク合成コーパス): 検索中央値 38-44ms・最悪経路(1字CJK LIKEフォールバック) ~120ms — 目標内。回答 p95 は実モデル依存のため本リポジトリでは未検証
-- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.597時点の実測: shoin/ 99%、未カバー23行は防御分岐・到達不能tail、テスト1256件)
+- 品質: ruff + mypy --strict 警告ゼロ / カバレッジ MVP≥50% → v1.0≥70%(v0.2.607時点の実測: shoin/ 99%、未カバー23行は防御分岐・到達不能tail、テスト1266件)
 
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en

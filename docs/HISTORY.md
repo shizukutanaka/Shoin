@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.607
+## Version History: v0.1.37 → v0.2.608
+
+### v0.2.608 — sync spec.md to v0.2.607
+
+Recurring contract-ledger sync (10 versions since v0.2.597).  New clauses
+record the contract changes landed in the interval: rrf_fuse_lists first-wins
+merge, _embed_chunks LLMError rollback, eval _utf8_ok surrogate gates, LLM
+output _strip_surrogates boundary, html skip-tag closer count, CommonMark
+heading opener, export status-line hint targets, and the v0.2.601
+lead+segment union evaluation rule.  Header version marker and the test
+count (1256 → 1266) updated to match.
+
 
 ### v0.2.607 — no dangling '→' in the export status line
 
