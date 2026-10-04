@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.603
+## Version History: v0.1.37 → v0.2.604
+
+### v0.2.604 — recognise indented and empty ATX headings
+
+`chunk.py`'s structural detectors applied the CommonMark indent rule
+inconsistently: `_FENCE_RE` accepts up to 3 leading spaces but the heading
+regex required `^#` at column 0 — and also required whitespace after the
+hashes, so a bare `###` (a valid empty heading) was missed too.  A document
+with `  ## Section` got no heading boundary, no breadcrumb entry, and its
+section title stayed invisible to the heading-weighted BM25 signal.  Both
+detectors now share the same CommonMark opener rule (≤3 leading spaces,
+1-6 '#', then whitespace or end-of-line).
+
 
 ### v0.2.603 — inject one synthetic closer per unmatched skip-tag open
 

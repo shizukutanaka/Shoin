@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.603")
+        self.assertEqual(VERSION, "0.2.604")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -1863,6 +1863,24 @@ class TestChunk(unittest.TestCase):
         chunks = split_text(text, chunk_tokens=6, overlap_tokens=0)
         self.assertTrue(any("第一章" in c for c in chunks))
         self.assertTrue(any("第二章" in c for c in chunks))
+
+    def test_indented_and_empty_headings_are_headings(self) -> None:
+        """CommonMark allows up to 3 leading spaces on an ATX opener and a bare
+        '###' with no title; _heading_level/_blocks must agree with _FENCE_RE's
+        identical 0-3-space rule (v0.2.604 — previously both shapes were missed)."""
+        from shoin.chunk import _blocks, _context_blocks, _heading_level
+
+        self.assertEqual(_heading_level("  ## Sec"), 2)
+        self.assertEqual(_heading_level("   # A"), 1)
+        self.assertEqual(_heading_level("###"), 3)
+        self.assertEqual(_heading_level("#"), 1)
+        self.assertEqual(_heading_level("    # code"), 0)
+        self.assertEqual(_heading_level("#tag"), 0)
+        blocks = _blocks("text\n  ## H\n\nbody")
+        self.assertEqual(len(blocks), 3)
+        self.assertTrue(blocks[1].startswith("## H"))
+        ctx = _context_blocks("para\n\n  ## Indented\n\nbody text")
+        self.assertEqual(ctx[-1], ("Indented", "body text"))
 
     def test_pathological_unbroken(self) -> None:
         chunks = split_text("x" * 5000, chunk_tokens=100, overlap_tokens=10)
@@ -13770,7 +13788,7 @@ _EXCEPT_CATALOG = {
     "pipeline.py": 3,
 }
 _DYNAMIC_COMPILE_CATALOG = {
-    "chunk.py:208",
+    "chunk.py:212",
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
@@ -19015,7 +19033,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [208],
+            "chunk.py": [212],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
             "search.py": [72, 919],
         }

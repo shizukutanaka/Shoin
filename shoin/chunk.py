@@ -131,7 +131,11 @@ _CJK_RANGES = (
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_HEADING_RE = re.compile(r"^#{1,6}\s")
+# ATX heading opener per CommonMark: up to 3 leading spaces (4+ is indented
+# code), 1-6 '#', then whitespace or end-of-line (a bare "###" is a valid empty
+# heading). _FENCE_RE's indent rule is the same one, so both structural
+# detectors read the same line the same way.
+_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
 # ｡ (U+FF61) is the halfwidth JIS X 0201 counterpart of 。 and terminates a
 # sentence identically — it is common in cp932 legacy text, which ingest._decode()
 # actively prefers, and NFKC folds it to 。 anyway. Without it, both this splitter's
@@ -409,15 +413,8 @@ def _tail(text: str, tokens: int) -> str:
 
 def _heading_level(line: str) -> int:
     """ATX heading depth of *line* (number of leading '#'), or 0 if not a heading."""
-    if not _HEADING_RE.match(line):
-        return 0
-    n = 0
-    for ch in line:
-        if ch == "#":
-            n += 1
-        else:
-            break
-    return n
+    m = _HEADING_RE.match(line)
+    return len(m.group(1)) if m else 0
 
 
 def _context_blocks(text: str) -> list[tuple[str, str]]:
@@ -438,7 +435,7 @@ def _context_blocks(text: str) -> list[tuple[str, str]]:
             # A heading closes every open section at the same or deeper level.
             while stack and stack[-1][0] >= lvl:
                 stack.pop()
-            title = _ATX_CLOSING_RE.sub("", first[lvl:].strip()).strip()
+            title = _ATX_CLOSING_RE.sub("", first.lstrip(" ")[lvl:].strip()).strip()
             if title:
                 stack.append((lvl, title))
         out.append((" > ".join(t for _, t in stack), block))
