@@ -106,7 +106,9 @@ def _status_line(report: dict[str, object]) -> str:
             targets = [
                 t
                 for s in supported
-                if isinstance((t := sup_src.get(s, "")), str) and t
+                if isinstance(s, str)
+                and isinstance((t := sup_src.get(s, "")), str)
+                and t
             ]
             targets = list(dict.fromkeys(targets))
             hint = "\u2192" + ",".join(targets) if targets else ""
@@ -132,7 +134,10 @@ def _status_line(report: dict[str, object]) -> str:
         and n_sources
         and cov < COVERAGE_LOW
     ):
-        bits.append(f"{_t('status_coverage_low')} ({len(set(cited))}/{n_sources})")
+        # Same malformed-report tolerance: `cited` is ints by contract, but a
+        # stored report can hold unhashable elements that break set().
+        n_cited = len({c for c in cited if isinstance(c, int)})
+        bits.append(f"{_t('status_coverage_low')} ({n_cited}/{n_sources})")
     return " / ".join(bits)
 
 
@@ -169,11 +174,15 @@ def _legend(report: dict[str, object]) -> str:
 
     def _legend_item(k: str, v: str) -> str:
         sec = f" (§ {section_map[k]})" if section_map.get(k) else ""
+        # source_detail values arrive as parsed JSON — a malformed stored
+        # report can hold a non-dict here; degrade to no-provenance like
+        # every other field guard in this function instead of crashing.
+        det = detail_map.get(k)
         bits = [
             f"{_t('found_' + kind)} #{int(val)}"
             if kind != "lex"
             else f"{_t('found_' + kind)} {val:.2f}"
-            for kind, val in found_bits(detail_map.get(k))
+            for kind, val in found_bits(det if isinstance(det, dict) else None)
         ]
         prov = f" [{_t('found_label')}{' + '.join(bits)}]" if bits else ""
         return f"{k}={v}{sec}{prov}"

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.616")
+        self.assertEqual(VERSION, "0.2.617")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -10360,6 +10360,46 @@ class TestExport(unittest.TestCase):
         self.assertEqual(len(user_lines), 1, "user question must appear on exactly one line")
         self.assertIn("line one", user_lines[0])
         self.assertIn("line two", user_lines[0])
+
+    def test_export_markdown_tolerates_malformed_report_field_shapes(self) -> None:
+        """A stored citation_report is user-controlled JSON: _parse_report()
+        accepts any well-formed object, so a wrong-typed field must degrade
+        to no-signal, not crash the whole export document.
+
+        Three read sites trusted the stored shape: _legend() passed a
+        source_detail value into found_bits() (non-dict → AttributeError),
+        _status_line() ran set() over `cited` (unhashable element →
+        TypeError) and dict.get() over `uncited_supported` sentences
+        (unhashable sentence → TypeError). A single malformed report row
+        took down the entire export — and the server route — for the
+        notebook (v0.2.617).
+        """
+        from shoin.export import export_markdown
+
+        bad = json.dumps(
+            {
+                "cited": [{"x": 1}, 2],
+                "coverage": 0.0,
+                "n_sources": 3,
+                "uncited": ["a claim"],
+                "uncited_supported": [{"y": 2}, "a claim"],
+                "uncited_supported_source": {"a claim": "S1"},
+                "source_detail": {"S1": "scalar", "S2": {"lex": 0.5}},
+                "source_map": {"S1": "t1", "S2": "t2"},
+            },
+            ensure_ascii=False,
+        )
+        with make_store() as s:
+            nb = s.create_notebook("md-bad-report")
+            s.add_source(nb.id, "txt", "doc", "mem://d", "sha-d")
+            s.add_message(nb.id, "assistant", "ans body [S1]", bad)
+            md = export_markdown(s, nb.id)
+        self.assertIn("ans body", md)
+        # The intact fields still render: legend from source_map, the
+        # well-shaped S2 provenance bit, and the low-coverage warning from
+        # the malformed `cited` counted over its hashable elements only.
+        self.assertIn("S1=t1", md)
+        self.assertIn("0.50", md)
 
     def test_status_line_includes_confirmed_misattributed_uncited_degraded(self) -> None:
         """_status_line() must surface every verification signal from the report.

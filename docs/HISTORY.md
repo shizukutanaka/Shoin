@@ -29,7 +29,26 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.616
+## Version History: v0.1.37 → v0.2.617
+
+### v0.2.617 — tolerate wrong-typed fields inside stored citation reports
+
+_export reads the persisted citation_report column through _parse_report,
+which deliberately accepts any well-formed JSON — old-version rows, rows
+written by custom callers, or hand-edited databases all reach the readers.
+Every field access was already isinstance-guarded for that reason, but
+three sites trusted the stored shape anyway and converted one malformed
+report row into a crashed export (a CLI traceback or a 500 on the export
+route, losing every section of the document).
+
+The three holes were the same class: _legend() passed a source_detail
+VALUE straight into found_bits() — a scalar there hit `detail.get` and
+raised AttributeError; _status_line() ran set() over `cited` and
+dict.get() over the `uncited_supported` sentences — an unhashable element
+(dict, list) raised TypeError at both. Each now degrades the malformed
+field to no-signal exactly like the sibling guards around it, and a
+store-level test drives an export over a report carrying all three
+malformed shapes at once.
 
 ### v0.2.616 — sync spec.md to v0.2.615
 
