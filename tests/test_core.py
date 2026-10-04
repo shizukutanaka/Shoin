@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.619")
+        self.assertEqual(VERSION, "0.2.620")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8886,6 +8886,65 @@ class TestLLMClient(unittest.TestCase):
         # The read limit must have been set (not None, meaning uncapped read was not called)
         self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
         self.assertLessEqual(fake_body.max_read, 300)
+
+    def test_post_deeply_nested_json_raises_llmerror(self) -> None:
+        """A deeply nested JSON body must map to SYSTEM_LLM_BAD_RESPONSE.
+
+        json.loads raises RecursionError — not JSONDecodeError — when the body
+        exceeds the decoder's recursion budget (~5k-deep nesting, trivially
+        emitted by a hostile/buggy endpoint). It escaped every coded catch and
+        surfaced as a 500-class error at request paths. _post now treats it as
+        the same malformed-response signal as JSONDecodeError."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        deep = ("[" * 10000 + "]" * 10000).encode()
+
+        class _DeepResp(io.BytesIO):
+            def __enter__(self) -> _DeepResp:
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+        with patch("urllib.request.urlopen", return_value=_DeepResp(deep)):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+
+    def test_chat_stream_deeply_nested_frame_is_dropped(self) -> None:
+        """A deeply nested SSE frame must be dropped, not abort the stream.
+
+        Same RecursionError class as _post: a hostile/buggy endpoint can emit
+        a data: line whose payload exceeds json.loads' recursion budget. The
+        malformed-frame contract is drop-and-continue — a single bad delta
+        must not kill the stream mid-flight (the frame parse errors already
+        covered: JSONDecodeError/KeyError/IndexError/TypeError)."""
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient
+
+        deep = "[" * 10000 + "]" * 10000
+
+        class _DeepStreamResp:
+            def __enter__(self) -> _DeepStreamResp:
+                return self
+
+            def __exit__(self, *a: object) -> bool:
+                return False
+
+            def __iter__(self):  # type: ignore[override]
+                yield f"data: {deep}\n".encode()
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n'
+                yield b"data: [DONE]\n"
+
+        with patch("urllib.request.urlopen", return_value=_DeepStreamResp()):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+            out = list(client.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(out, ["ok"])
 
     def test_embed_non_dict_data_items_raise_llmerror(self) -> None:
         """embed() must convert AttributeError from non-dict items in response['data']
@@ -17774,8 +17833,13 @@ class TestResidualGuards(unittest.TestCase):
                 "(OSError,ValueError,http.client.HTTPException)",
                 "(OSError,ValueError,http.client.HTTPException)",
                 "(AttributeError,OSError,ValueError,http.client.HTTPException)",
-                "(IndexError,KeyError,TypeError,json.JSONDecodeError)",
-                "LLMError", "json.JSONDecodeError",
+                # v0.2.620: RecursionError joins the malformed-frame drop set —
+                # a deeply nested delta is a parse failure like JSONDecodeError.
+                "(IndexError,KeyError,RecursionError,TypeError,json.JSONDecodeError)",
+                "LLMError",
+                # v0.2.620: deeply nested bodies raise RecursionError, not
+                # JSONDecodeError — same malformed-response mapping.
+                "(RecursionError,json.JSONDecodeError)",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
             "pipeline.py": ["Exception", "Exception", "Exception", "LLMError"],

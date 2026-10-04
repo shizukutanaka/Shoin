@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.619
+## Version History: v0.1.37 → v0.2.620
+
+### v0.2.620 — code deeply-nested LLM responses as malformed, not 500
+
+`json.loads` raises RecursionError — not JSONDecodeError — when a response
+body exceeds the decoder's recursion budget (~5k-deep nesting, trivially
+emitted by a hostile or buggy endpoint). Both response-parse sites let it
+escape uncoded: `_post()` surfaced it as a 500-class error at every caller
+(chat/embed → HTTP 500), and `chat_stream()` let a single deeply nested
+`data:` frame abort the whole SSE stream mid-flight. `_post` now maps it
+to SYSTEM_LLM_BAD_RESPONSE like any other malformed body, and
+chat_stream drops the frame per the malformed-frame contract. Found by a
+seeded fuzz over the LLM hostile-response surface (7.7k trials): zero
+remaining non-coded escapes across _post/chat/embed/chat_stream,
+`_message_text`, and `_strip_surrogates`.
 
 ### v0.2.619 — code stdlib-boundary errors on hostile URL/charset input
 

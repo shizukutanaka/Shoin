@@ -133,9 +133,13 @@ class LLMClient:
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             # Must precede (OSError, ValueError): json.JSONDecodeError is a ValueError
             # subclass and would otherwise be misrouted to SYSTEM_SERVICE_UNAVAILABLE.
+            # RecursionError is the same malformed-response signal: a deeply
+            # nested body (an endpoint can trivially emit one) overflows the
+            # decoder's recursion budget — it is not a service-availability
+            # error and must not escape uncoded.
             raise LLMError("SYSTEM_LLM_BAD_RESPONSE", f"invalid JSON from {path}") from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:
             # urllib wraps socket.timeout in URLError(reason=TimeoutError(...));
@@ -276,7 +280,16 @@ class LLMClient:
                             delta = _message_text(delta)
                     except LLMError:
                         raise
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    except (
+                        json.JSONDecodeError,
+                        KeyError,
+                        IndexError,
+                        TypeError,
+                        RecursionError,
+                    ):
+                        # RecursionError too: a deeply nested frame is a
+                        # malformed delta — drop it like every other parse
+                        # failure rather than letting it abort the stream.
                         continue
                     # A malformed non-text delta is dropped rather than
                     # str()-coerced — repr garbage mid-stream would land in the
