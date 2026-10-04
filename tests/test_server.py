@@ -2271,6 +2271,23 @@ class SafeReportTest(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertIn("corrupt citation_report", buf.getvalue())
 
+    def test_valid_json_non_dict_degrades_to_empty(self) -> None:
+        """v0.2.628: a stored blob that is *valid* JSON but not an object —
+        a list, number, string, or bool — must degrade to {} exactly as
+        export.py's `_parse_report` does for the same shapes. Emitting the
+        parsed non-dict into the envelope produces a `report` field that is
+        not an object, breaking every `report.<field>` reader (UI, export
+        legend) — the API/export parity gap fuzz480 caught."""
+        for raw in ("[1,2]", "5", '"str"', "true", "0.5"):
+            self.assertEqual(self._fn(raw), {}, f"non-dict blob leaked: {raw!r}")
+
+    def test_non_string_raw_does_not_raise(self) -> None:
+        """v0.2.628: json.loads raises TypeError (not ValueError) on a
+        non-string raw — e.g. a value fetched as int from a non-STRICT
+        column. That exception type escaped the old try/except entirely."""
+        for raw in (5, 0, True, b"{}"):
+            self.assertEqual(self._fn(raw), {}, f"non-str raw leaked: {raw!r}")
+
 
 class LLMErrorDispatchTest(unittest.TestCase):
     """Verify that LLMError propagating out of a route handler returns HTTP 502."""

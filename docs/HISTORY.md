@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.627
+## Version History: v0.1.37 → v0.2.628
+
+### v0.2.628 — _safe_report の非 dict JSON を {} へ降格 (API/export パリティ)
+
+messages/notes API 往復 fuzz (seed=480) が検出: 格納 `citation_report`
+が *valid な* JSON でも dict でない場合 (`"[1,2]"`, `"5"`, `"true"`)、
+`_safe_report` がパース済み値をそのまま返し `GET /api/notebooks/{id}`
+が `"report": [1,2]` 等の非オブジェクトフィールドを送出していた。
+export.py の `_parse_report` は同形状を `isinstance(dict)` ガードで
+{} へ降格する —— API/export 両面の「report は常にオブジェクト」契約
+のパリティ欠落。`str(raw)` 強制も追加し、非 str 格納値 (非 STRICT 列
+の int 等) で `json.loads` が送出する TypeError の未捕捉経路も閉塞。
 
 ### v0.2.627 — main() にプロセス境界の catch-all を追加 (CLI/API coded パリティ)
 

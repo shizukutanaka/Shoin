@@ -121,10 +121,16 @@ def _safe_report(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
     try:
-        return json.loads(raw) or {}
+        parsed = json.loads(str(raw))
     except (json.JSONDecodeError, ValueError):
         print(f"Warning: corrupt citation_report in DB (ignored): {raw!r:.120}", file=sys.stderr)
         return {}
+    # A stored blob can be *valid* JSON without being a report — `"[1,2]"`,
+    # `"5"`, `"true"` all parse but emit a non-object `report` field that the
+    # response schema never produces (every reader does `report.<field>`).
+    # export.py's `_parse_report` degrades the same shapes to {}, so the API
+    # and export surfaces now degrade identically.
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _notebook_json(store: Store, nb_id: int) -> Json:
