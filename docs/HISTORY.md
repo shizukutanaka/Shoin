@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.610
+## Version History: v0.1.37 → v0.2.611
+
+### v0.2.611 — cli main() catches UnicodeEncodeError from print()
+
+A custom ChatBackend passed via main(llm=...) can emit lone-surrogate tokens
+(LLMClient strips them since v0.2.599, but external backends are unguarded).
+print(answer.text) — or any of the module's other output writes — then
+raises UnicodeEncodeError on a strict-UTF-8 stdout, escaping every handler
+in main()'s chain as a raw traceback and breaking the "coded err.prefix,
+never a traceback" subcommand guarantee. main() now catches it at the
+boundary like OverflowError, printing SYSTEM_INTERNAL_ERROR to stderr and
+returning 1.
+
 
 ### v0.2.610 — SSE frames are always ASCII on the wire
 

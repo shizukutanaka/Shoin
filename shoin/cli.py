@@ -799,6 +799,17 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         # otherwise escape as a bare Python traceback.
         print(_t("err.prefix", code="SYSTEM_IO_ERROR", msg=str(exc)), file=sys.stderr)
         return 1
+    except UnicodeEncodeError as exc:
+        # A lone surrogate in printed output — e.g. from a custom ChatBackend
+        # passed to main(llm=...) emitting surrogate tokens (LLMClient strips
+        # them since v0.2.599, but external backends are unguarded) — fails
+        # every print() write on a strict-UTF-8 stdout. Same boundary catch
+        # as OverflowError below: a coded err.prefix, never a traceback.
+        print(
+            _t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=str(exc)),
+            file=sys.stderr,
+        )
+        return 1
     except OverflowError:
         print(
             _t(

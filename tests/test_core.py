@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.610")
+        self.assertEqual(VERSION, "0.2.611")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12129,6 +12129,61 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_main_surrogate_output_returns_exit_code_1(self) -> None:
+        """main() must catch UnicodeEncodeError from a print() and return 1.
+
+        v0.2.611: a custom ChatBackend passed via main(llm=...) can emit lone-
+        surrogate tokens (LLMClient strips them, but external backends are
+        unguarded). `print(answer.text)` then raises UnicodeEncodeError on a
+        strict-UTF-8 stdout — which escaped every handler in main()'s chain
+        (StoreError/IngestError/LLMError/OperationalError/OSError/
+        OverflowError/KeyboardInterrupt), producing a raw traceback and
+        breaking the "every subcommand exits with a coded err.prefix, never
+        a traceback" guarantee the health handler's comment documents.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.citation import CitationReport
+        from shoin.cli import main
+        from shoin.qa import Answer
+        from shoin.search import Hit
+        from shoin.store import Store
+
+        report: CitationReport = CitationReport(
+            cited=[], invalid=[], coverage=0.0, n_sources=1,
+            source_map={"S1": "doc"}, confirmed=[], misattributed=[],
+        )
+        fake_answer = Answer(
+            text="bad\ud800token",
+            hits=[Hit(chunk_id=1, source_id=1, text="body", score=1.0)],
+            report=report,
+            degraded=False,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("test").id
+
+            # Strict-UTF-8 stdout — io.StringIO would swallow the surrogate
+            # silently; only a real encoder reproduces the terminal failure.
+            raw_out = io.TextIOWrapper(
+                io.BytesIO(), encoding="utf-8", errors="strict", write_through=True
+            )
+            err_out = io.StringIO()
+            with patch("shoin.cli.ask", return_value=fake_answer):
+                with patch("sys.stdout", raw_out):
+                    with patch("sys.stderr", err_out):
+                        rc = main(["--db", db_file, "ask", str(nb_id), "question"])
+            self.assertEqual(rc, 1)
+            self.assertIn("SYSTEM_INTERNAL_ERROR", err_out.getvalue())
+        finally:
+            os.unlink(db_file)
+
 
 class TestCLINoteSourceParity(unittest.TestCase):
     """CLI note/source subcommands (v0.2.68): before this, notes and source
@@ -17497,7 +17552,12 @@ class TestResidualGuards(unittest.TestCase):
                 "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 "OSError", "OSError", "OSError", "OSError",
-                "OverflowError", "ValueError", "ValueError",
+                "OverflowError",
+                # v0.2.611: custom ChatBackends can emit surrogate tokens that
+                # crash print() on strict-UTF-8 stdout — boundary catch in
+                # main() like OverflowError, coded err.prefix not a traceback.
+                "UnicodeEncodeError",
+                "ValueError", "ValueError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
             ],
             "config.py": [
