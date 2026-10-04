@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.614")
+        self.assertEqual(VERSION, "0.2.615")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -3137,6 +3137,51 @@ class TestIngest(unittest.TestCase):
         _, text = html_to_text(html)
         self.assertIn("本文", text)
         self.assertIn("SiteMenu", text)  # degradation keeps the boilerplate
+
+    def test_html_stray_endtag_does_not_unlock_unrelated_skip_element(self) -> None:
+        """A stray </nav> or </footer> inside a DIFFERENT unclosed skip
+        element must not release its suppression: the parser keeps open
+        elements as a stack, so an endtag only closes elements that are
+        actually open (pop-through to the match, ignored otherwise).
+        A bare decrement counter let "</nav>" unlock "<noscript>" or
+        "<form>", leaking everything the element was meant to hide."""
+        _, text = html_to_text("<p>pre</p><noscript></nav>SECRET_A</noscript><p>post</p>")
+        self.assertNotIn("SECRET_A", text)
+        self.assertIn("post", text)
+        _, text = html_to_text("<form>alpha</footer>SECRET_B</form><p>post</p>")
+        self.assertNotIn("SECRET_B", text)
+        self.assertIn("post", text)
+
+    def test_html_endtag_pop_through_implicitly_closes_nested_skip_elements(self) -> None:
+        """A real </nav> inside <nav><noscript> ends BOTH elements —
+        DOM semantics: an endtag implicitly closes the elements nested
+        inside its element. Keeping only the strict top-of-stack pop
+        would leave <noscript> open until its own closer arrives,
+        suppressing text the DOM puts after </nav>."""
+        _, text = html_to_text("<nav><noscript>inner</nav>AFTER</noscript><p>M</p>")
+        self.assertNotIn("inner", text)
+        self.assertIn("AFTER", text)
+        self.assertIn("M", text)
+
+    def test_html_closer_inside_comment_does_not_pair_real_opener(self) -> None:
+        """</nav> written inside a <!-- ... --> comment is comment text,
+        not a tag: it never fires at parse level. The neutralization pass
+        must apply the same liveness filter or it pairs a real unmatched
+        <nav> with an inert closer and skips injecting — leaving the nav
+        open to swallow the rest of the page."""
+        _, text = html_to_text("pre<nav>mid<!--</nav>-->post")
+        self.assertIn("pre", text)
+        self.assertIn("mid", text)
+        self.assertIn("post", text)
+
+    def test_html_closer_inside_attribute_junk_does_not_pair_real_opener(self) -> None:
+        """The same liveness rule applies inside an unterminated tag:
+        "</nav>" floating in <a href='x' ... > attribute junk is text the
+        parser never fires, so a real <nav> left open before it stays
+        unmatched — the neutralizer must inject its closer rather than
+        pairing the inert text and leaving the nav open to EOF."""
+        _, text = html_to_text("<nav>SECRET<a href='x'</nav>")
+        self.assertIn("SECRET", text)
 
     def test_html_semantic_tags_produce_newline_boundaries(self) -> None:
         """nav, aside, main, figure, figcaption, dd/dt must produce line breaks."""
@@ -18443,7 +18488,7 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        baseline = {"ingest.py": 2, "search.py": 1}
+        baseline = {"ingest.py": 4, "search.py": 1}
         found: dict[str, int] = {}
         problems: list[str] = []
         for path in sorted(shoin_dir.glob("*.py")):
@@ -19367,14 +19412,18 @@ class TestResidualGuards(unittest.TestCase):
         digit-vs-kanji head test on `_NUM_PART`-matched segments, whose
         digit class is already Unicode-wide and `float()` parses the
         same rows), or on export-format keys where a
-        Unicode digit still parses (export.py). A NEW predicate site
-        is a drift event: it must be justified like these."""
+        Unicode digit still parses (export.py). ingest.py's isalpha is
+        isascii()-guarded: _outside_tag decides whether the char after
+        "<" can open a tag — ASCII-letter-only per HTMLParser's tagfind
+        (a "<テ" or "<ñ" is literal text, not a tag). A NEW predicate
+        site is a drift event: it must be justified like these."""
         import ast as _ast
 
         baseline: dict[str, int] = {
             "chunk.py": 5,
             "citation.py": 5,
             "export.py": 3,
+            "ingest.py": 1,
             "search.py": 6,
         }
         preds = {

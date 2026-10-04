@@ -29,7 +29,59 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.614
+## Version History: v0.1.37 → v0.2.615
+
+### v0.2.615 — parse-level pairing for malformed-markup neutralization
+
+The html_to_text pre-pass that repairs malformed markup was making pairing
+decisions a real parser would never make, in both directions. Seeded fuzz
+over generated malformed documents surfaced one coherent family — three
+mechanisms, one root: every regex-level scan that looked for tag or comment
+boundaries accepted matches inside constructs where the parser reads only
+inert text.
+
+The first mechanism was the skip-depth counter itself. _HTMLText kept an
+integer incremented on any skip-tag opener and decremented on any skip-tag
+closer, so a stray "</nav>" fired inside an open <noscript> or <form> ended
+THAT element's suppression and leaked the rest of its contents — fuzz
+produced it twice (</nav> inside <noscript>, </nav> inside <form>). The
+counter is now a stack of open tag names with DOM-semantics endtag
+handling: a closer pops through the matching opener (implicitly closing
+anything nested inside it, so "</nav>" in <nav><noscript> ends both) and a
+closer for an element that isn't open is ignored entirely. The </head>
+recovery keeps its _saw_head gate — a stray </head> inside an unclosed
+element can no longer zero the stack when no <head> was ever seen.
+
+The second was pairing against events that never fire. A "</nav>" written
+inside a <!-- ... --> comment or floating in <a href='x' ...> attribute
+junk is text at parse level, yet the balance pass counted it as a closer:
+a real unmatched <nav> paired with the inert token, looked balanced, and
+escaped closer injection — then swallowed the rest of the document because
+the injected closer that should have ended it never arrived. The new
+_live() predicate gates every event the pass consumes: a position is live
+only when it sits outside any <...> region AND outside any <!-- ... -->
+comment span. _outside_tag() walks back past "<"s whose following char
+can't open a tag (HTMLParser's tagfind semantics: ASCII letter, "/", "!",
+"?"), so a "</nav" inside a "<!" bogus declaration or a "<x" inside an
+attribute no longer qualifies as a boundary. _comment_spans() applies the
+same opener filter, and accepts the first "-->" unconditionally once
+inside a comment — comment content is CDATA-ish, so the closer inside a
+comment's own "<!---->" text is still a closer, and an unclosed comment
+spans to EOF exactly as the parser reads it.
+
+The third was pairing shape. The closer injection used to pair opens and
+closes per tag but treated every open uniformly; the fuzz oracle showed an
+earlier unmatched <form> could make a later balanced <form>x</form> leak
+its contents. Unmatched openers now each get "</{tag}>" injected directly
+after their own ">", and each unclosed "<!--" is emptied to "<!---->"
+individually — per-opener repair instead of whole-region teardown.
+
+Four new pins cover the family end to end: a stray endtag can't unlock an
+unrelated open element, an endtag implicitly closes nested opens
+(pop-through), a closer inside a comment can't pair a real opener, and a
+closer inside attribute junk can't either. All four fail on the pre-fix
+code and pass after.
+
 
 ### v0.2.614 — the JSON response writer survives surrogate payloads
 
