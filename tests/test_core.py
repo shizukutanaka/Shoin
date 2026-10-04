@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.622")
+        self.assertEqual(VERSION, "0.2.623")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -11768,6 +11768,40 @@ class TestCLI(unittest.TestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2, argv)
             self.assertIn("-k", err.getvalue())
+
+    def test_add_status_lines_escape_control_chars(self) -> None:
+        """v0.2.623: per-target `✗ target: [code]` status rows must stay one
+        line each — a target path containing a newline (or any control char)
+        would otherwise split the row and could forge a `✓`-looking line in
+        the stream."""
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main([
+                    "--db", db_file, "add", str(nb.id),
+                    "missing\nforged: [FAKE] ok",
+                    "tab\ttarget",
+                ])
+            self.assertEqual(rc, 1)
+            lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 2, err.getvalue())
+            for ln in lines:
+                self.assertTrue(ln.startswith("✗ "), ln)
+                self.assertIn("[", ln)
+        finally:
+            os.unlink(db_file)
 
     def test_pos_int_accepts_positive_values(self) -> None:
         """The -k validator's accept path: a valid positive integer must pass

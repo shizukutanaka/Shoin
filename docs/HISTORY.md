@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.622
+## Version History: v0.1.37 → v0.2.623
+
+### v0.2.623 — escape control chars in CLI status labels
+
+Every single-line status row (`✓`/`✗` results, `[id] name` lists,
+`[S{n}]` report lines, `err.prefix`-style value interpolations) embeds an
+externally-controlled string — a target path, a stored title, a notebook
+name. A control character (
+, , ESC, U+2028…) splits the row or
+rewrites earlier terminal output: `add` on a file named `x
+✓ forged`
+prints a fake success line indistinguishable from a real one, and an
+ESC sequence can clear or overdraw previous rows. New `_one_line()`
+escapes Cc/Zl/Zp characters at every label interpolation site; block
+content (answer text, studio bodies, chat message bodies) is untouched.
+Found by the seeded CLI-dispatch fuzz (1.3k trials): status rows were the
+only non-coded output-shape leak.
 
 ### v0.2.622 — sync the product-review ledger to v0.2.621
 
