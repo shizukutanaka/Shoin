@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.604
+## Version History: v0.1.37 → v0.2.605
+
+### v0.2.605 — correct the rrf_fuse_lists merge-order doc claim
+
+`docs/agents/opus.md` asserted the merged-Hit contract "does not depend on
+list order" — wrong on both sides of v0.2.602: before that fix `vec` was
+last-wins and `bm25` first-wins (order-dependent in opposite directions);
+after it, both are first-wins, which makes the caller's primary-first list
+ordering itself the contract (the user's own phrasing defines the merged
+signal).  An agent guided by the stale line could have "fixed" the ordering
+back into a bug.  The note now records the first-wins-per-field contract and
+why the list order is load-bearing.  No code change — qa.py was audited the
+same cycle and is clean (orphan/empty-reply history handling, SSE degrade
+paths, expand_query cap, rewrite dedup all verified in-contract).
+
 
 ### v0.2.604 — recognise indented and empty ATX headings
 

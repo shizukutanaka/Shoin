@@ -122,7 +122,9 @@ Workflow ツールが使える場合は pipeline（find→verify を item 毎に
   `fts_query`/`_NEG_RE` が共有する単一の真実（v0.2.107/118）。
 - **`search.py`** — `_NEG_RE` の lookbehind は ASCII と CJK の両方を除外する必要がある
   （CJK直後のハイフンを否定構文と誤認しない、v0.2.128）。RRF スコアは lexical rerank 前に
-  `_minmax` で [0,1] 正規化必須（v0.2.60）。`rrf_fuse_lists` の Hit マージは list 順序に
-  依存しない（v0.2.125）。
+  `_minmax` で [0,1] 正規化必須（v0.2.60）。`rrf_fuse_lists` の Hit マージは
+  シグナルフィールドごとに first-wins——呼出し側は primary クエリのリストを先頭に
+  並べるため、併合後の vec/bm25 はユーザ自身の問いのスコアが正準となる
+  （v0.2.602: vec は以前 last-wins で rewrite の弱いコサインに上書きされていた）。
 - **`citation.py`** — 「確信できる時のみ主張、判定不能なら沈黙」が設計原則（v0.1.4/1.5）。
   集約スコアを足したくなっても不可。`CONFIRM_MIN=0.30` は CJK 較正値。
