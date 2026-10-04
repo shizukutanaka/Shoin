@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.626
+## Version History: v0.1.37 → v0.2.627
+
+### v0.2.627 — main() にプロセス境界の catch-all を追加 (CLI/API coded パリティ)
+
+cli.py 残存サブコマンド統合 fuzz (seed=479) が検出: `main(llm=...)` へ
+渡される外部 ChatBackend が非 LLMError 例外 (RuntimeError 等) を送出
+すると、`main()` のハンドラ鎖 (StoreError/IngestError/LLMError/
+OperationalError/OSError/UnicodeEncodeError/OverflowError/
+KeyboardInterrupt) を全て素通りして生 traceback が脱出していた。
+server.py の `_dispatch` は同じ迷入例外を coded
+`SYSTEM_INTERNAL_ERROR` エンベロープへ写像する —— CLI と API の
+「coded 応答、traceback なし」契約のパリティ欠落。
+`except Exception → SYSTEM_INTERNAL_ERROR` (type 名のみ) を main()
+末尾へ追加して閉塞。KeyboardInterrupt/SystemExit は BaseException
+系統のため影響なし。except-Exception カタログを cli.py 1→2 へ、
+spec.md の「広域捕捉は17サイト」を18へ更新。
 
 ### v0.2.626 — product-review 台帳を v0.2.625 に同期
 

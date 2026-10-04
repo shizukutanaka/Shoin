@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.626"
+VERSION = "0.2.627"
 
 
 DEFAULT_PORT = 7440

@@ -853,6 +853,25 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130
+    except Exception as exc:  # noqa: BLE001 - process boundary catch-all
+        # Same parity as server.py's _dispatch, which maps any stray exception
+        # to a coded SYSTEM_INTERNAL_ERROR envelope instead of leaking a raw
+        # failure: the CLI's identical contract is "coded err.prefix line, never
+        # a traceback" (the health command's comment states it outright). A
+        # custom ChatBackend that raises a non-LLMError — RuntimeError, an
+        # SDK-specific exception — is the reachable path: every in-tree backend
+        # wraps into LLMError, but external backends are unguarded, and without
+        # this catch their exceptions escape main() as a bare traceback while
+        # the API sibling answers the same failure coded. Internal bugs are NOT
+        # silently masked: SYSTEM_INTERNAL_ERROR still signals "unexpected" to
+        # the user exactly as a traceback would, just without the stack noise —
+        # and it preserves the contract that callers parsing stderr only ever
+        # see the coded err.prefix shape.
+        print(
+            _t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=f"{type(exc).__name__}: {exc}"),
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

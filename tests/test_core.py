@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.626")
+        self.assertEqual(VERSION, "0.2.627")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12492,6 +12492,59 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_main_rogue_backend_error_returns_coded_1(self) -> None:
+        """A custom ChatBackend raising a non-LLMError must exit coded, never
+        as a raw traceback.
+
+        Every in-tree backend wraps its failures into LLMError, but external
+        backends passed to main(llm=...) are unguarded — a RuntimeError from
+        one escaped main()'s whole handler chain and printed a traceback,
+        while server.py's _dispatch maps the identical stray to a coded
+        SYSTEM_INTERNAL_ERROR envelope (CLI/API parity). The process-boundary
+        catch-all added in main() now applies the same mapping.
+        """
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class RogueBackend:
+            model = "rogue"
+            embedding_model = "rogue-emb"
+
+            def chat(self, messages, **kw):
+                raise RuntimeError("sdk exploded")
+
+            def chat_stream(self, messages, **kw):
+                yield "x"
+
+            def embed(self, texts, **kw):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_one(self, text, **kw):
+                return [0.2] * 8
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("test").id
+                src = s.add_source(nb_id, "txt", "doc", "o", "sha")
+                s.add_chunks(src.id, ["alpha beta content"])
+
+            out, err = io.StringIO(), io.StringIO()
+            with patch("sys.stdout", out), patch("sys.stderr", err):
+                rc = main(["--db", db_file, "ask", str(nb_id), "alpha"],
+                          llm=RogueBackend())
+            self.assertEqual(rc, 1)
+            self.assertIn("SYSTEM_INTERNAL_ERROR", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
 
 class TestCLINoteSourceParity(unittest.TestCase):
     """CLI note/source subcommands (v0.2.68): before this, notes and source
@@ -14266,7 +14319,7 @@ class TestCitationCoverageTail(unittest.TestCase):
 _EXCEPT_CATALOG = {
     "ingest.py": 4,
     "server.py": 9,
-    "cli.py": 1,
+    "cli.py": 2,
     "pipeline.py": 3,
 }
 _DYNAMIC_COMPILE_CATALOG = {
@@ -17579,7 +17632,7 @@ class TestResidualGuards(unittest.TestCase):
         )
         root = Path(__file__).resolve().parent.parent
         baseline = {
-            "cli.py": 2,      # noqa: BLE001 broad CLI catch + pragma on __main__
+            "cli.py": 3,      # noqa: BLE001 x2 (health + main catch-all) + pragma __main__
             "ingest.py": 2,   # type: ignore[misc] HTMLParser attr + pragma ImportError
             "pipeline.py": 1,  # noqa: E731 embed lambda
             "server.py": 5,   # noqa: N802 x4 (do_* verbs) + pragma serve loop
@@ -17859,6 +17912,11 @@ class TestResidualGuards(unittest.TestCase):
                 "(UnicodeDecodeError,json.JSONDecodeError)",
                 "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
+                # v0.2.627: process-boundary catch-all in main() — a custom
+                # ChatBackend raising a non-LLMError escaped every handler as
+                # a raw traceback; same coded SYSTEM_INTERNAL_ERROR mapping
+                # _dispatch applies to strays (CLI/API parity).
+                "Exception",
                 "OSError", "OSError", "OSError", "OSError",
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
