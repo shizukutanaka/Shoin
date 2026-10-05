@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable
@@ -29,6 +30,7 @@ from .config import (
     ui_lang,
 )
 from .llm import LLMError, Message
+from .log import emit
 from .search import Hit, retrieve, retrieve_multi
 from .store import Store, StoreError
 
@@ -729,6 +731,7 @@ def ask(
     same answer llm.chat() would have returned. When unset (or the backend
     cannot stream) the single-shot chat() path runs byte-identically.
     """
+    t0 = time.monotonic()
     history = history_messages(store, notebook_id)  # before persisting this turn
     retrieval_q = expand_query(question, history)
     qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
@@ -802,4 +805,13 @@ def ask(
 
     if persist:
         store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
+    emit(
+        "ask_completed",
+        nb=notebook_id,
+        q_len=len(question),
+        hits=len(answer.hits),
+        ans_len=len(answer.text),
+        degraded=answer.degraded,
+        ms=round((time.monotonic() - t0) * 1000),
+    )
     return answer

@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.651"
+VERSION = "0.2.652"
 
 
 DEFAULT_PORT = 7440
@@ -231,3 +231,11 @@ def chunk_overlap() -> int:
     if n < 0 or n >= chunk_tokens():
         return CHUNK_OVERLAP
     return n
+
+def log_json_enabled() -> bool:
+    """Opt-in structured logging switch (SHOIN_LOG_JSON, v0.2.652).
+
+    When truthy, shoin/log.py's emit() writes one JSON object per event to
+    stderr — the machine-readable observability half that complements
+    SHOIN_DEBUG's human-readable diagnostics. Default OFF (stderr quiet)."""
+    return _get("SHOIN_LOG_JSON", "").strip().lower() in ("1", "true", "yes", "on")

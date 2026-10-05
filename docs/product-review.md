@@ -184,7 +184,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~42~~ | ~~スペルミス/クエリ訂正なし~~ | **解消 v0.2.650** — ゼロ件時`POST /api/search`・nb_search・`shoin search`へ`suggestions`フィールド追加 (corpus最近接表層形上限3) |
 | 43 | **推奨質問が LLM 依存** | questions の品質は接続先モデルの力量に依存。モデル不在時は空配列で機能しない |
 | 44 | ~~**eval cases の生成支援なし**~~ → **解消済み** (v0.2.651: `shoin eval <nb> --gen` がチャンクを持つソース1件=1ケースの雛形を生成——`sources`は実際のidを運び質問文は手直し前提) |
-| 45 | **観測性が SHOIN_DEBUG のみ** | 構造化ログ・メトリクス・トレースの層が無く、本番系の運用診断は出来ない |
+| 45 | ~~**観測性が SHOIN_DEBUG のみ**~~ → **解消済み** (v0.2.652: `SHOIN_LOG_JSON=1`でJSON Linesイベントログ——`source_indexed`/`ask_completed`がID・件数・ms・degradedをstderr emit。`_PRIVATE_FIELDS`フィルタで本文流出不可。trace層は設計上不要として残) |
 | 46 | **Windows 未検証** | 開発・検証は macOS/Linux 前提。`shell=False` 設計とパス処理は概ね移植可能だが実機検証履歴が無い |
 | 47 | **Python 3.11 フロア** | requires-python >=3.11 で更に古い distro 標準 Python では動かない(意図的だが利用層を狭める) |
 | 48 | **SSE再接続/再開なし** | ストリーム断は「done欠落→永続回答復元」で救済するのみ。`Last-Event-ID` 再開やclient-side resumeは無い |

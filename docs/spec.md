@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.651 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.652 時点に同期)
 
 ## プロダクト定義
 
@@ -228,7 +228,7 @@ DNS-rebinding/CSRFガード(`_reject_cross_site`: Host/Originをloopback語彙�
 
 - 依存: 実行時依存は標準ライブラリ + 最小限(PDF抽出のみ許容: pypdf)。フロントエンドはビルド不要の単一HTML
 - i18n: `namespace.component.key`、ja一次 + en
-- ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。JSON構造化・trace_idは非対応(CLAUDE.md「No Distributed Tracing」参照)
+- ログ: 単一マシン用途のため意図的に最小限(stderrへの平文print、本文非含有)。`SHOIN_DEBUG=1`で検索統計(BM25/vectorヒット数、RRF順位、最終スコア)を出力(v0.2.56のRRF移行以降「融合alpha」は存在しない)。`SHOIN_LOG_JSON=1`で取込/回答イベントをJSON Lines emit(`source_indexed`/`ask_completed`——ID・件数・ms・degradedのみ、本文・質問文・パスは`_PRIVATE_FIELDS`フィルタで流出不可、emitは決してraiseしない)(v0.2.652)。trace_id・分散トレースは非対応(CLAUDE.md「No Distributed Tracing」参照)
 
 ## 競合差別化
 

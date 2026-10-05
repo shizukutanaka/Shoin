@@ -7,6 +7,7 @@ retrieval (degradation is a first-class mode, see spec REQ-004/008).
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from .config import (
 )
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
+from .log import emit
 from .qa import ChatBackend
 from .store import Source, Store, StoreError
 
@@ -204,6 +206,7 @@ def index_source(
     path), so the source row is committed with the correct title in a single
     transaction — no second update_source_title commit needed.
     """
+    t0 = time.monotonic()
     if target.startswith(("http://", "https://")):
         extracted = extract_url(target)
     else:
@@ -234,6 +237,16 @@ def index_source(
     chunk_ids = store.add_chunks(source.id, texts, full_contexts)
     embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
     n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+    emit(
+        "source_indexed",
+        nb=notebook_id,
+        id=source.id,
+        kind=extracted.kind,
+        chunks=len(chunk_ids),
+        embedded=n_embedded,
+        pages_failed=extracted.pages_failed,
+        ms=round((time.monotonic() - t0) * 1000),
+    )
     return IndexResult(
         source, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
     )

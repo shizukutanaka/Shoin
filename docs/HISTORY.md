@@ -29,7 +29,28 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.651
+## Version History: v0.1.37 → v0.2.652
+
+### v0.2.652 — 構造化イベントログ (SHOIN_LOG_JSON)
+
+短所45を解消: 観測経路がSHOIN_DEBUG(人間向け診断)のみで、実利用の
+失敗率・レイテンシを機械可読に観測する術が無かった。新モジュール
+`shoin/log.py` の `emit(event, **fields)` がSHOIN_LOG_JSON真値時に
+`{"ts","event",…}` を1行JSONでstderrへ送出 — 2収束点
+`pipeline.index_source`(`source_indexed`: nb/id/kind/chunks/embedded/
+pages_failed/ms)と`qa.ask`(`ask_completed`: nb/q_len/hits/ans_len/
+degraded/ms)へ配線しCLI/API両面を同一イベントでカバー。
+**プライバシー境界**: `_PRIVATE_FIELDS`(question/text/title/origin/url/
+path/content/body)は全イベントから除去 — 将来の呼出しサイトが本文を
+漏らさない。emitは決してraiseしない(default=strで非JSON値も直列化、
+壊れたstderrは嚥下)。env readはconfig.py `log_json_enabled()`へ集中
+(env集中ピン遵守)。行動ピン1クラス(TestStructuredLog 5件): 無効時
+無出力・JSON行shape・private除去・add→source_indexed・ask→
+ask_completed(degraded含む・質問文非含有)。カタログ追随: except-
+inventory +log.py(+trivial-body)・時間ピンに monotonic/perf_counter
+を期間用として除外・time/thread カタログ(pipeline/qa 各2サイト)。
+
+1340テスト全通過・カバレッジ99%・ruff/mypy --strict クリーン・secret scan 0件。
 
 ### v0.2.651 — eval ケース雛形生成 (`shoin eval <nb> --gen`)
 

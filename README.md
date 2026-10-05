@@ -83,6 +83,7 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 | `SHOIN_CHUNK_TOKENS` | `512` | チャンク分割の目安トークン数。`shoin eval` の前後で変えて自分の文書での効果を測定できる(次回の取込/再インデックスから有効) |
 | `SHOIN_CHUNK_OVERLAP` | `64` | チャンク間のオーバーラップトークン数(チャンクサイズ未満、負値・超過は既定に戻る)。オーバーラップの効果は文書依存で一律ではないため測定推奨 |
 | `SHOIN_DEBUG` | (無効) | `1`で検索の診断情報(BM25/vectorヒット数、RRF順位、最終スコア)を標準エラー出力に表示 |
+| `SHOIN_LOG_JSON` | (無効) | `1`で取込・回答イベントをJSON Linesで標準エラー出力へemit(`{"ts","event",…}`、`source_indexed`/`ask_completed`——ID・件数・msのみ、本文非含有) |
 | `SHOIN_THEME_CSS` | `~/.config/shoin/theme.css` | ユーザーテーマCSSのパス。配色は全てCSS変数のため `:root{--washi:…}` を上書きするだけで見た目を変えられる。Web UIが`/api/theme.css`経由で読込む(未存在・256KiB超は空スタイルシートに降格) |
 
 `shoin eval` の cases.json 例 — 設定変更(例: `SHOIN_MULTI_QUERY=1`)の前後で実行すれば、

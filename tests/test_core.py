@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.651")
+        self.assertEqual(VERSION, "0.2.652")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18425,9 +18425,12 @@ class TestResidualGuards(unittest.TestCase):
                     continue
                 if (
                     isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "sleep"
+                    and node.func.attr in {"sleep", "monotonic", "perf_counter"}
                 ):
-                    continue  # time.sleep is the busy-retry, not a clock
+                    # Durations, not timestamps: time.sleep is the busy-retry
+                    # and monotonic/perf_counter measure latency spans —
+                    # none emits a wall-clock value needing _now's format.
+                    continue
                 if (
                     isinstance(node.func, ast.Attribute)
                     and node.func.attr in verbs
@@ -18925,6 +18928,11 @@ class TestResidualGuards(unittest.TestCase):
                 "(RecursionError,json.JSONDecodeError)",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
+            "log.py": [
+                # v0.2.652: emit() must never break the operation it reports —
+                # a broken or strict-codec stderr is swallowed, not propagated.
+                "(OSError,UnicodeEncodeError,ValueError)",
+            ],
             "pipeline.py": [
                 "Exception", "Exception", "Exception",
                 # v0.2.648: refresh_all_sources degrades a per-source coded
@@ -18990,6 +18998,9 @@ class TestResidualGuards(unittest.TestCase):
             # default 2, same contract as port()'s range fallback.
             "config.py": 7, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
             "llm.py": 2,
+            # log.py +1: emit()'s stderr-write guard — logging must never
+            # break the operation it reports (v0.2.652).
+            "log.py": 1,
             "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
             "studio.py": 1,
         }
@@ -19255,7 +19266,8 @@ class TestResidualGuards(unittest.TestCase):
             "non-vacuous: ASCII overlap still scores",
         )
         baseline = {
-            "config.py": 1, "ingest.py": 4, "search.py": 4,
+            # config.py +1: log_json_enabled env compare (v0.2.652)
+            "config.py": 2, "ingest.py": 4, "search.py": 4,
             "server.py": 3, "store.py": 2,
         }
         actual: dict[str, int] = {}
@@ -19833,7 +19845,10 @@ class TestResidualGuards(unittest.TestCase):
             # v0.2.639: geometric backoff between _post retries.
             "llm.py": ["time.sleep"],
             "store.py": ["datetime.now", "time.sleep"],
-            "qa.py": ["threading.Lock"],
+            # v0.2.652: index_source/ask latency spans (structured-log ms
+            # fields) — monotonic durations, not clock reads.
+            "pipeline.py": ["time.monotonic", "time.monotonic"],
+            "qa.py": ["threading.Lock", "time.monotonic", "time.monotonic"],
             "server.py": ["threading.Lock", "threading.Lock"],
         }
         actual: dict[str, list[str]] = {}
@@ -20897,3 +20912,148 @@ class TestCliEvalGen(unittest.TestCase):
             self.assertIn("NOT_FOUND", err.getvalue())
         finally:
             os.unlink(db_file)
+
+# ---------------------------------------------------------------------------
+# v0.2.652: structured JSON event log (SHOIN_LOG_JSON)
+# ---------------------------------------------------------------------------
+
+class TestStructuredLog(unittest.TestCase):
+    """emit(): one JSON line per event on stderr, opt-in via SHOIN_LOG_JSON."""
+
+    def _with_env(self, val: str | None):
+        import os
+
+        class _Env:
+            def __enter__(self):
+                self.old = os.environ.get("SHOIN_LOG_JSON")
+                if val is None:
+                    os.environ.pop("SHOIN_LOG_JSON", None)
+                else:
+                    os.environ["SHOIN_LOG_JSON"] = val
+            def __exit__(self, *a):
+                if self.old is None:
+                    os.environ.pop("SHOIN_LOG_JSON", None)
+                else:
+                    os.environ["SHOIN_LOG_JSON"] = self.old
+        return _Env()
+
+    def test_disabled_is_silent(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env(None):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", n=1)
+            self.assertEqual(err.getvalue(), "")
+
+    def test_enabled_emits_json_line(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env("1"):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", n=1, flag=True)
+            line = err.getvalue().strip()
+            self.assertTrue(line.startswith("{"), err.getvalue())
+            obj = json.loads(line)
+            self.assertEqual(obj["event"], "probe")
+            self.assertEqual(obj["n"], 1)
+            self.assertIs(obj["flag"], True)
+            # ts is the store._now ISO-8601 string — the product's single
+            # clock source, so log lines match every DB row's format.
+            self.assertRegex(obj["ts"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_private_fields_are_dropped(self) -> None:
+        """A future call site must not be able to leak user content — keys in
+        _PRIVATE_FIELDS are dropped from every event line."""
+        import io
+        import json
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env("1"):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", question="秘密の質問", text="本文", ok=1)
+            obj = json.loads(err.getvalue())
+            self.assertNotIn("question", obj)
+            self.assertNotIn("text", obj)
+            self.assertEqual(obj["ok"], 1)
+
+    def test_index_source_emits_source_indexed(self) -> None:
+        """End-to-end: `shoin add` goes through index_source -> emit, so both
+        CLI and API ingests produce the same event."""
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            doc = str(Path(td) / "d.txt")
+            Path(doc).write_text("構造化ログのテスト本文。", encoding="utf-8")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with self._with_env("1"):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    rc = main(["--db", db_file, "add", str(nb.id), doc])
+            self.assertEqual(rc, 0)
+            events = [
+                json.loads(ln) for ln in err.getvalue().splitlines()
+                if ln.strip().startswith("{")
+            ]
+            hits = [e for e in events if e.get("event") == "source_indexed"]
+            self.assertEqual(len(hits), 1, err.getvalue())
+            e = hits[0]
+            self.assertEqual(e["nb"], nb.id)
+            self.assertEqual(e["kind"], "txt")
+            self.assertGreaterEqual(e["chunks"], 1)
+            self.assertIn("ms", e)
+
+    def test_ask_emits_ask_completed(self) -> None:
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "h")
+                s.add_chunks(src.id, ["回答の根拠となる本文。"])
+            with self._with_env("1"):
+                err, out = io.StringIO(), io.StringIO()
+                with redirect_stderr(err), redirect_stdout(out):
+                    rc = main(
+                        ["--db", db_file, "ask", str(nb.id), "本文について"],
+                        llm=FakeLLM(),
+                    )
+            self.assertEqual(rc, 0)
+            events = [
+                json.loads(ln) for ln in err.getvalue().splitlines()
+                if ln.strip().startswith("{")
+            ]
+            hits = [e for e in events if e.get("event") == "ask_completed"]
+            self.assertEqual(len(hits), 1, err.getvalue())
+            e = hits[0]
+            self.assertEqual(e["nb"], nb.id)
+            self.assertIn("degraded", e)
+            self.assertIn("ms", e)
+            self.assertNotIn("q", e)  # no question text leaked
