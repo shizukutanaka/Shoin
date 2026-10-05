@@ -597,6 +597,27 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["pages_failed"], 3)
 
+    def test_nb_refresh_all_collects_statuses(self) -> None:
+        """v0.2.648: POST /api/notebooks/{id}/refresh-all is the Web-side batch
+        refresh — echoes the per-source outcome list and keeps the coded
+        NOTEBOOK_NOT_FOUND contract on a dead notebook."""
+        import shoin.server as srv
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "ra"})
+        nb_id = nb["id"]
+        fake = [
+            {"id": 1, "title": "a", "status": "refreshed",
+             "n_chunks": 2, "n_embedded": 0},
+            {"id": 2, "title": "b", "status": "skipped"},
+        ]
+        with patch.object(srv, "refresh_all_sources", return_value=fake):
+            status, body = self._json("POST", f"/api/notebooks/{nb_id}/refresh-all")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"], fake)
+        status, body = self._json("POST", "/api/notebooks/9999/refresh-all")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
         (e.g. sqlite3.OperationalError: database is locked) must return HTTP 500

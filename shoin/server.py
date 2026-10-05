@@ -37,7 +37,14 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, refresh_source, reindex_notebook, rename_source
+from .pipeline import (
+    index_source,
+    refresh_all_sources,
+    refresh_source,
+    reindex_notebook,
+    rename_source,
+    source_is_refreshable,
+)
 from .qa import (
     ChatBackend,
     _check_embed_model_ok,
@@ -175,8 +182,8 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 # source qualifies only while its recorded path still exists
                 # (an upload's tmp copy is unlinked after ingest, so it reads
                 # false and the UI hides a button that could only error).
-                "refreshable": s.origin.startswith(("http://", "https://"))
-                or Path(s.origin).is_file(),
+                # Shared with the batch path — see pipeline.source_is_refreshable.
+                "refreshable": source_is_refreshable(s),
             }
             for s in store.sources_for_notebook(nb_id)
         ],
@@ -432,6 +439,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
         ("PATCH", r"^/api/chunks/(\d+)$", "chunk_patch"),
         ("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh"),
+        ("POST", r"^/api/notebooks/(\d+)/refresh-all$", "nb_refresh_all"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
         ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
@@ -845,6 +853,15 @@ class _Handler(BaseHTTPRequestHandler):
             },
             200,
         )
+
+    def _h_nb_refresh_all(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            results = refresh_all_sources(store, nb_id, self.llm)
+        # Any source's content may have changed: evict cached suggestions
+        # (same staleness class as the per-source refresh, v0.2.36).
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
+        self._json({"results": results})
 
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:

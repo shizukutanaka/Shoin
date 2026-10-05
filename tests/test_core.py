@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.647")
+        self.assertEqual(VERSION, "0.2.648")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -10238,6 +10238,65 @@ class TestPipeline(unittest.TestCase):
         )
         self.assertEqual(res1.n_embedded, 0)
 
+    def test_refresh_all_sources_collects_per_source_status(self) -> None:
+        """v0.2.648: refresh_all_sources is the batch path a scheduled job
+        (cron) needs — it must collect per-source outcomes instead of dying
+        on the first bad origin, and skip origins that can no longer be read
+        (same refreshable predicate the Web UI's ↻ button hides on)."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted, IngestError
+        from shoin.pipeline import index_source, refresh_all_sources
+
+        def ext(origin: str, sha: str, text: str) -> Extracted:
+            return Extracted(
+                kind="url", title=origin, origin=origin, sha256=sha, text=text
+            )
+
+        a_v1 = ext("http://a.test", "sha-a1", "alpha " * 50)
+        a_v2 = ext("http://a.test", "sha-a2", "alpha changed " * 50)
+        b_same = ext("http://b.test", "sha-b", "bravo " * 50)
+        c_v1 = ext("http://c.test", "sha-c", "charlie " * 50)
+        with make_store() as s:
+            nb_id = s.create_notebook("ra-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=a_v1):
+                a_id = index_source(s, nb_id, "http://a.test").source.id
+            with patch("shoin.pipeline.extract_url", return_value=b_same):
+                b_id = index_source(s, nb_id, "http://b.test").source.id
+            with patch("shoin.pipeline.extract_url", return_value=c_v1):
+                c_id = index_source(s, nb_id, "http://c.test").source.id
+            # A file source whose recorded path no longer exists: not
+            # refreshable, so it must land 'skipped', not 'failed'.
+            skip_id = s.add_source(
+                nb_id, "txt", "gone", "/nonexistent/dead-path.txt", "sha-skip"
+            ).id
+
+            def fake_fetch(url: str) -> Extracted:
+                if url == "http://a.test":
+                    return a_v2
+                if url == "http://b.test":
+                    return b_same
+                raise IngestError("INGEST_FETCH_FAILED", "down")
+
+            with patch("shoin.pipeline.extract_url", side_effect=fake_fetch):
+                results = refresh_all_sources(s, nb_id)
+        by_id = {int(r["id"]): r for r in results}
+        self.assertEqual(by_id[a_id]["status"], "refreshed")
+        self.assertEqual(by_id[a_id]["n_chunks"], 1)
+        self.assertEqual(by_id[b_id]["status"], "unchanged")
+        self.assertEqual(by_id[skip_id]["status"], "skipped")
+        self.assertEqual(by_id[c_id]["status"], "failed")
+        self.assertEqual(by_id[c_id]["code"], "INGEST_FETCH_FAILED")
+
+    def test_refresh_all_sources_unknown_notebook_raises_coded(self) -> None:
+        """The batch path must keep the same coded contract as the rest of the
+        store API — a dead notebook is NOTEBOOK_NOT_FOUND, not an empty list."""
+        from shoin.pipeline import refresh_all_sources
+
+        with make_store() as s, self.assertRaises(StoreError) as cm:
+            refresh_all_sources(s, 9999)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
         """A user's custom rename (PATCH /api/sources/{id}) must survive a
         subsequent refresh, even when the re-fetched page has a different
@@ -12848,6 +12907,46 @@ class TestCLI(unittest.TestCase):
                 rc2 = main(["--db", db_file, "chunk", "edit", "9999", "x"])
             self.assertEqual(rc2, 1)
             self.assertIn("CHUNK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_source_refresh_all_reports_tally(self) -> None:
+        """v0.2.648: `shoin source refresh-all <nb>` is the cron-friendly batch
+        entry point — prints one status line per source plus a tally, and keeps
+        the coded NOTEBOOK_NOT_FOUND contract on a dead id."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False).name
+        try:
+            fake = [
+                {"id": 1, "title": "a", "status": "refreshed",
+                 "n_chunks": 2, "n_embedded": 0},
+                {"id": 2, "title": "b", "status": "unchanged",
+                 "n_chunks": 3, "n_embedded": 0},
+                {"id": 3, "title": "c", "status": "skipped"},
+                {"id": 4, "title": "d", "status": "failed",
+                 "code": "INGEST_FETCH_FAILED"},
+            ]
+            out = io.StringIO()
+            with patch("shoin.cli.refresh_all_sources", return_value=fake):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "source", "refresh-all", "1"])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("[1] a: refreshed", text)
+            self.assertIn("[4] d: failed (INGEST_FETCH_FAILED)", text)
+            self.assertIn("4", text)
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "source", "refresh-all", "9999"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
             self.assertNotIn("Traceback", err.getvalue())
         finally:
             os.unlink(db_file)
@@ -18687,7 +18786,14 @@ class TestResidualGuards(unittest.TestCase):
                 "(RecursionError,json.JSONDecodeError)",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
-            "pipeline.py": ["Exception", "Exception", "Exception", "LLMError"],
+            "pipeline.py": [
+                "Exception", "Exception", "Exception",
+                # v0.2.648: refresh_all_sources degrades a per-source coded
+                # failure to a 'failed' row — one dead origin must not abort
+                # the batch a cron caller scheduled.
+                "(IngestError,LLMError,StoreError)",
+                "LLMError",
+            ],
             "qa.py": [
                 "LLMError", "LLMError", "LLMError",
                 "StoreError", "sqlite3.OperationalError",
@@ -19711,6 +19817,9 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": ["pathlib.Path"],
             "config.py": ["pathlib.Path"],
             "ingest.py": ["io.BytesIO", "pathlib.Path"],
+            # v0.2.648: source_is_refreshable's is_file() check — the dead-path
+            # branch of the shared refreshable predicate.
+            "pipeline.py": ["pathlib.Path"],
             "server.py": ["pathlib.Path"],
             "store.py": ["datetime.UTC", "datetime.datetime",
                          "pathlib.Path"],

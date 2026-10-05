@@ -29,7 +29,33 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.647
+## Version History: v0.1.37 → v0.2.648
+
+### v0.2.648 — ソース一括refresh (POST /api/notebooks/{id}/refresh-all + shoin source refresh-all)
+
+50長所/50短所監査 (product-review.md) の短所49を解消:
+cron的な定期再取込の経路が無く、URLソースの定期refreshは
+1ソースずつの手動実行しか手段がなかった。`refresh_all_sources`
+がノートブック内の全refreshableソースを順次処理し、per-source結果を
+収集して返す——1ソースの coded 失敗 (INGEST_*/SOURCE_*/SYSTEM_*) で
+バッチ全体を中断しない設計 (cron が夜間走らせる前提で、死んだ origin
+一つで残り全部が未実行になるのを防ぐ)。CLI経路は
+`shoin source refresh-all <nb>` (per-source ステータス行 + 集計行)、
+Web経路は `POST /api/notebooks/{id}/refresh-all` (→ `{"results":[…]}`) の
+CLI/Web両面 (REQ-103 パリティ)。status は4語彙: `refreshed`
+(sha256変化=内容更新), `unchanged` (byte同一の no-op),
+`skipped` (originが読取不能——detail `refreshable` と同一述語、
+単一点化した `pipeline.source_is_refreshable` がnb_get側のインライン
+述語も所有), `failed` (codedエラー・code併記)。refreshed/unchanged
+の識別は n_embedded では不能 (embed無効の真更新も0を返す) のため
+前後 sha256 比較で行う。questions cache は per-source refresh と同じ
+staleness class のためハンドラ側で手動 evict。ピン3件 (pipeline往復:
+4 status語彙 + dead nb の coded 404、API: results echo + coded 404、
+CLI: 逐次行+集計行+dead nb coded)。except inventory 追随
+(pipeline.py `(IngestError,LLMError,StoreError)` +1)。#16
+(ベクトル埋込みのバッチ化なし) は実測で既実装と判明——`_embed_chunks`
+は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ (`llm.embed`)
+で既にバッチ化済み、台帳記述のみ陳腐化していたため解消マーク。
 
 ### v0.2.647 — チャンク手動編集 (PATCH /api/chunks/{id} + shoin chunk edit)
 

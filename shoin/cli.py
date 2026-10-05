@@ -33,7 +33,13 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, refresh_source, reindex_notebook, rename_source
+from .pipeline import (
+    index_source,
+    refresh_all_sources,
+    refresh_source,
+    reindex_notebook,
+    rename_source,
+)
 from .qa import ChatBackend, ask
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
@@ -138,6 +144,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
         "src.pages_failed": "⚠ {n} ページのテキスト抽出に失敗（索引は不完全です）",
+        "src.refresh_all.done": (
+            "一括再取込: {n}件 (更新 {refreshed} / 変更なし {unchanged} / "
+            "skip {skipped} / 失敗 {failed})"
+        ),
         "chunk.edited": "チャンク更新完了: [{id}] (埋め込みクリア — reindexで再構築)",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
@@ -223,6 +233,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
         "src.pages_failed": "⚠ {n} page(s) could not be extracted — the index is incomplete",
+        "src.refresh_all.done": (
+            "refresh-all: {n} source(s) ({refreshed} refreshed / "
+            "{unchanged} unchanged / {skipped} skipped / {failed} failed)"
+        ),
         "chunk.edited": "Chunk updated: [{id}] (embedding cleared — run reindex to rebuild)",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
@@ -315,6 +329,10 @@ def _build_parser() -> argparse.ArgumentParser:
     src_ren.add_argument("title")
     src_ref = srcsub.add_parser("refresh", help="URLソースの再取込")
     src_ref.add_argument("source_id", type=int)
+    src_ra = srcsub.add_parser(
+        "refresh-all", help="ノートブック内の全ソースを一括再取込 (cron向け)"
+    )
+    src_ra.add_argument("notebook_id", type=int)
 
     chk = sub.add_parser("chunk", help="チャンク管理")
     chksub = chk.add_subparsers(dest="action", required=True)
@@ -856,6 +874,26 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
         )
         if result.pages_failed:
             print(_t("src.pages_failed", n=str(result.pages_failed)), file=sys.stderr)
+    elif action == "refresh-all":
+        results = refresh_all_sources(store, int(args.notebook_id), llm)
+        tally: dict[str, int] = {}
+        for r in results:
+            status = str(r["status"])
+            tally[status] = tally.get(status, 0) + 1
+            line = f"[{r['id']}] {r['title']}: {status}"
+            if status == "failed":
+                line += f" ({r['code']})"
+            print(line)
+        print(
+            _t(
+                "src.refresh_all.done",
+                n=str(len(results)),
+                refreshed=str(tally.get("refreshed", 0)),
+                unchanged=str(tally.get("unchanged", 0)),
+                skipped=str(tally.get("skipped", 0)),
+                failed=str(tally.get("failed", 0)),
+            )
+        )
     return 0
 
 

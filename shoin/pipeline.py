@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
 from .config import (
@@ -381,6 +382,56 @@ def refresh_source(
     return IndexResult(
         updated_src, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
     )
+
+
+def source_is_refreshable(src: Source) -> bool:
+    """The GET-detail `refreshable` predicate, shared so the batch path and
+    the Web UI's ↻ button can never disagree: URL origins always qualify;
+    a file origin qualifies only while its recorded path still exists."""
+    return src.origin.startswith(("http://", "https://")) or Path(src.origin).is_file()
+
+
+def refresh_all_sources(
+    store: Store, notebook_id: int, llm: ChatBackend | None = None
+) -> list[dict[str, object]]:
+    """Refresh every refreshable source in a notebook (v0.2.648 — the batch
+    path a cron job or a one-shot UI action needs, product-review #49).
+
+    Per-source outcomes are collected, never raised mid-batch: one dead
+    origin must not stop the rest. Statuses — `refreshed` (sha changed),
+    `unchanged` (byte-identical re-read, refresh_source's no-op path),
+    `skipped` (origin no longer readable), `failed` (coded error).
+    """
+    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+    out: list[dict[str, object]] = []
+    for src in store.sources_for_notebook(notebook_id):
+        if not source_is_refreshable(src):
+            out.append({"id": src.id, "title": src.title, "status": "skipped"})
+            continue
+        before = src.sha256
+        try:
+            res = refresh_source(store, src.id, llm)
+        except (StoreError, IngestError, LLMError) as exc:
+            out.append(
+                {
+                    "id": src.id,
+                    "title": src.title,
+                    "status": "failed",
+                    "code": exc.code,
+                }
+            )
+            continue
+        item: dict[str, object] = {
+            "id": src.id,
+            "title": src.title,
+            "status": "unchanged" if res.source.sha256 == before else "refreshed",
+            "n_chunks": res.n_chunks,
+            "n_embedded": res.n_embedded,
+        }
+        if res.pages_failed:
+            item["pages_failed"] = res.pages_failed
+        out.append(item)
+    return out
 
 
 def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[int, int]:

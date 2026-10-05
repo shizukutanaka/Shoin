@@ -155,7 +155,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 13 | ~~**CLI ask は非ストリーミング**~~ → **解消済み** (v0.2.635) | `ask()` が `on_delta` コールバックを受理し、chat_stream 搭載バックエンドでは逐字トークンを stdout へ即時転送(連結結果が永続回答と同一のため stdout バイト同一)。chat_stream 非搭載の最小 ChatBackend は従来の一括 chat() 経路へ自動退避 |
 | 14 | **同義語・語彙拡張が浅い** | term_variants は字形変換のみ。「車↔自動車」「PC↔パソコン」のような意味的同義語は BM25 では拾えず vector leg 頼み |
 | 15 | **英語ステミング無し** | run/running/ran のような活用は trgram/LIKE では別語扱い。EN コーパスの再現率を下げる |
-| 16 | **ベクトル埋込みのバッチ化なし** | `embed_one` は逐次呼出し。大規模取込の埋込み時間は線形でキャンセル不可 |
+| 16 | ~~**ベクトル埋込みのバッチ化なし**~~ → **解消済み** (台帳誤記 — `_embed_chunks` は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ `llm.embed(batch)` で既実装。v0.2.648 実測確認) |
 | 17 | **埋込みモデル変更時の自動再索引なし** | `_check_embed_model_ok` は不一致検出→vector leg無効化まで。再indexは `reindex` の手動実行が要る |
 | 18 | ~~ファイルソースの refresh 非対応~~ → **解消済み** (v0.2.633) | ファイル源は記録 origin パスを再読込。消失済みは `INGEST_FETCH_FAILED`、detail の `refreshable` で UI の↻表示を制御 |
 | 19 | **ソース優先度付けが無い** | 全ソースは同権で扱われる。「信頼できる一次資料を重く」系の重み付け経路が無い |
@@ -188,7 +188,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 46 | **Windows 未検証** | 開発・検証は macOS/Linux 前提。`shell=False` 設計とパス処理は概ね移植可能だが実機検証履歴が無い |
 | 47 | **Python 3.11 フロア** | requires-python >=3.11 で更に古い distro 標準 Python では動かない(意図的だが利用層を狭める) |
 | 48 | **SSE再接続/再開なし** | ストリーム断は「done欠落→永続回答復元」で救済するのみ。`Last-Event-ID` 再開やclient-side resumeは無い |
-| 49 | **スケジュール/定期タスク機構なし** | URLソースの定期refresh等、cron的な自動再取込の経路が無い |
+| 49 | ~~**スケジュール/定期タスク機構なし**~~ → **解消済み** (v0.2.648: `POST /api/notebooks/{id}/refresh-all`/`shoin source refresh-all` が全refreshableソースを一括処理——cronに登録すれば定期再取込が完結。per-source結果収集で死んだorigin一つで全体が止まらない) |
 | 50 | **ローカルLLM以外の選択肢前提** | 組込みモデル同梱やクラウドAPIキー対応は設計外。ユーザーが別途 OpenAI 互換サーバを用意する必要がある |
 
 ### 解決済み(記録)
