@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.638"
+VERSION = "0.2.639"
 
 
 DEFAULT_PORT = 7440
@@ -107,6 +107,21 @@ def llm_model() -> str:
 def embed_model() -> str:
     """Embedding model name. Empty string disables vector search (BM25 only)."""
     return _get("SHOIN_EMBED_MODEL", "nomic-embed-text")
+
+
+def llm_retries() -> int:
+    """Extra chat/embed attempts on transport failure (SHOIN_LLM_RETRIES, 0-5).
+
+    Default 2 — catches the transient blip (endpoint restarting, a refused
+    connection racing its own listen). Invalid or out-of-range values fall
+    back to the default rather than disabling retries (same invalid->default
+    contract as port()); an explicit 0 disables.
+    """
+    try:
+        n = int(_get("SHOIN_LLM_RETRIES", "2"))
+    except (ValueError, TypeError):
+        return 2
+    return n if 0 <= n <= 5 else 2
 
 
 def ui_lang() -> str:

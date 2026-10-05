@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from .config import embed_model, llm_model, llm_url
+from .config import embed_model, llm_model, llm_retries, llm_url
 
 CHAT_TIMEOUT_SEC = 180
 
@@ -36,6 +37,13 @@ HEALTH_TIMEOUT_SEC = 3
 # v0.2.85 — chat_stream() had no cap at all despite handling the identical
 # threat model _post() was fixed for in v0.2.37).
 _MAX_RESPONSE = 32 * 1024 * 1024
+
+# Retry budget for _post (v0.2.639): only transport-level codes — a refused
+# connection or socket timeout from a local runtime that is restarting or
+# still loading its model. HTTP_ERROR and BAD_RESPONSE are deterministic
+# server answers; retrying them just multiplies the wait to the same result.
+_RETRYABLE = frozenset({"SYSTEM_LLM_TIMEOUT", "SYSTEM_SERVICE_UNAVAILABLE"})
+_RETRY_BACKOFF_SEC = 0.25
 
 
 class LLMError(Exception):
@@ -106,10 +114,30 @@ class LLMClient:
         # "length" means the answer stopped at MAX_TOKENS — callers surface it
         # as report.truncated instead of presenting a clipped answer as whole.
         self.last_finish_reason: str | None = None
+        self.retries = llm_retries()
 
     # --- transport ---
 
     def _post(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
+        """_post_once + bounded retry on transport failures (v0.2.639).
+
+        Only idempotent callers route here (chat, embed — both unobservable
+        until return). chat_stream keeps its own no-retry path: deltas
+        already emitted are visible output a retry would duplicate.
+        available() is deliberately excluded too — the health probe exists
+        to answer "is it up" fast, not to wait for it to come up.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._post_once(path, payload, timeout)
+            except LLMError as exc:
+                if exc.code not in _RETRYABLE or attempt >= self.retries:
+                    raise
+                time.sleep(_RETRY_BACKOFF_SEC * (2**attempt))
+                attempt += 1
+
+    def _post_once(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
         try:
             # Request() itself parses base_url via urlsplit — a malformed one
             # (unclosed IPv6 bracket) raises ValueError here, not in urlopen,

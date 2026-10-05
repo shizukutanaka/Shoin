@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.638
+## Version History: v0.1.37 → v0.2.639
+
+### v0.2.639 — LLM輸送失敗の有界リトライ (SHOIN_LLM_RETRIES)
+
+50長所/50短所監査 (product-review.md) の短所36を解消: chat/embed の
+一時的輸送失敗 (接続拒否・ソケットタイムアウト——ローカルランタイムの
+再起動やモデルロード中の立ち上がり競合) が即 LLMError → degraded
+経路へ落ちていた。`_post` を単発の `_post_once` と再試行ループへ分離し、
+SYSTEM_LLM_TIMEOUT/SYSTEM_SERVICE_UNAVAILABLE のみを `_RETRYABLE`
+として指数バックオフ (0.25s × 2^attempt) で最大 retries 回まで再試行。
+HTTP_ERROR/BAD_RESPONSE は確定的サーバ応答のため初回で失敗する。
+回数は `SHOIN_LLM_RETRIES` (既定2・0-5・不正値は既定へ) — port() と同じ
+invalid→default 契約。chat_stream と available() は対象外: 送出済み
+delta は可視出力であり再試行は複写出力になる (stream の復旧は既存の
+degraded+永続復元経路)、health probe は「今上がっているか」を即答する
+ためのもので待機は用途外。
 
 ### v0.2.638 — `prefers-color-scheme: dark` (ダークモード追従)
 

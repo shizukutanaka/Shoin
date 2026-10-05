@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.638")
+        self.assertEqual(VERSION, "0.2.639")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9035,6 +9035,137 @@ class TestLLMClient(unittest.TestCase):
         # The read limit must have been set (not None, meaning uncapped read was not called)
         self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
         self.assertLessEqual(fake_body.max_read, 300)
+
+    def test_post_retries_transport_failures_then_succeeds(self) -> None:
+        """v0.2.639: a refused connection or socket timeout is a transient
+        for a local runtime (restarting, still loading its model) — _post
+        retries it under a bounded backoff instead of degrading on the
+        first blip."""
+        import json as _json
+        import urllib.error
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode()
+        calls = {"n": 0}
+
+        def _flaky(req, **kw):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.URLError(OSError("connection refused"))
+            return resp
+
+        with (
+            patch("urllib.request.urlopen", side_effect=_flaky),
+            patch("time.sleep") as sleep,
+        ):
+            out = LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(out, "ok")
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(
+            [c.args[0] for c in sleep.call_args_list], [0.25, 0.5])
+
+    def test_post_gives_up_after_retry_bound(self) -> None:
+        """The retry budget is bounded — a permanently down endpoint still
+        degrades to the coded error, just one bounded delay later."""
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        calls = {"n": 0}
+
+        def _down(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.URLError(OSError("connection refused"))
+
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with (
+            patch("urllib.request.urlopen", side_effect=_down),
+            patch("time.sleep"),
+        ):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertEqual(calls["n"], client.retries + 1)
+
+    def test_post_does_not_retry_http_errors(self) -> None:
+        """An HTTP 4xx/5xx is a deterministic server answer — retrying it
+        waits to the same result, so it must fail on the first attempt
+        (and never sleep)."""
+        import io
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        calls = {"n": 0}
+
+        def _http500(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                req.full_url, 500, "err", {}, io.BytesIO(b"x"))
+
+        with (
+            patch("urllib.request.urlopen", side_effect=_http500),
+            patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        self.assertEqual(calls["n"], 1)
+        sleep.assert_not_called()
+
+    def test_llm_retries_env_override(self) -> None:
+        """SHOIN_LLM_RETRIES=0 disables the retry layer; out-of-range and
+        non-numeric values fall back to the default rather than silently
+        disabling it (same invalid->default contract as port())."""
+        import os
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.config import llm_retries
+        from shoin.llm import LLMClient
+
+        for env, want in (
+            ({"SHOIN_LLM_RETRIES": "0"}, 0),
+            ({"SHOIN_LLM_RETRIES": "5"}, 5),
+            ({"SHOIN_LLM_RETRIES": "-1"}, 2),
+            ({"SHOIN_LLM_RETRIES": "9"}, 2),
+            ({"SHOIN_LLM_RETRIES": "x"}, 2),
+        ):
+            with patch.dict(os.environ, env):
+                self.assertEqual(llm_retries(), want, env)
+
+        calls = {"n": 0}
+
+        def _down(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.URLError(OSError("connection refused"))
+
+        with (
+            patch.dict(os.environ, {"SHOIN_LLM_RETRIES": "0"}),
+            patch("urllib.request.urlopen", side_effect=_down),
+            patch("time.sleep") as sleep,
+        ):
+            from shoin.llm import LLMError
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertEqual(calls["n"], 1)
+        sleep.assert_not_called()
 
     def test_post_deeply_nested_json_raises_llmerror(self) -> None:
         """A deeply nested JSON body must map to SYSTEM_LLM_BAD_RESPONSE.
@@ -18305,6 +18436,9 @@ class TestResidualGuards(unittest.TestCase):
             "config.py": [
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
+                # v0.2.639: llm_retries()'s int() parse shares the
+                # invalid->default contract with port().
+                "(TypeError,ValueError)",
                 "OSError", "json.JSONDecodeError",
             ],
             "evaluate.py": ["UnicodeEncodeError"],
@@ -18333,6 +18467,9 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.620: RecursionError joins the malformed-frame drop set —
                 # a deeply nested delta is a parse failure like JSONDecodeError.
                 "(IndexError,KeyError,RecursionError,TypeError,json.JSONDecodeError)",
+                "LLMError",
+                # v0.2.639: _post's retry loop catches LLMError to gate it on
+                # _RETRYABLE — a code outside the set re-raises immediately.
                 "LLMError",
                 # v0.2.620: deeply nested bodies raise RecursionError, not
                 # JSONDecodeError — same malformed-response mapping.
@@ -18389,7 +18526,9 @@ class TestResidualGuards(unittest.TestCase):
             ],
         }
         trivial_baseline = {
-            "config.py": 6, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
+            # config.py +1: llm_retries()'s parse failure falls back to the
+            # default 2, same contract as port()'s range fallback.
+            "config.py": 7, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
             "llm.py": 2,
             "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
             "studio.py": 1,
@@ -18512,7 +18651,8 @@ class TestResidualGuards(unittest.TestCase):
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
             "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
-            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
+            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,
+            # +1 RE-RAISE: _post retry loop re-raises the same coded error
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError", "IngestError",
                 "LLMError", "LLMError", "LLMError",
@@ -19221,6 +19361,8 @@ class TestResidualGuards(unittest.TestCase):
         }
 
         baseline = {
+            # v0.2.639: geometric backoff between _post retries.
+            "llm.py": ["time.sleep"],
             "store.py": ["datetime.now", "time.sleep"],
             "qa.py": ["threading.Lock"],
             "server.py": ["threading.Lock", "threading.Lock"],
