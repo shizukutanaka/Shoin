@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.631
+## Version History: v0.1.37 → v0.2.632
+
+### v0.2.632 — Web UI のソース選択を source_ids へ配線
+
+v0.2.631 で確定した API 契約の P1 フォローアップ (product-review.md
+改善点分析)。ソース行のチェックボックスが「検索対象」を選び、部分的な
+選択時のみ ask body に `source_ids` を同梱する。全選択はフィールド自体を
+省略して無スコープ (後方互換と同一経路)。ゼロ選択は `[]`=無スコープと
+解釈されるとユーザー意図と逆になるため送信自体をブロックして toast。
+`srcSel`/`knownIds` の二段管理で、ノートブック切替は全選択へリセット、
+追加ソースは既定ON、明示的OFFは openNotebook 再描画を跨いで保持。
+pane-head に `n/N` カウンタを表示。node ピンで scopeSelection/askPayload/
+ゼロ選択ブロックの3縫目を固定。
 
 ### v0.2.631 — 質問のソーススコープ (source_ids) を全経路へ
 
