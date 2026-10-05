@@ -257,8 +257,8 @@ YAGNI。短所の多くは「層の外」(認証/TLS/バイナリ配布/telemetr
 - ~~**P1**: ローカルファイルソースの `refresh` 対応~~ → 実装済み (v0.2.633):
   `refresh_source` が origin スキームで分岐しファイル源は `extract_file` 再読込。
   detail 応答の `refreshable` が↻表示の真値。
-- **P2**: `shoin stats` (ノートブック内のソース数/チャンク数/DBサイズ) —
-  デバッグと容量判断の補助。
+- ~~**P2**: `shoin stats`~~ → 実装済み (v0.2.634): テーブル件数 +
+  `page_count*page_size` のDBサイズを表示。
 - **P3**: ノートブック横断検索 (設計コスト大・需要不確か)。
 - **P4**: 残りは層の外 — 認証/TLS/バイナリ配布/telemetry/GHA/PyPI。前提が
   変わったときに再検討。

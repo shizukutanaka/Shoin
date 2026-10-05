@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.633")
+        self.assertEqual(VERSION, "0.2.634")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12375,6 +12375,49 @@ class TestCLI(unittest.TestCase):
             rc = main(["--db", "/tmp/custom-health-test.sqlite3", "health"], llm=FakeAvailLLM())
         self.assertEqual(rc, 0)
         self.assertIn("/tmp/custom-health-test.sqlite3", out.getvalue())
+
+    def test_cli_stats_reports_counts_and_db_size(self) -> None:
+        """v0.2.634: `shoin stats <nb>` prints per-table row counts plus the
+        database's on-disk size — the capacity information a user needs to
+        judge "is this notebook getting too large" (product-review P2) and a
+        missing notebook yields a coded error, never a traceback."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["本文は十分に長いテキスト。"])
+                s.add_note(nb.id, "n1", "b1")
+                s.add_message(nb.id, "user", "hi")
+                s.add_studio_output(nb.id, "briefing", "body", "{}")
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "stats", str(nb.id)])
+            self.assertEqual(rc, 0)
+            o = out.getvalue()
+            self.assertIn("研究", o)
+            self.assertIn("ソース: 1", o)
+            self.assertIn("チャンク: 1", o)
+            self.assertIn("ノート: 1", o)
+            self.assertIn("メッセージ: 1", o)
+            self.assertIn("Studio出力: 1", o)
+            self.assertRegex(o, r"DBサイズ: \d+(\.\d+)? [KMG]?B")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "stats", "9999"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
 
     def test_studio_no_citations_does_not_print_separator(self) -> None:
         """_cmd_studio must suppress the '---' separator when no citations are present.

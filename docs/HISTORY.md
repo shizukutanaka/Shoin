@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.633
+## Version History: v0.1.37 → v0.2.634
+
+### v0.2.634 — `shoin stats` (ノートブック統計 + DBサイズ)
+
+50長所/50短所監査 (product-review.md) の P2 を実装: 新サブコマンド
+`stats` が sources/chunks/notes/messages/studio_outputs の各テーブル
+件数を1クエリで数え、`PRAGMA page_count*page_size` のDBディスク
+占有サイズを人間可読 (B/KB/MB) で表示——「このノートブックはどれ
+だけ大きいか」の容量判断・デバッグ補助。`Store.counts()` は detail
+API の emit 形状 (sources/chunks 2キー) と
+`list_notebooks_with_counts` との件数パリティピン (v0.2.370) を維持
+するため、拡張は新メソッド `notebook_stats()` + `db_bytes()` へ分離。
+存在しないノートブックは `NOTEBOOK_NOT_FOUND` の coded エラー。
+i18n は ja/en 両表登録 (プレースホルダ同値)。
 
 ### v0.2.633 — ファイルソースの refresh 対応 + refreshable 境界契約
 

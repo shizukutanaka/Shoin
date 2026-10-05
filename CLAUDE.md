@@ -314,7 +314,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
+- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127), stats (v0.2.634), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -342,7 +342,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.633** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.634** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---
