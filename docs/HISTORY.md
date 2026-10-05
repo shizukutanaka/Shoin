@@ -29,7 +29,33 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.648
+## Version History: v0.1.37 → v0.2.649
+
+### v0.2.649 — ノートブック横断検索 (POST /api/search + shoin search)
+
+50長所/50短所監査 (product-review.md) の短所7を解消——残存短所最大面:
+全検索経路は `s.notebook_id = ?` で単一ノートブックに硬結合しており、
+複数ノートブックに分散した資料を一括で引く手段が無かった (各nb往復のみ)。
+`bm25_search`/`bm25_prf_search`/`vector_search`/`retrieve`/`retrieve_multi`
+の `notebook_id` を `int | None` 化し、SQLのスコープ節を
+`(? IS NULL OR s.notebook_id = ?)` とした——単一SQL形状のまま、
+`notebook_id=None` でスコープ節が真空化して全nbが候補になる。
+分岐SQL文字列を組み立てる方式でなく1つの固定テキストにバインド値だけ
+変える設計は、スコープ節の注入面を増やさずテストのSQL-pin面も維持する。
+
+Web経路は `POST /api/search` (nb_search と同じ事前validation:
+question必須+MAX_QUESTION_LEN、k 1-50)——retrieve_for_question を
+`notebook_id=None` で呼び、hits を `store.notebooks_for_sources()` の
+json_each一発クエリで (nb_id, nb名, src題名) provenanceへ解決して返す。
+検索とprovenance解決の間の並行削除は KeyError でなく hit 脱落として
+捌く (nb_search の titles.get() と同じ許容契約)。CLI経路は
+`shoin search <q>` でhitsが `[nb{id} {nb名}] {src題}` 接頭辞付きで出る
+(REQ-103 パリティ)。行動ピン3件: bm25/retrieveのNone↔int対比
+(真空化と非リークの両方向) + provenance map、API echo+provenance+scoped
+対比+coded 400両経路、CLI nb接頭辞+coded包絡。カタログ追随:
+from-import inventory cli.pyに`.qa._check_embed_model_ok`等の新規import。
+
+1327テスト全通過・カバレッジ99%・ruff/mypy --strict クリーン・secret scan 0件。
 
 ### v0.2.648 — ソース一括refresh (POST /api/notebooks/{id}/refresh-all + shoin source refresh-all)
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import array
 import contextlib
+import json
 import math
 import operator
 import os
@@ -777,6 +778,30 @@ class Store:
             row["sha256"],
             row["added_at"],
         )
+
+    def notebooks_for_sources(
+        self, source_ids: list[int]
+    ) -> dict[int, tuple[int, str, str]]:
+        """source_id -> (notebook_id, notebook name, source title).
+
+        Read-side provenance map for the cross-notebook search (v0.2.649):
+        a global hit carries only its source_id, so one query resolves the
+        notebook identity and title for every surfaced source at once.
+        Ids travel as a bound JSON parameter via json_each — the codebase's
+        variable-IN idiom — never interpolated into SQL text.
+        """
+        if not source_ids:
+            return {}
+        rows = self.conn.execute(
+            "SELECT s.id, s.notebook_id, n.name, s.title FROM sources s"
+            " JOIN notebooks n ON n.id = s.notebook_id"
+            " WHERE s.id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted({int(i) for i in source_ids})),),
+        ).fetchall()
+        return {
+            int(r["id"]): (int(r["notebook_id"]), str(r["name"]), str(r["title"]))
+            for r in rows
+        }
 
     def delete_source(self, source_id: int) -> None:
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing

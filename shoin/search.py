@@ -678,11 +678,14 @@ def _source_scope_params(source_ids: list[int] | None) -> list[str]:
 
 def bm25_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     k: int,
     source_ids: list[int] | None = None,
 ) -> list[Hit]:
+    # notebook_id=None is the cross-notebook form (v0.2.649, product-review
+    # #7): `? IS NULL` makes the scoping clause vacuous so one SQL text
+    # serves both call shapes — no interpolated branching, same bound params.
     # Strip negated tokens before building FTS5/LIKE queries.
     negs = neg_terms(query)
     clean_query = strip_neg_terms(query) if negs else query
@@ -696,11 +699,11 @@ def bm25_search(
             f" bm25(chunks_fts, {_CTX_BM25_WEIGHT}, 1.0) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
-            " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
+            " WHERE chunks_fts MATCH ? AND (? IS NULL OR s.notebook_id = ?)"
             " AND (json_array_length(?) = 0"
             " OR s.id IN (SELECT value FROM json_each(?)))"
             " ORDER BY rank, c.id LIMIT ?",
-            (expr, notebook_id, *scope_params, k),
+            (expr, notebook_id, notebook_id, *scope_params, k),
         ).fetchall()
         fts_hits.extend(
             Hit(
@@ -765,11 +768,11 @@ def bm25_search(
         rows = store.conn.execute(
             "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
             " JOIN sources s ON s.id = c.source_id"
-            " WHERE s.notebook_id = ?"
+            " WHERE (? IS NULL OR s.notebook_id = ?)"
             " AND (json_array_length(?) = 0"
             " OR s.id IN (SELECT value FROM json_each(?)))"
             " ORDER BY c.id LIMIT ?",
-            (notebook_id, *scope_params, max(k * 10, 2000)),
+            (notebook_id, notebook_id, *scope_params, max(k * 10, 2000)),
         ).fetchall()
         pool = [
             Hit(r["id"], r["source_id"], str(r["text"]), 0.0,
@@ -806,12 +809,12 @@ def bm25_search(
     rows = store.conn.execute(
         f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
-        f" WHERE s.notebook_id = ? AND ({conditions})"
+        f" WHERE (? IS NULL OR s.notebook_id = ?) AND ({conditions})"
         " AND (json_array_length(?) = 0"
         " OR s.id IN (SELECT value FROM json_each(?)))"
         f" ORDER BY {score_expr} DESC, c.id"
         f" LIMIT ?",
-        [notebook_id, *like_params, *scope_params, *score_params, like_cap],
+        [notebook_id, notebook_id, *like_params, *scope_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []
     for r in rows:
@@ -1034,7 +1037,7 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
 
 def bm25_prf_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     k: int,
     source_ids: list[int] | None = None,
@@ -1129,7 +1132,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 def vector_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query_vec: list[float] | None,
     k: int,
     source_ids: list[int] | None = None,
@@ -1147,10 +1150,10 @@ def vector_search(
     cur = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"
-        " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL"
+        " WHERE (? IS NULL OR s.notebook_id = ?) AND c.embedding IS NOT NULL"
         " AND (json_array_length(?) = 0"
         " OR s.id IN (SELECT value FROM json_each(?)))",
-        (notebook_id, *scope_params),
+        (notebook_id, notebook_id, *scope_params),
     )
     # Hoisted out of the per-chunk loop: the query's norm is the same for every
     # row, and unpacking straight into an array('f') avoids building a 768-float
@@ -1598,7 +1601,7 @@ def _debug_print(
 
 def retrieve(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     query_vec: list[float] | None = None,
     k: int = TOP_K,
@@ -1661,7 +1664,7 @@ def retrieve(
 
 def retrieve_multi(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     queries: list[str],
     query_vecs: list[list[float] | None] | None = None,
     k: int = TOP_K,

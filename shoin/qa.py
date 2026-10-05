@@ -649,7 +649,7 @@ def rewrite_queries(
 def retrieve_for_question(
     store: Store,
     llm: ChatBackend,
-    notebook_id: int,
+    notebook_id: int | None,
     retrieval_q: str,
     qvec: list[float] | None,
     k: int = TOP_K,

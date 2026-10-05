@@ -418,6 +418,50 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_global_search_endpoint_crosses_notebooks(self) -> None:
+        """v0.2.649: POST /api/search is the notebook-less sibling of
+        /notebooks/{id}/search — the same retrieve pipeline with scope
+        notebook_id=None, so sources in EVERY notebook are candidates and
+        each hit carries (notebook_id, notebook, title) so the caller can
+        route back to the owning notebook (product-review #7)."""
+        status, nb1 = self._json("POST", "/api/notebooks", {"name": "sea"})
+        status, nb2 = self._json("POST", "/api/notebooks", {"name": "sky"})
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            s1 = store.add_source(nb1["id"], "txt", "ocean.txt", "mem://o", "sha-o")
+            store.add_chunks(s1.id, ["海洋酸性化は炭酸塩飽和度を低下させる。"])
+            s2 = store.add_source(nb2["id"], "txt", "orbit.txt", "mem://s", "sha-s")
+            store.add_chunks(s2.id, ["気象衛星は赤外放射量を観測する。"])
+
+        status, out = self._json("POST", "/api/search", {"question": "気象衛星"})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["question"], "気象衛星")
+        self.assertTrue(out["hits"])
+        hit = out["hits"][0]
+        self.assertEqual(hit["rank"], 1)
+        self.assertEqual(hit["source_id"], s2.id)
+        self.assertEqual(hit["notebook_id"], nb2["id"])
+        self.assertEqual(hit["notebook"], "sky")
+        self.assertEqual(hit["title"], "orbit.txt")
+        self.assertIn("気象衛星", hit["text"])
+        # Same question scoped to nb1 cannot see the nb2 source.
+        status, scoped = self._json(
+            "POST", f"/api/notebooks/{nb1['id']}/search", {"question": "気象衛星"}
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn(s2.id, {h["source_id"] for h in scoped["hits"]})
+        # Missing question shares the coded envelope.
+        status, err = self._json("POST", "/api/search", {"k": 3})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json(
+            "POST", "/api/search", {"question": "q", "k": 51}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
     def test_nb_duplicate_forks_notebook_and_stays_coded(self) -> None:
         """v0.2.645: POST /api/notebooks/{id}/duplicate forks the notebook —
         empty body yields '<name> (copy)', {"name": "..."} is honored, and

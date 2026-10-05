@@ -442,6 +442,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("POST", r"^/api/notebooks/(\d+)/refresh-all$", "nb_refresh_all"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
         ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
+        ("POST", r"^/api/search$", "global_search"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
         ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
@@ -1045,6 +1046,59 @@ class _Handler(BaseHTTPRequestHandler):
                             "chunk_id": h.chunk_id,
                             "source_id": h.source_id,
                             "title": titles.get(h.source_id, ""),
+                            "section": h.context,
+                            "seq": h.seq,
+                            "score": round(h.score, 6),
+                            "bm25": round(h.bm25, 6),
+                            "vec": round(h.vec, 6),
+                            "text": h.text,
+                        }
+                        for i, h in enumerate(hits)
+                    ],
+                }
+            )
+
+    def _h_global_search(self) -> None:
+        """Cross-notebook sibling of /notebooks/{id}/search (v0.2.649,
+        product-review #7): the same retrieve_for_question pipeline with
+        notebook_id=None — every source in the DB is a candidate and each
+        hit carries its notebook identity so the caller can route back to
+        the owning notebook. Stateless like nb_search: no history, nothing
+        persisted, retrieval only (no answer generated)."""
+        body = self._read_json()
+        question = self._require(body, "question")
+        if len(question) > MAX_QUESTION_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"question too long (max {MAX_QUESTION_LEN} characters)",
+            )
+        k = self._optional_int(body, "k", lo=1, hi=SEARCH_K_MAX, default=TOP_K)
+        with Store(self.db) as store:
+            retrieval_q = expand_query(question, [])
+            qvec = (
+                _query_vector(self.llm, retrieval_q)
+                if _check_embed_model_ok(store, self.llm)
+                else None
+            )
+            hits = retrieve_for_question(
+                store, self.llm, None, retrieval_q, qvec, k=k
+            )
+            meta = store.notebooks_for_sources([h.source_id for h in hits])
+            # A source deleted by a concurrent request between the search and
+            # this provenance lookup is dropped rather than KeyErroring — the
+            # same toleration nb_search's titles.get() already applies.
+            hits = [h for h in hits if h.source_id in meta]
+            self._json(
+                {
+                    "question": question,
+                    "hits": [
+                        {
+                            "rank": i + 1,
+                            "chunk_id": h.chunk_id,
+                            "notebook_id": meta[h.source_id][0],
+                            "notebook": meta[h.source_id][1],
+                            "source_id": h.source_id,
+                            "title": meta[h.source_id][2],
                             "section": h.context,
                             "seq": h.seq,
                             "score": round(h.score, 6),

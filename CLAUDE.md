@@ -309,13 +309,14 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
   - DELETE `/api/notebooks/{id}/messages` → clear chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
   - POST `/api/notebooks/{id}/search` → ranked hits only (no generation, no persistence; v0.2.637)
+  - POST `/api/search` → the notebook-less sibling: scope `notebook_id=None`, hits carry (notebook_id, notebook, title) provenance (v0.2.649)
   - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
   - GET `/api/health` → LLM status, embedding model (GET only; no POST route is registered)
 - SSE Streaming: sends meta event (with citation report skeleton), delta events (tokens), done event (final report + status)
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh/refresh-all) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), chunk (edit — v0.2.647), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
+- Subcommands: notebook, add, ask, search (v0.2.649), studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh/refresh-all) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), chunk (edit — v0.2.647), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -343,7 +344,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.648** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.649** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.648")
+        self.assertEqual(VERSION, "0.2.649")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -5054,6 +5054,41 @@ class TestSearch(unittest.TestCase):
             nb_id = seed(s)
             hits = bm25_search(s, nb_id, "zzqqqxxx_nonexistent_token", k=5)
             self.assertEqual(hits, [])
+
+    def test_bm25_search_none_searches_all_notebooks(self) -> None:
+        """v0.2.649: notebook_id=None is the cross-notebook form — the
+        `? IS NULL` clause makes scoping vacuous so every source is a
+        candidate. An int still restricts (the shared SQL shape must not
+        leak across notebooks when a scope IS given)."""
+        with make_store() as s:
+            nb1 = seed(s)
+            nb2 = s.create_notebook("他書院").id
+            src = s.add_source(nb2, "txt", "orbit", "mem://o", "sha-o")
+            s.add_chunks(src.id, ["軌道決定は測距と測角の合成である。"])
+            hits = bm25_search(s, None, "軌道決定", k=5)
+            self.assertIn(src.id, {h.source_id for h in hits})
+            scoped = bm25_search(s, nb1, "軌道決定", k=5)
+            self.assertNotIn(src.id, {h.source_id for h in scoped})
+
+    def test_retrieve_cross_notebook(self) -> None:
+        """v0.2.649: retrieve(None) spans every notebook; hits resolve their
+        notebook identity via notebooks_for_sources in ONE query."""
+        with make_store() as s:
+            nb1 = seed(s)
+            nb2 = s.create_notebook("別書院").id
+            src = s.add_source(nb2, "txt", "space", "mem://sp", "sha-sp")
+            s.add_chunks(src.id, ["小惑星探査機は自律航法を搭載する。"])
+            hits = retrieve(s, None, "小惑星探査機", k=5)
+            self.assertIn(src.id, {h.source_id for h in hits})
+            scoped = retrieve(s, nb1, "小惑星探査機", k=5)
+            self.assertNotIn(src.id, {h.source_id for h in scoped})
+            meta = s.notebooks_for_sources([h.source_id for h in hits])
+            self.assertEqual(meta[src.id], (nb2, "別書院", "space"))
+            seed_src = s.add_source(nb1, "txt", "t", "mem://t", "sha-t")
+            self.assertEqual(
+                s.notebooks_for_sources([seed_src.id])[seed_src.id][0], nb1
+            )
+            self.assertEqual(s.notebooks_for_sources([]), {})
 
     def test_bm25_empty_query_returns_empty(self) -> None:
         """bm25_search() with an empty query string must return [] without crashing."""
@@ -12235,6 +12270,48 @@ class TestCLI(unittest.TestCase):
             rc = main(["serve"])
         self.assertEqual(rc, 1)
 
+    def test_cli_search_crosses_notebooks(self) -> None:
+        """v0.2.649: `shoin search <q>` runs the global pipeline — hits are
+        stamped with the owning notebook so the user can route to `ask`.
+        Same coded path as ask for a rejected question."""
+        import io
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb1 = s.create_notebook("sea").id
+                src1 = s.add_source(nb1, "txt", "ocean.txt", "mem://o", "sha-o")
+                s.add_chunks(src1.id, ["海洋酸性化は炭酸塩飽和度を低下させる。"])
+                nb2 = s.create_notebook("sky").id
+                src2 = s.add_source(nb2, "txt", "orbit.txt", "mem://s", "sha-s")
+                s.add_chunks(src2.id, ["気象衛星は赤外放射量を観測する。"])
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "search", "気象衛星"], llm=FakeLLM())
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn(f"nb{nb2}", text)
+            self.assertIn("sky", text)
+            self.assertIn("orbit.txt", text)
+            self.assertIn("気象衛星", text)
+            # And the coded path: whitespace-only question → err envelope.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = main(["--db", db_file, "search", "   "], llm=FakeLLM())
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+        finally:
+            import os
+
+            os.unlink(db_file)
+
     def test_ask_rejects_whitespace_question_like_the_api(self) -> None:
         """v0.2.286: _cmd_ask must strip + refuse an empty question, matching
         the API's _require("question") — otherwise a whitespace-only question is
@@ -15141,7 +15218,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:73", "search.py:949",
+    "search.py:73", "search.py:952",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -17993,7 +18070,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:699"],
+            sites, ["search.py:702"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -18968,6 +19045,8 @@ class TestResidualGuards(unittest.TestCase):
                 "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
+                # +2: _cmd_search's question/length guards (v0.2.649)
+                "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -18989,6 +19068,8 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
+                # +1: _h_global_search question-length guard (v0.2.649)
+                "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
@@ -20456,7 +20537,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [212],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
-            "search.py": [73, 949],
+            "search.py": [73, 952],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -20504,7 +20585,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:949"],
+            escaped_interps, ["search.py:952"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

@@ -40,7 +40,14 @@ from .pipeline import (
     reindex_notebook,
     rename_source,
 )
-from .qa import ChatBackend, ask
+from .qa import (
+    ChatBackend,
+    _check_embed_model_ok,
+    _query_vector,
+    ask,
+    expand_query,
+    retrieve_for_question,
+)
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
@@ -113,6 +120,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "(取得済みの根拠を使い切っていない可能性)"
         ),
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
+        "search.header": "横断検索結果 ({n}件)",
+        "search.hit": "  #{rank} [nb{nb_id} {nb}] {src} ({score}): {text}",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
         "eval.mrr": "  MRR     : {v}  (最初に当たった期待ソースの順位の逆数)",
         "eval.case_ok": "  ✓ {q}",
@@ -202,6 +211,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "(the answer may not use all retrieved evidence)"
         ),
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
+        "search.header": "Cross-notebook hits ({n})",
+        "search.hit": "  #{rank} [nb{nb_id} {nb}] {src} ({score}): {text}",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
         "eval.mrr": "  MRR     : {v}  (reciprocal rank of the first expected source)",
         "eval.case_ok": "  ✓ {q}",
@@ -359,6 +370,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     q = sub.add_parser("questions", help="推奨質問の提案")
     q.add_argument("notebook_id", type=int)
+
+    srch = sub.add_parser("search", help="全ノートブック横断検索")
+    srch.add_argument("question")
+    srch.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
 
     ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
     ev.add_argument("notebook_id", type=int)
@@ -813,6 +828,43 @@ def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> 
     return 0
 
 
+def _cmd_search(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
+    """Cross-notebook retrieval (v0.2.649): the same pipeline ask() runs, with
+    notebook_id=None — every source in the DB is a candidate and each hit is
+    prefixed by its owning notebook so the user can route back to `ask`."""
+    question = str(args.question).strip()
+    if not question:
+        raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "missing field: question")
+    if len(question) > MAX_QUESTION_LEN:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"question too long (max {MAX_QUESTION_LEN} characters)",
+        )
+    retrieval_q = expand_query(question, [])
+    qvec = (
+        _query_vector(llm, retrieval_q)
+        if _check_embed_model_ok(store, llm)
+        else None
+    )
+    hits = retrieve_for_question(store, llm, None, retrieval_q, qvec, k=int(args.k))
+    meta = store.notebooks_for_sources([h.source_id for h in hits])
+    print(_t("search.header", n=str(len(hits))))
+    for i, h in enumerate(hits):
+        nb_id, nb_name, title = meta.get(h.source_id, (0, "", ""))
+        print(
+            _t(
+                "search.hit",
+                rank=str(i + 1),
+                nb_id=str(nb_id),
+                nb=_one_line(nb_name),
+                src=_one_line(title),
+                score=f"{h.score:.2f}",
+                text=_one_line(h.text[:80]),
+            )
+        )
+    return 0
+
+
 def _cmd_reindex(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     if not (llm.embedding_model or "").strip():
         print(_t("reindex.no_embed"), file=sys.stderr)
@@ -948,6 +1000,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_questions(store, backend, args)
             if command == "eval":
                 return _cmd_eval(store, backend, args)
+            if command == "search":
+                return _cmd_search(store, backend, args)
             if command == "messages":
                 return _cmd_messages(store, args)
             if command == "reindex":
