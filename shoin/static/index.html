@@ -92,6 +92,8 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .src{display:flex;align-items:flex-start;gap:8px;padding:8px 6px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:3px}
 .src:hover{background:var(--paper)}
 .src .no{font-family:var(--mono);font-size:11px;color:var(--seiji-ink);border:1px solid var(--border-strong);border-radius:2px;padding:0 4px;margin-top:3px}
+.src .src-sel{margin-top:5px;flex:none;accent-color:var(--seiji-ink)}
+.pane-head .selinfo{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:0;color:var(--sumi-soft);align-self:center}
 .src .t{flex:1;font-size:13.5px;word-break:break-all}
 .src .k{font-size:11px;color:var(--sumi-soft)}
 .src .src-act{border:0;background:none;color:var(--sumi-soft);cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0}
@@ -189,7 +191,7 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
 <main>
   <!-- sources -->
   <section class="pane" id="paneSrc" role="tabpanel" aria-labelledby="tabSrc">
-    <div class="pane-head" data-i18n="sources.head">書 棚</div>
+    <div class="pane-head"><span data-i18n="sources.head">書 棚</span><span id="srcSelInfo" class="selinfo"></span></div>
     <div class="pane-body">
       <ul id="nbList"></ul>
       <form id="nbForm" class="adders" autocomplete="off">
@@ -305,6 +307,7 @@ const I18N = {
     "viewer.excerpt":"参照箇所","viewer.full_src":"ソース全文を表示","viewer.section":"節:","viewer.cited_chunk":"引用箇所","viewer.match_label":"検出:","viewer.match_fts":"全文","viewer.match_vec":"意味","viewer.match_lex":"語彙",
     "src.refresh":"更新","src.refresh.ok":"ソースを更新しました",
     "src.rename":"タイトルを編集","src.rename.ok":"タイトルを変更しました",
+    "src.scope":"検索対象","chat.noscope":"検索対象の資料を1つ以上選んでください",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…",
     "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)",
@@ -343,6 +346,7 @@ const I18N = {
     "viewer.excerpt":"Supporting passage","viewer.full_src":"View full source","viewer.section":"Section:","viewer.cited_chunk":"cited here","viewer.match_label":"found:","viewer.match_fts":"full-text","viewer.match_vec":"semantic","viewer.match_lex":"lexical",
     "src.refresh":"Refresh","src.refresh.ok":"Source refreshed",
     "src.rename":"Edit title","src.rename.ok":"Title updated",
+    "src.scope":"In scope","chat.noscope":"Select at least one source to ask.",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…",
     "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy)",
@@ -418,6 +422,11 @@ const COVERAGE_LOW = 0.5;
 
 /* ---------- state ---------- */
 let notebooks = [], cur = null, srcIndex = new Map(); // source_id -> {s, title}
+// Per-notebook selection scope for ask (source_ids, v0.2.632): srcSel holds
+// the source ids a question is scoped to. knownIds tracks which ids have been
+// seen, so a newly added source defaults to checked while an explicit uncheck
+// survives the re-renders every mutation triggers via openNotebook().
+const srcSel = new Set(), knownIds = new Set(); let selNb = -1;
 // Stashes an uncommitted rename that's about to be torn down by a rebuild
 // the user themselves triggered from the SAME row (clicking refresh while
 // mid-rename) -- renderNotebook()'s own document.activeElement-based
@@ -580,17 +589,33 @@ function renderNotebook(){
   list.replaceChildren();
   srcIndex.clear();
   if (cur){
+    if (cur.id !== selNb){ selNb = cur.id; srcSel.clear(); knownIds.clear(); }
+    const liveIds = new Set();
+    cur.sources.forEach(s=>{
+      liveIds.add(s.id);
+      if (!knownIds.has(s.id)){ knownIds.add(s.id); srcSel.add(s.id); }
+    });
+    for (const id of [...knownIds]) if (!liveIds.has(id)){ knownIds.delete(id); srcSel.delete(id); }
     cur.sources.forEach((s,i)=>{
       srcIndex.set(s.id, {s:i+1, title:s.title});
       const row = el("div","src");
+      const cb = el("input","src-sel");
+      cb.type = "checkbox";
+      cb.checked = srcSel.has(s.id);
+      cb.setAttribute("aria-label", t("src.scope"));
+      cb.setAttribute("title", t("src.scope"));
+      cb.onclick = ev => ev.stopPropagation();
+      cb.onchange = () => { if (cb.checked) srcSel.add(s.id); else srcSel.delete(s.id); updateScopeInfo(); };
+      row.append(cb);
       row.append(el("span","no",`S${i+1}`));
       const tt = el("span","t", s.title); tt.append(el("div","k", s.kind));
       // Inline title editing: double-click turns the span into an input
       tt.ondblclick = ev => { ev.stopPropagation(); startSourceRename(s, tt, row); };
       tt.setAttribute("title", t("src.rename"));
       row.append(tt);
-      // Refresh button for URL sources
-      if (s.origin && s.origin.startsWith("http")) {
+      // Refresh button: URL sources always, file sources while their
+      // recorded path still exists (server-computed `refreshable`).
+      if (s.refreshable) {
         const ref = el("button","src-act","↻"); ref.setAttribute("aria-label", t("src.refresh"));
         ref.setAttribute("title", t("src.refresh"));
         ref.onclick = async ev => { ev.stopPropagation();
@@ -655,6 +680,7 @@ function renderNotebook(){
       }
     });
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
+    updateScopeInfo();
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
     $("#exMd").href = `/api/notebooks/${cur.id}/export?format=md`;
     $("#exBib").href = `/api/notebooks/${cur.id}/export?format=bibtex`;
@@ -990,11 +1016,30 @@ async function refreshQuestions(){
     });
   }catch(_e){ /* suggestions are best-effort */ }
 }
+function scopeSelection(){
+  const live = (cur && cur.sources ? cur.sources : []).map(s=>s.id);
+  return {live, sel: live.filter(id=>srcSel.has(id))};
+}
+function scopedIds(sel, live){
+  // Absent field == whole notebook (the API treats an empty source_ids the
+  // same); only a partial selection is worth sending — null means "omit".
+  return sel.length && sel.length < live.length ? sel : null;
+}
+function updateScopeInfo(){
+  const info = $("#srcSelInfo"); if (!info) return;
+  if (!cur || !cur.sources || !cur.sources.length){ info.textContent = ""; return; }
+  info.textContent = `${scopeSelection().sel.length}/${cur.sources.length}`;
+}
 $("#askForm").onsubmit = async e=>{
   e.preventDefault();
   if (!cur) return;
   const nbId = cur.id;
   const q = $("#askInput").value.trim(); if(!q) return;
+  const scope = scopeSelection();
+  // Sources exist but every one is unchecked — asking would silently query the
+  // whole notebook (source_ids:[] is unscoped), the opposite of the user's
+  // intent, so refuse before the input is cleared.
+  if (scope.live.length && !scope.sel.length){ toast(t("chat.noscope")); return; }
   $("#askInput").value=""; $("#chatEmpty").hidden=true;
   addMsg("user", q, null);
   const bd = addMsg("ai", "", null);
@@ -1002,7 +1047,8 @@ $("#askForm").onsubmit = async e=>{
   $("#askBtn").disabled = true;
   let acc = "", gotDone = false, failed = false;
   try{
-    const r = await jpost(`/api/notebooks/${nbId}/ask`, {question:q});
+    const ids = scopedIds(scope.sel, scope.live);
+    const r = await jpost(`/api/notebooks/${nbId}/ask`, ids ? {question:q, source_ids:ids} : {question:q});
     const reader = r.body.getReader(); const dec = new TextDecoder();
     let buf = "";
     for(;;){

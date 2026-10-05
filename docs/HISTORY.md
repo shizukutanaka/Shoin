@@ -29,7 +29,96 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.630
+## Version History: v0.1.37 → v0.2.636
+
+### v0.2.636 — `shoin backup` (DBオンラインバックアップ)
+
+50長所/50短所監査 (product-review.md) の短所22を解消: 新サブコマンド
+`backup <dest>` が `Store.backup_to()` 経由で SQLite の online
+backup API (`conn.backup()`) を使い、開いたまま書込み中でも一貫した
+ページ単位スナップショットを dest へ作成——ノートブック単位の
+export とは別の「DB丸ごとの保全経路」。dest は DB 本体と同じ
+0600 で作成 (文書・履歴を含むため)・既存ファイルは上書き
+(backup API が置換)・`~` 展開対応。ライブDB自身を dest に指定
+する自己上書きは `VALIDATION_FIELD_FORMAT_INVALID` で coded 拒否
+(コピー元の読取り中ファイルを truncate しない)。失敗は既存
+ハンドラ鎖で coded — OSError→SYSTEM_IO_ERROR・OperationalError→
+SYSTEM_DB_LOCKED。sqlite3.connect は store.py 内部に留保する既存
+ピンに従い、接続生成は CLI から見えない `backup_to()` の中だけ。
+
+### v0.2.635 — CLI ask のストリーミング応答 (API SSE パリティ)
+
+50長所/50短所監査 (product-review.md) の短所13を解消: `qa.ask()` が
+任意パラメータ `on_delta` を受理し、chat_stream を持つバックエンド
+(llm.LLMClient)では回答を `chat_stream` で逐字生成して各deltaを
+stdoutへ即時転送——4-8GBローカルLLMで数十秒かかる回答の体感待ちを
+除去し、Web SSE と同一の逐字体験をCLIへ。連結されたストリーム自体が
+永続回答となるため、stdoutのバイト列は従来の一括 print と同一
+(非TTYパイプ・スクリプト利用を壊さない)。chat_stream を持たない最小
+ChatBackend (Protocol面)は getattr ガードで自動的に従来の一括
+`chat()` 経路へ退避。ストリーム途中の LLMError は従来の degraded
+経路へ落ち、既出力の部分deltaは可視のまま最終回答も全文表示
+(SSEの「部分テキストは実在し永続化される」契約と同型)。
+`last_finish_reason` の truncated 検出は chat_stream 内部で同様に
+設定されるため警告経路も維持。`on_delta` 未指定時は byte-identical
+な現行 chat() 経路——サーバ経路は変更ゼロ。
+
+### v0.2.634 — `shoin stats` (ノートブック統計 + DBサイズ)
+
+50長所/50短所監査 (product-review.md) の P2 を実装: 新サブコマンド
+`stats` が sources/chunks/notes/messages/studio_outputs の各テーブル
+件数を1クエリで数え、`PRAGMA page_count*page_size` のDBディスク
+占有サイズを人間可読 (B/KB/MB) で表示——「このノートブックはどれ
+だけ大きいか」の容量判断・デバッグ補助。`Store.counts()` は detail
+API の emit 形状 (sources/chunks 2キー) と
+`list_notebooks_with_counts` との件数パリティピン (v0.2.370) を維持
+するため、拡張は新メソッド `notebook_stats()` + `db_bytes()` へ分離。
+存在しないノートブックは `NOTEBOOK_NOT_FOUND` の coded エラー。
+i18n は ja/en 両表登録 (プレースホルダ同値)。
+
+### v0.2.633 — ファイルソースの refresh 対応 + refreshable 境界契約
+
+50長所/50短所監査 (product-review.md) の P1 を実装: `refresh_source` が
+origin スキームで分岐し、URL源は `extract_url` 再取得・ファイル源は
+`extract_file` で記録パスを再読込する同一契約 (sha256一致ならno-op・
+不一致ならチャンク置換・ソースid保持・タイトル不変更) 。これまでの
+`INGEST_REFRESH_NOT_URL` ハードゲートは撤廢——消失済みパス (upload
+取込後に削除されるtmp等) は refresh 専用コードではなく汎用の
+`INGEST_FETCH_FAILED` へ写像し、「origin がもう読めない」形状を1種に
+統一。`GET /api/notebooks/{id}` の sources 要素は `refreshable` 真偽値を
+運ぶ: URL源は常 true・ファイル源は origin パスの実存在時のみ true ——
+upload経由の死んだtmpパスへ常時エラーになる↻ボタンをUIが提示しない
+ための境界契約。UIの↻表示判定は `origin.startsWith("http")` から
+`s.refreshable` へ移行。CLI `src refresh` は同一経路でファイル源を
+扱う (ローカルファイル編集後の delete→再add が不要に)。
+
+### v0.2.632 — Web UI のソース選択を source_ids へ配線
+
+v0.2.631 で確定した API 契約の P1 フォローアップ (product-review.md
+改善点分析)。ソース行のチェックボックスが「検索対象」を選び、部分的な
+選択時のみ ask body に `source_ids` を同梱する。全選択はフィールド自体を
+省略して無スコープ (後方互換と同一経路)。ゼロ選択は `[]`=無スコープと
+解釈されるとユーザー意図と逆になるため送信自体をブロックして toast。
+`srcSel`/`knownIds` の二段管理で、ノートブック切替は全選択へリセット、
+追加ソースは既定ON、明示的OFFは openNotebook 再描画を跨いで保持。
+pane-head に `n/N` カウンタを表示。node ピンで scopeSelection/askPayload/
+ゼロ選択ブロックの3縫目を固定。
+
+### v0.2.631 — 質問のソーススコープ (source_ids) を全経路へ
+
+50長所/50短所監査 (product-review.md) の第一原理分析が特定した最大の
+未実装機能を実装: NotebookLM の「このソースだけに聞く」操作。
+`source_ids` を `bm25_search`/`vector_search`/`bm25_prf_search`/
+`retrieve`/`retrieve_multi` → `qa.retrieve_for_question`/`qa.ask` →
+API (`POST /ask` の任意 `source_ids` フィールド) → CLI (`ask --source ID`
+複数回指定可) へ縦貫。SQL 側は `AND s.id IN (?,…)` を全パス (FTS5・
+否定オンリーpool・LIKE fallback・vector row scan) にバインド変数で
+注入 — 未指定/空配列は無スコープで従来とバイト同一 SQL。API 検証は
+SSE ヘッダ送出前に実施: 非 list・非正整数・bool・i64 超は coded 400
+(FIELD_FORMAT_INVALID / INTEGER_OVERFLOW)、未所属ソースは
+SOURCE_NOT_FOUND 404 — 他ノートブックのソースIDも死んだIDと同じ
+404 扱いで存在性を漏洩しない。UI のソース選択は後続タスクとして
+台帳に記録 (API 能力先行の先例どおり)。
 
 ### v0.2.630 — vector_search の corrupt embedding BLOB を「信号なし」へ降格
 

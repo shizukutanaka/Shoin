@@ -368,8 +368,10 @@ class Store:
     """Thin typed wrapper around the Shoin SQLite database."""
 
     def __init__(self, path: Path | str = ":memory:") -> None:
+        self._db_file: Path | None = None
         if path != ":memory:":
             db_file = Path(path)
+            self._db_file = db_file
             db_file.parent.mkdir(parents=True, exist_ok=True)
             # Pre-create at 0600 so the DB is born private: it holds the user's
             # documents and chat history, and would otherwise sit umask-readable
@@ -1223,6 +1225,57 @@ class Store:
             (notebook_id,),
         ).fetchone()
         return {"sources": int(row["sources"]), "chunks": int(row["chunks"])}
+
+    def notebook_stats(self, notebook_id: int) -> dict[str, int]:
+        """Row counts across every notebook content table, in one query."""
+        row = self.conn.execute(
+            "SELECT"
+            " (SELECT COUNT(*) FROM sources WHERE notebook_id=?),"
+            " (SELECT COUNT(*) FROM chunks c"
+            "  JOIN sources s ON s.id=c.source_id WHERE s.notebook_id=?),"
+            " (SELECT COUNT(*) FROM notes WHERE notebook_id=?),"
+            " (SELECT COUNT(*) FROM messages WHERE notebook_id=?),"
+            " (SELECT COUNT(*) FROM studio_outputs WHERE notebook_id=?)",
+            (notebook_id,) * 5,
+        ).fetchone()
+        return {
+            "sources": int(row[0]),
+            "chunks": int(row[1]),
+            "notes": int(row[2]),
+            "messages": int(row[3]),
+            "studio_outputs": int(row[4]),
+        }
+
+    def backup_to(self, dest: Path | str) -> None:
+        """Write an online snapshot of this database to dest.
+
+        SQLite's backup API copies page-by-page against the live connection,
+        so the snapshot is consistent even while the DB stays open and
+        writable. dest is created (0600, same privacy as the database) or
+        overwritten; refusing dest == the live DB prevents truncating the
+        source it reads from.
+        """
+        dest_file = Path(dest)
+        if self._db_file is not None and dest_file.resolve() == self._db_file.resolve():
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                "backup destination must differ from the live database path",
+            )
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest_file, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        target = sqlite3.connect(str(dest_file))
+        try:
+            self.conn.backup(target)
+        finally:
+            target.close()
+        os.chmod(dest_file, 0o600)
+
+    def db_bytes(self) -> int:
+        """Bytes the database occupies on disk (page_count * page_size)."""
+        page_count = int(self.conn.execute("PRAGMA page_count").fetchone()[0])
+        page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0])
+        return page_count * page_size
 
     def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
         """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""

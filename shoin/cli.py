@@ -153,6 +153,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_batch_default": "{n} (既定)",
         "health.data_dir": "データベースファイル: {v}",
         "health.llm_url": "LLMエンドポイント: {v}",
+        "stats.name": "ノートブック: {v}",
+        "stats.sources": "ソース: {n}",
+        "stats.chunks": "チャンク: {n}",
+        "stats.notes": "ノート: {n}",
+        "stats.messages": "メッセージ: {n}",
+        "stats.studio_outputs": "Studio出力: {n}",
+        "stats.db_bytes": "DBサイズ: {n}",
+        "backup.done": "バックアップを保存しました: {path}",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -228,6 +236,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_batch_default": "{n} (default)",
         "health.data_dir": "Database file: {v}",
         "health.llm_url": "LLM endpoint: {v}",
+        "stats.name": "Notebook: {v}",
+        "stats.sources": "Sources: {n}",
+        "stats.chunks": "Chunks: {n}",
+        "stats.notes": "Notes: {n}",
+        "stats.messages": "Messages: {n}",
+        "stats.studio_outputs": "Studio outputs: {n}",
+        "stats.db_bytes": "DB size: {n}",
+        "backup.done": "Backup written: {path}",
     },
 }
 
@@ -297,6 +313,14 @@ def _build_parser() -> argparse.ArgumentParser:
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
     askp.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
+    askp.add_argument(
+        "--source",
+        dest="source_ids",
+        action="append",
+        type=_pos_int,
+        metavar="ID",
+        help="このソースIDのみを検索対象にする(複数回指定可)",
+    )
 
     st = sub.add_parser("studio", help="Studio出力生成")
     st.add_argument("notebook_id", type=int)
@@ -320,6 +344,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
 
     sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
+
+    stt = sub.add_parser("stats", help="ノートブック統計 (ソース/チャンク/DBサイズ)")
+    stt.add_argument("notebook_id", type=int)
+
+    bk = sub.add_parser("backup", help="DBをバックアップ (オンラインスナップショット)")
+    bk.add_argument("dest")
     return p
 
 
@@ -470,6 +500,34 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     print(_t("health.embed_batch", v=batch_v))
     print(_t("health.chunking", tokens=str(chunk_tokens()), overlap=str(chunk_overlap())))
     print(_t("health.data_dir", v=_one_line(db if db else str(db_path()))))
+    return 0
+
+
+def _human_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / 1024 / 1024:.2f} MB"
+
+
+def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
+    nb = store.get_notebook(int(args.notebook_id))
+    s = store.notebook_stats(nb.id)
+    print(_t("stats.name", v=nb.name))
+    print(_t("stats.sources", n=str(s["sources"])))
+    print(_t("stats.chunks", n=str(s["chunks"])))
+    print(_t("stats.notes", n=str(s["notes"])))
+    print(_t("stats.messages", n=str(s["messages"])))
+    print(_t("stats.studio_outputs", n=str(s["studio_outputs"])))
+    print(_t("stats.db_bytes", n=_human_bytes(store.db_bytes())))
+    return 0
+
+
+def _cmd_backup(store: Store, args: argparse.Namespace) -> int:
+    dest = Path(args.dest).expanduser()
+    store.backup_to(dest)
+    print(_t("backup.done", path=str(dest)))
     return 0
 
 
@@ -670,8 +728,30 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"question too long (max {MAX_QUESTION_LEN} characters)",
         )
-    answer = ask(store, llm, int(args.notebook_id), question, k=int(args.k))
-    print(answer.text)
+    deltas: list[str] = []
+
+    def _emit(delta: str) -> None:
+        print(delta, end="", flush=True)
+        deltas.append(delta)
+
+    answer = ask(
+        store,
+        llm,
+        int(args.notebook_id),
+        question,
+        k=int(args.k),
+        source_ids=args.source_ids,
+        on_delta=_emit,
+    )
+    streamed = "".join(deltas)
+    if deltas:
+        print()  # end the streamed answer's line
+    if streamed != answer.text:
+        # No streaming capability (deltas empty → "" ≠ text) or the stream died
+        # mid-answer into the degraded path — the already-emitted partial stays
+        # visible and the final answer is printed in full, matching the SSE
+        # contract that partial text is real and persisted.
+        print(answer.text)
     # A non-degraded answer can still legitimately carry an empty report — e.g.
     # the model correctly follows the system prompt's "say so explicitly" rule
     # for a fact not in the sources, which uncited_sentences() deliberately
@@ -814,6 +894,10 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_note(store, args)
             if command == "source":
                 return _cmd_source(store, backend, args)
+            if command == "stats":
+                return _cmd_stats(store, args)
+            if command == "backup":
+                return _cmd_backup(store, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0

@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import unicodedata
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -652,6 +653,7 @@ def retrieve_for_question(
     retrieval_q: str,
     qvec: list[float] | None,
     k: int = TOP_K,
+    source_ids: list[int] | None = None,
 ) -> list[Hit]:
     """Retrieval entry point for ask(): single-query, or RAG-Fusion when opted in.
 
@@ -674,17 +676,21 @@ def retrieve_for_question(
     disconnected. Skipping serialization here removes both problems.
     """
     if not multi_query_enabled():
-        return retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
+        return retrieve(
+            store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
+        )
     rewrites = rewrite_queries(llm, retrieval_q)
     if not rewrites:
-        return retrieve(store, notebook_id, retrieval_q, query_vec=qvec, k=k)
+        return retrieve(
+            store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
+        )
     queries = [retrieval_q, *rewrites]
     vecs: list[list[float] | None] = [qvec]
     # Only embed rewrites when the original query itself embedded — a None
     # qvec means embeddings are disabled/mismatched/unreachable and each
     # per-rewrite embed_one would just repeat the same failure.
     vecs.extend(_query_vector(llm, rq) if qvec is not None else None for rq in rewrites)
-    return retrieve_multi(store, notebook_id, queries, vecs, k=k)
+    return retrieve_multi(store, notebook_id, queries, vecs, k=k, source_ids=source_ids)
 
 
 def _degraded_text(hits: list[Hit]) -> str:
@@ -711,12 +717,24 @@ def ask(
     question: str,
     k: int = TOP_K,
     persist: bool = True,
+    source_ids: list[int] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> Answer:
-    """Grounded Q&A over a notebook. Never raises on LLM unavailability."""
+    """Grounded Q&A over a notebook. Never raises on LLM unavailability.
+
+    on_delta: when set AND the backend carries chat_stream (a capability,
+    not part of the ChatBackend Protocol — getattr-guarded like
+    last_finish_reason), the answer is produced via chat_stream and each
+    delta is forwarded to on_delta as it arrives; the joined text is the
+    same answer llm.chat() would have returned. When unset (or the backend
+    cannot stream) the single-shot chat() path runs byte-identically.
+    """
     history = history_messages(store, notebook_id)  # before persisting this turn
     retrieval_q = expand_query(question, history)
     qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
-    hits = retrieve_for_question(store, llm, notebook_id, retrieval_q, qvec, k=k)
+    hits = retrieve_for_question(
+        store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
+    )
     if persist:
         store.add_message(notebook_id, "user", question, "{}")
 
@@ -732,7 +750,16 @@ def ask(
                 f"database locked during context build: {exc}",
             ) from exc
         try:
-            text = llm.chat(build_messages(question, context, history))
+            messages = build_messages(question, context, history)
+            stream = getattr(llm, "chat_stream", None)
+            if on_delta is not None and callable(stream):
+                parts: list[str] = []
+                for delta in stream(messages):
+                    parts.append(delta)
+                    on_delta(delta)
+                text = "".join(parts)
+            else:
+                text = llm.chat(messages)
             answer = Answer(
                 text,
                 hits,

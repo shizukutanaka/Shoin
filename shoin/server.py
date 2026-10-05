@@ -159,7 +159,19 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
         "name": nb.name,
         "counts": store.counts(nb_id),
         "sources": [
-            {"id": s.id, "kind": s.kind, "title": s.title, "origin": s.origin}
+            {
+                "id": s.id,
+                "kind": s.kind,
+                "title": s.title,
+                "origin": s.origin,
+                # Refreshability is decided by what the origin can still be
+                # read from, not by kind: URL sources always qualify; a file
+                # source qualifies only while its recorded path still exists
+                # (an upload's tmp copy is unlinked after ingest, so it reads
+                # false and the UI hides a button that could only error).
+                "refreshable": s.origin.startswith(("http://", "https://"))
+                or Path(s.origin).is_file(),
+            }
             for s in store.sources_for_notebook(nb_id)
         ],
         "notes": [
@@ -344,6 +356,31 @@ class _Handler(BaseHTTPRequestHandler):
         value = raw or ""
         _check_utf8(key, value)
         return value
+
+    def _optional_id_list(self, data: Json, key: str) -> list[int] | None:
+        """Optional list-of-ids field: absent -> None (unscoped), present ->
+        validated positive ints. The _require/_optional_str siblings cover
+        strings; a list field needs its own typed reader so handlers never
+        touch the raw bound dict directly (the v0.2.408 pin's contract)."""
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a list, got {type(raw).__name__}",
+            )
+        out: list[int] = []
+        for item in raw:
+            if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+                raise StoreError(
+                    "VALIDATION_FIELD_FORMAT_INVALID",
+                    f"{key} must be positive integers",
+                )
+            if item >= 2**63:
+                raise StoreError("VALIDATION_INTEGER_OVERFLOW", "ID out of range")
+            out.append(item)
+        return out
 
     # --- routing --------------------------------------------------------
 
@@ -808,14 +845,27 @@ class _Handler(BaseHTTPRequestHandler):
             yield self.llm.chat(messages)
 
     def _h_ask_sse(self, nb_id: int) -> None:
-        question = self._require(self._read_json(), "question")
+        body = self._read_json()
+        question = self._require(body, "question")
         if len(question) > MAX_QUESTION_LEN:
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"question too long (max {MAX_QUESTION_LEN} characters)",
             )
+        # Optional per-question scoping: "ask only these sources". Absent or an
+        # empty list means the whole notebook (the SQL helper treats both as
+        # unscoped). Validation happens BEFORE headers go out so a malformed
+        # field is still a 400 envelope, not an SSE error frame mid-stream.
+        scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404 before headers go out
+            for sid in scope_ids or ():
+                # A foreign source id must 404 exactly like a dead one —
+                # answering scoped to another notebook's sources would both
+                # leak its existence and silently ground the reply in content
+                # the user never attached to this notebook.
+                if store.get_source(sid).notebook_id != nb_id:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
             qvec = (
@@ -828,7 +878,9 @@ class _Handler(BaseHTTPRequestHandler):
             # it is serialized under generation_lock (spec.md single-generation
             # DoS control) — only the actual answer-generation streaming call
             # below is. See retrieve_for_question()'s own docstring for why.
-            hits = retrieve_for_question(store, self.llm, nb_id, retrieval_q, qvec)
+            hits = retrieve_for_question(
+                store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
+            )
             store.add_message(nb_id, "user", question, "{}")
 
             try:

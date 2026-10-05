@@ -411,6 +411,46 @@ const fetch = async (path, opts) => {
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_ask_scope_selection_end_to_end(self) -> None:
+        """v0.2.632: the ask payload mirrors the API's source_ids contract —
+        a partial selection carries `source_ids`, a full selection sends the
+        unscoped field-less body, and zero selection is refused by the handler
+        (source_ids:[] would silently mean "whole notebook", the opposite of
+        unchecking everything). Pins the two pure seams under node plus the
+        literal wiring the contract hangs on."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script_body(_html())
+        # Wiring seams: the submit handler consults scopeSelection(), passes a
+        # literal object (the request-body pin's readable contract), and the
+        # zero-selection guard names the toast key.
+        self.assertIn("scopeSelection()", src)
+        self.assertIn("scopedIds(scope.sel, scope.live)", src)
+        self.assertIn("source_ids:ids", src)
+        self.assertIn("chat.noscope", src)
+        self.assertIn("srcSel.delete", src)
+        scope_fn = _js_block(src, "function scopeSelection")
+        payload_fn = _js_block(src, "function scopedIds")
+        harness = """\
+let cur = {sources: [{id: 1}, {id: 2}, {id: 3}]};
+const srcSel = new Set([1, 2, 3]);
+""" + scope_fn + "\n" + payload_fn + """
+const bad = [];
+{ const r = scopeSelection(); const ids = scopedIds(r.sel, r.live);
+  if (r.sel.length !== 3) bad.push("full selection lost ids");
+  if (ids !== null) bad.push("full selection leaks source_ids"); }
+srcSel.delete(2);
+{ const r = scopeSelection(); const ids = scopedIds(r.sel, r.live);
+  if (JSON.stringify(ids) !== "[1,3]") bad.push("partial ids: " + JSON.stringify(ids)); }
+srcSel.clear();
+{ const r = scopeSelection();
+  if (r.sel.length !== 0) bad.push("zero selection not empty"); }
+if (bad.length) { console.error(bad.join("; ")); process.exit(1) }
+console.log("ok");
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_route_arity_matches_capture_groups(self) -> None:
         """_dispatch invokes handler(*[int(g) for g in m.groups()]) — so each
         capturing group must be (a) numeric, else int() ValueErrors into a
@@ -721,6 +761,8 @@ const fetch = async (path, opts) => {
                     required.add(key)
                     allowed.add(key)
                 elif node.func.attr == "_optional_str" and key:
+                    allowed.add(key)
+                elif node.func.attr == "_optional_id_list" and key:
                     allowed.add(key)
                 elif (
                     node.func.attr == "get"
@@ -1632,6 +1674,9 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        scope_fns = _js_block(src, "function scopeSelection") + _js_block(
+            src, "function updateScopeInfo"
+        )
         harness = """\
 const reg = {};
 function $(sel){
@@ -1646,11 +1691,12 @@ function t(k){ return k }
 const document = { activeElement: null };
 let srcIndex = new Map();
 let cur = {id: 7, name: "nb", sources: []};
+const srcSel = new Set(), knownIds = new Set(); let selNb = -1;
 let externalPendingRename = null;
 function renderChatHistory(){} function renderStudio(){}
 function renderNotes(){} function refreshQuestions(){}
 function startSourceRename(){ return {setSelectionRange(){}} }
-""" + fn + """
+""" + fn + scope_fns + """
 renderNotebook();
 if (reg["#exMd"].href !== "/api/notebooks/7/export?format=md")
   { console.error("export href not bound: " + reg["#exMd"].href); process.exit(1) }
@@ -2445,6 +2491,9 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        scope_fns = _js_block(src, "function scopeSelection") + _js_block(
+            src, "function updateScopeInfo"
+        )
         harness = """\
 const reg = {};
 function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
@@ -2472,6 +2521,7 @@ let apiCalls = [];
 async function api(path, o){ apiCalls.push(path); return {json:async()=>({})}; }
 function openNotebook(){}
 let notebooks = [], cur = null, srcIndex = new Map();
+const srcSel = new Set(), knownIds = new Set(); let selNb = -1;
 let externalPendingRename = null;
 let renameCalls = [], selCalls = [];
 function startSourceRename(s, tt, row, initial){
@@ -2479,7 +2529,7 @@ function startSourceRename(s, tt, row, initial){
   const inp = mkEl(); inp.cls = "src-rename"; return inp;
 }
 const document = { activeElement: null };
-""" + fn + """
+""" + fn + scope_fns + """
 // Path 1: focused rename input inside #srcList survives the rebuild.
 cur = { id:1, name:"nb", sources:[{id:5,title:"old",kind:"txt"}],
     messages:[], studio:[], notes:[] };
@@ -2533,6 +2583,9 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        scope_fns = _js_block(src, "function scopeSelection") + _js_block(
+            src, "function updateScopeInfo"
+        )
         fn_embed = _js_block(src, "function embedNote")
         harness = """\
 const reg = {};
@@ -2563,6 +2616,7 @@ function showSource(){}
 function renderChatHistory(){} function renderStudio(){}
 function renderNotes(){} function refreshQuestions(){}
 let notebooks = [], cur = null, srcIndex = new Map();
+const srcSel = new Set(), knownIds = new Set(); let selNb = -1;
 let externalPendingRename = null;
 let renameCalls = [];
 function startSourceRename(s, tt, row, initial){
@@ -2570,9 +2624,9 @@ function startSourceRename(s, tt, row, initial){
   const inp = mkEl(); inp.cls = "src-rename"; return inp;
 }
 const document = { activeElement: null };
-""" + fn_embed + fn + """
+""" + fn_embed + fn + scope_fns + """
 (async () => {
-cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x"}],
+cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x",refreshable:true}],
   messages:[], studio:[], notes:[] };
 renderNotebook();
 const row = $("#srcList").children[0];
@@ -2676,6 +2730,9 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
         fn = _js_block(src, "function renderNotebook")
+        scope_fns = _js_block(src, "function scopeSelection") + _js_block(
+            src, "function updateScopeInfo"
+        )
         harness = """\
 const reg = {};
 function mkEl(){ return {children:[], parent:null, value:"", hidden:false,
@@ -2704,6 +2761,7 @@ function showSource(id, title){ shown.push(id) }
 function renderChatHistory(){} function renderStudio(){}
 function renderNotes(){} function refreshQuestions(){}
 let notebooks = [], cur = null, srcIndex = new Map();
+const srcSel = new Set(), knownIds = new Set(); let selNb = -1;
 let externalPendingRename = null;
 let renameCalls = [];
 function startSourceRename(s, tt, row, initial){
@@ -2711,7 +2769,7 @@ function startSourceRename(s, tt, row, initial){
   const inp = mkEl(); inp.cls = "src-rename"; return inp;
 }
 const document = { activeElement: null };
-""" + fn + """
+""" + fn + scope_fns + """
 (async () => {
 // Non-URL source: no refresh button — row children are [no][tt][del].
 cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"md"}],
