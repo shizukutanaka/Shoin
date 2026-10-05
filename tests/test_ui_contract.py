@@ -1642,6 +1642,56 @@ console.log("ok");
                 f"{sel} keeps its light literal bg under dark mode",
             )
 
+    def test_print_styles_fold_chrome_and_expand_panes(self) -> None:
+        """v0.2.640: `@media print` turns the three-pane app into paper —
+        chrome folds, panes flatten, the palette is forced light.
+
+        - The block must hide the interactive chrome (buttons, inputs,
+          composer, adders, tabs, toast, banner) — otherwise a printed
+          answer carries the UI skeleton.
+        - The grid/scroll layout must flatten (`main{display:block}`,
+          `.pane{display:block}`, `.pane-body{overflow:visible}`) —
+          without it only the visible scroll window prints.
+        - `--washi` must re-map to a light hex: under
+          prefers-color-scheme:dark the dark block still matches in
+          print and would emit light text on white paper.
+        - Messages need page-break-inside:avoid so a Q/A isn't split
+          across pages."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        m = re.search(r"@media\s+print\s*\{(.*)", style, re.S)
+        self.assertIsNotNone(m, "no @media print block in <style>")
+        assert m is not None
+        block = m.group(1)
+
+        for sel in (
+            "#composer", "#banner", "#toast", ".tabs", ".adders",
+            ".note-form", ".kinds", "button", "input",
+        ):
+            self.assertIn(
+                sel, block,
+                f"{sel} chrome still prints (not hidden by @media print)",
+            )
+        self.assertRegex(block, r"main\{[^}]*display:block")
+        self.assertRegex(block, r"\.pane[^{]*\{[^}]*display:block")
+        self.assertRegex(block, r"\.pane-body\{[^}]*overflow:visible")
+        washi = re.search(r"--washi:(#[0-9A-Fa-f]+)", block)
+        self.assertIsNotNone(
+            washi, "print block does not re-map --washi to a light hex")
+        assert washi is not None
+        self.assertGreater(
+            min(int(washi.group(1)[i:i + 2], 16) for i in (1, 3, 5)), 200,
+            "--washi under print must be paper-white, not a dark hex",
+        )
+        self.assertIn("page-break-inside:avoid", block)
+        ids = set(re.findall(r'\bid="([^"]+)"', html))
+        for sel in re.findall(r"#[A-Za-z_][\w-]*", block):
+            if not re.fullmatch(r"#[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{3})?", sel):
+                self.assertIn(
+                    sel[1:], ids,
+                    f"{sel} in print block matches no element id",
+                )
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element

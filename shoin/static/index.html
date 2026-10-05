@@ -183,6 +183,29 @@ details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   border-radius:3px;padding:9px 16px;font-size:13px;max-width:88vw}
 .spin{display:inline-block;font-family:var(--mono)}
 [hidden]{display:none!important}
+
+/* ---- print (v0.2.640): fold the app chrome, keep the content ----
+   The :root override forces the light palette onto paper even under
+   prefers-color-scheme:dark — the dark media block would otherwise still
+   match in print and emit white text on white paper. */
+@media print{
+  :root{
+    --washi:#FFFFFF; --paper:#FFFFFF; --sumi:#20242B; --sumi-soft:#5A6068;
+    --seiji-ink:#00777D; --shu:#B3261E; --kohaku:#8A5A00;
+    --matsu:#2C6E49; --border:#D8D2C0; --border-strong:#B9B09A;
+    --band:#FFFFFF; --band-ink:#20242B;
+  }
+  body{background:#fff}
+  .lamp,header button,.tabs,#banner,#composer,#toast,.selinfo,
+  #nbList,.adders,#nbForm,#srcAdders,.note-form,.kinds,
+  button,input{display:none!important}
+  header{height:auto;padding:8px 16px;border-bottom:1px solid var(--border-strong)}
+  main{display:block;height:auto}
+  .pane,.pane.active{display:block;border-right:0;min-height:0}
+  .pane-body{overflow:visible;height:auto;padding:8px 12px}
+  .msg{max-width:100%;page-break-inside:avoid}
+  a{color:var(--seiji-ink);text-decoration:none}
+}
 </style>
 </head>
 <body>

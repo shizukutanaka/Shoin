@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.639
+## Version History: v0.1.37 → v0.2.640
+
+### v0.2.640 — `@media print` (印刷経路)
+
+50長所/50短所監査 (product-review.md) の短所31を解消: 印刷/紙PDF出力
+するとUI骨格ごと出ていた。`@media print` でインタラクティブchrome
+(buttons・inputs・composer・adders・tabs・toast・banner・lamp等)を
+畳み、`main` grid・スクロールペインを展開 (`.pane{display:block}`・
+`.pane-body{overflow:visible}`)、`.msg` は page-break-inside:avoid。
+`:root` をブロック内でライトへ再写像——dark mode下でもプリントは
+紙色に強制 (darkブロックは印刷メディアでも一致するため)。
+あわせて短所38を実測同期: `chat.hint` ツールチップ
+(ヒント: -語 で除外検索) は ja/en 両言語で既実装済み。
 
 ### v0.2.639 — LLM輸送失敗の有界リトライ (SHOIN_LLM_RETRIES)
 
