@@ -31,6 +31,7 @@ from .config import (
     VERSION,
     db_path,
     multi_query_enabled,
+    theme_css_path,
     ui_lang,
 )
 from .export import FORMATS, export
@@ -73,6 +74,9 @@ def _t(key: str) -> str:
     return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
 _STATIC = Path(__file__).resolve().parent / "static" / "index.html"
+# v0.2.643: bound the user-theme response — a cosmetic hook must not be a
+# DoS backdoor by pointing SHOIN_THEME_CSS at a giant file.
+_THEME_CSS_LIMIT = 256 * 1024
 
 _EXPORT_MIME = {
     "md": "text/markdown; charset=utf-8",
@@ -411,6 +415,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     _ROUTES: tuple[tuple[str, str, str], ...] = (
         ("GET", r"^/$", "ui"),
+        ("GET", r"^/api/theme\.css$", "theme_css"),
         ("GET", r"^/api/health$", "health"),
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
@@ -543,12 +548,29 @@ class _Handler(BaseHTTPRequestHandler):
             {
                 "Content-Length": str(len(body)),
                 "Content-Security-Policy": (
-                    "default-src 'none'; style-src 'unsafe-inline';"
+                    "default-src 'none'; style-src 'unsafe-inline' 'self';"
                     " script-src 'unsafe-inline'; connect-src 'self'; img-src data:;"
                     " frame-ancestors 'none'"
                 ),
                 "X-Frame-Options": "DENY",
             },
+        )
+        self.wfile.write(body)
+
+    def _h_theme_css(self) -> None:
+        # User theme hook: the palette is already :root variables, so a file
+        # dropped next to config.json restyles the app without a build.
+        # Missing/unreadable/oversized all degrade to an empty stylesheet —
+        # a 5xx or truncated tail would only break the optional hook.
+        try:
+            path = theme_css_path()
+            body = b"" if path.stat().st_size > _THEME_CSS_LIMIT else path.read_bytes()
+        except OSError:
+            body = b""
+        self._headers(
+            200,
+            "text/css; charset=utf-8",
+            {"Content-Length": str(len(body))},
         )
         self.wfile.write(body)
 

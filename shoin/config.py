@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.642"
+VERSION = "0.2.643"
 
 
 DEFAULT_PORT = 7440
@@ -126,6 +126,18 @@ def llm_retries() -> int:
 
 def ui_lang() -> str:
     return _get("SHOIN_LANG", "ja")
+
+
+def theme_css_path() -> Path:
+    """User theme stylesheet, served verbatim at /api/theme.css (v0.2.643).
+
+    SHOIN_THEME_CSS > config.json > ~/.config/shoin/theme.css — next to
+    config.json by default so one directory carries all optional config.
+    """
+    env = _get("SHOIN_THEME_CSS", "")
+    if env:
+        return Path(env).expanduser()
+    return config_file().parent / "theme.css"
 
 
 def port() -> int:

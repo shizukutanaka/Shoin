@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.642")
+        self.assertEqual(VERSION, "0.2.643")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18501,6 +18501,10 @@ class TestResidualGuards(unittest.TestCase):
                 # error-envelope path itself would emit zero HTTP response.
                 "UnicodeEncodeError",
                 "ValueError", "ValueError", "ValueError",
+                # v0.2.643: _h_theme_css degrades a missing/unreadable theme
+                # file to an empty stylesheet — the cosmetic hook must never
+                # 5xx a page load.
+                "OSError",
             ],
             "store.py": [
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",

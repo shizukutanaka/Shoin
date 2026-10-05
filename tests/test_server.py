@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -19,7 +20,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shoin.server import make_server  # noqa: E402
+from shoin.server import _THEME_CSS_LIMIT, make_server  # noqa: E402
 
 
 class FakeLLM:
@@ -1316,6 +1317,46 @@ class ServerTest(unittest.TestCase):
             status, data = self._json("GET", "/api/health")
         self.assertEqual(status, 200)
         self.assertTrue(data["multi_query"])
+
+    def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
+        """GET /api/theme.css (v0.2.643): the user-theme hook serves
+        SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.
+        Missing, unreadable, or oversized files all degrade to an empty
+        stylesheet — a cosmetic hook must never 5xx a page load."""
+        # default: no theme file -> 200 + empty CSS (a <link> never fails)
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(Path(self.tmp.name) / "nope.css")}):
+            status, headers, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+        self.assertIn("text/css", headers.get("Content-Type", ""))
+
+        # user file -> served verbatim
+        theme = Path(self.tmp.name) / "theme.css"
+        theme.write_bytes(b":root{--washi:#000}\n")
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(theme)}):
+            status, headers, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b":root{--washi:#000}\n")
+
+        # oversized -> empty, not a truncated tail that corrupts a rule
+        theme.write_bytes(b"x" * (_THEME_CSS_LIMIT + 1))
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(theme)}):
+            status, _, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+
+    def test_ui_serves_theme_link_and_csp_allows_self_styles(self) -> None:
+        """The theme hook needs both ends wired: index.html <link>s to
+        /api/theme.css, and the CSP must permit same-origin stylesheets —
+        'unsafe-inline' alone would block the linked file."""
+        status, headers, page = self._req("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<link rel="stylesheet" href="/api/theme.css">', page)
+        csp = headers.get("Content-Security-Policy", "")
+        style = re.search(r"style-src\s+([^;]+)", csp)
+        self.assertIsNotNone(style)
+        assert style is not None
+        self.assertIn("'self'", style.group(1))
 
     def test_ui_lang_meta_reflects_shoin_lang(self) -> None:
         """README documents SHOIN_LANG as controlling "UI言語", but the Web UI

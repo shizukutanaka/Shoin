@@ -560,6 +560,7 @@ console.log("ok");
             self.assertTrue(pattern.startswith("^"), f"{name}: pattern not ^-anchored")
             self.assertTrue(pattern.endswith("$"), f"{name}: pattern not $-anchored")
             concrete = re.sub(r"\(\\d\+\)", "1", pattern.strip("^$"))
+            concrete = concrete.replace("\\.", ".")  # unescape literal dots (v0.2.643)
             self.assertIsNotNone(
                 re.match(pattern, concrete), f"{name}: doesn't match {concrete!r}"
             )

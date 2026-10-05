@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.642
+## Version History: v0.1.37 → v0.2.643
+
+### v0.2.643 — ユーザーテーマ差込み口 (`/api/theme.css`)
+
+50長所/50短所監査 (product-review.md) の短所32を解消: 配色・フォントは
+ハードコードでユーザーCSS差込み口が無かった。パレットは既に :root
+変数化済みのため、差込みは「後勝ちの外部スタイルシート」で完結する——
+`GET /api/theme.css` が `~/.config/shoin/theme.css` (SHOIN_THEME_CSSで
+変更可) を verbatim 返し、index.html は `</style>` 直後に
+`<link rel="stylesheet" href="/api/theme.css">` で読込む。未存在・
+読取不可・256KiB超は空スタイルシートへ降格 (cosmetic hookを5xxや
+途切れたルールで壊さない)。CSP `style-src` に `'self'` を追加——
+`'unsafe-inline'` のみだと同一オリジンのlinkも塞がれる。ピン2件:
+エンドポイント契約 (verbatim・空降格・size上限) と `<link>`+CSP配線。
 
 ### v0.2.642 — グローバルキーボードショートカット層
 
