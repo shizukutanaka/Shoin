@@ -1584,6 +1584,64 @@ console.log("ok");
         self.assertEqual(external, [],
                          f"external resource references (offline + CSP): {external}")
 
+    def test_dark_mode_palette_is_complete(self) -> None:
+        """v0.2.638: `@media (prefers-color-scheme:dark)` re-skins the app by
+        overriding the palette — whatever it misses silently stays light.
+
+        - The block must redefine every surface variable the light `:root`
+          declares (washi/paper/sumi/sumi-soft/seiji-ink/shu/kohaku/matsu/
+          border/border-strong) to a different hex — a forgotten var leaves
+          a light surface under dark text or dark text on a dark pane.
+        - Surfaces meant to stay dark (header band, toast) must bind the
+          dedicated `--band`/`--band-ink` vars — remapping `--sumi` to a
+          light color would invert them into light bands, and leaving them
+          on `--washi` keeps them light-texted on a dark band.
+        - Tinted literal surfaces (.badge.warn/.err/.dim, #banner) are not
+          var-driven — each needs a literal override inside the block."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        m = re.search(
+            r"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{(.*?)\n\}",
+            style, re.S,
+        )
+        self.assertIsNotNone(
+            m, "no prefers-color-scheme:dark block in <style>")
+        assert m is not None
+        block = m.group(1)
+
+        for var in (
+            "--washi", "--paper", "--sumi", "--sumi-soft", "--seiji-ink",
+            "--shu", "--kohaku", "--matsu", "--border", "--border-strong",
+        ):
+            light = re.search(rf"{var}:(#[0-9A-Fa-f]+)", style)
+            dark = re.search(rf"{var}:(#[0-9A-Fa-f]+)", block)
+            self.assertIsNotNone(
+                dark, f"{var} not redefined inside the dark block")
+            assert light is not None and dark is not None
+            self.assertNotEqual(
+                light.group(1), dark.group(1),
+                f"{var} identical in light and dark palettes",
+            )
+
+        for sel in (r"header\{", r"#toast\{"):
+            rule = re.search(rf"{sel}[^}}]*}}", style)
+            self.assertIsNotNone(rule, f"{sel} rule not found")
+            assert rule is not None
+            body = rule.group(0)
+            self.assertIn("var(--band)", body,
+                          f"{sel} band background not on --band")
+            for var in ("--sumi", "--washi"):
+                self.assertNotIn(
+                    f"var({var})", body,
+                    f"{sel} paints the band from {var} — inverts under "
+                    "dark mode",
+                )
+        for sel in (".badge.warn", ".badge.err", ".badge.dim", "#banner"):
+            self.assertIn(
+                sel, block,
+                f"{sel} keeps its light literal bg under dark mode",
+            )
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element

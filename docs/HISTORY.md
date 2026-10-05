@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.637
+## Version History: v0.1.37 → v0.2.638
+
+### v0.2.638 — `prefers-color-scheme: dark` (ダークモード追従)
+
+50長所/50短所監査 (product-review.md) の短所28を解消: 固定ライト配色のみ
+だった UI が OS の配色設定へ追従する。`:root` のパレット変数を
+`@media (prefers-color-scheme:dark)` で上書きする方式——和紙/墨色
+パレットを反転した暗色版 (washi #181A1F・paper #21252C・sumi #E4E0D4、
+アクセント色は暗背景可読性へ明度調整: seiji-ink #5FD9DF・shu #E57368・
+kohaku #D9A83F・matsu #7CC49A)。設計上の分離点: `--sumi` をそのまま
+反転すると「墨帯」面 (header・#toast) が白帯化してしまうため、常時
+暗帯の面は新変数 `--band`/`--band-ink` へ分離——帯は両モードで
+暗いまま、本文面のみ反転する。変数非駆動の色付け面 (.badge.warn/
+.err/.dim・#banner のリテラル tint) はブロック内で個別上書き。
 
 ### v0.2.637 — `POST /api/notebooks/{id}/search` (検索専用API)
 
