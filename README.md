@@ -100,7 +100,11 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 (質問文の一致で対応付けるため、casesファイルの行順変更や編集で偽の回帰は出ない)。
 同一質問の重複は出現順にペアリングされる。
 
+`--gen` でノートブックからケース雛形を生成できる(チャンクを持つソース1件=1ケース、
+`sources` は実際のid——手直し前提の雛形):
+
 ```bash
+shoin eval 1 --gen > cases.json                # 雛形を生成してから手直し
 shoin eval 1 cases.json --save before.json   # 設定変更前
 shoin eval 1 cases.json --diff before.json   # 設定変更後: recall/MRR の ± を表示
 ```

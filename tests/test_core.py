@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.650")
+        self.assertEqual(VERSION, "0.2.651")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18708,7 +18708,8 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "cli.py": 1,     # Path(args.save).write_text — eval baseline export
+            "cli.py": 2,     # Path(args.save).write_text — eval baseline export
+            # +1: Path(args.gen).write_text — eval --gen case-scaffold (v0.2.651)
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)
@@ -19107,7 +19108,8 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 # +2: _cmd_search's question/length guards (v0.2.649)
-                "StoreError", "StoreError",
+                # +1: _cmd_eval's missing-cases guard (v0.2.651)
+                "StoreError", "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -20789,3 +20791,109 @@ class TestResidualGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+# ---------------------------------------------------------------------------
+# v0.2.651: eval --gen case-scaffold tests
+# ---------------------------------------------------------------------------
+
+class TestCliEvalGen(unittest.TestCase):
+    """`shoin eval <nb> --gen` scaffolds one skeleton case per chunked source."""
+
+    def _db(self) -> tuple[str, int]:
+        import tempfile
+
+        from shoin.store import Store
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        with Store(f.name) as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "設計メモ", "mem://a", "h1")
+            s.add_chunks(a.id, ["本文一", "本文二"])
+            # zero-chunk source — nothing retrieves it, so no case
+            s.add_source(nb.id, "txt", "空ソース", "mem://b", "h2")
+        return f.name, nb.id
+
+    def test_gen_stdout_lists_one_case_per_chunked_source(self) -> None:
+        import io
+        import json
+        import os
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+        from shoin.evaluate import parse_cases
+
+        db_file, nb_id = self._db()
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = main(["--db", db_file, "eval", str(nb_id), "--gen"])
+            self.assertEqual(rc, 0)
+            cases = json.loads(out.getvalue())
+            # the generated file must itself pass the eval parser
+            parsed = parse_cases(cases)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].expected_source_ids, [1])
+            self.assertIn("設計メモ", parsed[0].question)
+        finally:
+            os.unlink(db_file)
+
+    def test_gen_file_writes_parseable_json(self) -> None:
+        import io
+        import json
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db_file, nb_id = self._db()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                target = str(Path(td) / "gen.json")
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = main(["--db", db_file, "eval", str(nb_id), "--gen", target])
+                self.assertEqual(rc, 0)
+                self.assertTrue(Path(target).exists())
+                self.assertIn("設計メモ", Path(target).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    len(json.loads(Path(target).read_text(encoding="utf-8"))), 1
+                )
+                self.assertIn("1", out.getvalue())  # {n} in the saved line
+        finally:
+            os.unlink(db_file)
+
+    def test_eval_without_cases_or_gen_is_coded(self) -> None:
+        import io
+        import os
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db_file, nb_id = self._db()
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main(["--db", db_file, "eval", str(nb_id)])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_gen_dead_notebook_is_coded_404(self) -> None:
+        import io
+        import os
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db_file, _ = self._db()
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main(["--db", db_file, "eval", "99", "--gen"])
+            self.assertEqual(rc, 1)
+            self.assertIn("NOT_FOUND", err.getvalue())
+        finally:
+            os.unlink(db_file)

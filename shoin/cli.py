@@ -134,6 +134,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             " (削除/別idの可能性)"
         ),
         "eval.saved": "ベースライン保存: {f}",
+        "eval.gen_saved": "ケース雛形を保存しました: {f} ({n}件)",
         "eval.diff_header": "ベースライン比較 ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
         "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
@@ -226,6 +227,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             " (deleted or rekeyed?)"
         ),
         "eval.saved": "Baseline saved: {f}",
+        "eval.gen_saved": "Wrote case skeleton: {f} ({n} cases)",
         "eval.diff_header": "Baseline comparison ({f})",
         "eval.diff_recall": "  recall  : {old} → {new} ({d})",
         "eval.diff_mrr": "  MRR     : {old} → {new} ({d})",
@@ -380,10 +382,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
     ev.add_argument("notebook_id", type=int)
-    ev.add_argument("cases", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]')
+    ev.add_argument(
+        "cases", nargs="?", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]'
+    )
     ev.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
     ev.add_argument("--save", metavar="FILE", help="この実行をベースラインJSONとして保存")
     ev.add_argument("--diff", metavar="FILE", help="保存済みベースラインとの差分を表示")
+    ev.add_argument(
+        "--gen",
+        nargs="?",
+        const="-",
+        metavar="FILE",
+        help="ノートブックからケース雛形を生成 (--gen単独=stdout、--gen FILE=保存)",
+    )
 
     ex = sub.add_parser("export", help="エクスポート")
     ex.add_argument("notebook_id", type=int)
@@ -590,8 +601,32 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     """
     import json
 
-    from .evaluate import evaluate, parse_cases
+    from .evaluate import evaluate, gen_cases, parse_cases
 
+    if args.gen is not None:
+        # --gen (product-review #44): scaffold one skeleton case per chunked
+        # source — the sources array carries the real data (this notebook's
+        # actual ids, the part hand-authoring gets wrong); the title-derived
+        # question is a seed for hand-editing, not a measured ground truth.
+        skeleton = gen_cases(store, int(args.notebook_id))
+        payload = json.dumps(skeleton, ensure_ascii=False, indent=1) + "\n"
+        if args.gen == "-":
+            print(payload, end="")
+        else:
+            Path(str(args.gen)).expanduser().write_text(payload, encoding="utf-8")
+            print(
+                _t(
+                    "eval.gen_saved",
+                    f=_one_line(str(args.gen)),
+                    n=str(len(skeleton)),
+                )
+            )
+        return 0
+    if args.cases is None:
+        raise StoreError(
+            "VALIDATION_REQUIRED_FIELD_MISSING",
+            "missing cases file (or --gen to scaffold one)",
+        )
     try:
         raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
     except OSError as exc:

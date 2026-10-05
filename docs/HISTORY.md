@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.650
+## Version History: v0.1.37 → v0.2.651
+
+### v0.2.651 — eval ケース雛形生成 (`shoin eval <nb> --gen`)
+
+短所44を解消: 評価セットは手書きJSONのみで、ノートブックからの生成経路が無かった。
+`evaluate.gen_cases(store, nb)` がチャンクを持つソース1件=1ケースの雛形
+`{"q": "「<題>」について教えて", "sources": [id]}` を生成 — `sources` は実際の
+id(手書きで最も間違える部分)を運び、タイトル由来の質問文は手直し前提の種。
+チャンク0件のソースは取り得ないためスキップ。`shoin eval <nb> --gen` (単独=stdout
+へJSON、`--gen FILE`で保存) を追加。`cases`引数はnargs="?"化、`--gen`無しで
+省略時は`VALIDATION_REQUIRED_FIELD_MISSING`(coded)。REQ-103: eval自体が
+CLI専用機能のためWeb側経路は不要。行動ピン1クラス(TestCliEvalGen 4件):
+stdout生成+parse_cases往復・FILE保存・cases/--gen両無しのcoded 400・
+死nb→coded 404。カタログ追随: raise-inventory cli.py +1。
+
+1335テスト全通過・カバレッジ99%・ruff/mypy --strict クリーン・secret scan 0件。
 
 ### v0.2.650 — 検索ゼロ件時のスペル提案 (suggestionsフィールド)
 
