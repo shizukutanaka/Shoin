@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.636")
+        self.assertEqual(VERSION, "0.2.637")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -17580,7 +17580,7 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_read_json_results_flow_through_validators(self) -> None:
         """`_read_json()`'s dict must only be consumed via _require() /
-        _optional_str() / _optional_id_list(). Those helpers exist because JSON's
+        _optional_str() / _optional_id_list() / _optional_int(). Those helpers exist because JSON's
         dynamic typing
         meets Python's attribute access badly: `data.get("title").strip()`
         raises AttributeError→500 on a list body field where
@@ -17616,7 +17616,7 @@ class TestResidualGuards(unittest.TestCase):
         offenders = []
         for var, lo, hi in spans:
             ok = re.compile(
-                rf"self\._(?:require|optional_str|optional_id_list)\(\s*{var}\b"
+                rf"self\._(?:require|optional_str|optional_id_list|optional_int)\(\s*{var}\b"
             )
             for i in range(lo, hi):
                 line = lines[i]
@@ -18525,7 +18525,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
+                # +4: _optional_int x2 + _h_nb_search question/k guards
                 "ValueError",
             ],
             "store.py": [

@@ -327,6 +327,96 @@ class ServerTest(unittest.TestCase):
             self.assertTrue(by_title["live.txt"]["refreshable"])
             self.assertFalse(by_title["gone.txt"]["refreshable"])
 
+    def test_search_endpoint_returns_ranked_hits(self) -> None:
+        """v0.2.637: POST /api/notebooks/{id}/search runs ask's own retrieval
+        pipeline (expand→embed→retrieve_for_question) and returns the ranked
+        hits — rank/source/section/score/text — generating no answer and
+        persisting nothing (product-review #25: "I just want the search
+        results" had no API route; bm25_search/vector_search were internal
+        only)."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "searchapi"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "cats.txt", "mem://cats", "sha-c")
+            store.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+            src2 = store.add_source(nb_id, "txt", "dogs.txt", "mem://dogs", "sha-d")
+            store.add_chunks(src2.id, ["犬は固体である。"])
+
+        status, out = self._json(
+            "POST", f"/api/notebooks/{nb_id}/search",
+            {"question": "猫は液体である説について"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["question"], "猫は液体である説について")
+        hits = out["hits"]
+        self.assertGreaterEqual(len(hits), 1)
+        top = hits[0]
+        self.assertEqual(top["rank"], 1)
+        self.assertEqual(top["source_id"], src.id)
+        self.assertEqual(top["title"], "cats.txt")
+        self.assertIn("猫は液体", top["text"])
+        self.assertIn("score", top)
+        # Nothing persisted: the notebook's message list stays empty.
+        status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["messages"], [])
+
+        # source_ids scoping is the same contract as /ask.
+        status, out = self._json(
+            "POST", f"/api/notebooks/{nb_id}/search",
+            {"question": "猫は液体", "source_ids": [src2.id]},
+        )
+        self.assertEqual(status, 200)
+        for h in out["hits"]:
+            self.assertEqual(h["source_id"], src2.id)
+
+    def test_search_endpoint_validates_like_ask(self) -> None:
+        """v0.2.637: /search shares /ask's pre-dispatch validation contract —
+        coded envelope for a missing question, an out-of-range or mistyped k,
+        a dead notebook, and a foreign source id (never leaking that it
+        exists on another notebook)."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "searchval"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            other_nb = store.create_notebook("other")
+            foreign = store.add_source(
+                other_nb.id, "txt", "x.txt", "mem://x", "sha-x"
+            )
+
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb_id}/search", {"k": 3}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+
+        for bad_k in (0, -1, 51, "x", [1], True):
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/search",
+                {"question": "q", "k": bad_k},
+            )
+            self.assertEqual(status, 400, f"k={bad_k!r}")
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+
+        status, err = self._json(
+            "POST", f"/api/notebooks/{nb_id}/search",
+            {"question": "q", "source_ids": [foreign.id]},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
+
+        status, err = self._json(
+            "POST", "/api/notebooks/999999/search", {"question": "q"}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is
