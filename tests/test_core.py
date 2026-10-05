@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.632")
+        self.assertEqual(VERSION, "0.2.633")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -10052,18 +10052,56 @@ class TestPipeline(unittest.TestCase):
             )
             self.assertNotIn("Original Title", row["context"])
 
-    def test_refresh_source_nonurl_raises(self) -> None:
-        """refresh_source on a file source must raise INGEST_REFRESH_NOT_URL."""
+    def test_refresh_source_file_rereads_path(self) -> None:
+        """v0.2.633: refresh_source on a file source re-reads the recorded path.
+
+        The file-refresh contract mirrors the URL one: same source id, chunks
+        replaced with fresh content, sha256 updated, title untouched.
+        """
+        import tempfile
+
+        from shoin.pipeline import index_source, refresh_source
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "doc.txt"
+            path.write_text("old file content", encoding="utf-8")
+            with make_store() as s:
+                nb_id = s.create_notebook("nb").id
+                res0 = index_source(s, nb_id, str(path))
+                source_id = res0.source.id
+                path.write_text("totally different file content", encoding="utf-8")
+                res1 = refresh_source(s, source_id)
+                texts = [c.text for c in s.chunks_for_notebook(nb_id)]
+                self.assertEqual(res1.source.id, source_id)
+                self.assertTrue(
+                    all("old file content" not in t for t in texts),
+                    f"stale chunks must be gone, got {texts!r}",
+                )
+                self.assertTrue(
+                    any("totally different" in t for t in texts),
+                    f"refreshed chunks must hold new content, got {texts!r}",
+                )
+                self.assertNotEqual(res0.source.sha256, res1.source.sha256)
+
+    def test_refresh_source_file_missing_raises(self) -> None:
+        """A file source whose recorded path is gone raises INGEST_FETCH_FAILED.
+
+        Uploads store a tmp path that is unlinked after ingest, so the generic
+        'origin cannot be read' code — not a refresh-specific one — is what the
+        client can act on (v0.2.633).
+        """
         from shoin.ingest import IngestError
         from shoin.pipeline import refresh_source
 
         with make_store() as s:
             nb_id = s.create_notebook("nb").id
-            src = s.add_source(nb_id, "txt", "doc.txt", "/local/doc.txt", "sha-f")
+            src = s.add_source(
+                nb_id, "txt", "doc.txt", "/nonexistent/dir/doc.txt", "sha-f"
+            )
             s.add_chunks(src.id, ["text"])
             with self.assertRaises(IngestError) as cm:
                 refresh_source(s, src.id)
-        self.assertEqual(cm.exception.code, "INGEST_REFRESH_NOT_URL")
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
 
     def test_refresh_source_missing_raises(self) -> None:
         """refresh_source on a non-existent source must raise SOURCE_NOT_FOUND."""
@@ -14468,7 +14506,6 @@ _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
     "CHUNK_NOT_FOUND",
     "EMBEDDING_INVALID",
-    "INGEST_REFRESH_NOT_URL",
     "NOTEBOOK_EMPTY",
     "NOTEBOOK_NOT_FOUND",
     "NOTE_NOT_FOUND",
@@ -18276,8 +18313,7 @@ class TestResidualGuards(unittest.TestCase):
             "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
             "pipeline.py": [
-                "IngestError", "IngestError", "IngestError",
-                "IngestError", "IngestError",
+                "IngestError", "IngestError", "IngestError", "IngestError",
                 "LLMError", "LLMError", "LLMError",
                 "StoreError",
             ],

@@ -2626,7 +2626,7 @@ function startSourceRename(s, tt, row, initial){
 const document = { activeElement: null };
 """ + fn_embed + fn + scope_fns + """
 (async () => {
-cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x"}],
+cur = { id:3, name:"nb", sources:[{id:9,title:"t",kind:"url",origin:"https://x",refreshable:true}],
   messages:[], studio:[], notes:[] };
 renderNotebook();
 const row = $("#srcList").children[0];

@@ -298,6 +298,35 @@ class ServerTest(unittest.TestCase):
         up = json.loads(raw)
         self.assertEqual(up["source"]["title"], "upload.txt")
 
+    def test_detail_sources_carry_refreshable(self) -> None:
+        """v0.2.633: GET /api/notebooks/{id} sources carry `refreshable` —
+        true for URL origins and file origins whose path still exists, false
+        for a file origin that is gone (e.g. an upload's cleaned-up tmp copy),
+        so the UI can hide a refresh button that could only error."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "refreshable"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+
+        # File sources can't come over HTTP (src_add is URL-only); the CLI-add
+        # shape is created directly, same as a real `shoin add` + `shoin serve`.
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td) / "live.txt"
+            live.write_text("live file content " * 4, encoding="utf-8")
+            with Store(db) as store:
+                store.add_source(nb_id, "txt", "live.txt", str(live), "sha-l")
+                # The upload shape: a source whose origin path is already gone.
+                store.add_source(
+                    nb_id, "txt", "gone.txt", "/nonexistent/gone.txt", "sha-g"
+                )
+
+            status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+            self.assertEqual(status, 200)
+            by_title = {s["title"]: s for s in detail["sources"]}
+            self.assertTrue(by_title["live.txt"]["refreshable"])
+            self.assertFalse(by_title["gone.txt"]["refreshable"])
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is

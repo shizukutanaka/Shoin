@@ -284,16 +284,20 @@ def refresh_source(
     source_id: int,
     llm: ChatBackend | None = None,
 ) -> IndexResult:
-    """Re-fetch a URL source in-place, replacing chunks while keeping the source ID.
+    """Re-read a source's origin in-place, replacing chunks while keeping the source ID.
 
     The source ID is preserved so that citation references in stored messages
-    remain resolvable after the content update. Only URL sources can be refreshed;
-    file sources raise IngestError(INGEST_REFRESH_NOT_URL).
+    remain resolvable after the content update. URL origins are re-fetched;
+    file origins are re-read from the recorded path — a source whose file has
+    moved or been deleted (e.g. an upload's cleaned-up tmp copy) raises the
+    ordinary extract_file failure INGEST_FETCH_FAILED rather than a refresh-
+    specific code, since it is the same "origin can no longer be read" shape.
     """
     src = store.get_source(source_id)
-    if not src.origin.startswith(("http://", "https://")):
-        raise IngestError("INGEST_REFRESH_NOT_URL", "refresh is only supported for URL sources")
-    extracted = extract_url(src.origin)
+    if src.origin.startswith(("http://", "https://")):
+        extracted = extract_url(src.origin)
+    else:
+        extracted = extract_file(src.origin)
     # Guard against SHA-256 collision BEFORE replacing chunks.  Without this check,
     # replace_chunks_for_source commits new chunks and then update_source_sha256 raises
     # SOURCE_ALREADY_EXISTS, leaving the source with new chunks but the old sha256/title —

@@ -613,8 +613,9 @@ function renderNotebook(){
       tt.ondblclick = ev => { ev.stopPropagation(); startSourceRename(s, tt, row); };
       tt.setAttribute("title", t("src.rename"));
       row.append(tt);
-      // Refresh button for URL sources
-      if (s.origin && s.origin.startsWith("http")) {
+      // Refresh button: URL sources always, file sources while their
+      // recorded path still exists (server-computed `refreshable`).
+      if (s.refreshable) {
         const ref = el("button","src-act","↻"); ref.setAttribute("aria-label", t("src.refresh"));
         ref.setAttribute("title", t("src.refresh"));
         ref.onclick = async ev => { ev.stopPropagation();

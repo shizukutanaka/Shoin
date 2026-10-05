@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.632
+## Version History: v0.1.37 → v0.2.633
+
+### v0.2.633 — ファイルソースの refresh 対応 + refreshable 境界契約
+
+50長所/50短所監査 (product-review.md) の P1 を実装: `refresh_source` が
+origin スキームで分岐し、URL源は `extract_url` 再取得・ファイル源は
+`extract_file` で記録パスを再読込する同一契約 (sha256一致ならno-op・
+不一致ならチャンク置換・ソースid保持・タイトル不変更) 。これまでの
+`INGEST_REFRESH_NOT_URL` ハードゲートは撤廢——消失済みパス (upload
+取込後に削除されるtmp等) は refresh 専用コードではなく汎用の
+`INGEST_FETCH_FAILED` へ写像し、「origin がもう読めない」形状を1種に
+統一。`GET /api/notebooks/{id}` の sources 要素は `refreshable` 真偽値を
+運ぶ: URL源は常 true・ファイル源は origin パスの実存在時のみ true ——
+upload経由の死んだtmpパスへ常時エラーになる↻ボタンをUIが提示しない
+ための境界契約。UIの↻表示判定は `origin.startsWith("http")` から
+`s.refreshable` へ移行。CLI `src refresh` は同一経路でファイル源を
+扱う (ローカルファイル編集後の delete→再add が不要に)。
 
 ### v0.2.632 — Web UI のソース選択を source_ids へ配線
 

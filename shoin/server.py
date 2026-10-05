@@ -159,7 +159,19 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
         "name": nb.name,
         "counts": store.counts(nb_id),
         "sources": [
-            {"id": s.id, "kind": s.kind, "title": s.title, "origin": s.origin}
+            {
+                "id": s.id,
+                "kind": s.kind,
+                "title": s.title,
+                "origin": s.origin,
+                # Refreshability is decided by what the origin can still be
+                # read from, not by kind: URL sources always qualify; a file
+                # source qualifies only while its recorded path still exists
+                # (an upload's tmp copy is unlinked after ingest, so it reads
+                # false and the UI hides a button that could only error).
+                "refreshable": s.origin.startswith(("http://", "https://"))
+                or Path(s.origin).is_file(),
+            }
             for s in store.sources_for_notebook(nb_id)
         ],
         "notes": [
