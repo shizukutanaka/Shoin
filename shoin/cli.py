@@ -160,6 +160,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.messages": "メッセージ: {n}",
         "stats.studio_outputs": "Studio出力: {n}",
         "stats.db_bytes": "DBサイズ: {n}",
+        "backup.done": "バックアップを保存しました: {path}",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -242,6 +243,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.messages": "Messages: {n}",
         "stats.studio_outputs": "Studio outputs: {n}",
         "stats.db_bytes": "DB size: {n}",
+        "backup.done": "Backup written: {path}",
     },
 }
 
@@ -345,6 +347,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     stt = sub.add_parser("stats", help="ノートブック統計 (ソース/チャンク/DBサイズ)")
     stt.add_argument("notebook_id", type=int)
+
+    bk = sub.add_parser("backup", help="DBをバックアップ (オンラインスナップショット)")
+    bk.add_argument("dest")
     return p
 
 
@@ -516,6 +521,13 @@ def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
     print(_t("stats.messages", n=str(s["messages"])))
     print(_t("stats.studio_outputs", n=str(s["studio_outputs"])))
     print(_t("stats.db_bytes", n=_human_bytes(store.db_bytes())))
+    return 0
+
+
+def _cmd_backup(store: Store, args: argparse.Namespace) -> int:
+    dest = Path(args.dest).expanduser()
+    store.backup_to(dest)
+    print(_t("backup.done", path=str(dest)))
     return 0
 
 
@@ -884,6 +896,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_source(store, backend, args)
             if command == "stats":
                 return _cmd_stats(store, args)
+            if command == "backup":
+                return _cmd_backup(store, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0

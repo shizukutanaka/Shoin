@@ -368,8 +368,10 @@ class Store:
     """Thin typed wrapper around the Shoin SQLite database."""
 
     def __init__(self, path: Path | str = ":memory:") -> None:
+        self._db_file: Path | None = None
         if path != ":memory:":
             db_file = Path(path)
+            self._db_file = db_file
             db_file.parent.mkdir(parents=True, exist_ok=True)
             # Pre-create at 0600 so the DB is born private: it holds the user's
             # documents and chat history, and would otherwise sit umask-readable
@@ -1243,6 +1245,31 @@ class Store:
             "messages": int(row[3]),
             "studio_outputs": int(row[4]),
         }
+
+    def backup_to(self, dest: Path | str) -> None:
+        """Write an online snapshot of this database to dest.
+
+        SQLite's backup API copies page-by-page against the live connection,
+        so the snapshot is consistent even while the DB stays open and
+        writable. dest is created (0600, same privacy as the database) or
+        overwritten; refusing dest == the live DB prevents truncating the
+        source it reads from.
+        """
+        dest_file = Path(dest)
+        if self._db_file is not None and dest_file.resolve() == self._db_file.resolve():
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                "backup destination must differ from the live database path",
+            )
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest_file, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        target = sqlite3.connect(str(dest_file))
+        try:
+            self.conn.backup(target)
+        finally:
+            target.close()
+        os.chmod(dest_file, 0o600)
 
     def db_bytes(self) -> int:
         """Bytes the database occupies on disk (page_count * page_size)."""

@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.635")
+        self.assertEqual(VERSION, "0.2.636")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12510,6 +12510,70 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_cli_backup_writes_consistent_snapshot(self) -> None:
+        """v0.2.636: `shoin backup <dest>` snapshots the live database via
+        SQLite's online backup API — the copy opens cleanly and holds every
+        table's rows, is created 0600 like the DB itself, and refuses to
+        overwrite the live database it reads from (product-review #22)."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "live.sqlite3")
+            dest = os.path.join(d, "backup.sqlite3")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["本文は十分に長いテキスト。"])
+                s.add_note(nb.id, "n1", "b1")
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db, "backup", dest])
+            self.assertEqual(rc, 0)
+            self.assertIn("バックアップを保存しました", out.getvalue())
+            self.assertEqual(os.stat(dest).st_mode & 0o777, 0o600)
+            with Store(dest) as s2:
+                nbs = s2.list_notebooks()
+                self.assertEqual(len(nbs), 1)
+                stats = s2.notebook_stats(nbs[0].id)
+                self.assertEqual(
+                    stats,
+                    {"sources": 1, "chunks": 1, "notes": 1,
+                     "messages": 0, "studio_outputs": 0},
+                )
+            # Overwrite is legal: a second backup refreshes the snapshot.
+            with Store(db) as s:
+                nb2 = s.create_notebook("second")
+                src2 = s.add_source(nb2.id, "txt", "doc2", "mem://d2", "sha2")
+                s.add_chunks(src2.id, ["二冊目の本文。"])
+            self.assertEqual(main(["--db", db, "backup", dest]), 0)
+            with Store(dest) as s3:
+                self.assertEqual(len(s3.list_notebooks()), 2)
+
+    def test_cli_backup_rejects_live_db_path(self) -> None:
+        """Backing up onto the live database path would truncate the file
+        being read — StoreError VALIDATION_FIELD_FORMAT_INVALID, coded rc=1."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "live.sqlite3")
+            with Store(db) as s:
+                s.create_notebook("研究")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = main(["--db", db, "backup", db])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+
     def test_studio_no_citations_does_not_print_separator(self) -> None:
         """_cmd_studio must suppress the '---' separator when no citations are present.
 
@@ -18067,7 +18131,8 @@ class TestResidualGuards(unittest.TestCase):
         baseline = {
             "cli.py": 1,     # Path(args.save).write_text — eval baseline export
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
-            "store.py": 4,   # mkdir + os.open(O_CREAT,0600) + os.chmod x2
+            "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
+                             # (init 4; backup_to dest-parent + fd + mode 3)
         }
         actual: dict[str, int] = {}
         sites: list[str] = []
@@ -18466,7 +18531,8 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 50,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 51,  # +1: _utf8's coded surrogate rejection
+                                      # +1: backup_to's live-path guard
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.635
+## Version History: v0.1.37 → v0.2.636
+
+### v0.2.636 — `shoin backup` (DBオンラインバックアップ)
+
+50長所/50短所監査 (product-review.md) の短所22を解消: 新サブコマンド
+`backup <dest>` が `Store.backup_to()` 経由で SQLite の online
+backup API (`conn.backup()`) を使い、開いたまま書込み中でも一貫した
+ページ単位スナップショットを dest へ作成——ノートブック単位の
+export とは別の「DB丸ごとの保全経路」。dest は DB 本体と同じ
+0600 で作成 (文書・履歴を含むため)・既存ファイルは上書き
+(backup API が置換)・`~` 展開対応。ライブDB自身を dest に指定
+する自己上書きは `VALIDATION_FIELD_FORMAT_INVALID` で coded 拒否
+(コピー元の読取り中ファイルを truncate しない)。失敗は既存
+ハンドラ鎖で coded — OSError→SYSTEM_IO_ERROR・OperationalError→
+SYSTEM_DB_LOCKED。sqlite3.connect は store.py 内部に留保する既存
+ピンに従い、接続生成は CLI から見えない `backup_to()` の中だけ。
 
 ### v0.2.635 — CLI ask のストリーミング応答 (API SSE パリティ)
 

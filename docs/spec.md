@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.635 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.636 時点に同期)
 
 ## プロダクト定義
 
@@ -54,7 +54,7 @@
 | REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可) |
 | REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化(各出力カードから1クリック保存、v0.2.412) |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
-| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/health/stats。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459) |
+| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/health/stats/backup。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459) |
 | REQ-106 | レキシカルリランカ + MMR | 上位候補の多様性確保(冗長チャンク抑制) |
 
 ### P2 (Future / アーキ上の予約)
