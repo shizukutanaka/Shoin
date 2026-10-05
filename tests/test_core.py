@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.652")
+        self.assertEqual(VERSION, "0.2.653")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -15269,7 +15269,12 @@ _EXCEPT_CATALOG = {
     "ingest.py": 4,
     "server.py": 9,
     "cli.py": 2,
-    "pipeline.py": 3,
+    # +1: index_source's metrics wrapper — every escaping failure counts once
+    # as index.fail, then the original exception propagates (v0.2.653).
+    "pipeline.py": 4,
+    # +1: ask()'s metrics wrapper — same count-then-propagate contract for
+    # ask.fail (v0.2.653).
+    "qa.py": 1,
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:212",
@@ -18935,6 +18940,9 @@ class TestResidualGuards(unittest.TestCase):
             ],
             "pipeline.py": [
                 "Exception", "Exception", "Exception",
+                # v0.2.653: index_source's usage-metrics wrapper counts every
+                # escaping failure once (index.fail), then re-raises it.
+                "Exception",
                 # v0.2.648: refresh_all_sources degrades a per-source coded
                 # failure to a 'failed' row — one dead origin must not abort
                 # the batch a cron caller scheduled.
@@ -18942,6 +18950,9 @@ class TestResidualGuards(unittest.TestCase):
                 "LLMError",
             ],
             "qa.py": [
+                # v0.2.653: ask()'s usage-metrics wrapper counts every
+                # escaping failure once (ask.fail), then re-raises it.
+                "Exception",
                 "LLMError", "LLMError", "LLMError",
                 "StoreError", "sqlite3.OperationalError",
             ],
@@ -18971,6 +18982,12 @@ class TestResidualGuards(unittest.TestCase):
                 "OSError",
             ],
             "store.py": [
+                # v0.2.653: bump_metrics is best-effort — a counter write
+                # must never break the operation it counts.
+                "(OSError,sqlite3.Error)",
+                # v0.2.653: usage_metrics skips a hand-corrupted (non-numeric)
+                # metric row instead of failing the whole surface.
+                "(TypeError,ValueError)",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
@@ -19002,6 +19019,9 @@ class TestResidualGuards(unittest.TestCase):
             # break the operation it reports (v0.2.652).
             "log.py": 1,
             "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
+            # store.py +2: bump_metrics' best-effort pass and usage_metrics'
+            # corrupt-row skip (v0.2.653).
+            "store.py": 2,
             "studio.py": 1,
         }
         actual: dict[str, list[str]] = {}
@@ -19130,9 +19150,14 @@ class TestResidualGuards(unittest.TestCase):
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError", "IngestError",
                 "LLMError", "LLMError", "LLMError",
+                # +1 RE-RAISE: the metrics wrapper re-raises after counting
+                # index.fail (v0.2.653).
+                "RE-RAISE",
                 "StoreError",
             ],
-            "qa.py": ["StoreError"],
+            # +1 RE-RAISE: the metrics wrapper re-raises after counting
+            # ask.fail (v0.2.653).
+            "qa.py": ["RE-RAISE", "StoreError"],
             "server.py": [
                 "IngestError", "IngestError", "IngestError",
                 "IngestError", "IngestError",
@@ -21057,3 +21082,132 @@ class TestStructuredLog(unittest.TestCase):
             self.assertIn("degraded", e)
             self.assertIn("ms", e)
             self.assertNotIn("q", e)  # no question text leaked
+
+class TestUsageMetrics(unittest.TestCase):
+    """Store.bump_metrics/usage_metrics — durable content-free usage counters
+    (v0.2.653, weakness #34): settings-row accumulation that survives
+    restarts, index/ask wiring, and the /api/metrics + `shoin stats`
+    surfaces. Counters are product constants and counts — never content."""
+
+    def _tmpdb(self) -> str:
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        return f.name
+
+    def test_bump_accumulates_and_persists(self) -> None:
+        """Deltas add up across calls AND across connections (settings rows),
+        and live under the metric.* namespace."""
+        db = self._tmpdb()
+        with Store(db) as s:
+            s.bump_metrics({"probe.count": 1.0, "probe.ms": 12.5})
+            s.bump_metrics({"probe.count": 2.0, "probe.ms": 7.5})
+            m = s.usage_metrics()
+            self.assertEqual(m["probe.count"], 3.0)
+            self.assertEqual(m["probe.ms"], 20.0)
+            self.assertEqual(s.get_setting("metric.probe.count"), "3.0")
+            # nothing escapes the namespace
+            self.assertIsNone(s.get_setting("probe.count"))
+        with Store(db) as s2:
+            self.assertEqual(s2.usage_metrics()["probe.count"], 3.0)
+
+    def test_bump_never_breaks_the_caller(self) -> None:
+        """A metrics write must never break the operation it counts —
+        on a broken connection the bump is swallowed, not raised."""
+        with make_store() as s:
+            s.conn.close()
+            s.bump_metrics({"x": 1.0})
+
+    def test_index_success_and_failure_counters(self) -> None:
+        """index_source: ok + ms + embed_skip on success; index.fail once on
+        any raised failure (here: unreadable file → IngestError)."""
+        import tempfile
+
+        from shoin.pipeline import index_source
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb = s.create_notebook("nb")
+            p = tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", delete=False, encoding="utf-8"
+            )
+            p.write("本文です。二度目の文。")
+            p.close()
+            res = index_source(s, nb.id, p.name)
+            m = s.usage_metrics()
+            self.assertEqual(m["index.ok"], 1.0)
+            self.assertGreaterEqual(m["index.ms"], 0.0)
+            # no LLM passed → _NoEmbed → every chunk counted as embed-skipped
+            self.assertEqual(m["index.embed_skip"], float(res.n_chunks))
+            with self.assertRaises(IngestError) as cm:
+                index_source(s, nb.id, "/nonexistent/definitely-missing.txt")
+            self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+            m2 = s.usage_metrics()
+            self.assertEqual(m2["index.fail"], 1.0)
+            self.assertEqual(m2["index.ok"], 1.0)  # fail does not touch ok
+
+    def test_ask_counters(self) -> None:
+        """ask(): count + nohit + ms on a normal answer; degraded on LLM
+        failure; ask.fail only when the call escapes with an exception."""
+        from shoin.qa import ask
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+            ans = ask(s, FakeLLM(), nb_id, "天気", persist=False)
+            m = s.usage_metrics()
+            self.assertEqual(m["ask.count"], 1.0)
+            self.assertEqual(m["ask.nohit"], 0.0 if ans.hits else 1.0)
+            self.assertEqual(m["ask.degraded"], 0.0)
+            self.assertIn("ask.ms", m)
+            self.assertNotIn("ask.fail", m)
+            ask(s, FakeLLM(chat_error=True), nb_id, "天気", persist=False)
+            m2 = s.usage_metrics()
+            self.assertEqual(m2["ask.count"], 2.0)
+            self.assertEqual(m2["ask.degraded"], 1.0)
+            # escaping exception (here: DB lock inside the call) → ask.fail
+            fake_hit = Hit(chunk_id=1, source_id=1, text="t", score=0.9)
+            with patch("shoin.qa.retrieve", return_value=[fake_hit]):
+                with patch(
+                    "shoin.qa.build_context",
+                    side_effect=sqlite3.OperationalError("database is locked"),
+                ):
+                    with self.assertRaises(StoreError) as cm:
+                        ask(s, FakeLLM(), nb_id, "天気", persist=False)
+                    self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+            self.assertEqual(s.usage_metrics()["ask.fail"], 1.0)
+
+    def test_cli_stats_shows_metrics_block(self) -> None:
+        """`shoin stats` appends the usage block once counters exist —
+        asks+indexes performed through the CLI path itself."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "ask", str(nb_id), "天気"], llm=FakeLLM()), 0
+            )
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "stats", str(nb_id)]), 0)
+        body = out2.getvalue()
+        self.assertIn("利用メトリクス:", body)
+        self.assertIn("ask: 1 回", body)
+        self.assertIn("index: 0 回", body)
+
+    def test_usage_metrics_skips_corrupt_rows(self) -> None:
+        """A hand-edited non-numeric metric.* row is skipped, not fatal."""
+        with make_store() as s:
+            s.set_setting("metric.bogus", "not-a-number")
+            s.bump_metrics({"good": 2.0})
+            m = s.usage_metrics()
+            self.assertEqual(m, {"good": 2.0})

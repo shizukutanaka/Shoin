@@ -173,7 +173,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 31 | ~~**印刷スタイル無し**~~ → **解消済み** (v0.2.640: `@media print`でchrome畳込み+3ペイン展開+強制ライト配色。`.msg`はpage-break-inside:avoid) |
 | 32 | ~~**ブランディング/テーマ変更機構無し**~~ → **解消済み** (v0.2.643: `GET /api/theme.css`が`~/.config/shoin/theme.css`をverbatim配信——パレットは`:root`変数化済みのため後勝ちlinkで完結。SHOIN_THEME_CSSでパス変更可・CSP 'self'許可) |
 | 33 | **バイナリ配布経路なし** | PyPI とは別に、brew/PyInstaller系の単一実行形式が無い。Python環境前提が参入障壁 |
-| 34 | **利用メトリクス無し** | プライバシー原則と引き換えに、実利用での失敗率・レイテンシ分布を観測する術が無い(ローカルログも任意) |
+| 34 | ~~**利用メトリクス無し**~~ → **解消済み** (v0.2.653: `Store.bump_metrics`がsettings表へatomic加算(本文非含有・再起動横断)、`GET /api/metrics`/`shoin stats`利用ブロックへ露出。index.ok/fail/ms/embed_skip・ask.count/nohit/degraded/fail/ms。SHOIN_LOG_JSONと対——イベント行vs永続合計) |
 | 35 | ~~**LLMエンドポイントの認証非対応**~~ → **解消済み** (v0.2.644: `SHOIN_LLM_API_KEY`設定時に全リクエストへ`Authorization: Bearer`付与——未設定時はヘッダ自体を送らない) |
 | 36 | ~~**LLM呼出しにリトライ/バックオフ無し**~~ → **解消済み** (v0.2.639: `_post`が輸送系失敗(TIMEOUT/SERVICE_UNAVAILABLE)のみ指数バックオフで再試行。`SHOIN_LLM_RETRIES`既定2・0-5。chat_stream/availableは対象外——送出済みdeltaの複写防止) |
 | 37 | ~~**チャンクの手動編集不可**~~ → **解消済み** (v0.2.647: `PATCH /api/chunks/{id}`/`shoin chunk edit` で in-place 書換え——chunks_au trigger が FTS を同TX再索引・embedding は NULL 降格で reindex 再構築・questions cache 手動evict) |

@@ -184,6 +184,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.messages": "メッセージ: {n}",
         "stats.studio_outputs": "Studio出力: {n}",
         "stats.db_bytes": "DBサイズ: {n}",
+        "stats.metrics_header": "利用メトリクス:",
+        "stats.metric_ask": "  ask: {n} 回 (degraded {d}・no-hit {z}・fail {f}・平均 {ms}ms)",
+        "stats.metric_index": "  index: {n} 回 (fail {f}・embed-skip {e}・平均 {ms}ms)",
         "backup.done": "バックアップを保存しました: {path}",
     },
     "en": {
@@ -277,6 +280,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.messages": "Messages: {n}",
         "stats.studio_outputs": "Studio outputs: {n}",
         "stats.db_bytes": "DB size: {n}",
+        "stats.metrics_header": "Usage metrics:",
+        "stats.metric_ask": "  ask: {n} calls (degraded {d}, no-hit {z}, failed {f}, avg {ms}ms)",
+        "stats.metric_index": "  index: {n} calls (failed {f}, embed-skipped {e}, avg {ms}ms)",
         "backup.done": "Backup written: {path}",
     },
 }
@@ -581,6 +587,32 @@ def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
     print(_t("stats.messages", n=str(s["messages"])))
     print(_t("stats.studio_outputs", n=str(s["studio_outputs"])))
     print(_t("stats.db_bytes", n=_human_bytes(store.db_bytes())))
+    m = store.usage_metrics()
+    if m:
+        # Durable content-free counters (see Store.bump_metrics): totals since
+        # first use, not this session — the in-product half of SHOIN_LOG_JSON.
+        print(_t("stats.metrics_header"))
+        asks = int(m.get("ask.count", 0.0))
+        print(
+            _t(
+                "stats.metric_ask",
+                n=str(asks),
+                d=str(int(m.get("ask.degraded", 0.0))),
+                z=str(int(m.get("ask.nohit", 0.0))),
+                f=str(int(m.get("ask.fail", 0.0))),
+                ms=str(round(m.get("ask.ms", 0.0) / asks)) if asks else "0",
+            )
+        )
+        idx = int(m.get("index.ok", 0.0))
+        print(
+            _t(
+                "stats.metric_index",
+                n=str(idx),
+                f=str(int(m.get("index.fail", 0.0))),
+                e=str(int(m.get("index.embed_skip", 0.0))),
+                ms=str(round(m.get("index.ms", 0.0) / idx)) if idx else "0",
+            )
+        )
     return 0
 
 

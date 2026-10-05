@@ -732,79 +732,95 @@ def ask(
     cannot stream) the single-shot chat() path runs byte-identically.
     """
     t0 = time.monotonic()
-    history = history_messages(store, notebook_id)  # before persisting this turn
-    retrieval_q = expand_query(question, history)
-    qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
-    hits = retrieve_for_question(
-        store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
-    )
-    if persist:
-        store.add_message(notebook_id, "user", question, "{}")
+    try:
+        history = history_messages(store, notebook_id)  # before persisting this turn
+        retrieval_q = expand_query(question, history)
+        qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
+        hits = retrieve_for_question(
+            store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
+        )
+        if persist:
+            store.add_message(notebook_id, "user", question, "{}")
 
-    if not hits:
-        no_hit = _t("no_hit")
-        answer = Answer(no_hit, [], make_report(no_hit, []))
-    else:
-        try:
-            context = build_context(store, hits)
-        except sqlite3.OperationalError as exc:
-            raise StoreError(
-                "SYSTEM_DB_LOCKED",
-                f"database locked during context build: {exc}",
-            ) from exc
-        try:
-            messages = build_messages(question, context, history)
-            stream = getattr(llm, "chat_stream", None)
-            if on_delta is not None and callable(stream):
-                parts: list[str] = []
-                for delta in stream(messages):
-                    parts.append(delta)
-                    on_delta(delta)
-                text = "".join(parts)
-            else:
-                text = llm.chat(messages)
-            answer = Answer(
-                text,
-                hits,
-                make_report(
+        if not hits:
+            no_hit = _t("no_hit")
+            answer = Answer(no_hit, [], make_report(no_hit, []))
+        else:
+            try:
+                context = build_context(store, hits)
+            except sqlite3.OperationalError as exc:
+                raise StoreError(
+                    "SYSTEM_DB_LOCKED",
+                    f"database locked during context build: {exc}",
+                ) from exc
+            try:
+                messages = build_messages(question, context, history)
+                stream = getattr(llm, "chat_stream", None)
+                if on_delta is not None and callable(stream):
+                    parts: list[str] = []
+                    for delta in stream(messages):
+                        parts.append(delta)
+                        on_delta(delta)
+                    text = "".join(parts)
+                else:
+                    text = llm.chat(messages)
+                answer = Answer(
+                    text,
+                    hits,
+                    make_report(
+                        text,
+                        context.source_titles,
+                        context.source_ids,
+                        context.source_bodies,
+                        context.source_contexts,
+                        context.source_chunk_ids,
+                        context.source_detail,
+                        # Prior assistant text lets degenerate_spans catch a
+                        # cross-turn parrot loop (same paragraph re-emitted every
+                        # turn) that a per-message check structurally cannot see.
+                        history="\n".join(
+                            m["content"] for m in history if m["role"] == "assistant"
+                        ),
+                    ),
+                )
+                # finish_reason "length" means the answer hit MAX_TOKENS mid-
+                # generation — the text is real but silently clipped. Flag it so
+                # every surface can warn instead of presenting it as complete.
+                # getattr-guarded: ChatBackend stubs do not carry the attribute.
+                if getattr(llm, "last_finish_reason", None) == "length":
+                    answer.report["truncated"] = True
+            except LLMError:
+                text = _degraded_text(hits)
+                report = make_report(
                     text,
                     context.source_titles,
                     context.source_ids,
                     context.source_bodies,
                     context.source_contexts,
-                    context.source_chunk_ids,
-                    context.source_detail,
-                    # Prior assistant text lets degenerate_spans catch a
-                    # cross-turn parrot loop (same paragraph re-emitted every
-                    # turn) that a per-message check structurally cannot see.
-                    history="\n".join(
-                        m["content"] for m in history if m["role"] == "assistant"
-                    ),
-                ),
-            )
-            # finish_reason "length" means the answer hit MAX_TOKENS mid-
-            # generation — the text is real but silently clipped. Flag it so
-            # every surface can warn instead of presenting it as complete.
-            # getattr-guarded: ChatBackend stubs do not carry the attribute.
-            if getattr(llm, "last_finish_reason", None) == "length":
-                answer.report["truncated"] = True
-        except LLMError:
-            text = _degraded_text(hits)
-            report = make_report(
-                text,
-                context.source_titles,
-                context.source_ids,
-                context.source_bodies,
-                context.source_contexts,
-                    context.source_chunk_ids,
-                    context.source_detail,
-                check_uncited=False,
-            )
-            report["degraded"] = True
-            answer = Answer(text, hits, report, degraded=True)
+                        context.source_chunk_ids,
+                        context.source_detail,
+                    check_uncited=False,
+                )
+                report["degraded"] = True
+                answer = Answer(text, hits, report, degraded=True)
 
-    if persist:
-        store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
+        if persist:
+            store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
+    except Exception:
+        # Catch-all by contract, not by accident: every failure escaping
+        # ask() — coded or not — is a real usage failure worth one counter
+        # tick, then the original exception propagates unchanged.
+        store.bump_metrics({"ask.fail": 1.0})
+        raise
+    ms = round((time.monotonic() - t0) * 1000)
+    store.bump_metrics(
+        {
+            "ask.count": 1.0,
+            "ask.ms": float(ms),
+            "ask.nohit": 0.0 if answer.hits else 1.0,
+            "ask.degraded": 1.0 if answer.degraded else 0.0,
+        }
+    )
     emit(
         "ask_completed",
         nb=notebook_id,
@@ -812,6 +828,6 @@ def ask(
         hits=len(answer.hits),
         ans_len=len(answer.text),
         degraded=answer.degraded,
-        ms=round((time.monotonic() - t0) * 1000),
+        ms=ms,
     )
     return answer

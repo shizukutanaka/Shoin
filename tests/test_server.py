@@ -1526,6 +1526,21 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["multi_query"])
 
+    def test_metrics_endpoint_returns_counter_dict(self) -> None:
+        """GET /api/metrics exposes Store.usage_metrics() (v0.2.653) — a
+        dict of floats only: counts and millisecond sums, never content."""
+        status, body = self._json("GET", "/api/metrics")
+        self.assertEqual(status, 200)
+        self.assertIn("metrics", body)
+        self.assertIsInstance(body["metrics"], dict)
+        self.assertTrue(
+            all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                for v in body["metrics"].values()
+            ),
+            body["metrics"],
+        )
+
     def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
         """GET /api/theme.css (v0.2.643): the user-theme hook serves
         SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.

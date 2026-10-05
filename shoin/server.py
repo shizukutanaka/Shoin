@@ -425,6 +425,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/$", "ui"),
         ("GET", r"^/api/theme\.css$", "theme_css"),
         ("GET", r"^/api/health$", "health"),
+        ("GET", r"^/api/metrics$", "metrics"),
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
@@ -606,6 +607,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "multi_query": multi_query_enabled(),
             }
         )
+
+    def _h_metrics(self) -> None:
+        # Content-free usage counters (counts / millisecond sums written by
+        # Store.bump_metrics) — the in-product half of the SHOIN_LOG_JSON
+        # observability pair: durable totals vs per-event lines.
+        with Store(self.db) as store:
+            self._json({"metrics": store.usage_metrics()})
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:

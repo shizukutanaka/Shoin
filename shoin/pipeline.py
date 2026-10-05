@@ -207,36 +207,57 @@ def index_source(
     transaction — no second update_source_title commit needed.
     """
     t0 = time.monotonic()
-    if target.startswith(("http://", "https://")):
-        extracted = extract_url(target)
-    else:
-        extracted = extract_file(target)
-    # Guard before add_source so that zero-text documents don't leave an orphaned
-    # source row (no chunks → permanently invisible to all retrieval queries).
-    pairs = split_text_with_context(
-        extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
-    )
-    contexts = [c for c, _ in pairs]
-    texts = [t for _, t in pairs]
-    if not texts:
-        raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
-    # spec.md STRIDE DoS control: cap total chunks per notebook. Checked before
-    # add_source so an over-limit ingest never commits an orphaned source row.
-    existing_chunks = store.counts(notebook_id)["chunks"]
-    if existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
-        raise IngestError(
-            "INGEST_NOTEBOOK_FULL",
-            f"notebook chunk limit exceeded: {existing_chunks} existing + {len(texts)} new"
-            f" > {MAX_CHUNKS_PER_NOTEBOOK}",
+    try:
+        if target.startswith(("http://", "https://")):
+            extracted = extract_url(target)
+        else:
+            extracted = extract_file(target)
+        # Guard before add_source so that zero-text documents don't leave an
+        # orphaned source row (no chunks → permanently invisible to all
+        # retrieval queries).
+        pairs = split_text_with_context(
+            extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
         )
-    title_used = title or extracted.title
-    source = store.add_source(
-        notebook_id, extracted.kind, title_used, extracted.origin, extracted.sha256
+        contexts = [c for c, _ in pairs]
+        texts = [t for _, t in pairs]
+        if not texts:
+            raise IngestError(
+                "INGEST_EMPTY", "no text content could be extracted from source"
+            )
+        # spec.md STRIDE DoS control: cap total chunks per notebook. Checked
+        # before add_source so an over-limit ingest never commits an orphaned
+        # source row.
+        existing_chunks = store.counts(notebook_id)["chunks"]
+        if existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+            raise IngestError(
+                "INGEST_NOTEBOOK_FULL",
+                f"notebook chunk limit exceeded: {existing_chunks} existing +"
+                f" {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
+            )
+        title_used = title or extracted.title
+        source = store.add_source(
+            notebook_id, extracted.kind, title_used, extracted.origin, extracted.sha256
+        )
+        full_contexts = [_chunk_context(source.title, c) for c in contexts]
+        chunk_ids = store.add_chunks(source.id, texts, full_contexts)
+        embed_texts = [
+            _embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)
+        ]
+        n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+    except Exception:
+        # Catch-all by contract, not by accident: every ingest/index failure —
+        # coded or not — is a real usage failure worth one counter tick, then
+        # the original exception propagates unchanged.
+        store.bump_metrics({"index.fail": 1.0})
+        raise
+    ms = round((time.monotonic() - t0) * 1000)
+    store.bump_metrics(
+        {
+            "index.ok": 1.0,
+            "index.ms": float(ms),
+            "index.embed_skip": float(len(chunk_ids) - n_embedded),
+        }
     )
-    full_contexts = [_chunk_context(source.title, c) for c in contexts]
-    chunk_ids = store.add_chunks(source.id, texts, full_contexts)
-    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
-    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
     emit(
         "source_indexed",
         nb=notebook_id,
@@ -245,7 +266,7 @@ def index_source(
         chunks=len(chunk_ids),
         embedded=n_embedded,
         pages_failed=extracted.pages_failed,
-        ms=round((time.monotonic() - t0) * 1000),
+        ms=ms,
     )
     return IndexResult(
         source, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed

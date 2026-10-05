@@ -29,7 +29,34 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.652
+## Version History: v0.1.37 → v0.2.653
+
+### v0.2.653 — 利用メトリクス (bump_metrics + GET /api/metrics)
+
+短所34を解消: 実利用の失敗率・レイテンシを観測する製品内経路が無かった
+(SHOIN_LOG_JSONはイベント行のみ・再起動で失われる)。`Store.bump_metrics`
+が`metric.*`キーのカウンタをsettings表へ`INSERT..ON CONFLICT DO UPDATE
+SET value=CAST(CAST(value AS REAL)+? AS TEXT)`の単一文atomic加算で
+永続化 — SELECT-then-UPDATEのread-modify-write競合で増分を失う経路が
+構造的に存在しない。`usage_metrics()`は全`metric.*`行をname->floatで
+返し、手編集の非数値行はスキップして面全体を守る。配線は2収束点:
+`pipeline.index_source`成功時`index.ok`+`index.ms`+`index.embed_skip`、
+あらゆる例外脱出で`index.fail`を1回加算後に元例外を再送出; `qa.ask`
+完了時`ask.count`+`ask.ms`+`ask.nohit`+`ask.degraded`、例外脱出で
+`ask.fail`。計測は`time.monotonic()`期間(タイムスタンプでない)。
+**プライバシー境界**: キー名は製品定数・値はカウント/ミリ秒のみ —
+`_PRIVATE_FIELDS`と同一境界で本文は一切書かれない。bump_metricsは
+best-effort契約: カウンタ書込みが計測対象の操作自体を壊してはならず
+DB系失敗は嚥下。surfaceは`GET /api/metrics`(`{"metrics":{…}}`)と
+`shoin stats`末尾の利用ブロック(回数・degraded/no-hit/fail・平均ms、
+カウンタ存在時のみ表示)のCLI/Web両面=REQ-103パリティ。行動ピン
+2クラス: TestUsageMetrics 6件(累積+接続横断永続・壊れたconn嚥下・
+index成功/失敗・ask count/nohit/degraded/fail・CLI stats表示・
+非数値行スキップ)+ServerTest 1件(/api/metrics形状)。カタログ追随:
+_EXCEPT_CATALOG pipeline+1/qa+1・except-inventory +3・trivial-body
+store+2・raise-inventory RE-RAISE×2・spec広域捕捉18→20サイト。
+
+1347テスト全通過・カバレッジ99%・ruff/mypy --strict クリーン・secret scan 0件。
 
 ### v0.2.652 — 構造化イベントログ (SHOIN_LOG_JSON)
 

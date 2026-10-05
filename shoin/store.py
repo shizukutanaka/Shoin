@@ -36,6 +36,11 @@ STUDIO_KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
 # typo'd literal silently degrades exported citations and the source list.
 SOURCE_KINDS = ("txt", "md", "html", "pdf", "url")
 
+# Settings-table key prefix for the usage counters written by bump_metrics —
+# the prefix is what usage_metrics scans for, and it keeps product counters
+# out of any future user-facing settings namespace.
+_METRIC_PREFIX = "metric."
+
 
 def _retry_on_lock(fn: Callable[[], _T], attempts: int = 5) -> _T:
     """Retry `fn` when SQLite reports 'database is locked'.
@@ -1477,3 +1482,52 @@ class Store:
             (key, value),
         )
         self.conn.commit()
+
+    # --- usage metrics ------------------------------------------------------
+
+    def bump_metrics(self, deltas: dict[str, float]) -> None:
+        """Add each delta to a named usage counter (durable, content-free).
+
+        Counters are settings rows under `metric.*` keys — they survive
+        restarts and need no schema migration. Each update is one
+        INSERT..ON CONFLICT statement, so the read-modify-write happens
+        inside SQLite's own expression and two writers on separate
+        connections cannot lose increments the way a SELECT-then-UPDATE
+        pair would. Names are the product's own constants and values are
+        counts/millisecond sums — user content never lands here (the same
+        privacy boundary as shoin/log.py's _PRIVATE_FIELDS).
+
+        Best-effort by contract: a counter write must never break the
+        operation it counts, so database-level failures are swallowed.
+        """
+        if not deltas:
+            return
+        try:
+            with self.conn:
+                for name, delta in deltas.items():
+                    self.conn.execute(
+                        "INSERT INTO settings(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET "
+                        "value = CAST(CAST(value AS REAL) + ? AS TEXT)",
+                        (_METRIC_PREFIX + name, repr(float(delta)), float(delta)),
+                    )
+        except (OSError, sqlite3.Error):
+            pass
+
+    def usage_metrics(self) -> dict[str, float]:
+        """Every `metric.*` counter as name -> value.
+
+        A hand-corrupted settings row (non-numeric text) is skipped rather
+        than breaking the metrics surface that reads it.
+        """
+        rows = self.conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?",
+            (_METRIC_PREFIX + "%",),
+        ).fetchall()
+        out: dict[str, float] = {}
+        for r in rows:
+            try:
+                out[str(r["key"])[len(_METRIC_PREFIX):]] = float(r["value"])
+            except (TypeError, ValueError):
+                continue
+        return out
