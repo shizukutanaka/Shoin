@@ -297,6 +297,14 @@ def _build_parser() -> argparse.ArgumentParser:
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
     askp.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
+    askp.add_argument(
+        "--source",
+        dest="source_ids",
+        action="append",
+        type=_pos_int,
+        metavar="ID",
+        help="このソースIDのみを検索対象にする(複数回指定可)",
+    )
 
     st = sub.add_parser("studio", help="Studio出力生成")
     st.add_argument("notebook_id", type=int)
@@ -670,7 +678,14 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"question too long (max {MAX_QUESTION_LEN} characters)",
         )
-    answer = ask(store, llm, int(args.notebook_id), question, k=int(args.k))
+    answer = ask(
+        store,
+        llm,
+        int(args.notebook_id),
+        question,
+        k=int(args.k),
+        source_ids=args.source_ids,
+    )
     print(answer.text)
     # A non-degraded answer can still legitimately carry an empty report — e.g.
     # the model correctly follows the system prompt's "say so explicitly" rule

@@ -29,7 +29,23 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.630
+## Version History: v0.1.37 → v0.2.631
+
+### v0.2.631 — 質問のソーススコープ (source_ids) を全経路へ
+
+50長所/50短所監査 (product-review.md) の第一原理分析が特定した最大の
+未実装機能を実装: NotebookLM の「このソースだけに聞く」操作。
+`source_ids` を `bm25_search`/`vector_search`/`bm25_prf_search`/
+`retrieve`/`retrieve_multi` → `qa.retrieve_for_question`/`qa.ask` →
+API (`POST /ask` の任意 `source_ids` フィールド) → CLI (`ask --source ID`
+複数回指定可) へ縦貫。SQL 側は `AND s.id IN (?,…)` を全パス (FTS5・
+否定オンリーpool・LIKE fallback・vector row scan) にバインド変数で
+注入 — 未指定/空配列は無スコープで従来とバイト同一 SQL。API 検証は
+SSE ヘッダ送出前に実施: 非 list・非正整数・bool・i64 超は coded 400
+(FIELD_FORMAT_INVALID / INTEGER_OVERFLOW)、未所属ソースは
+SOURCE_NOT_FOUND 404 — 他ノートブックのソースIDも死んだIDと同じ
+404 扱いで存在性を漏洩しない。UI のソース選択は後続タスクとして
+台帳に記録 (API 能力先行の先例どおり)。
 
 ### v0.2.630 — vector_search の corrupt embedding BLOB を「信号なし」へ降格
 

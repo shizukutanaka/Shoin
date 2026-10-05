@@ -594,6 +594,70 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
 
+    def test_ask_source_ids_validation(self) -> None:
+        """v0.2.631: the optional source_ids field on /ask scopes retrieval to
+        the named sources — malformed values must be a 400/404 JSON envelope
+        BEFORE the SSE stream opens, and a foreign-notebook source id must
+        404 exactly like a dead one."""
+        _, nb = self._json("POST", "/api/notebooks", {"name": "スコープ"})
+        nb_id = nb["id"]
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            "和紙の原料は楮である。".encode(),
+            {"X-Filename": urllib.parse.quote("原料.txt")},
+        )
+        self.assertEqual(status, 201)
+        src_id = json.loads(raw)["source"]["id"]
+
+        def ask(payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+            return self._json("POST", f"/api/notebooks/{nb_id}/ask", payload)
+
+        for bad in ("5", "src", [True], [0], [-3], [1.5], ["1"]):
+            status, err = ask({"question": "楮は？", "source_ids": bad})
+            self.assertEqual(status, 400, f"{bad!r} -> {status}")
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"  # type: ignore[index]
+            )
+        status, err = ask({"question": "楮は？", "source_ids": [2**63]})
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            err["error"]["code"], "VALIDATION_INTEGER_OVERFLOW"  # type: ignore[index]
+        )
+        status, err = ask({"question": "楮は？", "source_ids": [99999]})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
+
+        # A source living in another notebook 404s exactly like a dead id —
+        # answering scoped to foreign content would both leak its existence
+        # and ground the reply in sources the user never attached here.
+        _, nb2 = self._json("POST", "/api/notebooks", {"name": "他ノート"})
+        status, _, raw2 = self._req(
+            "POST",
+            f"/api/notebooks/{nb2['id']}/upload",
+            b"foreign content.",
+            {"X-Filename": urllib.parse.quote("他.txt")},
+        )
+        self.assertEqual(status, 201)
+        foreign_id = json.loads(raw2)["source"]["id"]
+        status, err = ask({"question": "楮は？", "source_ids": [foreign_id]})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
+
+        # A valid scope streams normally and cites only the selected source.
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/ask",
+            json.dumps({"question": "楮は？", "source_ids": [src_id]}).encode(),
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        events = parse_sse(raw.decode())
+        self.assertEqual(events[-1][0], "done")
+        meta = next(d for e, d in events if e == "meta")
+        self.assertTrue(meta["sources"])
+        self.assertTrue(all(s["source_id"] == src_id for s in meta["sources"]))
+
     def test_questions_cached_until_sources_change(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "提案キャッシュ"})
         nb_id = nb["id"]

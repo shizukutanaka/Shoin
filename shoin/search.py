@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import array
 import heapq
+import json
 import math
 import operator
 import os
@@ -660,10 +661,32 @@ def _fallback_needles(query: str) -> list[str]:
 # --- candidate generation -------------------------------------------------
 
 
-def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
+def _source_scope_params(source_ids: list[int] | None) -> list[str]:
+    """Bind values for the scope clause embedded in every retrieval query:
+    `` AND (json_array_length(?) = 0 OR s.id IN (SELECT value FROM json_each(?)))``
+
+    ``source_ids`` is serialized once to a JSON array and bound twice — the
+    empty array short-circuits on ``json_array_length = 0`` (absent/empty
+    scope means the whole notebook), otherwise the ``json_each`` subquery
+    restricts hits to the named source ids.  Ids travel as bound JSON
+    parameters, never interpolated into SQL text, so the fragment adds no
+    injection surface and stays constant across query shapes.
+    """
+    ids_json = json.dumps([int(i) for i in source_ids or []])
+    return [ids_json, ids_json]
+
+
+def bm25_search(
+    store: Store,
+    notebook_id: int,
+    query: str,
+    k: int,
+    source_ids: list[int] | None = None,
+) -> list[Hit]:
     # Strip negated tokens before building FTS5/LIKE queries.
     negs = neg_terms(query)
     clean_query = strip_neg_terms(query) if negs else query
+    scope_params = _source_scope_params(source_ids)
 
     expr = fts_query(clean_query)
     fts_hits: list[Hit] = []
@@ -674,8 +697,10 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
             " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
+            " AND (json_array_length(?) = 0"
+            " OR s.id IN (SELECT value FROM json_each(?)))"
             " ORDER BY rank, c.id LIMIT ?",
-            (expr, notebook_id, k),
+            (expr, notebook_id, *scope_params, k),
         ).fetchall()
         fts_hits.extend(
             Hit(
@@ -740,8 +765,11 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         rows = store.conn.execute(
             "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
             " JOIN sources s ON s.id = c.source_id"
-            " WHERE s.notebook_id = ? ORDER BY c.id LIMIT ?",
-            (notebook_id, max(k * 10, 2000)),
+            " WHERE s.notebook_id = ?"
+            " AND (json_array_length(?) = 0"
+            " OR s.id IN (SELECT value FROM json_each(?)))"
+            " ORDER BY c.id LIMIT ?",
+            (notebook_id, *scope_params, max(k * 10, 2000)),
         ).fetchall()
         pool = [
             Hit(r["id"], r["source_id"], str(r["text"]), 0.0,
@@ -779,9 +807,11 @@ def bm25_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]
         f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
         f" WHERE s.notebook_id = ? AND ({conditions})"
+        " AND (json_array_length(?) = 0"
+        " OR s.id IN (SELECT value FROM json_each(?)))"
         f" ORDER BY {score_expr} DESC, c.id"
         f" LIMIT ?",
-        [notebook_id, *like_params, *score_params, like_cap],
+        [notebook_id, *like_params, *scope_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []
     for r in rows:
@@ -1002,7 +1032,13 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
     return cands[:PRF_TERMS]
 
 
-def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[Hit]:
+def bm25_prf_search(
+    store: Store,
+    notebook_id: int,
+    query: str,
+    k: int,
+    source_ids: list[int] | None = None,
+) -> list[Hit]:
     """bm25_search plus one pseudo-relevance-feedback pass (see _prf_terms).
 
     The expanded second pass runs only when the first left the result list
@@ -1014,13 +1050,13 @@ def bm25_prf_search(store: Store, notebook_id: int, query: str, k: int) -> list[
     list is re-sorted by bm25 so an expansion-surfaced chunk with genuinely
     higher term density still earns its rank.
     """
-    hits = bm25_search(store, notebook_id, query, k)
+    hits = bm25_search(store, notebook_id, query, k, source_ids)
     if len(hits) >= k:
         return hits
     terms = _prf_terms(hits, query)
     if not terms:
         return hits
-    extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k)
+    extra = bm25_search(store, notebook_id, f"{query} {' '.join(terms)}", k, source_ids)
     seen = {h.chunk_id for h in hits}
     # Expansion-surfaced chunks match a SYSTEM-proposed term, not the user's
     # vocabulary — detail["exp"] lets _tail_cut tell them apart from hits that
@@ -1092,7 +1128,11 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 def vector_search(
-    store: Store, notebook_id: int, query_vec: list[float] | None, k: int
+    store: Store,
+    notebook_id: int,
+    query_vec: list[float] | None,
+    k: int,
+    source_ids: list[int] | None = None,
 ) -> list[Hit]:
     if not query_vec:
         return []
@@ -1103,11 +1143,14 @@ def vector_search(
     # 4-8 GB total while also hosting the LLM. heapq.nlargest keeps k items and is
     # defined as sorted(..., key=..., reverse=True)[:k], so ties still resolve in
     # row order and the returned list is identical to the previous sort-then-slice.
+    scope_params = _source_scope_params(source_ids)
     cur = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"
-        " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL",
-        (notebook_id,),
+        " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL"
+        " AND (json_array_length(?) = 0"
+        " OR s.id IN (SELECT value FROM json_each(?)))",
+        (notebook_id, *scope_params),
     )
     # Hoisted out of the per-chunk loop: the query's norm is the same for every
     # row, and unpacking straight into an array('f') avoids building a 768-float
@@ -1559,6 +1602,7 @@ def retrieve(
     query: str,
     query_vec: list[float] | None = None,
     k: int = TOP_K,
+    source_ids: list[int] | None = None,
 ) -> list[Hit]:
     """Full pipeline: candidates -> RRF fusion -> lexical rerank -> MMR.
 
@@ -1578,8 +1622,12 @@ def retrieve(
     # bm25_prf_search, not bare bm25_search: the pseudo-relevance-feedback pass
     # costs nothing when the first pass already fills the pool, and adds recall
     # for vocabulary-mismatch queries when it does not.
-    bm25_hits = bm25_prf_search(store, notebook_id, query, pool)
-    vec_hits = vector_search(store, notebook_id, query_vec, pool) if query_vec else []
+    bm25_hits = bm25_prf_search(store, notebook_id, query, pool, source_ids)
+    vec_hits = (
+        vector_search(store, notebook_id, query_vec, pool, source_ids)
+        if query_vec
+        else []
+    )
     # bm25_search() already excludes negated-term hits internally; vector_search()
     # has no query text to do the same, so filter it here. This must happen BEFORE
     # fusion/MMR (not after, on the final k results): MMR spends its k-selection
@@ -1617,6 +1665,7 @@ def retrieve_multi(
     queries: list[str],
     query_vecs: list[list[float] | None] | None = None,
     k: int = TOP_K,
+    source_ids: list[int] | None = None,
 ) -> list[Hit]:
     """Multi-query RAG-Fusion retrieval: fuse ranked lists from several phrasings.
 
@@ -1643,7 +1692,7 @@ def retrieve_multi(
         q_search = q if i == 0 else strip_neg_terms(q)
         # Same PRF-wrapped search as retrieve(): every phrasing expands on its
         # own feedback evidence — original and rewrite queries alike.
-        bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool)
+        bm25_hits = bm25_prf_search(store, notebook_id, q_search, pool, source_ids)
         if i > 0:
             # A hit surfaced only by a rewrite's vocabulary still matched a
             # retrieval term — mark it so _tail_cut's term-free test (built on
@@ -1658,7 +1707,7 @@ def retrieve_multi(
         lists.append(bm25_hits)
         total_bm25 += len(bm25_hits)
         if qv:
-            vec_hits = vector_search(store, notebook_id, qv, pool)
+            vec_hits = vector_search(store, notebook_id, qv, pool, source_ids)
             if i > 0:
                 # A rewrite's vector phrasing is system-proposed just like its
                 # BM25 vocabulary — mark the lane so _tail_cut does not read

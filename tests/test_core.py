@@ -42,6 +42,7 @@ from shoin.search import (
     neg_terms,
     query_terms,
     retrieve,
+    retrieve_multi,
     rrf_fuse,
     strip_neg_terms,
     term_variants,
@@ -107,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.630")
+        self.assertEqual(VERSION, "0.2.631")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4591,6 +4592,79 @@ class TestSearch(unittest.TestCase):
             hits = retrieve(s, nb_id, "書斎とは", query_vec=[1.0, 0.0], k=8)
             self.assertTrue(hits)
             self.assertNotIn(chunk.id, [h.chunk_id for h in hits])
+
+    def test_source_ids_scope_bm25_search(self) -> None:
+        """v0.2.631: source_ids restricts the BM25 leg to the named sources —
+        the same AND s.id IN (...) clause must apply on every SQL path the
+        search can take: FTS5, the negation-only pool, and the LIKE fallback
+        that serves <3-char terms."""
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            ja_src = next(c.source_id for c in chunks if "書斎" in c.text)
+            en_src = next(c.source_id for c in chunks if "Shoin" in c.text)
+
+            # FTS path (>=3-char term).
+            self.assertTrue(bm25_search(s, nb_id, "書斎", 8))
+            hits = bm25_search(s, nb_id, "書斎", 8, source_ids=[ja_src])
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == ja_src for h in hits))
+            self.assertEqual(bm25_search(s, nb_id, "書斎", 8, source_ids=[en_src]), [])
+
+            # LIKE fallback (2-char CJK term skips FTS5 entirely).
+            hits = bm25_search(s, nb_id, "晴れ", 8, source_ids=[ja_src])
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == ja_src for h in hits))
+            self.assertEqual(bm25_search(s, nb_id, "晴れ", 8, source_ids=[en_src]), [])
+
+            # Negation-only pool ("everything except X" scan).
+            hits = bm25_search(s, nb_id, "-晴れ", 8, source_ids=[en_src])
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == en_src for h in hits))
+
+            # An empty list is unscoped — byte-identical to passing nothing.
+            self.assertEqual(
+                [h.chunk_id for h in bm25_search(s, nb_id, "書斎", 8, source_ids=[])],
+                [h.chunk_id for h in bm25_search(s, nb_id, "書斎", 8)],
+            )
+
+    def test_source_ids_scope_vector_search(self) -> None:
+        """v0.2.631: the same scope applies to the vector leg's row scan."""
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            en_src = next(c.source_id for c in chunks if "Shoin" in c.text)
+            for c in chunks:
+                s.set_embedding(c.id, [1.0, 0.0])
+            self.assertEqual(len(vector_search(s, nb_id, [1.0, 0.0], k=8)), 5)
+            hits = vector_search(s, nb_id, [1.0, 0.0], k=8, source_ids=[en_src])
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == en_src for h in hits))
+            self.assertTrue(all(h.vec > 0.0 for h in hits))
+
+    def test_source_ids_scope_retrieve_end_to_end(self) -> None:
+        """v0.2.631 (e2e): retrieve() and the multi-query path must deliver
+        the scope to BOTH legs (BM25-PRF and vector) — a filter applied to
+        only one would leak unscoped chunks through the other."""
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            en_src = next(c.source_id for c in chunks if "Shoin" in c.text)
+            for c in chunks:
+                s.set_embedding(c.id, [1.0, 0.0])
+            hits = retrieve(
+                s, nb_id, "書斎 notebook", query_vec=[1.0, 0.0], k=8,
+                source_ids=[en_src],
+            )
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == en_src for h in hits))
+
+            hits = retrieve_multi(
+                s, nb_id, ["書斎", "notebook"], [None, None], k=8,
+                source_ids=[en_src],
+            )
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source_id == en_src for h in hits))
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""
@@ -11824,6 +11898,21 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_ask_source_flag_collects_positive_ids(self) -> None:
+        """v0.2.631: `ask --source ID` append-collects scope ids and _pos_int
+        rejects non-positive values at parse time (same family as -k)."""
+        from shoin.cli import _build_parser
+
+        args = _build_parser().parse_args(
+            ["ask", "1", "楮は？", "--source", "3", "--source", "7"]
+        )
+        self.assertEqual(args.source_ids, [3, 7])
+        self.assertIsNone(
+            _build_parser().parse_args(["ask", "1", "楮は？"]).source_ids
+        )
+        with self.assertRaises(SystemExit):
+            _build_parser().parse_args(["ask", "1", "楮は？", "--source", "0"])
+
     def test_ask_and_eval_reject_non_positive_k(self) -> None:
         """-k is a free int: k=0 silently yields an empty hit list (degraded
         answer / zero-score eval) and k<0 slices the merged pool arbitrarily
@@ -14373,7 +14462,7 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:72", "search.py:919",
+    "search.py:73", "search.py:949",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -17226,7 +17315,7 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         self.assertEqual(
-            sites, ["search.py:676"],
+            sites, ["search.py:699"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17254,7 +17343,8 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_read_json_results_flow_through_validators(self) -> None:
         """`_read_json()`'s dict must only be consumed via _require() /
-        _optional_str(). Those helpers exist because JSON's dynamic typing
+        _optional_str() / _optional_id_list(). Those helpers exist because JSON's
+        dynamic typing
         meets Python's attribute access badly: `data.get("title").strip()`
         raises AttributeError→500 on a list body field where
         _require()→VALIDATION_FIELD_FORMAT_INVALID→400 is the contract
@@ -17288,7 +17378,9 @@ class TestResidualGuards(unittest.TestCase):
             spans.append((m.group(1), start, end))
         offenders = []
         for var, lo, hi in spans:
-            ok = re.compile(rf"self\._(?:require|optional_str)\(\s*{var}\b")
+            ok = re.compile(
+                rf"self\._(?:require|optional_str|optional_id_list)\(\s*{var}\b"
+            )
             for i in range(lo, hi):
                 line = lines[i]
                 if line.lstrip().startswith("#"):
@@ -18193,6 +18285,7 @@ class TestResidualGuards(unittest.TestCase):
             "server.py": [
                 "IngestError", "IngestError", "IngestError",
                 "IngestError", "IngestError",
+                "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
@@ -19653,7 +19746,7 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [212],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
-            "search.py": [72, 919],
+            "search.py": [73, 949],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -19701,7 +19794,7 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         self.assertEqual(
-            escaped_interps, ["search.py:919"],
+            escaped_interps, ["search.py:949"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
