@@ -716,6 +716,12 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"question too long (max {MAX_QUESTION_LEN} characters)",
         )
+    deltas: list[str] = []
+
+    def _emit(delta: str) -> None:
+        print(delta, end="", flush=True)
+        deltas.append(delta)
+
     answer = ask(
         store,
         llm,
@@ -723,8 +729,17 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         question,
         k=int(args.k),
         source_ids=args.source_ids,
+        on_delta=_emit,
     )
-    print(answer.text)
+    streamed = "".join(deltas)
+    if deltas:
+        print()  # end the streamed answer's line
+    if streamed != answer.text:
+        # No streaming capability (deltas empty → "" ≠ text) or the stream died
+        # mid-answer into the degraded path — the already-emitted partial stays
+        # visible and the final answer is printed in full, matching the SSE
+        # contract that partial text is real and persisted.
+        print(answer.text)
     # A non-degraded answer can still legitimately carry an empty report — e.g.
     # the model correctly follows the system prompt's "say so explicitly" rule
     # for a fact not in the sources, which uncited_sentences() deliberately

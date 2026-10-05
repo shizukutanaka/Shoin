@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.634")
+        self.assertEqual(VERSION, "0.2.635")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12376,6 +12376,97 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("/tmp/custom-health-test.sqlite3", out.getvalue())
 
+    def test_cli_ask_streams_deltas_when_backend_streams(self) -> None:
+        """v0.2.635: CLI `ask` forwards chat_stream deltas to stdout as they
+        arrive (API SSE parity, weakness #13) — the joined stream IS the
+        persisted answer so stdout stays byte-identical to the one-shot
+        print, and a stream-capable backend must not also receive chat()."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class StreamingLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise AssertionError("stream-capable backend must stream, not chat()")
+
+            def chat_stream(self, messages, temperature=0.2):
+                yield "これは"
+                yield "テスト回答"
+                yield "です。[S1]"
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(
+                        ["--db", db_file, "ask", str(nb.id), "猫は液体である説について"],
+                        llm=StreamingLLM(),
+                    )
+            self.assertEqual(rc, 0)
+            o = out.getvalue()
+            self.assertIn("これはテスト回答です。[S1]", o)
+            self.assertEqual(
+                o.count("これはテスト回答です"), 1, "answer must print once, not twice"
+            )
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_ask_without_stream_backend_prints_answer_once(self) -> None:
+        """v0.2.635: a minimal ChatBackend (chat() only, no chat_stream —
+        the Protocol surface) falls back to the one-shot path unchanged."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class ChatOnlyLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                return "通常の回答です。[S1]"
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(
+                        ["--db", db_file, "ask", str(nb.id), "猫は液体である説について"],
+                        llm=ChatOnlyLLM(),
+                    )
+            self.assertEqual(rc, 0)
+            self.assertIn("通常の回答です。[S1]", out.getvalue())
+        finally:
+            os.unlink(db_file)
+
     def test_cli_stats_reports_counts_and_db_size(self) -> None:
         """v0.2.634: `shoin stats <nb>` prints per-table row counts plus the
         database's on-disk size — the capacity information a user needs to
@@ -12717,7 +12808,9 @@ class TestCLI(unittest.TestCase):
         one escaped main()'s whole handler chain and printed a traceback,
         while server.py's _dispatch maps the identical stray to a coded
         SYSTEM_INTERNAL_ERROR envelope (CLI/API parity). The process-boundary
-        catch-all added in main() now applies the same mapping.
+        catch-all added in main() now applies the same mapping — covering
+        BOTH generation paths, since v0.2.635's on_delta prefers chat_stream
+        when the backend carries it.
         """
         import io
         import os
@@ -12735,7 +12828,7 @@ class TestCLI(unittest.TestCase):
                 raise RuntimeError("sdk exploded")
 
             def chat_stream(self, messages, **kw):
-                yield "x"
+                raise RuntimeError("sdk exploded")
 
             def embed(self, texts, **kw):
                 return [[0.1] * 8 for _ in texts]

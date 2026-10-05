@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import unicodedata
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -717,8 +718,17 @@ def ask(
     k: int = TOP_K,
     persist: bool = True,
     source_ids: list[int] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> Answer:
-    """Grounded Q&A over a notebook. Never raises on LLM unavailability."""
+    """Grounded Q&A over a notebook. Never raises on LLM unavailability.
+
+    on_delta: when set AND the backend carries chat_stream (a capability,
+    not part of the ChatBackend Protocol — getattr-guarded like
+    last_finish_reason), the answer is produced via chat_stream and each
+    delta is forwarded to on_delta as it arrives; the joined text is the
+    same answer llm.chat() would have returned. When unset (or the backend
+    cannot stream) the single-shot chat() path runs byte-identically.
+    """
     history = history_messages(store, notebook_id)  # before persisting this turn
     retrieval_q = expand_query(question, history)
     qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
@@ -740,7 +750,16 @@ def ask(
                 f"database locked during context build: {exc}",
             ) from exc
         try:
-            text = llm.chat(build_messages(question, context, history))
+            messages = build_messages(question, context, history)
+            stream = getattr(llm, "chat_stream", None)
+            if on_delta is not None and callable(stream):
+                parts: list[str] = []
+                for delta in stream(messages):
+                    parts.append(delta)
+                    on_delta(delta)
+                text = "".join(parts)
+            else:
+                text = llm.chat(messages)
             answer = Answer(
                 text,
                 hits,

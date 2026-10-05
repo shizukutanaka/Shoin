@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.634
+## Version History: v0.1.37 → v0.2.635
+
+### v0.2.635 — CLI ask のストリーミング応答 (API SSE パリティ)
+
+50長所/50短所監査 (product-review.md) の短所13を解消: `qa.ask()` が
+任意パラメータ `on_delta` を受理し、chat_stream を持つバックエンド
+(llm.LLMClient)では回答を `chat_stream` で逐字生成して各deltaを
+stdoutへ即時転送——4-8GBローカルLLMで数十秒かかる回答の体感待ちを
+除去し、Web SSE と同一の逐字体験をCLIへ。連結されたストリーム自体が
+永続回答となるため、stdoutのバイト列は従来の一括 print と同一
+(非TTYパイプ・スクリプト利用を壊さない)。chat_stream を持たない最小
+ChatBackend (Protocol面)は getattr ガードで自動的に従来の一括
+`chat()` 経路へ退避。ストリーム途中の LLMError は従来の degraded
+経路へ落ち、既出力の部分deltaは可視のまま最終回答も全文表示
+(SSEの「部分テキストは実在し永続化される」契約と同型)。
+`last_finish_reason` の truncated 検出は chat_stream 内部で同様に
+設定されるため警告経路も維持。`on_delta` 未指定時は byte-identical
+な現行 chat() 経路——サーバ経路は変更ゼロ。
 
 ### v0.2.634 — `shoin stats` (ノートブック統計 + DBサイズ)
 
