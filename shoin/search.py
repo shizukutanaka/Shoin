@@ -1117,12 +1117,19 @@ def vector_search(
     def _scored() -> Iterator[Hit]:
         for r in cur:
             vec = array.array("f")
-            vec.frombytes(r["embedding"])
-            # embedding_norm is cached beside the BLOB by set_embedding (migration 7);
-            # NULL means the row predates it, so fall back to computing it. Both paths
-            # divide by the same true norm, so scores are identical either way.
-            stored_norm = r["embedding_norm"]
-            vec_norm = _vec_norm(vec) if stored_norm is None else float(stored_norm)
+            try:
+                vec.frombytes(r["embedding"])
+                stored_norm = r["embedding_norm"]
+                vec_norm = _vec_norm(vec) if stored_norm is None else float(stored_norm)
+            except (ValueError, TypeError):
+                # A non-NULL embedding that does not decode (byte length not a
+                # multiple of 4, or a non-numeric norm) is a corrupt row — same
+                # degrade-to-no-signal semantics _cosine_with_norms documents
+                # for a mismatched blob. Skipping the row leaves BM25 as the
+                # only leg for this chunk, which is exactly the documented
+                # vector-degraded mode; letting the decode error escape would
+                # crash the whole read path (retrieve -> 500) on one bad BLOB.
+                continue
             yield Hit(
                 r["id"],
                 r["source_id"],
