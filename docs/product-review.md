@@ -162,7 +162,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 20 | **ノートブック単位設定が無い** | TOP_K・トークン予算・言語等はプロセスグローバル。プロジェクトごとに変えられない |
 | 21 | **削除は即物理削除** | trash/undo 層が無く、notebook/source/note の削除は cascade で不可逆 |
 | 22 | ~~**DB全体のバックアップ/エクスポート経路なし**~~ → **解消済み** (v0.2.636: `shoin backup <dest>` が SQLite online backup API でライブ一貫スナップショットを作成。dest=0600・`~`展開・自己上書き拒否・coded失敗経路) |
-| 23 | **ノートブック統合・複製が無い** | merge/duplicate の経路が無く、再編は delete+add のやり直し |
+| 23 | **ノートブック統合・複製が無い** | 複製のみ解消 (v0.2.645: `POST /api/notebooks/{id}/duplicate`/`shoin notebook duplicate`——全子表を一TX複写・embedding verbatim有効・FTS再索引)。mergeは設計上の別件として残 |
 | 24 | **ソースのメタデータが薄い** | title/kind/origin/sha256 のみ。著者・発行日・タグ等の分類用メタ無し |
 | 25 | ~~**全文検索 API が無い**~~ → **解消済み** (v0.2.637: `POST /api/notebooks/{id}/search` が /ask 同一retrieve経路のhitsを生成・永続化なしで返す。`k`は_optional_intで1..50・`source_ids`同一契約・history非展開) |
 | 26 | **detail応答のページネーション無し** | sources/messages/notes は 500 cap+omitted 計数のみ。全件取得のカーソル経路が無い |

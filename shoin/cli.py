@@ -83,6 +83,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "作成: [{id}] {name}",
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
+        "nb.duplicated": "複製完了: [{id}] {name}",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
         "msg.empty": "チャット履歴がありません。",
@@ -166,6 +167,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "Created: [{id}] {name}",
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
+        "nb.duplicated": "Duplicated: [{id}] {name}",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
         "msg.empty": "No chat history.",
@@ -273,6 +275,9 @@ def _build_parser() -> argparse.ArgumentParser:
     nb_ren = nbsub.add_parser("rename", help="改名")
     nb_ren.add_argument("notebook_id", type=int)
     nb_ren.add_argument("name")
+    nb_dup = nbsub.add_parser("duplicate", help="複製(ソース・チャンク・ノート等を全コピー)")
+    nb_dup.add_argument("notebook_id", type=int)
+    nb_dup.add_argument("name", nargs="?", default=None)
 
     msgs = sub.add_parser("messages", help="チャット履歴管理")
     msgssub = msgs.add_subparsers(dest="action", required=True)
@@ -662,6 +667,9 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
         # stripped value here, not the raw CLI argument, matching the v0.2.93-95
         # fix already applied to this action's sibling, source rename, below.
         print(_t("nb.renamed", id=str(args.notebook_id), name=_one_line(str(args.name).strip())))
+    elif action == "duplicate":
+        nb = store.duplicate_notebook(int(args.notebook_id), args.name)
+        print(_t("nb.duplicated", id=str(nb.id), name=_one_line(nb.name)))
     return 0
 
 

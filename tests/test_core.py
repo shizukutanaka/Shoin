@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.644")
+        self.assertEqual(VERSION, "0.2.645")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -232,6 +232,49 @@ class TestStore(unittest.TestCase):
         with make_store() as s:
             with self.assertRaises(StoreError) as cm:
                 s.create_notebook("   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_duplicate_notebook_forks_every_table(self) -> None:
+        """v0.2.645: duplicate_notebook forks sources, chunks (embedding
+        BLOBs verbatim — same model, still valid), notes, studio outputs
+        and messages in one transaction; FTS triggers re-index so the
+        copy is searchable immediately; the source keeps its rows."""
+        from shoin.search import bm25_search
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["白良浜の砂浜は石英砂。"])
+            s.add_note(nb.id, "n1", "b1")
+            s.add_message(nb.id, "user", "hi")
+            s.add_studio_output(nb.id, "briefing", "body", "{}")
+
+            dup = s.duplicate_notebook(nb.id)
+            self.assertNotEqual(dup.id, nb.id)
+            self.assertEqual(dup.name, "研究 (copy)")
+
+            srcs = s.sources_for_notebook(dup.id)
+            self.assertEqual(len(srcs), 1)
+            self.assertEqual(srcs[0].title, "doc")
+            chunks = s.chunks_for_source(srcs[0].id)
+            self.assertEqual([c.text for c in chunks], ["白良浜の砂浜は石英砂。"])
+            # FTS re-indexed on INSERT: the fork is searchable now.
+            hits = bm25_search(s, dup.id, "石英砂", 5)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(len(s.list_notes(dup.id)), 1)
+            self.assertEqual(len(s.list_messages(dup.id)), 1)
+            self.assertEqual(len(s.latest_studio_outputs(dup.id)), 1)
+            # original untouched
+            self.assertEqual(len(s.sources_for_notebook(nb.id)), 1)
+
+            # explicit name honored; dead notebook stays coded
+            named = s.duplicate_notebook(nb.id, "複製先")
+            self.assertEqual(named.name, "複製先")
+            with self.assertRaises(StoreError) as cm:
+                s.duplicate_notebook(9999)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.duplicate_notebook(nb.id, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_rename_notebook_empty_name_rejected(self) -> None:
@@ -12700,6 +12743,39 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_cli_notebook_duplicate_forks_and_reports(self) -> None:
+        """v0.2.645: `shoin notebook duplicate <id>` forks the notebook —
+        the printed name is the persisted '<name> (copy)' (explicit name
+        honored), and a dead id is a coded error, never a traceback."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("研究")
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "notebook", "duplicate", str(nb.id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("複製完了", out.getvalue())
+            self.assertIn("研究 (copy)", out.getvalue())
+            with Store(db_file) as s:
+                self.assertEqual(len(s.list_notebooks()), 2)
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "notebook", "duplicate", "9999"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
     def test_cli_backup_writes_consistent_snapshot(self) -> None:
         """v0.2.636: `shoin backup <dest>` snapshots the live database via
         SQLite's online backup API — the copy opens cleanly and holds every
@@ -18736,8 +18812,9 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 51,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 53,  # +1: _utf8's coded surrogate rejection
                                       # +1: backup_to's live-path guard
+                                      # +2: duplicate_notebook empty/too-long name
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

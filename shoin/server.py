@@ -422,6 +422,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
         ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
+        ("POST", r"^/api/notebooks/(\d+)/duplicate$", "nb_duplicate"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
@@ -629,6 +630,13 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             store.clear_messages(nb_id)
         self._json({"cleared": nb_id})
+
+    def _h_nb_duplicate(self, nb_id: int) -> None:
+        # Optional {"name": "..."} — absent/empty body forks as "<name> (copy)".
+        name = self._optional_str(self._read_json(), "name") or None
+        with Store(self.db) as store:
+            nb = store.duplicate_notebook(nb_id, name)
+            self._json({"id": nb.id, "name": nb.name}, 201)
 
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")

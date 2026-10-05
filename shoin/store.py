@@ -551,6 +551,77 @@ class Store:
         """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""
         self.conn.execute("UPDATE notebooks SET updated_at=? WHERE id=?", (_now(), notebook_id))
 
+    def duplicate_notebook(self, notebook_id: int, name: str | None = None) -> Notebook:
+        """Full-fidelity fork of a notebook in one transaction (v0.2.645).
+
+        Sources, chunks (embedding BLOBs verbatim — the same embed model
+        produced them, so they stay valid), notes, studio outputs and
+        messages are all copied. The FTS triggers re-index new chunks on
+        INSERT, and the questions cache is keyed on source ids so nothing
+        bleeds across the fork. Child rows keep their original timestamps
+        — they describe the copied content, not the copy event.
+        """
+        src = self.get_notebook(notebook_id)
+        if name is None:
+            suffix = " (copy)"
+            name = src.name[: MAX_NAME_LEN - len(suffix)] + suffix
+        name = name.strip()
+        if not name:
+            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
+        if len(name) > MAX_NAME_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"name too long (max {MAX_NAME_LEN} chars)",
+            )
+        _utf8(name, "name")
+        ts = _now()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO notebooks(name, created_at, updated_at) VALUES (?,?,?)",
+                (name, ts, ts),
+            )
+            new_id = int(cur.lastrowid or 0)
+            id_map: dict[int, int] = {}
+            for row in self.conn.execute(
+                "SELECT * FROM sources WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            ).fetchall():
+                cur = self.conn.execute(
+                    "INSERT INTO sources"
+                    "(notebook_id, kind, title, origin, sha256, added_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (new_id, row["kind"], row["title"], row["origin"],
+                     row["sha256"], row["added_at"]),
+                )
+                id_map[int(row["id"])] = int(cur.lastrowid or 0)
+            for old_src, new_src in id_map.items():
+                self.conn.execute(
+                    "INSERT INTO chunks(source_id, seq, text, context,"
+                    " embedding, embedding_norm)"
+                    " SELECT ?, seq, text, context, embedding, embedding_norm"
+                    " FROM chunks WHERE source_id=? ORDER BY seq",
+                    (new_src, old_src),
+                )
+            self.conn.execute(
+                "INSERT INTO notes(notebook_id, title, body, created_at)"
+                " SELECT ?, title, body, created_at FROM notes WHERE notebook_id=?",
+                (new_id, notebook_id),
+            )
+            self.conn.execute(
+                "INSERT INTO studio_outputs(notebook_id, kind, body,"
+                " citation_report, created_at)"
+                " SELECT ?, kind, body, citation_report, created_at"
+                " FROM studio_outputs WHERE notebook_id=?",
+                (new_id, notebook_id),
+            )
+            self.conn.execute(
+                "INSERT INTO messages(notebook_id, role, body, citation_report,"
+                " created_at) SELECT ?, role, body, citation_report, created_at"
+                " FROM messages WHERE notebook_id=?",
+                (new_id, notebook_id),
+            )
+        return Notebook(new_id, name, ts, ts)
+
     # --- sources / chunks ---
 
     def add_source(

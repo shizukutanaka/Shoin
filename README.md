@@ -44,6 +44,7 @@ ollama pull nomic-embed-text      # 埋め込み用(任意。無くてもBM25検
 ```bash
 shoin serve                           # Web UI起動
 shoin notebook new "研究ノート"        # CLIでも操作可
+shoin notebook duplicate 1             # ノートブックを複製(ソース/チャンク/ノート全コピー)
 shoin add 1 ./paper.pdf https://example.com/article
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide

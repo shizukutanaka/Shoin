@@ -29,7 +29,22 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.644
+## Version History: v0.1.37 → v0.2.645
+
+### v0.2.645 — ノートブック複製 (duplicate)
+
+50長所/50短所監査 (product-review.md) の短所23の複製側を解消:
+notebookの再編は delete+add のやり直しだった。`Store.duplicate_
+notebook` が全子表 (sources・chunks・notes・studio_outputs・messages)
+を一TXで複写——embedding BLOBは同一モデル由来のためverbatimで有効、
+FTS triggerがINSERTで再索引するため複製直後から検索可能。子行の
+timestampは複写内容を表すものとして維持。`POST /api/notebooks/
+{id}/duplicate` (空body→"<name> (copy)"、{"name"}で任意名) と
+`shoin notebook duplicate <id> [name]` のCLI/Web両面 (REQ-103
+パリティ)。merge側は設計上の別件 (衝突解消・ソースid再写像の
+意味論) として残。ピン3件: store往複 (全表複写+FTS再索引+元
+保持+coded NOT_FOUND/空名)、API契約 (201・両命名経路・404)、
+CLI parity (複製完了行・永続反映・coded rc=1)。
 
 ### v0.2.644 — LLMエンドポイント認証 (`SHOIN_LLM_API_KEY`)
 

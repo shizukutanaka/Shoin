@@ -418,6 +418,33 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_nb_duplicate_forks_notebook_and_stays_coded(self) -> None:
+        """v0.2.645: POST /api/notebooks/{id}/duplicate forks the notebook —
+        empty body yields '<name> (copy)', {"name": "..."} is honored, and
+        a dead id is a coded 404, never a 500."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "複製元"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+
+        status, dup = self._json("POST", f"/api/notebooks/{nb_id}/duplicate")
+        self.assertEqual(status, 201)
+        self.assertEqual(dup["name"], "複製元 (copy)")
+        self.assertNotEqual(dup["id"], nb_id)
+
+        status, named = self._json(
+            "POST", f"/api/notebooks/{nb_id}/duplicate", {"name": "複製先"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(named["name"], "複製先")
+
+        status, detail = self._json("GET", f"/api/notebooks/{dup['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["name"], "複製元 (copy)")
+
+        status, err = self._json("POST", "/api/notebooks/999999/duplicate")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is
