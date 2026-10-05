@@ -50,7 +50,7 @@ shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
 shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
-# その他: questions / messages / note / source (rename・refresh・delete) / reindex
+# その他: questions / messages / note / source (rename・refresh・delete) / chunk edit / reindex
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。

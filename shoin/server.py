@@ -430,6 +430,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
         ("DELETE", r"^/api/sources/(\d+)$", "src_delete"),
         ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
+        ("PATCH", r"^/api/chunks/(\d+)$", "chunk_patch"),
         ("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
         ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
@@ -854,6 +855,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(
                 {"chunks": [{"id": cid, "seq": seq, "text": text} for cid, seq, text in rows]}
             )
+
+    def _h_chunk_patch(self, chunk_id: int) -> None:
+        text = self._require(self._read_json(), "text")
+        with Store(self.db) as store:
+            chunk = store.update_chunk_text(chunk_id, text)
+            # A chunk edit changes retrievable content without moving the
+            # source sha256 the questions fingerprint keys on — the cache
+            # would never self-expire (same staleness class as a rename,
+            # v0.2.36), so evict it here.
+            nb_id = store.get_source(chunk.source_id).notebook_id
+            with self.questions_cache_lock:
+                self.questions_cache.pop(nb_id, None)
+        self._json(
+            {"id": chunk.id, "source_id": chunk.source_id, "seq": chunk.seq,
+             "text": chunk.text}
+        )
 
     def _h_studio(self, nb_id: int) -> None:
         kind = self._require(self._read_json(), "kind")

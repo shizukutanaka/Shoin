@@ -29,7 +29,27 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.646
+## Version History: v0.1.37 → v0.2.647
+
+### v0.2.647 — チャンク手動編集 (PATCH /api/chunks/{id} + shoin chunk edit)
+
+50長所/50短所監査 (product-review.md) の短所37を解消:
+抽出テキストの誤り (OCR欠落・PDF変換ミス・文字化け) を修正する
+経路が無く、ソースごと削除→再追加しか手段がなかった。
+`Store.update_chunk_text` が1チャンクを in-place で書換え——
+`chunks_au` UPDATE trigger が同一書込みで FTS を再索引し、
+`updated_at` を touch。embedding は保持せず NULL クリア:
+旧本文から計算されたベクトルを残すと編集後テキストとは無関係の
+内容へ意味検索が接地するため、「信号なし」降格 (BM25 leg のみ、
+corrupt BLOB と同一契約) が正直な中間状態で、`reindex` が再構築
+する。`PATCH /api/chunks/{id}` (`{"text"}` → `{id, source_id,
+seq, text}` echo) と `shoin chunk edit <id> <text>` の CLI/Web
+両面 (REQ-103 パリティ)。編集はソース sha256 を動かさないため
+questions cache は sha256 フィンガープリントで自己失効しない——
+rename と同じ staleness class としてハンドラ側で手動 evict。
+ピン3件 (store往復: 新語ヒット/旧語消失/兄弟chunk無傷/coded 404・
+空文400、API契約、CLI parity)。カタログ追随:
+raise-inventory `store.py` StoreError 53→56。
 
 ### v0.2.646 — messages/notes の全量カーソル (offset/limit)
 

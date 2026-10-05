@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.646")
+        self.assertEqual(VERSION, "0.2.647")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -686,6 +686,9 @@ class TestStore(unittest.TestCase):
             ("add_message",
              lambda s, nb: s.add_message(nb.id, "user", "hi")),
             ("clear_messages", lambda s, nb: s.clear_messages(nb.id)),
+            ("update_chunk_text",
+             lambda s, nb: s.update_chunk_text(
+                 s.chunks_for_notebook(nb.id)[0].id, "edited-chunk")),
             ("delete_source",
              lambda s, nb: s.delete_source(
                  s.sources_for_notebook(nb.id)[0].id)),
@@ -922,6 +925,41 @@ class TestStore(unittest.TestCase):
             t0 = s.get_notebook(nb.id).updated_at
             s.replace_chunks_for_source(src.id, ["new"])
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_chunk_text_replaces_and_clears_embedding(self) -> None:
+        """v0.2.647: update_chunk_text rewrites one chunk in place — FTS
+        re-indexes via chunks_au (new term hits, old term gone), the stale
+        embedding is cleared rather than kept (a vector of the old text
+        would silently retrieve the wrong content; NULL = "no vector
+        signal"), and the notebook's updated_at bumps. Dead chunks and
+        empty text stay coded."""
+        from shoin.search import bm25_search
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["古い文言が索引済み", "別の段落"])
+            cid = s.chunks_for_source(src.id)[0].id
+            s.set_embedding(cid, [0.1, 0.2, 0.3])
+            self.assertIsNotNone(s.get_chunk(cid).embedding)
+
+            t0 = s.get_notebook(nb.id).updated_at
+            chunk = s.update_chunk_text(cid, "  修正後の記述  ")
+            self.assertEqual(chunk.text, "修正後の記述")
+            self.assertIsNone(chunk.embedding)
+            # FTS re-indexed in the same write (chunks_au trigger).
+            self.assertEqual(len(bm25_search(s, nb.id, "修正後", 5)), 1)
+            self.assertEqual(bm25_search(s, nb.id, "古い文言", 5), [])
+            # sibling chunk untouched
+            self.assertEqual(s.chunks_for_source(src.id)[1].text, "別の段落")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+            with self.assertRaises(StoreError) as cm:
+                s.update_chunk_text(9999, "x")
+            self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.update_chunk_text(cid, "   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
         """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
@@ -12776,6 +12814,44 @@ class TestCLI(unittest.TestCase):
         finally:
             os.unlink(db_file)
 
+    def test_cli_chunk_edit_updates_and_reports(self) -> None:
+        """v0.2.647: `shoin chunk edit <id> <text>` rewrites the chunk via
+        the same store path the API uses (REQ-103 parity) — the edit
+        persists, the report is printed, and a dead id is a coded error,
+        never a traceback."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["old text"])
+                cid = s.chunks_for_source(src.id)[0].id
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(
+                        ["--db", db_file, "chunk", "edit", str(cid), "新しい本文"]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertIn(str(cid), out.getvalue())
+            with Store(db_file) as s:
+                self.assertEqual(s.get_chunk(cid).text, "新しい本文")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "chunk", "edit", "9999", "x"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("CHUNK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
     def test_cli_backup_writes_consistent_snapshot(self) -> None:
         """v0.2.636: `shoin backup <dest>` snapshots the live database via
         SQLite's online backup API — the copy opens cleanly and holds every
@@ -18814,9 +18890,10 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 53,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 56,  # +1: _utf8's coded surrogate rejection
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
+                                      # +3: update_chunk_text empty/missing/deleted
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",

@@ -1074,6 +1074,42 @@ class Store:
         ).fetchall()
         return [(int(r["id"]), int(r["seq"]), str(r["text"])) for r in rows]
 
+    def update_chunk_text(self, chunk_id: int, text: str) -> Chunk:
+        """Replace one chunk's text (v0.2.647 — the fix path for extraction
+        errors, which previously required delete + re-add of the source).
+
+        The embedding is cleared, not kept: it was computed from the old
+        text, so retaining it would silently retrieve the wrong content.
+        NULL degrades to the BM25 leg ("no vector signal", same contract as
+        a corrupt BLOB), and `reindex` rebuilds the vector. The chunks_au
+        UPDATE trigger re-syncs the FTS index inside the same write.
+        """
+        text = text.strip()
+        if not text:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING", "chunk text is empty"
+            )
+        _utf8(text, "text")
+        row = self.conn.execute(
+            "SELECT c.id, s.notebook_id FROM chunks c"
+            " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE chunks SET text=?, embedding=NULL, embedding_norm=NULL"
+                " WHERE id=?",
+                (text, chunk_id),
+            )
+            if cur.rowcount == 0:
+                raise StoreError(
+                    "CHUNK_NOT_FOUND", f"chunk {chunk_id} was concurrently deleted"
+                )
+            self.touch_notebook(int(row["notebook_id"]))
+        return self.get_chunk(chunk_id)
+
     def id_context_text_chunks_for_notebook(
         self, notebook_id: int
     ) -> list[tuple[int, str, str]]:

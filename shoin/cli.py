@@ -138,6 +138,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
         "src.pages_failed": "⚠ {n} ページのテキスト抽出に失敗（索引は不完全です）",
+        "chunk.edited": "チャンク更新完了: [{id}] (埋め込みクリア — reindexで再構築)",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
         "health.yes": "はい",
@@ -222,6 +223,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
         "src.pages_failed": "⚠ {n} page(s) could not be extracted — the index is incomplete",
+        "chunk.edited": "Chunk updated: [{id}] (embedding cleared — run reindex to rebuild)",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
         "health.yes": "yes",
@@ -313,6 +315,12 @@ def _build_parser() -> argparse.ArgumentParser:
     src_ren.add_argument("title")
     src_ref = srcsub.add_parser("refresh", help="URLソースの再取込")
     src_ref.add_argument("source_id", type=int)
+
+    chk = sub.add_parser("chunk", help="チャンク管理")
+    chksub = chk.add_subparsers(dest="action", required=True)
+    chk_edit = chksub.add_parser("edit", help="抽出テキスト修正(埋込みクリア→reindexで再構築)")
+    chk_edit.add_argument("chunk_id", type=int)
+    chk_edit.add_argument("text")
 
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
@@ -851,6 +859,14 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     return 0
 
 
+def _cmd_chunk(store: Store, args: argparse.Namespace) -> int:
+    action = str(args.action)
+    if action == "edit":
+        chunk = store.update_chunk_text(int(args.chunk_id), str(args.text))
+        print(_t("chunk.edited", id=str(chunk.id)))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if str(args.command) == "serve":
@@ -902,6 +918,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_note(store, args)
             if command == "source":
                 return _cmd_source(store, backend, args)
+            if command == "chunk":
+                return _cmd_chunk(store, args)
             if command == "stats":
                 return _cmd_stats(store, args)
             if command == "backup":

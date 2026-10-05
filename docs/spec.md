@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.646 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.647 時点に同期)
 
 ## プロダクト定義
 
@@ -39,7 +39,7 @@
 |----|------|-------------|
 | REQ-001 | Notebook CRUD | 作成/一覧/改名/削除/複製。削除はソース・ノート・出力をcascade。複製は`POST /api/notebooks/{id}/duplicate`/`shoin notebook duplicate`で全子表を一TX複写——embedding BLOBは同一モデル由来のためverbatim有効、FTS triggerが再索引(v0.2.645) |
 | REQ-002 | ソース取込: PDF/MD/TXT/HTML/URL | 各形式でテキスト抽出成功。10MB上限。失敗時はエラーIDつき明示 |
-| REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。各チャンクに節文脈(タイトル>見出し)を併記(v0.2.123)。SQLite FTS5へ登録 |
+| REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。各チャンクに節文脈(タイトル>見出し)を併記(v0.2.123)。SQLite FTS5へ登録。抽出誤りは `PATCH /api/chunks/{id}`/`shoin chunk edit` で個別修正可——embeddingクリア(旧本文のベクトルは誤取得の元、reindexで再構築)・chunks_au triggerがFTSを同TX再索引(v0.2.647) |
 | REQ-004 | ハイブリッド検索 | BM25(FTS5) + ベクトル(埋め込みAPI委譲)をRRF融合(v0.2.56、下記「検索パイプライン」参照)。クエリは幅/字体バリアントに展開し半角カナ・全角英数を相互一致(v0.2.144)。埋め込み未設定時はBM25のみで劣化動作。`POST /api/notebooks/{id}/search`で同パイプラインのhitsのみを回答生成なしで返す検索専用経路あり(v0.2.637) |
 | REQ-005 | ソース限定・引用付きQ&A | 回答に `[S1][S2]` 形式の引用。コンテキスト外の質問には「ソースに記載なし」と回答 |
 | REQ-006 | 引用検証 | 生成テキストから `[Ss]\s*(\d+)`(NFKC正規化により全角Ｓ１等も受理)を括弧内から抽出し実在ソース番号と照合。不正引用をフラグ、引用カバレッジとソースマップ(`[S1]→ファイル名`)を回答に添付 |
@@ -54,7 +54,7 @@
 | REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可) |
 | REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化(各出力カードから1クリック保存、v0.2.412) |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
-| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/health/stats/backup。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459) |
+| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/chunk/health/stats/backup。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459) |
 | REQ-106 | レキシカルリランカ + MMR | 上位候補の多様性確保(冗長チャンク抑制) |
 
 ### P2 (Future / アーキ上の予約)

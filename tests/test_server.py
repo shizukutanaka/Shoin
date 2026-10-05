@@ -499,6 +499,44 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_chunk_patch_updates_text_and_stays_coded(self) -> None:
+        """v0.2.647: PATCH /api/chunks/{id} rewrites the chunk in place —
+        echo carries {id, source_id, seq, text}, the reader endpoint shows
+        the new text, dead chunk 404s, empty/missing text is a coded 400."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "edit"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "mem://d", "sha1")
+            store.add_chunks(src.id, ["typo'd extract"])
+            cid = store.chunks_for_source(src.id)[0].id
+
+        status, body = self._json(
+            "PATCH", f"/api/chunks/{cid}", {"text": "corrected extract"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["id"], cid)
+        self.assertEqual(body["source_id"], src.id)
+        self.assertEqual(body["seq"], 0)
+        self.assertEqual(body["text"], "corrected extract")
+
+        status, view = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertEqual(status, 200)
+        self.assertEqual(view["chunks"][0]["text"], "corrected extract")
+
+        status, err = self._json("PATCH", "/api/chunks/999999", {"text": "x"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "CHUNK_NOT_FOUND")
+        status, err = self._json("PATCH", f"/api/chunks/{cid}", {"text": "  "})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json("PATCH", f"/api/chunks/{cid}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is
