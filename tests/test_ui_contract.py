@@ -1733,6 +1733,95 @@ console.log("ok");
         self.assertEqual(targets, panes,
                          f"tab/pane mismatch: tabs={targets} panes={panes}")
 
+    def test_keyboard_shortcuts_layer(self) -> None:
+        """v0.2.642: the global shortcut layer is a contract (product-review
+        #29). `/` focuses #askInput; 1/2/3 select the pane at that position
+        via the same selectTab path the tab strip uses; both are inert while
+        typing (guard on editable targets) so they can't steal keys from a
+        form field. The hint tooltip must keep documenting them — an
+        undiscoverable shortcut is dead code."""
+        html = _html()
+        script = "\n".join(re.findall(r"<script[^>]*>(.*?)</script>", html, re.S))
+
+        self.assertIn('document.addEventListener("keydown"', script)
+        self.assertIn('e.key==="/"', script)
+        self.assertIn('$("#askInput").focus()', script)
+        # inert-while-typing guard: editable targets bail before any binding
+        for guard in ("INPUT", "TEXTAREA", "isContentEditable"):
+            self.assertIn(guard, script)
+        # inert inside the modal — a focus() behind it breaks the trap
+        self.assertIn('$("#viewer").classList.contains("open")', script)
+        # digit keys route through the shared selectTab, not a parallel path
+        self.assertRegex(script, r'\{"1":0,\s*"2":1,\s*"3":2\}\[e\.key\]')
+        self.assertIn("selectTab(tabs[i])", script)
+        # discoverability: the hint string documents the layer in both langs
+        self.assertRegex(script, r'"chat\.hint":"[^"]*/[^"]*1/2/3[^"]*"')
+        self.assertRegex(
+            script,
+            r'"chat\.hint":"Tip[^"]*e\.g\.[^"]*legacy\)\.\s*/[^"]*1/2/3[^"]*"',
+        )
+
+        # behavioral: run the real selectTab + keydown handler under node
+        select_fn = _js_block(script, "const selectTab")
+        handler_src = _js_block(
+            script,
+            'document.addEventListener("keydown", e=>{\n  if (e.defaultPrevented',
+        )
+        harness = """\
+let focusTarget = null;
+const body = {tagName:"BODY", isContentEditable:false};
+const inputEl = {tagName:"INPUT", isContentEditable:false};
+const ask = {tagName:"INPUT", focus(){ focusTarget = "ask"; }};
+let viewerOpen = false;
+const viewer = {classList:{contains: () => viewerOpen}};
+const tabEls = ["paneSrc","paneChat","paneStudio"].map((p, i) => ({
+  dataset: {pane: p}, _sel: "false",
+  setAttribute(k, v){ if (k === "aria-selected") this._sel = v; },
+  focus(){ focusTarget = "tab" + i; },
+}));
+const paneEls = tabEls.map(t => ({
+  id: t.dataset.pane,
+  classList: {add(){ this.active = true; }, remove(){ this.active = false; }},
+}));
+const handlers = [];
+globalThis.$ = s => s === "#askInput" ? ask : s === "#viewer" ? viewer
+  : paneEls.find(p => "#" + p.id === s) || null;
+globalThis.document = {
+  addEventListener: (t, f) => { if (t === "keydown") handlers.push(f); },
+  querySelectorAll: sel => sel === ".tabs button" ? tabEls
+    : sel === ".pane" ? paneEls : [],
+};
+""" + select_fn + "\n" + handler_src + """);
+const handler = handlers[handlers.length - 1];
+const ev = key => ({key, target: body, defaultPrevented: false,
+  preventDefault(){ this.defaultPrevented = true; },
+  ctrlKey: false, metaKey: false, altKey: false});
+const bad = [];
+handler(ev("/"));
+if (focusTarget !== "ask") bad.push("/ did not focus #askInput");
+focusTarget = null;
+handler({...ev("/"), target: inputEl});
+if (focusTarget !== null) bad.push("/ stole keys from an input");
+focusTarget = null;
+handler(ev("2"));
+if (focusTarget !== "tab1") bad.push("key 2 did not focus pane tab 2");
+if (tabEls[1]._sel !== "true") bad.push("key 2 did not selectTab pane 2");
+if (!paneEls[1].classList.active) bad.push("key 2 did not activate pane 2");
+focusTarget = null;
+handler(ev("7"));
+if (focusTarget !== null) bad.push("unmapped key 7 leaked");
+viewerOpen = true;
+focusTarget = null;
+handler(ev("/"));
+if (focusTarget !== null) bad.push("/ broke the viewer focus trap");
+if (bad.length) { console.error(bad.join("; ")); process.exit(1) }
+console.log("ok");
+"""
+        rc, out = _run_node(harness)
+        if rc == -1:
+            self.skipTest("node not available; behavioral check skipped")
+        self.assertEqual(rc, 0, out)
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element

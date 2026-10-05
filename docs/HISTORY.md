@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.641
+## Version History: v0.1.37 → v0.2.642
+
+### v0.2.642 — グローバルキーボードショートカット層
+
+50長所/50短所監査 (product-review.md) の短所29を解消: ショートカットは
+タブ上の矢印キーのみだった。`/`で `#askInput` へフォーカス、1/2/3 で
+tab行の順序どおりにペイン選択 (共有 `selectTab` 経路を再利用——
+別実装にすると状態が二系統化する)。編集中 (INPUT/TEXTAREA/SELECT/
+contenteditable)・修飾キー付き・モーダル `open` 中は無効——
+`/` でviewer裏へ .focus() するとフォーカストラップを破るため。
+発見性は `chat.hint` ツールチップへ追記 (ja/en)。ピン
+`test_keyboard_shortcuts_layer` はリテラル配線+node実走
+(selectTab+ハンドラを stub DOM で実実行: `/`でフォーカス・入力中は
+鍵を奪わない・2でpane2選択・未割当キー無害・モーダル中無効)を固定。
 
 ### v0.2.641 — ≤880px 狭幅契約の監査・ピン固定
 
