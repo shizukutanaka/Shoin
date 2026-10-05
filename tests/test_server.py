@@ -462,6 +462,30 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_search_zero_hit_returns_suggestions(self) -> None:
+        """v0.2.650 (product-review #42): a zero-hit query is no dead end —
+        both search routes echo `suggestions` carrying the nearest in-corpus
+        spelling; a hitting query emits the key as []."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "気象"})
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(
+                nb["id"], "txt", "気象衛星メモ", "mem://m", "sha-m"
+            )
+            store.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+
+        for path in (f"/api/notebooks/{nb['id']}/search", "/api/search"):
+            status, out = self._json("POST", path, {"question": "気海衛生"})
+            self.assertEqual(status, 200)
+            self.assertEqual(out["hits"], [])
+            self.assertEqual(out["suggestions"], ["気象衛星"])
+            status, hit = self._json("POST", path, {"question": "気象衛星"})
+            self.assertEqual(status, 200)
+            self.assertTrue(hit["hits"])
+            self.assertEqual(hit["suggestions"], [])
+
     def test_nb_duplicate_forks_notebook_and_stays_coded(self) -> None:
         """v0.2.645: POST /api/notebooks/{id}/duplicate forks the notebook —
         empty body yields '<name> (copy)', {"name": "..."} is honored, and

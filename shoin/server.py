@@ -59,6 +59,7 @@ from .qa import (
 from .qa import (
     _t as _qa_t,
 )
+from .search import suggest_corrections
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
@@ -1037,9 +1038,16 @@ class _Handler(BaseHTTPRequestHandler):
                 store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
             )
             titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
+            # Zero hits is a dead end (product-review #42): offer the nearest
+            # in-corpus spellings so a typo'd query has somewhere to go. Only
+            # emitted on the empty path — a non-empty list never needs it.
+            suggestions = (
+                suggest_corrections(store, nb_id, question) if not hits else []
+            )
             self._json(
                 {
                     "question": question,
+                    "suggestions": suggestions,
                     "hits": [
                         {
                             "rank": i + 1,
@@ -1088,9 +1096,13 @@ class _Handler(BaseHTTPRequestHandler):
             # this provenance lookup is dropped rather than KeyErroring — the
             # same toleration nb_search's titles.get() already applies.
             hits = [h for h in hits if h.source_id in meta]
+            suggestions = (
+                suggest_corrections(store, None, question) if not hits else []
+            )
             self._json(
                 {
                     "question": question,
+                    "suggestions": suggestions,
                     "hits": [
                         {
                             "rank": i + 1,

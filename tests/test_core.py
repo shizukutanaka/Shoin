@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.649")
+        self.assertEqual(VERSION, "0.2.650")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -5089,6 +5089,34 @@ class TestSearch(unittest.TestCase):
                 s.notebooks_for_sources([seed_src.id])[seed_src.id][0], nb1
             )
             self.assertEqual(s.notebooks_for_sources([]), {})
+
+    def test_suggest_corrections_zero_hit(self) -> None:
+        """v0.2.650: a zero-hit query gets the nearest in-corpus spelling —
+        absent terms only (a present term is never rewritten), preferring the
+        whole surface form over its own fragment, scoped to the notebook."""
+        from shoin.search import suggest_corrections
+
+        with make_store() as s:
+            nb1 = s.create_notebook("気象研究").id
+            src = s.add_source(nb1, "txt", "気象衛星メモ", "mem://m", "sha-m")
+            s.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+            # One edit away inside a title's CJK run → the full term wins.
+            self.assertEqual(
+                suggest_corrections(s, nb1, "気海衛生"), ["気象衛星"]
+            )
+            # Present terms and too-short terms are never rewritten.
+            self.assertEqual(suggest_corrections(s, nb1, "気象衛星"), [])
+            self.assertEqual(suggest_corrections(s, nb1, "AB"), [])
+            # Genuinely out-of-domain → no forced suggestion.
+            self.assertEqual(suggest_corrections(s, nb1, "xyzzy"), [])
+            # Scoped: a term living in ANOTHER notebook does not leak.
+            nb2 = s.create_notebook("別研究").id
+            src2 = s.add_source(nb2, "txt", "軌道決定資料", "mem://k", "sha-k")
+            s.add_chunks(src2.id, ["軌道決定は測距と測角の合成である。"])
+            self.assertEqual(suggest_corrections(s, nb1, "軌道決完"), [])
+            self.assertEqual(
+                suggest_corrections(s, None, "軌道決完"), ["軌道決定"]
+            )
 
     def test_bm25_empty_query_returns_empty(self) -> None:
         """bm25_search() with an empty query string must return [] without crashing."""
@@ -12312,6 +12340,36 @@ class TestCLI(unittest.TestCase):
 
             os.unlink(db_file)
 
+    def test_cli_search_suggests_on_zero_hits(self) -> None:
+        """v0.2.650: `shoin search` turns a zero-hit typo into the nearest
+        in-corpus spelling (もしかして) instead of a bare empty list."""
+        import io
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("気象").id
+                src = s.add_source(nb, "txt", "気象衛星メモ", "mem://m", "sha-m")
+                s.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "search", "気海衛生"], llm=FakeLLM())
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("もしかして", text)
+            self.assertIn("気象衛星", text)
+        finally:
+            import os
+
+            os.unlink(db_file)
+
     def test_ask_rejects_whitespace_question_like_the_api(self) -> None:
         """v0.2.286: _cmd_ask must strip + refuse an empty question, matching
         the API's _require("question") — otherwise a whitespace-only question is
@@ -15219,6 +15277,9 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
     "search.py:73", "search.py:952",
+    # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
+    # character class (v0.2.650 suggestion oracle).
+    "search.py:1747",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -20537,7 +20598,10 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [212],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
-            "search.py": [73, 952],
+            # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
+            # constant character class — same static-constant category as
+            # the other sites (v0.2.650 suggestion oracle).
+            "search.py": [73, 1747, 952],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}

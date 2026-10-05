@@ -1736,3 +1736,125 @@ def retrieve_multi(
             primary, negs, total_bm25, total_vec, result,
         )
     return result
+
+
+# --- zero-hit spelling suggestions (v0.2.650) -------------------------------
+
+
+_SUGGEST_SCAN_LIMIT = 20_000
+_SUGGEST_MIN_TERMLEN = 3
+_SUGGEST_MAX = 3
+_CJK_RUN_RE = re.compile(rf"[{_CJK_WORD_NEG_CLASS}]+")
+
+
+def _lev_within(a: str, b: str, cap: int) -> int | None:
+    """Levenshtein distance with early exit; None once it provably exceeds cap."""
+    if abs(len(a) - len(b)) > cap:
+        return None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        row = [i]
+        best = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            v = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost)
+            row.append(v)
+            if v < best:
+                best = v
+        if best > cap:
+            return None
+        prev = row
+    return prev[-1] if prev[-1] <= cap else None
+
+
+def _corpus_strings(store: Store, notebook_id: int | None) -> list[str]:
+    """Corpus carrier strings for the suggestion oracle: source titles plus
+    chunk contexts (section breadcrumbs) — the corpus's salient vocabulary
+    without scanning every chunk's full text. Bounded at _SUGGEST_SCAN_LIMIT
+    context rows. notebook_id=None is the cross-notebook form — the same
+    `(? IS NULL OR …)` scoping idiom the retrieval queries use."""
+    strings = [
+        str(r["title"])
+        for r in store.conn.execute(
+            "SELECT s.title FROM sources s"
+            " WHERE (? IS NULL OR s.notebook_id = ?)",
+            (notebook_id, notebook_id),
+        ).fetchall()
+    ]
+    strings += [
+        str(r["context"])
+        for r in store.conn.execute(
+            "SELECT c.context FROM chunks c"
+            " JOIN sources s ON s.id = c.source_id"
+            " WHERE (? IS NULL OR s.notebook_id = ?) AND c.context != ''"
+            " ORDER BY c.id LIMIT ?",
+            (notebook_id, notebook_id, _SUGGEST_SCAN_LIMIT),
+        ).fetchall()
+    ]
+    return strings
+
+
+def _nearest_corpus_term(
+    term: str, strings_low: list[str], vocab_words: set[str], cap: int
+) -> str | None:
+    """The closest corpus surface form within `cap` edits of `term`.
+
+    Candidates are discrete vocabulary words (ASCII tokens, title/context
+    terms) plus every CJK substring of length len(term)±cap inside a corpus
+    CJK run — contiguous-CJK runs tokenize as one long term, so the word-level
+    vocabulary alone can never name the fragment a typo actually aimed at.
+    """
+    best: tuple[int, int, str] | None = None
+    for w in vocab_words:
+        d = _lev_within(term, w, cap)
+        if d is not None and (best is None or (d, -len(w), w) < best):
+            best = (d, -len(w), w)
+    n = len(term)
+    for s in strings_low:
+        for m in _CJK_RUN_RE.finditer(s):
+            run = m.group(0)
+            for ln in range(max(_SUGGEST_MIN_TERMLEN, n - cap), n + cap + 1):
+                for i in range(len(run) - ln + 1):
+                    cand = run[i : i + ln]
+                    d = _lev_within(term, cand, cap)
+                    if d is not None and (best is None or (d, -ln, cand) < best):
+                        # Equal distance prefers the longer surface form: the
+                        # whole term the typo aimed at over its own prefix
+                        # fragment ("気象衛星" over "気象衛").
+                        best = (d, -ln, cand)
+    return best[2] if best is not None else None
+
+
+def suggest_corrections(
+    store: Store,
+    notebook_id: int | None,
+    question: str,
+    limit: int = _SUGGEST_MAX,
+) -> list[str]:
+    """Did-you-mean corpus terms for a zero-hit query (product-review #42).
+
+    Only terms *absent* from the corpus (no substring match anywhere) are
+    rewritten — a term the corpus contains cannot be the miss, and rewriting
+    it would hallucinate a different intent. Terms shorter than
+    _SUGGEST_MIN_TERMLEN are skipped: edit distance on 1-2 characters is
+    noise. A genuinely out-of-domain query yields [] — never a forced,
+    unrelated suggestion."""
+    strings = _corpus_strings(store, notebook_id)
+    if not strings:
+        return []
+    strings_low = [s.casefold() for s in strings]
+    vocab_words: set[str] = set()
+    for s in strings_low:
+        vocab_words.update(t.casefold() for t in query_terms(s))
+    out: list[str] = []
+    for term in query_terms(question):
+        t = term.casefold()
+        if len(t) < _SUGGEST_MIN_TERMLEN:
+            continue
+        if any(t in s for s in strings_low):
+            continue  # present in the corpus — cannot be the miss
+        cap = max(1, min(3, len(t) // 2))
+        near = _nearest_corpus_term(t, strings_low, vocab_words, cap)
+        if near is not None and near not in out:
+            out.append(near)
+    return out[:limit]

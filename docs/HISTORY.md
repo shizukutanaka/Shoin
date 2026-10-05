@@ -29,7 +29,35 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.649
+## Version History: v0.1.37 → v0.2.650
+
+### v0.2.650 — 検索ゼロ件時のスペル提案 (suggestionsフィールド)
+
+短所42を解消: typo耐性が無く、ゼロ件クエリが「何も返らない」死路だった。
+`POST /api/notebooks/{id}/search`・`POST /api/search`・`shoin search` の
+3検索面に、hits空時の `suggestions` フィールドを追加——corpus語彙への
+最近接表層形 (上限3件) を返す。
+
+設計上の境界: corpus内に存在する語は絶対に書換えない (部分文字列存在
+チェックで欠落語のみ候補化——実在語を書換えると意図しないクエリへ
+誘導する)。3文字未満は編集距離がノイズになるため除外、ドメイン外の
+語は無理に提案せず [] を返す。CJKは連続ランが1語としてトークン化される
+ため、語彙集合だけでは部分文字列が名指せない——corpus文字列のCJKラン
+内の len±cap 部分文字列を候補化する。距離は長さ比例キャップ付き
+Levenshtein (`max(1, min(3, len//2))`)、同距離では長い表層形を優先
+(全体形 > 接頭辞断片)。corpus走査は titles + chunks.context
+(セクションパンくず) に限定——全chunk本文を読まずに顕著語彙のみを
+走査する bounded oracle (LIMIT 20,000行)。単一trigramのOR検索が
+1編集typoを既に吸収するため、ゼロ件に落ちるのは中位置編集以上の
+損傷のみ——cap≥2が実効領域。
+
+行動ピン3件: ヘルパ往復 (欠落語→最近接・存在語不変・短語スキップ・
+ドメイン外空・nbスコープ非リーク)・API両routeのsuggestions echo
+(ゼロ件=提案・ヒット=[])・CLI `もしかして:` 行。カタログ追随:
+interpolated-regexカタログに `_CJK_RUN_RE` (モジュール定数の文字
+クラス内挿——他9サイトと同カテゴリ)。
+
+1331テスト全通過・カバレッジ99%・ruff/mypy --strict クリーン・secret scan 0件。
 
 ### v0.2.649 — ノートブック横断検索 (POST /api/search + shoin search)
 

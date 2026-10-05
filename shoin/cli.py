@@ -48,6 +48,7 @@ from .qa import (
     expand_query,
     retrieve_for_question,
 )
+from .search import suggest_corrections
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
@@ -122,6 +123,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.header": "検索精度 (k={k}, {n}件のケース)",
         "search.header": "横断検索結果 ({n}件)",
         "search.hit": "  #{rank} [nb{nb_id} {nb}] {src} ({score}): {text}",
+        "search.suggest": "もしかして: {terms}",
         "eval.recall": "  recall  : {v}  (期待ソースのうち上位kに現れた割合)",
         "eval.mrr": "  MRR     : {v}  (最初に当たった期待ソースの順位の逆数)",
         "eval.case_ok": "  ✓ {q}",
@@ -213,6 +215,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "eval.header": "Retrieval quality (k={k}, {n} cases)",
         "search.header": "Cross-notebook hits ({n})",
         "search.hit": "  #{rank} [nb{nb_id} {nb}] {src} ({score}): {text}",
+        "search.suggest": "Did you mean: {terms}",
         "eval.recall": "  recall  : {v}  (share of expected sources found in top-k)",
         "eval.mrr": "  MRR     : {v}  (reciprocal rank of the first expected source)",
         "eval.case_ok": "  ✓ {q}",
@@ -849,6 +852,10 @@ def _cmd_search(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     hits = retrieve_for_question(store, llm, None, retrieval_q, qvec, k=int(args.k))
     meta = store.notebooks_for_sources([h.source_id for h in hits])
     print(_t("search.header", n=str(len(hits))))
+    if not hits:
+        suggestions = suggest_corrections(store, None, question)
+        if suggestions:
+            print(_t("search.suggest", terms=" ".join(suggestions)))
     for i, h in enumerate(hits):
         nb_id, nb_name, title = meta.get(h.source_id, (0, "", ""))
         print(
