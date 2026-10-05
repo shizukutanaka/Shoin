@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.645
+## Version History: v0.1.37 → v0.2.646
+
+### v0.2.646 — messages/notes の全量カーソル (offset/limit)
+
+50長所/50短所監査 (product-review.md) の短所26を解消:
+`GET /api/notebooks/{id}` の埋め込み messages/notes は v0.2.250/409
+で最新500件 cap+omitted 計数になったが、cap を超えた残りを取得
+する経路が API に無かった (export/CLI のみ全量)。専用カーソル
+`GET /api/notebooks/{id}/messages` および `/notes` を追加——
+newest-first で offset/limit を受け、{messages|notes, total,
+offset, limit} を返す。クエリパラメータは `_q_int` で型/範囲検証
+(`limit=abc`→coded 400・上限500)——JSON body の _optional_* 系
+と同じ境界をURLパラメータへ適用。messages 行は detail より多い
+id/created_at を含む全量レコード。ピン1件 (両経路の順序・範囲・
+total・coded 400/404)。
 
 ### v0.2.645 — ノートブック複製 (duplicate)
 

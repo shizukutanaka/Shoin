@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.645")
+        self.assertEqual(VERSION, "0.2.646")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18635,7 +18635,7 @@ class TestResidualGuards(unittest.TestCase):
                 # payload field carries a lone surrogate — without it the
                 # error-envelope path itself would emit zero HTTP response.
                 "UnicodeEncodeError",
-                "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError", "ValueError",
                 # v0.2.643: _h_theme_css degrades a missing/unreadable theme
                 # file to an empty stylesheet — the cosmetic hook must never
                 # 5xx a page load.
@@ -18806,7 +18806,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
+                # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
             ],
             "store.py": [

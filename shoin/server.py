@@ -423,6 +423,8 @@ class _Handler(BaseHTTPRequestHandler):
         ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
         ("POST", r"^/api/notebooks/(\d+)/duplicate$", "nb_duplicate"),
+        ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
+        ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
@@ -637,6 +639,75 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             nb = store.duplicate_notebook(nb_id, name)
             self._json({"id": nb.id, "name": nb.name}, 201)
+
+    def _q_int(self, key: str, lo: int, hi: int, default: int) -> int:
+        """Query-string bounded int: absent -> default; non-numeric or
+        out-of-range -> coded 400. The _optional_* siblings read JSON
+        bodies; URL params need the same typed boundary so 'limit=abc' is
+        a 400, not a ValueError 500 (v0.2.646)."""
+        raw_list = self._query.get(key)
+        raw = raw_list[0] if raw_list else None
+        if raw is None:
+            return default
+        try:
+            val = int(raw, 10)
+        except ValueError:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be an integer"
+            ) from None
+        if not lo <= val <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be within {lo}..{hi}",
+            )
+        return val
+
+    def _h_nb_messages(self, nb_id: int) -> None:
+        # Cursor the detail cap doesn't reach: newest-first offset/limit
+        # over the full chat history, with total for progress display.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_MESSAGES_LIMIT, NB_MESSAGES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "messages": [
+                        {
+                            "id": m["id"],
+                            "role": m["role"],
+                            "body": m["body"],
+                            "report": _safe_report(m["citation_report"]),
+                            "created_at": m["created_at"],
+                        }
+                        for m in store.list_messages_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_messages(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+
+    def _h_nb_notes(self, nb_id: int) -> None:
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_NOTES_LIMIT, NB_NOTES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "notes": [
+                        {
+                            "id": n["id"],
+                            "title": n["title"],
+                            "body": n["body"],
+                            "created_at": n["created_at"],
+                        }
+                        for n in store.list_notes_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_notes(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")

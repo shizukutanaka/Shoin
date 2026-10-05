@@ -445,6 +445,60 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_nb_messages_and_notes_pagination(self) -> None:
+        """v0.2.646: GET .../messages and .../notes page the full record the
+        detail cap can't reach — newest-first, offset/limit bounded, total
+        disclosed, invalid params coded 400, dead notebook 404."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "paged"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            for i in range(5):
+                store.add_message(nb_id, "user", f"m{i}")
+            for i in range(3):
+                store.add_note(nb_id, f"n{i}", "b")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/messages?offset=1&limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual([m["body"] for m in page["messages"]], ["m3", "m2"])
+        self.assertIn("id", page["messages"][0])
+        self.assertIn("created_at", page["messages"][0])
+
+        status, page = self._json("GET", f"/api/notebooks/{nb_id}/messages")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page["messages"]), 5)
+        self.assertEqual(page["messages"][0]["body"], "m4")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/notes?limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 3)
+        self.assertEqual([n["title"] for n in page["notes"]], ["n2", "n1"])
+
+        for bad in ("offset=-1", "offset=abc", "limit=0", "limit=501"):
+            status, err = self._json(
+                "GET", f"/api/notebooks/{nb_id}/messages?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/notebooks/999999/messages")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, err = self._json("GET", "/api/notebooks/999999/notes")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is

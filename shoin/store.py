@@ -1156,6 +1156,24 @@ class Store:
             ).fetchall()
         )
 
+    def count_notes(self, notebook_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM notes WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()
+        return int(row[0])
+
+    def list_notes_page(
+        self, notebook_id: int, offset: int, limit: int
+    ) -> list[sqlite3.Row]:
+        # Newest-first: page 0 overlaps the detail payload's embedded notes.
+        return list(
+            self.conn.execute(
+                "SELECT * FROM notes WHERE notebook_id=? ORDER BY id DESC"
+                " LIMIT ? OFFSET ?",
+                (notebook_id, limit, offset),
+            ).fetchall()
+        )
+
     def delete_note(self, note_id: int) -> None:
         row = self.conn.execute("SELECT notebook_id FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
@@ -1271,6 +1289,18 @@ class Store:
         return list(
             self.conn.execute(
                 "SELECT * FROM messages WHERE notebook_id=? ORDER BY id", (notebook_id,)
+            ).fetchall()
+        )
+
+    def list_messages_page(
+        self, notebook_id: int, offset: int, limit: int
+    ) -> list[sqlite3.Row]:
+        # Newest-first: page 0 overlaps the detail payload's embedded tail.
+        return list(
+            self.conn.execute(
+                "SELECT * FROM messages WHERE notebook_id=? ORDER BY id DESC"
+                " LIMIT ? OFFSET ?",
+                (notebook_id, limit, offset),
             ).fetchall()
         )
 
