@@ -26,6 +26,8 @@ from .config import (
     NB_MESSAGES_LIMIT,
     NB_NOTES_LIMIT,
     REQUEST_SOCKET_SEC,
+    SEARCH_K_MAX,
+    TOP_K,
     VERSION,
     db_path,
     multi_query_enabled,
@@ -382,6 +384,29 @@ class _Handler(BaseHTTPRequestHandler):
             out.append(item)
         return out
 
+    def _optional_int(
+        self, data: Json, key: str, lo: int, hi: int, default: int
+    ) -> int:
+        """Optional bounded-int field: absent -> default; present -> an int
+        in [lo, hi] or VALIDATION_FIELD_FORMAT_INVALID. The numeric sibling
+        of _optional_str/_optional_id_list — a JSON list/dict/bool or an
+        out-of-range value must be a coded 400, not a raw comparison or a
+        silently unbounded read."""
+        raw = data.get(key)
+        if raw is None:
+            return default
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be an integer, got {type(raw).__name__}",
+            )
+        if not lo <= raw <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be in {lo}..{hi}",
+            )
+        return raw
+
     # --- routing --------------------------------------------------------
 
     _ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -399,6 +424,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
         ("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
+        ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
         ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
@@ -843,6 +869,58 @@ class _Handler(BaseHTTPRequestHandler):
             yield from stream(messages)
         else:
             yield self.llm.chat(messages)
+
+    def _h_nb_search(self, nb_id: int) -> None:
+        """Retrieval-only sibling of /ask: the same search pipeline, but the
+        ranked hits are the response — no answer generated, nothing
+        persisted (product-review weakness #25's "just give me the search
+        results" route). Stateless: history is NOT folded in, so the query
+        is the literal question, not a conversation turn."""
+        body = self._read_json()
+        question = self._require(body, "question")
+        if len(question) > MAX_QUESTION_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"question too long (max {MAX_QUESTION_LEN} characters)",
+            )
+        k = self._optional_int(body, "k", lo=1, hi=SEARCH_K_MAX, default=TOP_K)
+        scope_ids = self._optional_id_list(body, "source_ids")
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)  # 404, same contract as /ask
+            for sid in scope_ids or ():
+                # Same non-leak rule as /ask: a foreign source id is a dead id.
+                if store.get_source(sid).notebook_id != nb_id:
+                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
+            retrieval_q = expand_query(question, [])
+            qvec = (
+                _query_vector(self.llm, retrieval_q)
+                if _check_embed_model_ok(store, self.llm)
+                else None
+            )
+            hits = retrieve_for_question(
+                store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
+            )
+            titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
+            self._json(
+                {
+                    "question": question,
+                    "hits": [
+                        {
+                            "rank": i + 1,
+                            "chunk_id": h.chunk_id,
+                            "source_id": h.source_id,
+                            "title": titles.get(h.source_id, ""),
+                            "section": h.context,
+                            "seq": h.seq,
+                            "score": round(h.score, 6),
+                            "bm25": round(h.bm25, 6),
+                            "vec": round(h.vec, 6),
+                            "text": h.text,
+                        }
+                        for i, h in enumerate(hits)
+                    ],
+                }
+            )
 
     def _h_ask_sse(self, nb_id: int) -> None:
         body = self._read_json()

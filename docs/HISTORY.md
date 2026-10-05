@@ -29,7 +29,37 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.636
+## Version History: v0.1.37 → v0.2.638
+
+### v0.2.638 — `prefers-color-scheme: dark` (ダークモード追従)
+
+50長所/50短所監査 (product-review.md) の短所28を解消: 固定ライト配色のみ
+だった UI が OS の配色設定へ追従する。`:root` のパレット変数を
+`@media (prefers-color-scheme:dark)` で上書きする方式——和紙/墨色
+パレットを反転した暗色版 (washi #181A1F・paper #21252C・sumi #E4E0D4、
+アクセント色は暗背景可読性へ明度調整: seiji-ink #5FD9DF・shu #E57368・
+kohaku #D9A83F・matsu #7CC49A)。設計上の分離点: `--sumi` をそのまま
+反転すると「墨帯」面 (header・#toast) が白帯化してしまうため、常時
+暗帯の面は新変数 `--band`/`--band-ink` へ分離——帯は両モードで
+暗いまま、本文面のみ反転する。変数非駆動の色付け面 (.badge.warn/
+.err/.dim・#banner のリテラル tint) はブロック内で個別上書き。
+
+### v0.2.637 — `POST /api/notebooks/{id}/search` (検索専用API)
+
+50長所/50短所監査 (product-review.md) の短所25を解消: 「検索結果だけ
+欲しい」用途——bm25_search/vector_search は ask の内部経路のみで
+API未公開だった。新エンドポイントは /ask と同じ retrieve_for_question
+パイプライン (expand→embed→BM25/vector RRF融合→rerank→MMR) を走らせ
+ranked hits (rank/chunk_id/source_id/title/section/seq/score/bm25/vec/text)
+を返すが、回答生成もメッセージ永続化もしない——検索は会話ターンで
+なくリテラルクエリのため history への展開も行わない (expand_query
+(q, []))。バリデーションは /ask と同一契約: `question` は _require+
+MAX_QUESTION_LEN・`k` は新 _optional_int で 1..SEARCH_K_MAX(50、
+全文テキストを返すため無制限kはコーパス一括 dump になる)・
+`source_ids` は全要素当該nb所属を 404 非漏洩検証。bound body dict
+を読むvalidatorは _optional_int を追加して _require/_optional_str/
+_optional_id_list の3件套を4件套へ拡張——型未検証の data.get が
+AttributeError→生500化する経路を維持的に閉塞。
 
 ### v0.2.636 — `shoin backup` (DBオンラインバックアップ)
 

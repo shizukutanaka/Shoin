@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.636"
+VERSION = "0.2.638"
 
 
 DEFAULT_PORT = 7440
@@ -17,6 +17,7 @@ MAX_TITLE_LEN = 500      # chars; source titles silently truncated (external con
 CHUNK_TOKENS = 512  # REQ-003: target tokens per chunk
 CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth
+SEARCH_K_MAX = 50  # /search k cap — hits carry full chunk text; unbounded k dumps the corpus
 URL_TIMEOUT_SEC = 15
 URL_MAX_REDIRECTS = 3
 # Bound on any single blocking socket op on an accepted connection. Without it a

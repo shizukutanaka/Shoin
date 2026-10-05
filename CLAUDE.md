@@ -308,6 +308,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
   - GET `/api/notebooks/{id}` → full notebook payload; chat history is embedded as its `"messages"` array (there is no dedicated GET route for messages alone — a prior version of this doc incorrectly claimed one existed, v0.2.75)
   - DELETE `/api/notebooks/{id}/messages` → clear chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
+  - POST `/api/notebooks/{id}/search` → ranked hits only (no generation, no persistence; v0.2.637)
   - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
   - GET `/api/health` → LLM status, embedding model (GET only; no POST route is registered)
 - SSE Streaming: sends meta event (with citation report skeleton), delta events (tokens), done event (final report + status)
@@ -342,7 +343,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.636** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.638** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

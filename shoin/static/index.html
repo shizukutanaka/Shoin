@@ -11,10 +11,20 @@
   --washi:#F6F2E9; --paper:#FFFFFF; --sumi:#20242B; --sumi-soft:#5A6068;
   --seiji:#00C4CC; --seiji-ink:#00777D; --shu:#B3261E; --kohaku:#8A5A00;
   --matsu:#2C6E49; --border:#E2DCCB; --border-strong:#C9C2AE;
+  --band:#20242B; --band-ink:#F6F2E9;
   --serif:"Hiragino Mincho ProN","Yu Mincho","BIZ UDMincho","Noto Serif CJK JP",Georgia,serif;
   --sans:system-ui,-apple-system,"Hiragino Sans","Noto Sans CJK JP",sans-serif;
   --mono:ui-monospace,"SF Mono",Consolas,monospace;
   --sp:4px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --washi:#181A1F; --paper:#21252C; --sumi:#E4E0D4; --sumi-soft:#9AA0A8;
+    --seiji-ink:#5FD9DF; --shu:#E57368; --kohaku:#D9A83F;
+    --matsu:#7CC49A; --border:#363B44; --border-strong:#4A5058;
+  }
+  .badge.warn{background:#3A3220}.badge.err{background:#40251F}
+  .badge.dim{background:#2B2E34}#banner{background:#332D1D}
 }
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
@@ -28,7 +38,7 @@ a{color:var(--seiji-ink)}
 }
 
 /* ---- header: ink band ---- */
-header{display:flex;align-items:center;gap:16px;background:var(--sumi);color:var(--washi);
+header{display:flex;align-items:center;gap:16px;background:var(--band);color:var(--band-ink);
   padding:0 16px;height:52px}
 .mark{font-family:var(--serif);writing-mode:vertical-rl;font-size:13px;letter-spacing:.35em;
   line-height:1;border:1px solid var(--seiji);color:var(--seiji);padding:5px 3px;border-radius:2px}
@@ -37,7 +47,7 @@ header h1{font-family:var(--serif);font-size:17px;font-weight:600;letter-spacing
 .lamp{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#C8C2B4}
 .lamp i{width:9px;height:9px;border-radius:50%;background:#6A6F77}
 .lamp.on i{background:var(--seiji)}
-header button{background:none;border:1px solid #4A4F57;color:var(--washi);border-radius:3px;
+header button{background:none;border:1px solid #4A4F57;color:var(--band-ink);border-radius:3px;
   padding:3px 10px;font-size:12px;cursor:pointer}
 header button:hover{border-color:var(--seiji)}
 
@@ -169,7 +179,7 @@ details.full-src[open] summary::before{content:"▾ "}
 details.full-src .full-body{white-space:pre-wrap;word-break:break-word;
   border-top:1px solid var(--border);padding-top:10px;margin-top:6px;font-size:13px}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:40;display:none;
-  background:var(--sumi);color:var(--washi);border-left:3px solid var(--shu);
+  background:var(--band);color:var(--band-ink);border-left:3px solid var(--shu);
   border-radius:3px;padding:9px 16px;font-size:13px;max-width:88vw}
 .spin{display:inline-block;font-family:var(--mono)}
 [hidden]{display:none!important}
