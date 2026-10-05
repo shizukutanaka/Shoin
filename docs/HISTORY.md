@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.629
+## Version History: v0.1.37 → v0.2.630
+
+### v0.2.630 — vector_search の corrupt embedding BLOB を「信号なし」へ降格
+
+search.py ハイブリッド検索経路 fuzz (seed=482) が検出: `embedding` が
+非 NULL でも decode 不能な BLOB (4 バイト非整列、非数値 norm —
+古い版の書込みや破損DBが典型) のとき、`vec.frombytes` が ValueError
+を送出して vector_search ごと read path (retrieve → API 500) を
+クラッシュさせた。隣接契約は残りの全スコア不能形状 (次元不一致、
+NaN norm) を「ベクトル信号なし」へ降格済み — 破損行も同じ経路を
+取るよう decode を try/except で包み、行ごとスキップ (BM25 leg は
+残存)。行動ピン2件 (vector_search単体 + retrieve e2e)。fuzz後検証
+(~40敵対クエリ×4経路・FTS5実MATCH・RRF/MMR・~5400ランダム試行)
+で残flagゼロ。
 
 ### v0.2.629 — spec.md を v0.2.628 に同期
 

@@ -107,7 +107,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.629")
+        self.assertEqual(VERSION, "0.2.630")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4545,6 +4545,52 @@ class TestSearch(unittest.TestCase):
                 all(h.bm25 > 0.0 or h.vec > 0.0 for h in hits),
                 "a hit reached the result list with zero evidence from both legs",
             )
+
+    def test_vector_search_corrupt_blob_degrades_to_no_signal(self) -> None:
+        """v0.2.630: a non-NULL embedding BLOB that does not decode (byte
+        length not a multiple of 4 — a corrupt row, e.g. written by an older
+        version or a damaged database) crashed vector_search with a ValueError
+        at vec.frombytes() — an uncaught exception on a pure read path that
+        also escaped through retrieve() (a 500 on the API surface). The
+        neighboring contract already degrades every other unscorable shape
+        (dimension mismatch, NaN norms) to "no vector signal"; a corrupt row
+        now takes the same path — the chunk keeps its BM25 leg and is simply
+        absent from the vector list."""
+        from shoin.search import vector_search
+
+        with make_store() as s:
+            nb_id = seed(s)
+            chunks = s.chunks_for_notebook(nb_id)
+            s.set_embedding(chunks[0].id, [1.0, 0.0])  # valid, cosine +1.0
+            with s.conn:
+                s.conn.execute(
+                    "UPDATE chunks SET embedding=?, embedding_norm=? WHERE id=?",
+                    (b"\x01\x02\x03", 1.0, chunks[1].id),  # 3 bytes: unaligned
+                )
+            hits = vector_search(s, nb_id, [1.0, 0.0], k=5)
+            self.assertEqual([h.chunk_id for h in hits], [chunks[0].id])
+
+    def test_retrieve_survives_corrupt_embedding_blob(self) -> None:
+        """v0.2.630 (e2e): the same corrupt BLOB used to crash retrieve() —
+        vector_search's decode error propagated straight up through fusion.
+        A corrupt row must cost the chunk its vector leg only; BM25 hits for
+        the rest of the corpus still return normally."""
+        with make_store() as s:
+            nb_id = seed(s)
+            # A chunk whose text does NOT match the query — a corrupt blob on
+            # it must not crash the read, and the row must not gain a vector
+            # rank slot either (its only retrieval path was the vector leg).
+            chunk = next(
+                c for c in s.chunks_for_notebook(nb_id) if "書斎" not in c.text
+            )
+            with s.conn:
+                s.conn.execute(
+                    "UPDATE chunks SET embedding=?, embedding_norm=? WHERE id=?",
+                    (b"\x07\x11", 1.0, chunk.id),  # 2 bytes: unaligned
+                )
+            hits = retrieve(s, nb_id, "書斎とは", query_vec=[1.0, 0.0], k=8)
+            self.assertTrue(hits)
+            self.assertNotIn(chunk.id, [h.chunk_id for h in hits])
 
     def test_char_bigrams_empty_returns_empty_set(self) -> None:
         """_char_bigrams('') must return set(), not {''}."""
@@ -18001,6 +18047,12 @@ class TestResidualGuards(unittest.TestCase):
                 # handler converts (same class as evaluate.py's _utf8_ok gate).
                 "UnicodeEncodeError",
             ],
+            "search.py": [
+                # v0.2.630: a corrupt embedding BLOB (unaligned bytes or a
+                # non-numeric norm) decodes to "no vector signal" — the row
+                # keeps its BM25 leg instead of crashing the read path.
+                "(TypeError,ValueError)",
+            ],
             "studio.py": [
                 "LLMError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
@@ -18009,7 +18061,8 @@ class TestResidualGuards(unittest.TestCase):
         trivial_baseline = {
             "config.py": 6, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
             "llm.py": 2,
-            "pipeline.py": 2, "qa.py": 2, "server.py": 11, "studio.py": 1,
+            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
+            "studio.py": 1,
         }
         actual: dict[str, list[str]] = {}
         trivial: dict[str, int] = {}
