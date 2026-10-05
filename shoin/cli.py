@@ -98,6 +98,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
         "nb.duplicated": "複製完了: [{id}] {name}",
+        "trash.empty": "ゴミ箱は空です。",
+        "trash.item": "[{id}] {name}  (nb_id {nb_id}・削除 {ts})",
+        "trash.restored": "復元完了: [{id}] {name}",
+        "trash.purged": "アーカイブを完全削除しました",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
         "msg.empty": "チャット履歴がありません。",
@@ -194,6 +198,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
         "nb.duplicated": "Duplicated: [{id}] {name}",
+        "trash.empty": "Trash is empty.",
+        "trash.item": "[{id}] {name}  (nb_id {nb_id}, deleted {ts})",
+        "trash.restored": "Restored: [{id}] {name}",
+        "trash.purged": "Trash archive purged.",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
         "msg.empty": "No chat history.",
@@ -416,6 +424,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     bk = sub.add_parser("backup", help="DBをバックアップ (オンラインスナップショット)")
     bk.add_argument("dest")
+
+    tr = sub.add_parser("trash", help="ゴミ箱 (削除済みnbの一覧・復元・完全削除)")
+    trsub = tr.add_subparsers(dest="action", required=True)
+    trsub.add_parser("list", help="一覧")
+    tr_res = trsub.add_parser("restore", help="元id・埋込み込みで復元")
+    tr_res.add_argument("trash_id", type=int)
+    tr_pur = trsub.add_parser("purge", help="アーカイブを完全削除(復元不可)")
+    tr_pur.add_argument("trash_id", type=int)
     return p
 
 
@@ -784,6 +800,31 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trash(store: Store, args: argparse.Namespace) -> int:
+    action = str(args.action)
+    if action == "list":
+        rows = store.trash_list()
+        if not rows:
+            print(_t("trash.empty"))
+        for r in rows:
+            print(
+                _t(
+                    "trash.item",
+                    id=str(r["id"]),
+                    name=_one_line(r["name"]),
+                    nb_id=str(r["notebook_id"]),
+                    ts=r["deleted_at"],
+                )
+            )
+    elif action == "restore":
+        nb = store.trash_restore(int(args.trash_id))
+        print(_t("trash.restored", id=str(nb.id), name=_one_line(nb.name)))
+    elif action == "purge":
+        store.trash_purge(int(args.trash_id))
+        print(_t("trash.purged"))
+    return 0
+
+
 def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "list":
@@ -1090,6 +1131,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_stats(store, args)
             if command == "backup":
                 return _cmd_backup(store, args)
+            if command == "trash":
+                return _cmd_trash(store, args)
             if command == "export":
                 print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0

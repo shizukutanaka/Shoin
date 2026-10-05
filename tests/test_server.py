@@ -1541,6 +1541,41 @@ class ServerTest(unittest.TestCase):
             body["metrics"],
         )
 
+    def test_trash_endpoints_round_trip(self) -> None:
+        """DELETE archives to trash; GET /api/trash lists it; restore brings
+        the notebook back with its id; purge removes the archive (v0.2.654)."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "trashed"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        status, body = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        items = [t for t in body["trash"] if t["notebook_id"] == nb_id]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "trashed")
+        tid = items[0]["id"]
+        status, body = self._json("POST", f"/api/trash/{tid}/restore")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["id"], nb_id)
+        status, body = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["name"], "trashed")
+        status, body = self._json("DELETE", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        tid2 = [
+            t for t in self._json("GET", "/api/trash")[1]["trash"]
+            if t["notebook_id"] == nb_id
+        ][0]["id"]
+        status, body = self._json("DELETE", f"/api/trash/{tid2}")
+        self.assertEqual(status, 200)
+        status, body = self._json("POST", f"/api/trash/{tid2}/restore")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
+        status, body = self._json("DELETE", "/api/trash/99999")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
+
     def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
         """GET /api/theme.css (v0.2.643): the user-theme hook serves
         SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.
@@ -3799,3 +3834,4 @@ class GenerationSerializationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
+

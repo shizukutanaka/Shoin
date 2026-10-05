@@ -29,7 +29,28 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.653
+## Version History: v0.1.37 → v0.2.654
+
+### v0.2.654 — ゴミ箱 / undo-log (trash_items + GET /api/trash)
+
+短所21を解消: notebook削除は cascade で即物理削除・undo経路ゼロだった。
+`delete_notebook` が全子表(sources/chunks/notes/studio_outputs/messages)
+を `trash_items` へJSON undo-log化してから同一TXでDELETE——アーカイブ
+無しで削除がコミットされる経路が構造上存在しない。chunkのembedding
+BLOBはbase64タグ付きで巻込み、restoreは元idのまま全表に再挿入する
+ため chunks_ai trigger がFTSを再索引(復元直後から検索可能)し、同一
+モデル由来ベクトルはverbatim有効=再埋込コストゼロ。
+設計上の分岐: notebooks.deleted_at のsoft-deleteフラグではなくundo-log
+を選んだ——フラグ方式はlist/get/retrieve x4/counts/export/askの全読み
+経路が除外述語を覚える必要があり、一本取り漏らせば横断検索
+(notebook_id=None)がゴミ箱の中身を暗黙リークする。undo-log方式は
+liveスキーマと全クエリをbyte同一のまま保つ。id衝突(INTEGER PRIMARY
+KEYがmax+1を再利用)は`NOTEBOOK_ALREADY_EXISTS`で拒否——暗黙mergeや
+id書換えはしない。復号不能なpayloadは`SYSTEM_INTERNAL_ERROR`にcoded化
+してアーカイブ行を残す。面: `GET /api/trash`、`POST
+/api/trash/{id}/restore`(201)、`DELETE /api/trash/{id}`、`shoin trash
+list|restore|purge`(CLI/Web parity=REQ-103)。行動ピン6件(1353テスト全
+通過)。
 
 ### v0.2.653 — 利用メトリクス (bump_metrics + GET /api/metrics)
 

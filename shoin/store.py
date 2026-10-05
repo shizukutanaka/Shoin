@@ -7,6 +7,7 @@ that CJK text is searchable without external tokenizers (SQLite >= 3.34).
 from __future__ import annotations
 
 import array
+import base64
 import contextlib
 import json
 import math
@@ -103,6 +104,13 @@ class NotebookWithCounts(TypedDict):
     id: int
     name: str
     counts: _Counts
+
+
+class TrashItem(TypedDict):
+    id: int
+    notebook_id: int
+    name: str
+    deleted_at: str
 
 # --- schema migrations (append-only; never edit a shipped entry) ---
 
@@ -314,6 +322,28 @@ MIGRATIONS: list[tuple[int, str]] = [
         BEGIN
           UPDATE chunks SET embedding_norm = NULL WHERE id = new.id;
         END;
+        """,
+    ),
+    (
+        10,
+        # Undo-log trash archive: delete_notebook serializes the whole
+        # notebook tree to JSON (chunk embedding BLOBs base64-tagged)
+        # and writes it here in the same transaction as the cascade
+        # DELETE — a delete can never commit without its undo record.
+        # Deliberately NOT a deleted_at flag on notebooks: a soft-delete
+        # marker would force every read path (list/get/retrieve x4/
+        # counts/export/ask) to learn the filter, and one missed path
+        # silently leaks trashed content. No FK to notebooks — the
+        # parent row is deleted by design. notebook_id/name/deleted_at
+        # are duplicated as columns so trash_list() never parses payloads.
+        """
+        CREATE TABLE IF NOT EXISTS trash_items(
+          id INTEGER PRIMARY KEY,
+          notebook_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          deleted_at TEXT NOT NULL,
+          payload TEXT NOT NULL
+        );
         """,
     ),
 ]
@@ -547,11 +577,196 @@ class Store:
         if cur.rowcount == 0:
             raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
+    def _notebook_tree_payload(self, notebook_id: int) -> str:
+        """Serialize the whole notebook tree for the trash archive.
+
+        Column fidelity over the ORM projections: raw rows keep every
+        field (context, embedding_norm, citation_report) so a restore
+        re-inserts byte-identical children. Embedding BLOBs are
+        base64-tagged — verbatim-valid on restore, zero re-embed cost.
+        """
+        nb = self.get_notebook(notebook_id)
+        payload: dict[str, Any] = {
+            "notebook": {
+                "id": nb.id,
+                "name": nb.name,
+                "created_at": nb.created_at,
+                "updated_at": nb.updated_at,
+            },
+            "sources": [],
+            "chunks": [],
+            "notes": [],
+            "studio_outputs": [],
+            "messages": [],
+        }
+        src_ids: list[int] = []
+        for r in self.conn.execute(
+            "SELECT * FROM sources WHERE notebook_id=? ORDER BY id",
+            (notebook_id,),
+        ):
+            payload["sources"].append(dict(r))
+            src_ids.append(int(r["id"]))
+        for sid in src_ids:
+            for r in self.conn.execute(
+                "SELECT * FROM chunks WHERE source_id=? ORDER BY seq", (sid,)
+            ):
+                row = dict(r)
+                if row["embedding"] is not None:
+                    row["embedding"] = {
+                        "$blob": base64.b64encode(row["embedding"]).decode("ascii")
+                    }
+                payload["chunks"].append(row)
+        payload["notes"] = [
+            dict(r)
+            for r in self.conn.execute(
+                "SELECT * FROM notes WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            )
+        ]
+        payload["studio_outputs"] = [
+            dict(r)
+            for r in self.conn.execute(
+                "SELECT * FROM studio_outputs WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            )
+        ]
+        payload["messages"] = [
+            dict(r)
+            for r in self.conn.execute(
+                "SELECT * FROM messages WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            )
+        ]
+        return json.dumps(payload, ensure_ascii=False)
+
     def delete_notebook(self, notebook_id: int) -> None:
-        cur = self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+        # Undo-log trash (v0.2.654): archive-then-delete in ONE
+        # transaction — the undo record can never be missing for a
+        # committed delete, and live read paths need no filter changes.
+        nb = self.get_notebook(notebook_id)
+        payload = self._notebook_tree_payload(notebook_id)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO trash_items(notebook_id, name, deleted_at, payload)"
+                " VALUES(?,?,?,?)",
+                (notebook_id, nb.name, _now(), payload),
+            )
+            self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+
+    def trash_list(self) -> list[TrashItem]:
+        """Newest-first trash index — columns only, payload never parsed."""
+        rows = self.conn.execute(
+            "SELECT id, notebook_id, name, deleted_at"
+            " FROM trash_items ORDER BY deleted_at DESC, id DESC"
+        ).fetchall()
+        return [
+            TrashItem(
+                id=int(r["id"]),
+                notebook_id=int(r["notebook_id"]),
+                name=str(r["name"]),
+                deleted_at=str(r["deleted_at"]),
+            )
+            for r in rows
+        ]
+
+    def trash_restore(self, trash_id: int) -> Notebook:
+        """Re-insert a trashed tree with its original ids, in one TX.
+
+        Chunk INSERTs re-fire the FTS triggers, so a restored notebook
+        is searchable immediately with its (base64-decoded) vectors
+        intact. The one refusal is an occupied notebook id: INTEGER
+        PRIMARY KEY reuses max(id)+1, so after delete→create the old
+        id can legitimately be taken — ALREADY_EXISTS, never a
+        silent merge or id rewrite.
+        """
+        row = self.conn.execute(
+            "SELECT payload FROM trash_items WHERE id=?", (trash_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError("TRASH_NOT_FOUND", f"trash item {trash_id} not found")
+        try:
+            payload = json.loads(row["payload"])
+            nb = payload["notebook"]
+            sources = payload["sources"]
+            chunks = payload["chunks"]
+            notes = payload["notes"]
+            studio_outputs = payload["studio_outputs"]
+            messages = payload["messages"]
+            for c in chunks:
+                if c["embedding"] is not None:
+                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"trash item {trash_id} payload is corrupt",
+            ) from exc
+        if self.conn.execute(
+            "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
+        ).fetchone():
+            raise StoreError(
+                "NOTEBOOK_ALREADY_EXISTS",
+                f"notebook {nb['id']} already exists — cannot restore over it",
+            )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO notebooks(id, name, created_at, updated_at)"
+                " VALUES(?,?,?,?)",
+                (nb["id"], nb["name"], nb["created_at"], nb["updated_at"]),
+            )
+            for s in sources:
+                self.conn.execute(
+                    "INSERT INTO sources(id, notebook_id, kind, title, origin,"
+                    " sha256, added_at) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        s["id"], s["notebook_id"], s["kind"], s["title"],
+                        s["origin"], s["sha256"], s["added_at"],
+                    ),
+                )
+            for c in chunks:
+                self.conn.execute(
+                    "INSERT INTO chunks(id, source_id, seq, text, context,"
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        c["id"], c["source_id"], c["seq"], c["text"],
+                        c["context"], c["embedding"], c["embedding_norm"],
+                    ),
+                )
+            for n in notes:
+                self.conn.execute(
+                    "INSERT INTO notes(id, notebook_id, title, body, created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (
+                        n["id"], n["notebook_id"], n["title"],
+                        n["body"], n["created_at"],
+                    ),
+                )
+            for o in studio_outputs:
+                self.conn.execute(
+                    "INSERT INTO studio_outputs(id, notebook_id, kind, body,"
+                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        o["id"], o["notebook_id"], o["kind"], o["body"],
+                        o["citation_report"], o["created_at"],
+                    ),
+                )
+            for m in messages:
+                self.conn.execute(
+                    "INSERT INTO messages(id, notebook_id, role, body,"
+                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        m["id"], m["notebook_id"], m["role"], m["body"],
+                        m["citation_report"], m["created_at"],
+                    ),
+                )
+            self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
+        return Notebook(nb["id"], nb["name"], nb["created_at"], nb["updated_at"])
+
+    def trash_purge(self, trash_id: int) -> None:
+        """Permanently drop one trash archive — the undo record itself."""
+        cur = self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
         self.conn.commit()
         if cur.rowcount == 0:
-            raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
+            raise StoreError("TRASH_NOT_FOUND", f"trash item {trash_id} not found")
 
     def touch_notebook(self, notebook_id: int) -> None:
         """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""

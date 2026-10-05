@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.653")
+        self.assertEqual(VERSION, "0.2.654")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -15290,6 +15290,8 @@ _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
     "CHUNK_NOT_FOUND",
     "EMBEDDING_INVALID",
+    # v0.2.654: trash restore refuses to merge over an occupied id.
+    "NOTEBOOK_ALREADY_EXISTS",
     "NOTEBOOK_EMPTY",
     "NOTEBOOK_NOT_FOUND",
     "NOTE_NOT_FOUND",
@@ -15299,6 +15301,8 @@ _ERROR_CODE_CATALOG = {
     "SYSTEM_DB_LOCKED",
     "SYSTEM_IO_ERROR",
     "SYSTEM_SERVICE_UNAVAILABLE",
+    # v0.2.654: missing trash archive row on restore/purge.
+    "TRASH_NOT_FOUND",
     # ingest.py / pipeline.py / server.py raises (IngestError)
     "INGEST_EMPTY",
     "INGEST_FILE_TOO_LARGE",
@@ -16752,7 +16756,7 @@ class TestResidualGuards(unittest.TestCase):
             "_set_embedding_pair": 2,  # caller-transacted when commit=False
             "create_notebook": 1,
             "rename_notebook": 1,
-            "delete_notebook": 1,
+            "trash_purge": 1,  # single-statement writer like rename_notebook
             "set_setting": 1,
         }
         root = Path(__file__).resolve().parent.parent / "shoin"
@@ -17794,7 +17798,10 @@ class TestResidualGuards(unittest.TestCase):
         declared = _ERROR_CODE_CATALOG
         taxonomy = re.compile(
             r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
-            r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
+            r"SECURITY|SOURCE|STUDIO|SYSTEM|TRASH|VALIDATION)_[A-Z_]+$"
+            # +TRASH family: undo-log archive rows are a first-class
+            # resource (v0.2.654) — its TRASH_NOT_FOUND belongs to the
+            # same *_NOT_FOUND -> 404 taxonomy as every other entity.
         )
         root = Path(__file__).resolve().parent.parent
         found: set[str] = set()
@@ -18982,6 +18989,10 @@ class TestResidualGuards(unittest.TestCase):
                 "OSError",
             ],
             "store.py": [
+                # v0.2.654: trash_restore maps a corrupt/hand-edited
+                # archive payload to a coded error instead of leaking
+                # a raw JSONDecodeError/b64 KeyError.
+                "(KeyError,TypeError,ValueError)",
                 # v0.2.653: bump_metrics is best-effort — a counter write
                 # must never break the operation it counts.
                 "(OSError,sqlite3.Error)",
@@ -19176,10 +19187,14 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 56,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 59,  # +1: _utf8's coded surrogate rejection
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
                                       # +3: update_chunk_text empty/missing/deleted
+                                      # +4: trash raises (TRASH_NOT_FOUND x2,
+                                      #     ALREADY_EXISTS, corrupt payload)
+                                      # -1: delete_notebook's own NOT_FOUND
+                                      #     raise now delegated to get_notebook
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -21211,3 +21226,143 @@ class TestUsageMetrics(unittest.TestCase):
             s.bump_metrics({"good": 2.0})
             m = s.usage_metrics()
             self.assertEqual(m, {"good": 2.0})
+
+
+class TestTrash(unittest.TestCase):
+    """Undo-log trash (v0.2.654): delete archives the whole tree in the same
+    transaction; restore re-inserts it with original ids (chunks re-fire the
+    FTS triggers, embedding BLOBs decode back verbatim)."""
+
+    def _tmpdb(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
+
+    def test_delete_archives_and_restore_recovers_byte_identical(self) -> None:
+        with make_store() as s:
+            nb_id = seed(s)
+            note_id = s.add_note(nb_id, "memo", "本文メモ")
+            s.add_message(nb_id, "user", "質問", "{}")
+            chunk_id = int(
+                s.conn.execute("SELECT id FROM chunks LIMIT 1").fetchone()["id"]
+            )
+            s.set_embedding(chunk_id, [0.1, 0.2, 0.3])
+            before = s.counts(nb_id)
+            saved = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk_id,),
+            ).fetchone()
+            s.delete_notebook(nb_id)
+            # live view: gone. archive: present.
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(nb_id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            items = s.trash_list()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["name"], "研究")
+            self.assertEqual(items[0]["notebook_id"], nb_id)
+            nb = s.trash_restore(items[0]["id"])
+            self.assertEqual(nb.id, nb_id)
+            self.assertEqual(s.counts(nb_id), before)
+            row = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk_id,),
+            ).fetchone()
+            # BLOB bytes + cached norm round-tripped verbatim
+            self.assertEqual(row["embedding"], saved["embedding"])
+            self.assertEqual(row["embedding_norm"], saved["embedding_norm"])
+            # INSERT re-fired the FTS triggers — searchable immediately
+            hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts"
+                " WHERE chunks_fts MATCH '猫は液'"
+            ).fetchone()["n"]
+            self.assertEqual(int(hits), 1)
+            # notes/messages restored with original ids
+            self.assertEqual(
+                int(
+                    s.conn.execute(
+                        "SELECT COUNT(*) AS n FROM notes WHERE id=?", (note_id,)
+                    ).fetchone()["n"]
+                ),
+                1,
+            )
+            self.assertEqual(s.trash_list(), [])  # archive consumed
+
+    def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
+        """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take
+        the freed id. Restore must refuse ALREADY_EXISTS (never a silent
+        merge or id rewrite) and keep the archive for a later purge."""
+        with make_store() as s:
+            nb = s.create_notebook("old")
+            s.delete_notebook(nb.id)
+            nb2 = s.create_notebook("new")
+            self.assertEqual(nb2.id, nb.id)  # id reuse is the premise
+            item = s.trash_list()[0]
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(item["id"])
+            self.assertEqual(cm.exception.code, "NOTEBOOK_ALREADY_EXISTS")
+            self.assertEqual(len(s.trash_list()), 1)  # archive intact
+
+    def test_trash_purge_and_missing_codes(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(99999)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.trash_purge(99999)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+            nb_id = seed(s)
+            s.delete_notebook(nb_id)
+            tid = s.trash_list()[0]["id"]
+            s.trash_purge(tid)
+            self.assertEqual(s.trash_list(), [])
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+
+    def test_restore_corrupt_payload_is_coded(self) -> None:
+        """A hand-edited trash payload must surface as a coded error and
+        leave the archive row — never a raw JSONDecodeError traceback."""
+        with make_store() as s:
+            nb_id = seed(s)
+            s.delete_notebook(nb_id)
+            tid = s.trash_list()[0]["id"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?", ("not-json", tid)
+            )
+            s.conn.commit()
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertEqual(len(s.trash_list()), 1)
+
+    def test_cli_trash_lifecycle(self) -> None:
+        """`shoin trash list|restore` round-trips a deleted notebook —
+        CLI parity with GET /api/trash + POST /api/trash/{id}/restore."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "trash", "list"]), 0)
+        self.assertIn("ゴミ箱は空です", out.getvalue())
+        self.assertEqual(main(["--db", db, "notebook", "delete", str(nb_id)]), 0)
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "trash", "list"]), 0)
+        body = out2.getvalue()
+        self.assertIn("研究", body)
+        tid = body.split("[")[1].split("]")[0]
+        out3 = io.StringIO()
+        with redirect_stdout(out3):
+            self.assertEqual(main(["--db", db, "trash", "restore", tid]), 0)
+        self.assertIn("復元完了", out3.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.get_notebook(nb_id).name, "研究")

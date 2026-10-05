@@ -426,6 +426,9 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/theme\.css$", "theme_css"),
         ("GET", r"^/api/health$", "health"),
         ("GET", r"^/api/metrics$", "metrics"),
+        ("GET", r"^/api/trash$", "trash_list"),
+        ("POST", r"^/api/trash/(\d+)/restore$", "trash_restore"),
+        ("DELETE", r"^/api/trash/(\d+)$", "trash_purge"),
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
@@ -614,6 +617,20 @@ class _Handler(BaseHTTPRequestHandler):
         # observability pair: durable totals vs per-event lines.
         with Store(self.db) as store:
             self._json({"metrics": store.usage_metrics()})
+
+    def _h_trash_list(self) -> None:
+        with Store(self.db) as store:
+            self._json({"trash": store.trash_list()})
+
+    def _h_trash_restore(self, item_id: int) -> None:
+        with Store(self.db) as store:
+            nb = store.trash_restore(item_id)
+        self._json({"id": nb.id, "name": nb.name}, 201)
+
+    def _h_trash_purge(self, item_id: int) -> None:
+        with Store(self.db) as store:
+            store.trash_purge(item_id)
+        self._json({"purged": item_id})
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:

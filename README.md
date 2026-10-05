@@ -51,7 +51,7 @@ shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
 shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
 # その他: search / questions / messages / note / source (rename・refresh・refresh-all・delete) / chunk edit / reindex
-#         stats(利用メトリクス表示。GET /api/metricsでも同一カウンタを返す) / backup
+#         stats(利用メトリクス表示。GET /api/metricsでも同一カウンタを返す) / trash(list|restore|purge 削除済みnbのundo) / backup
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
