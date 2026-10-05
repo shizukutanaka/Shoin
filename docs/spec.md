@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.643 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.644 時点に同期)
 
 ## プロダクト定義
 
@@ -44,7 +44,7 @@
 | REQ-005 | ソース限定・引用付きQ&A | 回答に `[S1][S2]` 形式の引用。コンテキスト外の質問には「ソースに記載なし」と回答 |
 | REQ-006 | 引用検証 | 生成テキストから `[Ss]\s*(\d+)`(NFKC正規化により全角Ｓ１等も受理)を括弧内から抽出し実在ソース番号と照合。不正引用をフラグ、引用カバレッジとソースマップ(`[S1]→ファイル名`)を回答に添付 |
 | REQ-007 | Web UI (3ペイン) | ソース/チャット/Studio。単一HTML+vanilla JS、引用クリックで原文ハイライト表示。`prefers-color-scheme` でダークモード追従(v0.2.638)。`@media print` でchrome畳込み・3ペイン展開・強制ライト配色の印刷経路(v0.2.640)。≤880pxはタブ切替の単一ペイン契約(v0.2.641で監査・ピン固定)。`/`で質問入力へ・1/2/3でペイン選択のグローバルショートカット層(編集中・モーダル中は無効、v0.2.642)。`GET /api/theme.css`が `~/.config/shoin/theme.css` を verbatim 配信するユーザーテーマ差込み口(未存在・過大は空降格、CSP style-src 'self'許可、v0.2.643) |
-| REQ-008 | LLMクライアント | OpenAI互換 `/v1/chat/completions` + `/v1/embeddings`(Ollama/llama.cpp/LM Studio)。SSEストリーミング。接続不可時はgraceful degradation(検索のみ動作)。chat/embedの一時的輸送失敗は有界リトライ(SHOIN_LLM_RETRIES、既定2・0-5、v0.2.639) |
+| REQ-008 | LLMクライアント | OpenAI互換 `/v1/chat/completions` + `/v1/embeddings`(Ollama/llama.cpp/LM Studio)。SSEストリーミング。接続不可時はgraceful degradation(検索のみ動作)。chat/embedの一時的輸送失敗は有界リトライ(SHOIN_LLM_RETRIES、既定2・0-5、v0.2.639)。`SHOIN_LLM_API_KEY`設定時は全リクエストへ`Authorization: Bearer`付与——未設定時はヘッダ自体を送らない(v0.2.644) |
 
 ### P1 (Should-Have)
 

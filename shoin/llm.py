@@ -15,7 +15,7 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from .config import embed_model, llm_model, llm_retries, llm_url
+from .config import embed_model, llm_api_key, llm_model, llm_retries, llm_url
 
 CHAT_TIMEOUT_SEC = 180
 
@@ -115,6 +115,14 @@ class LLMClient:
         # as report.truncated instead of presenting a clipped answer as whole.
         self.last_finish_reason: str | None = None
         self.retries = llm_retries()
+        # Auth gateways (vLLM behind a proxy, hosted OpenAI-compatible) need
+        # a Bearer token; local runtimes ignore auth entirely. Attached only
+        # when configured — never logged (error paths report codes/details,
+        # not request headers).
+        key = llm_api_key()
+        self._headers = {"Content-Type": "application/json"}
+        if key:
+            self._headers["Authorization"] = f"Bearer {key}"
 
     # --- transport ---
 
@@ -145,7 +153,7 @@ class LLMClient:
             req = urllib.request.Request(
                 f"{self.base_url}{path}",
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=self._headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -199,7 +207,9 @@ class LLMClient:
             # below already listing "ValueError: unknown URL scheme" as a case
             # it exists to catch — ADDRESS/SCHEME parsing errors happen at
             # Request() construction time, not just at urlopen() time.
-            req = urllib.request.Request(f"{self.base_url}/models")
+            req = urllib.request.Request(
+                f"{self.base_url}/models", headers=self._headers
+            )
             with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC) as resp:
                 # Check Content-Type to distinguish LLM API servers (application/json)
                 # from plain HTTP servers (text/html) that also return HTTP 200 on any
@@ -260,7 +270,7 @@ class LLMClient:
                         "max_tokens": MAX_TOKENS,
                     }
                 ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=self._headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:

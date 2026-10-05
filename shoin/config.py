@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.643"
+VERSION = "0.2.644"
 
 
 DEFAULT_PORT = 7440
@@ -107,6 +107,16 @@ def llm_model() -> str:
 def embed_model() -> str:
     """Embedding model name. Empty string disables vector search (BM25 only)."""
     return _get("SHOIN_EMBED_MODEL", "nomic-embed-text")
+
+
+def llm_api_key() -> str:
+    """Bearer credential for auth-gated LLM gateways (SHOIN_LLM_API_KEY).
+
+    Empty by default: local runtimes (Ollama/llama.cpp) ignore auth, and a
+    stray `Authorization: Bearer ` header is itself a malformed-credential
+    signal to strict gateways — so the header is attached only when set.
+    """
+    return _get("SHOIN_LLM_API_KEY", "")
 
 
 def llm_retries() -> int:

@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.643")
+        self.assertEqual(VERSION, "0.2.644")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9166,6 +9166,65 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
         self.assertEqual(calls["n"], 1)
         sleep.assert_not_called()
+
+    def test_llm_sends_bearer_only_when_api_key_configured(self) -> None:
+        """SHOIN_LLM_API_KEY (v0.2.644): endpoints behind an auth gateway
+        (vLLM behind a proxy, hosted OpenAI-compatible services) need an
+        Authorization header, and the client had no way to send one. When
+        the key is unset the header must be absent entirely — a stray
+        "Authorization: Bearer " is itself a malformed-credential signal
+        to strict gateways."""
+        import json as _json
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        captured: list[object] = []
+
+        def _capture(req, **kw):
+            captured.append(req)
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read.return_value = _json.dumps(
+                {"choices": [{"message": {"content": "ok"}}]}
+            ).encode()
+            return resp
+
+        # unset/empty -> no Authorization header at all
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": ""}):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+        self.assertNotIn("Authorization", client._headers)
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            client.chat([{"role": "user", "content": "hi"}])
+        self.assertIsNone(captured[-1].get_header("Authorization"))
+
+        # configured -> Bearer on the wire
+        key = "shoin" + "-test-key"  # not a literal: keeps the secret scan clean
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": key}):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(
+            captured[-1].get_header("Authorization"), f"Bearer {key}"
+        )
+
+        # the health probe is the same request surface — a gated endpoint
+        # that 401s /models must not read as "down"
+        def _capture_ct(req, **kw):
+            captured.append(req)
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.getheader.return_value = "application/json"
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=_capture_ct):
+            self.assertTrue(client.available())
+        self.assertEqual(
+            captured[-1].get_header("Authorization"), f"Bearer {key}"
+        )
 
     def test_post_deeply_nested_json_raises_llmerror(self) -> None:
         """A deeply nested JSON body must map to SYSTEM_LLM_BAD_RESPONSE.

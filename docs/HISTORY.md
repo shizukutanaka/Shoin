@@ -29,7 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.643
+## Version History: v0.1.37 → v0.2.644
+
+### v0.2.644 — LLMエンドポイント認証 (`SHOIN_LLM_API_KEY`)
+
+50長所/50短所監査 (product-review.md) の短所35を解消: `SHOIN_LLM_URL`は
+URLのみで、認証必須のゲートウェイ (vLLM behind a proxy・ホスト型
+OpenAI互換サービス) へ接続する経路が無かった。`SHOIN_LLM_API_KEY`を
+設定すると `LLMClient` が全リクエスト面 (chat・chat_stream・embed・
+available) へ `Authorization: Bearer <key>` を付与する。ヘッダは
+構築時に一度組立て——3リクエストサイトで重複させない。未設定時は
+ヘッダ自体を送らない: 空の `Bearer ` は厳格なゲートウェイへの
+malformed-credential信号自体になる。キーはエラー経路 (コード/詳細
+のみ報告・リクエストヘッダは含まない) に流出しない。行動ピン:
+未設定→ヘッダ無し・設定→wire上にBearerの双方向をurlopenキャプチャで
+固定。
 
 ### v0.2.643 — ユーザーテーマ差込み口 (`/api/theme.css`)
 
