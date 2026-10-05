@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.640
+## Version History: v0.1.37 → v0.2.641
+
+### v0.2.641 — ≤880px 狭幅契約の監査・ピン固定
+
+50長所/50短所監査 (product-review.md) の短所30を解消: 狭幅viewportは
+タブ切替のレスポンシブ骨格が既存だったが、実害2件を修復し契約を
+ピン固定した。①flex行内のinputは min-width:auto が既定のため
+intrinsic幅がflex縮小より優先し狭幅で溢れる——`#askInput`/`#nbName`/
+`#urlInput`へ `min-width:0`。②`#viewer.open` の padding:24pxは360px
+幅でシート実効幅を圧迫——8pxへ。ピン `test_narrow_viewport_contract`
+が単一カラム・ペイン切替・tabs可視・min-width:0・viewer余白・
+data-pane↔pane idの双方向一致を固定。
 
 ### v0.2.640 — `@media print` (印刷経路)
 

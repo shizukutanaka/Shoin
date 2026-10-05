@@ -1692,6 +1692,47 @@ console.log("ok");
                     f"{sel} in print block matches no element id",
                 )
 
+    def test_narrow_viewport_contract(self) -> None:
+        """v0.2.641: the ≤880px layout is a contract, not a nicety — the
+        mobile audit (product-review #30) pinned what keeps the app usable
+        on a phone-width viewport.
+
+        - `main` must collapse to one column and panes must switch: a
+          non-active `.pane` hides, `.pane.active` shows, and `.tabs`
+          becomes visible — the only path between panes when the three
+          columns no longer fit.
+        - Flex form rows overflow without `min-width:0`: a text input's
+          intrinsic width beats flex shrinking (min-width:auto), so every
+          input inside `.row`/`#askForm` needs the override.
+        - The viewer sheet's padding must shrink — 24px×2 of chrome at
+          360px eats a tenth of the sheet."""
+        html = _html()
+        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        m = re.search(r"@media\s*\(max-width:\s*880px\)\s*\{(.*?)\n\}", style, re.S)
+        self.assertIsNotNone(m, "no max-width:880px block in <style>")
+        assert m is not None
+        block = m.group(1)
+
+        self.assertRegex(block, r"main\{[^}]*grid-template-columns:1fr")
+        self.assertRegex(block, r"\.pane\{[^}]*display:none")
+        self.assertRegex(block, r"\.pane\.active\{[^}]*display:flex")
+        self.assertRegex(block, r"\.tabs\{[^}]*display:flex")
+        self.assertIn(".tabs button", block)
+        for inp in ("#askInput", "#nbName", "#urlInput"):
+            self.assertIn(
+                inp, block,
+                f"{inp} lacks min-width:0 — overflows its flex row at ≤880px",
+            )
+        self.assertIn("min-width:0", block)
+        self.assertRegex(block, r"#viewer\.open\{[^}]*padding:")
+
+        # every tab's data-pane target and every pane's controller must
+        # line up — a one-way switch strands a pane with no way back
+        panes = set(re.findall(r'class="pane(?:\s[^"]*)?"\s+id="([^"]+)"', html))
+        targets = set(re.findall(r'data-pane="([^"]+)"', html))
+        self.assertEqual(targets, panes,
+                         f"tab/pane mismatch: tabs={targets} panes={panes}")
+
     def test_every_id_reference_resolves_to_an_element(self) -> None:
         """A $("#id") or getElementById("id") with no matching id= attribute is
         a silent TypeError on the next interaction — renames of the element

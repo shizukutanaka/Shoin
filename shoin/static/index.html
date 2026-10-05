@@ -67,6 +67,10 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
   .tabs button{flex:1;border:0;background:none;padding:10px;font-size:13px;cursor:pointer;
     color:var(--sumi-soft);border-bottom:2px solid transparent}
   .tabs button[aria-selected="true"]{color:var(--sumi);border-bottom-color:var(--seiji)}
+  /* flex children default to min-width:auto — an input's intrinsic width
+     overflows its row before flex can shrink it */
+  #askInput,#nbName,#urlInput{min-width:0}
+  #viewer.open{padding:8px}
 }
 
 /* ---- shared bits ---- */
