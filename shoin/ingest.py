@@ -97,12 +97,57 @@ def _decode(data: bytes, charset: str | None = None) -> str:
         candidates.append("utf-32")
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         candidates.append("utf-16")
+    # v0.2.673: BOM-less UTF-16/32 — a wide encoding saved without its
+    # signature leaks NUL bytes in a fixed position pattern (every other
+    # byte for UTF-16, three of four for UTF-32, on the side opposite the
+    # payload). utf-8 would decode UTF-16 ASCII text as alternating NULs
+    # (readable only after the post-strip) and cp932 would decode UTF-16
+    # CJK as mojibake — guess the wide codec from the dominant NUL side
+    # BEFORE the lossy fallbacks. Honored only without an explicit
+    # charset declaration. Longest-unit first, mirroring the BOM order.
+    if not charset:
+        sample = data[:4096]
+        quads = len(sample) // 4
+        if quads >= 8:
+            nul4 = [
+                sum(1 for i in range(r, len(sample), 4) if sample[i] == 0)
+                / quads
+                for r in range(4)
+            ]
+            if (
+                nul4[0] < 0.05
+                and nul4[1] > 0.25
+                and nul4[2] > 0.25
+                and nul4[3] > 0.25
+            ):
+                candidates.append("utf-32-le")
+            elif (
+                nul4[3] < 0.05
+                and nul4[0] > 0.25
+                and nul4[1] > 0.25
+                and nul4[2] > 0.25
+            ):
+                candidates.append("utf-32-be")
+        pairs = len(sample) // 2
+        if pairs >= 4:
+            nul_even = sum(
+                1 for i in range(0, len(sample), 2) if sample[i] == 0
+            ) / pairs
+            nul_odd = sum(
+                1 for i in range(1, len(sample), 2) if sample[i] == 0
+            ) / pairs
+            if nul_odd > 0.08 and nul_even < 0.05:
+                candidates.append("utf-16-le")
+            elif nul_even > 0.08 and nul_odd < 0.05:
+                candidates.append("utf-16-be")
     # utf-8-sig handles plain UTF-8 and BOM-prefixed UTF-8 (Windows Notepad);
     # cp932 covers Shift-JIS, the dominant legacy encoding for Japanese content.
     candidates.extend(["utf-8-sig", "cp932"])
+    text = ""
     for enc in candidates:
         try:
-            return data.decode(enc)
+            text = data.decode(enc)
+            break
         except (ValueError, LookupError):
             # UnicodeDecodeError is a ValueError subclass; the plain-ValueError
             # branch covers malformed codec names — a charset parameter with an
@@ -110,7 +155,31 @@ def _decode(data: bytes, charset: str | None = None) -> str:
             # header) raises ValueError("embedded null character"), not the
             # LookupError an unknown-but-wellformed name raises.
             continue
-    return data.decode("utf-8", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    # v0.2.673: binary guard — utf-8/cp932 plus errors="replace" mean EVERY
+    # byte stream decodes to *something*, so binary content indexed as
+    # mojibake chunks (replacement chars, C0/C1 control runs) that wasted
+    # the chunk budget and poisoned BM25. The signature is replacement +
+    # control density; \n\r\t are legit text controls and real binary is
+    # far denser than 20%. Checked on the first 4K decoded chars — magic
+    # headers live at the head.
+    probe = text[:4096]
+    if probe:
+        noise = sum(
+            1
+            for ch in probe
+            if ch == "\ufffd"
+            or (ord(ch) < 32 and ch not in "\n\r\t")
+            or 127 <= ord(ch) <= 159
+        )
+        if noise / len(probe) > 0.20:
+            raise IngestError(
+                "INGEST_BINARY",
+                "content appears to be binary"
+                " (replacement/control characters exceed 20%)",
+            )
+    return text
 
 
 class _HTMLText(HTMLParser):

@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.672
+## Version History: v0.1.37 → v0.2.673
+
+### v0.2.673 — _decodeのバイナリガード + BOM無しUTF-16/32のNULパターン検出
+
+- **新規短所57解消(ソクラテス監査で発掘)**: 「バイナリファイルはテキストとして索引されてしまうか」の問いで発見——`_decode` は utf-8-sig→cp932→utf-8 `errors="replace"` の連鎖で**いかなるバイト列も必ず文字列化**するため、.txt/.md名で追加されたバイナリが置換文字まみれのモジバケチャンクとして索引されていた。実測: PNGライクバイト列→50% `\ufffd`、上位バイト列→100%
+- **バイナリガード**: デコード結果の先頭4096文字で `\ufffd`+C0制御(`\n\r\t`除外)+C1制御(127-159)の合計密度 >20% なら `INGEST_BINARY`(coded 400)をraise——`_decode` 内の単一点でfile/URL/HTMLの全経路をカバー。ANSI色付きログ等の合法制御文字は疎率で透過
+- **BOM無しUTF-16/32の救出**: 広エンコーディングはBOM無しだとNULバイトが固定位置に滲む(UTF-16は片側奇偶・UTF-32は4中3)。utf-8だと交互NUL(除去後読めるがロッシー)、cp932だとモジバケになるため、charset宣言が無い時に限り支配的NUL側からcodecを推測——utf-32四重位置をutf-16偶奇より先に(utf-32-LEはutf-16パターンを同時満たす)。utf-16検出は8%閾値でASCII少数混入のCJK文書も拾う
+- **契約更新2件(誠実な再分類)**: NUL-only contentは INGEST_EMPTY→INGEST_BINARY(空ではなく「テキストでない」が正直)、utf-8 replaceフォールバックの純置換出力は受理→拒否(疎な混入は従来通り透過)
+- **境界(記録)**: CJK主体でASCII混入が極端に少ないBOM無しUTF-16はパターン未検出→cp932モジバケ→バイナリガードが拒否(静かなゴミ索引より loud error が正直)。utf-32のCJK主体も同型
+- **行動ピン3件**: バイナリバイト列のcoded拒否・BOM無し4codec往復・NUL-only再分類(file+URL両面)と疎混入の透過
+- **カタログ追随2件**: raise-inventory ingest.py +1(INGEST_BINARY)・error-code catalog +1
 
 ### v0.2.672 — チャンク数上限を全書込経路へ拡張(import/merge/duplicate)
 

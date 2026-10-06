@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.672")
+        self.assertEqual(VERSION, "0.2.673")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2974,18 +2974,47 @@ class TestIngest(unittest.TestCase):
             self.assertIn("BOM付きテキスト", text)
 
     def test_null_byte_file_raises_ingest_empty(self) -> None:
-        """A .txt file containing only null bytes must raise INGEST_EMPTY.
+        """A .txt file containing only null bytes must raise a coded error.
 
         Before the fix, str.strip() skipped U+0000 (category Cc, not whitespace),
         so '\x00\x00\x00'.strip() returned '\x00\x00\x00' (truthy) and the file was
         indexed as valid text, inserting garbage into BM25 and vector search.
+        v0.2.673 reclassified the shape: NUL-only content decodes to a string
+        that is >20% control characters — the binary guard reports it as
+        INGEST_BINARY before the empty check ever sees it.
         """
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "nulls.txt"
             p.write_bytes(b"\x00\x00\x00")
             with self.assertRaises(IngestError) as ctx:
                 extract_file(p)
-            self.assertEqual(ctx.exception.code, "INGEST_EMPTY")
+            self.assertEqual(ctx.exception.code, "INGEST_BINARY")
+
+    def test_binary_bytes_raise_ingest_binary(self) -> None:
+        """v0.2.673: binary content must be refused, not indexed as
+        mojibake. utf-8/cp932 + errors="replace" always decode to *some*
+        string, so a binary file under a .txt name silently inserted
+        replacement-character garbage chunks into BM25 and vector search
+        — detected as >20% replacement/control characters."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "blob.txt"
+            p.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 20)
+            with self.assertRaises(IngestError) as ctx:
+                extract_file(p)
+            self.assertEqual(ctx.exception.code, "INGEST_BINARY")
+
+    def test_bomless_utf16_utf32_decoded(self) -> None:
+        """v0.2.673: UTF-16/32 saved WITHOUT a BOM leaks NUL bytes in a
+        fixed position pattern (every other byte for UTF-16, three of four
+        for UTF-32). utf-8 decoded it as alternating NULs — post-strip
+        readable but lossy — and cp932 as mojibake; _decode now guesses
+        the wide codec from the dominant NUL side before the fallbacks."""
+        from shoin.ingest import _decode
+
+        for enc in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+            text = "café document テスト with ascii padding abcdef"
+            with self.subTest(enc=enc):
+                self.assertEqual(_decode(text.encode(enc)), text)
 
     def test_utf16_le_file_decoded_correctly(self) -> None:
         """A UTF-16 LE .txt file must be decoded as UTF-16, not mangled by cp932.
@@ -3866,13 +3895,20 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(result.title, "https://cdn.example/notes.txt")
 
     def test_decode_fallback_to_replace_on_non_utf8_non_cp932(self) -> None:
-        """Bytes that fail both UTF-8 and cp932 must fall back to utf-8 replace (line 73)."""
+        """Bytes that fail both UTF-8 and cp932 fall back to utf-8 replace —
+        but v0.2.673's binary guard rejects the output when it is mostly
+        replacement/control characters (the fallback's garbage signature).
+        A sparse sprinkling in otherwise-real text still passes."""
         from shoin.ingest import _decode
 
-        # b'\x80\x81' fails both utf-8-sig and cp932.
-        result = _decode(b"\x80\x81")
-        # Should not raise; replacement characters indicate the fallback was used.
-        self.assertIsInstance(result, str)
+        # b'\x80\x81' fails utf-8-sig AND cp932 — pure replacement output.
+        with self.assertRaises(IngestError) as cm:
+            _decode(b"\x80\x81")
+        self.assertEqual(cm.exception.code, "INGEST_BINARY")
+        # Two bad bytes inside real text: fallback used, guard tolerates.
+        result = _decode(b"mostly text with one \x80\x81 byte")
+        self.assertIn("mostly text", result)
+        self.assertIn("byte", result)
 
     def test_decode_charset_hint_used_before_defaults(self) -> None:
         """_decode must try the supplied charset first, before utf-8-sig/cp932.
@@ -4267,14 +4303,16 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_extract_url_null_byte_body_raises_ingest_empty(self) -> None:
-        """extract_url must raise INGEST_EMPTY when the response body decodes to only
-        null bytes (U+0000).
+        """extract_url must raise a coded error when the response body decodes
+        to only null bytes (U+0000).
 
-        str.strip() does not remove null bytes (category Cc, not Unicode whitespace),
-        so a body of b'\\x00\\x00\\x00' produced the non-empty string '\\x00\\x00\\x00'
-        which passed the `not text` guard and was indexed as garbage content.
-        Before v0.2.58, extract_file() had the null-byte guard (v0.2.50) but
-        extract_url() did not.  Fix: apply text.replace('\\x00', '') before strip().
+        str.strip() does not remove null bytes (category Cc, not Unicode
+        whitespace), so a body of b'\\x00\\x00\\x00' produced the non-empty
+        string '\\x00\\x00\\x00' which passed the `not text` guard and was
+        indexed as garbage content. Before v0.2.58, extract_file() had the
+        null-byte guard (v0.2.50) but extract_url() did not. v0.2.673
+        reclassified the shape: NUL-only content is >20% control characters
+        — the binary guard reports INGEST_BINARY before the empty check.
         """
         import shoin.ingest as ing
 
@@ -4287,7 +4325,7 @@ class TestIngest(unittest.TestCase):
             self.assertRaises(IngestError) as cm,
         ):
             ing.extract_url("http://example.com/nulls")
-        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+        self.assertEqual(cm.exception.code, "INGEST_BINARY")
 
     def test_pinned_https_connection_connect(self) -> None:
         """_PinnedHTTPSConnection.connect() must use the pinned IP and
@@ -15570,6 +15608,9 @@ _ERROR_CODE_CATALOG = {
     # v0.2.654: missing trash archive row on restore/purge.
     "TRASH_NOT_FOUND",
     # ingest.py / pipeline.py / server.py raises (IngestError)
+    # v0.2.673: decoded content denser than 20% replacement/control
+    # characters is binary, not text — refused before indexing.
+    "INGEST_BINARY",
     "INGEST_EMPTY",
     "INGEST_FILE_TOO_LARGE",
     "INGEST_NOTEBOOK_FULL",
@@ -19518,7 +19559,8 @@ class TestResidualGuards(unittest.TestCase):
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
+            # +1: _decode's binary guard (INGEST_BINARY) — v0.2.673.
+            "ingest.py": ["IngestError"] * 27 + ["zlib.error", "RE-RAISE"],
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,
             # +1 RE-RAISE: _post retry loop re-raises the same coded error
             "pipeline.py": [
