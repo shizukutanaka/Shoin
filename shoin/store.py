@@ -9,6 +9,7 @@ from __future__ import annotations
 import array
 import base64
 import contextlib
+import hashlib
 import json
 import math
 import operator
@@ -1275,24 +1276,66 @@ class Store:
         # (notebook_id, sha256), so a merge whose source notebook shares
         # content with the target — or a crafted import listing the same
         # sha twice — used to die on a raw IntegrityError (HTTP 500) after
-        # partially inserting. Identical sha means identical text, which
-        # the deterministic chunker turns into identical chunks: keep the
-        # existing row, remap the incoming tree onto it through id_map,
-        # and skip its chunk INSERTs (the index gains no duplicate
-        # content; citation_reports still resolve via the remap).
-        seen_sha: dict[str, int] = {
+        # partially inserting.
+        # v0.2.682: dedupe only on identical CONTENT, not just an
+        # identical sha — update_chunk_text edits a chunk without
+        # touching the source's origin-sha, so an edited copy carries a
+        # stale label. Same sha + same (seq, text) corpus → remap onto
+        # the existing row and skip its chunk INSERTs (identical chunks,
+        # citation_reports resolve via the remap). Same sha + different
+        # corpus → the doc's sha no longer describes its content, so
+        # recompute the label from the doc's own chunks and keep BOTH
+        # versions — discarding the incoming chunks was silent data loss.
+        src_chunks: dict[Any, list[tuple[Any, str]]] = {}
+        for c in chunks:
+            src_chunks.setdefault(c["source_id"], []).append(
+                (c["seq"], c["text"])
+            )
+        # sha -> owner: an existing sources.id (int) or the dict of a doc
+        # source still waiting for its INSERT (in-document collisions).
+        seen_sha: dict[str, Any] = {
             str(row[1]): int(row[0])
             for row in self.conn.execute(
                 "SELECT id, sha256 FROM sources WHERE notebook_id=?",
                 (notebook_id,),
             )
         }
+
+        def _corpus(owner: Any) -> list[tuple[Any, str]]:
+            if isinstance(owner, int):
+                return [
+                    (r[0], r[1])
+                    for r in self.conn.execute(
+                        "SELECT seq, text FROM chunks WHERE source_id=?",
+                        (owner,),
+                    )
+                ]
+            return list(src_chunks.get(owner["id"], []))
+
         deduped: set[Any] = set()
+        dedupe_owner: dict[Any, Any] = {}
         for s in sources:
-            if s["sha256"] in seen_sha:
-                deduped.add(s["id"])
-            else:
-                seen_sha[str(s["sha256"])] = -1  # placeholder until INSERT
+            mine = sorted(src_chunks.get(s["id"], []))
+            sha = str(s["sha256"])
+            n = -1  # -1 = the doc's own sha; >=0 = rehash with salt n
+            while True:
+                owner = seen_sha.get(sha)
+                if owner is None:
+                    seen_sha[sha] = s
+                    s["sha256"] = sha
+                    break
+                if sorted(_corpus(owner)) == mine:
+                    deduped.add(s["id"])
+                    dedupe_owner[s["id"]] = owner
+                    break
+                n += 1
+                h = hashlib.sha256()
+                if n:
+                    h.update(str(n).encode("ascii"))
+                for _seq, t in mine:
+                    h.update(t.encode("utf-8"))
+                    h.update(b"\n")
+                sha = h.hexdigest()
         # v0.2.672: the per-notebook chunk cap is a product invariant, not
         # an ingest-rate limit — the vector leg scans every chunk in a
         # notebook, so an over-cap corpus slows EVERY query on it. Until
@@ -1312,7 +1355,13 @@ class Store:
         id_map: dict[Any, int] = {}
         for s in sources:
             if s["id"] in deduped:
-                id_map[s["id"]] = seen_sha[str(s["sha256"])]
+                owner = dedupe_owner[s["id"]]
+                # An int owner is an existing row; a dict owner is a doc
+                # source already INSERTed earlier in this loop.
+                if isinstance(owner, int):
+                    id_map[s["id"]] = owner
+                else:
+                    id_map[s["id"]] = id_map[owner["id"]]
                 continue
             cur = self.conn.execute(
                 "INSERT INTO sources"

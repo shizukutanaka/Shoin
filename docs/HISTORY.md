@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.681
+## Version History: v0.1.37 → v0.2.682
+
+### v0.2.682 — dedupeは同一コーパス限り(編集済みchunkの消失を閉塞)
+
+- **Devin Review finding修正(#358への4件レビューのbug #1)**: `update_chunk_text`はchunk本文を編集するが`source.sha256`(取込元のハッシュ)を変更しない——編集済みコピーは**古いラベル**を持つ。v0.2.679のdedupeは「同sha=同本文」前提だったため、編集済みソースを同shaの未編集ソースを持つnbへmergeすると**編集が静かに捨てられた**(実検証で消失を確認)
+- **dedupeにコーパス一致を要求**: 同shaであっても`SELECT seq,text ORDER BY seq`の全量一致でのみ既存行へid_map折返し——「同sha・別コーパス」は文書のshaが自身の内容を記述していないため、文書自身のchunksからsha256を再計算(salt反復で衝突解消)してUNIQUEを満たし**両版を保持**
+- **in-document dupにも同一経路**: pending ownerをdoc dictとして保持し、文書内の「同sha・別本文」も再ラベル(681テストを全コーパス複製に訂正——部分コーパスは別内容として保持が正解)
+- **境界(記録)**: context(パンくず)/embeddingの差分は同一コーパス扱い——dedupeは本文の同一性判定であってメタ差の伝搬ではない(既存行のcontextを保持)。`context`の新しい方への更新はreindexと同じ修復経路で賄う
+- **行動ピン3件**: merge=同sha編集済み→2ソース両テキスト生存+UNIQUE満足+FTS索引・import=文書内同sha別テキスト→再ラベルで3ソース・dedupe経路(679)は全コーパス複製で不変維持
+- **カタログ追随ゼロ**: raise/except/`.lower()`/find/imports(hashlibはcapability watched外)ドリフトなし
 
 ### v0.2.681 — `shoin import` の文書サイズ上限(MAX_IMPORT_BYTES)
 

@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.681")
+        self.assertEqual(VERSION, "0.2.682")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22743,14 +22743,20 @@ class TestNbMerge(unittest.TestCase):
     def test_merge_dedupes_identical_sources(self) -> None:
         """v0.2.679 (product-review #63): merging two notebooks sharing a
         source sha256 used to die on a raw UNIQUE IntegrityError (HTTP
-        500, partial write rolled back). Same sha means identical text —
-        identical deterministic chunks — so the merge keeps the existing
-        row, remaps the incoming tree onto it via id_map, and skips its
-        chunk INSERTs; reports still resolve to the kept row."""
+        500, partial write rolled back). v0.2.682 makes the corpus check
+        explicit: same sha + identical (seq, text) chunks means identical
+        content, so the merge keeps the existing row, remaps the incoming
+        tree onto it via id_map, and skips its chunk INSERTs; reports
+        still resolve to the kept row."""
         with make_store() as s:
             target = s.create_notebook("取込先")
             kept = s.add_source(target.id, "txt", "doc-ja-copy", "mem://ja2", "sha-ja")
-            s.add_chunks(kept.id, ["取込先の既存チャンク"])
+            # v0.2.682: dedupe requires an identical (seq, text) corpus —
+            # the kept copy carries doc-ja's exact chunks.
+            s.add_chunks(
+                kept.id,
+                [JA, "本日の天気は晴れ。気温は二十五度。", "猫は液体である説。"],
+            )
             src_nb = seed(s)
             src_ids = {
                 x.title: int(x.id) for x in s.sources_for_notebook(src_nb)
@@ -22766,16 +22772,16 @@ class TestNbMerge(unittest.TestCase):
             )
             self.assertEqual(titles, ["doc-en", "doc-ja-copy"])
             counts = s.counts(target.id)
-            # kept source (1 chunk) + doc-en (2 chunks); doc-ja's 3 chunks
+            # kept source (3 chunks) + doc-en (2 chunks); doc-ja's 3 chunks
             # were content-identical and skipped.
             self.assertEqual(counts["sources"], 2)
-            self.assertEqual(counts["chunks"], 3)
+            self.assertEqual(counts["chunks"], 5)
             self.assertEqual(
                 s.conn.execute(
                     "SELECT count(*) FROM chunks WHERE source_id=?",
                     (kept.id,),
                 ).fetchone()[0],
-                1,
+                3,
                 "deduped source must not gain the incoming chunks",
             )
             # citation_report remapped the deduped source onto the KEPT id.
@@ -22789,26 +22795,112 @@ class TestNbMerge(unittest.TestCase):
         """v0.2.679 (product-review #63): a crafted export listing the same
         source sha256 twice also hit the UNIQUE constraint — the dedupe
         pass treats in-document duplicates the same way (second source
-        folds onto the first; its chunks are skipped)."""
+        folds onto the first; its chunks are skipped). v0.2.682 requires
+        an identical (seq, text) corpus, so the clone copies every chunk."""
         with make_store() as s:
             src_nb = seed(s)
             doc = s._notebook_tree_dict(src_nb)
-            # Clone doc-ja's source row (new id, same sha) + one chunk.
+            # Clone doc-ja's source row (new id, same sha) + ALL its
+            # chunks — a partial corpus is different content now and
+            # would be kept under a recomputed label instead of deduped.
             dup_src = dict(doc["sources"][0])
             dup_src["id"] = "dup-id"
             doc["sources"].append(dup_src)
-            dup_chunk = dict(doc["chunks"][0])
-            dup_chunk["source_id"] = "dup-id"
-            doc["chunks"].append(dup_chunk)
+            n_dup = 0
+            for c in list(doc["chunks"]):
+                if c["source_id"] == doc["sources"][0]["id"]:
+                    d = dict(c)
+                    d["source_id"] = "dup-id"
+                    doc["chunks"].append(d)
+                    n_dup += 1
 
             nb = s.import_notebook(doc)
             counts = s.counts(nb.id)
             self.assertEqual(counts["sources"], 2)
             self.assertEqual(
                 counts["chunks"],
-                len(doc["chunks"]) - 1,
+                len(doc["chunks"]) - n_dup,
                 "the in-document duplicate contributes zero chunks",
             )
+
+    def test_merge_keeps_edited_chunks_on_sha_collision(self) -> None:
+        """v0.2.682 (Devin Review on #358): update_chunk_text edits text
+        without touching the source's origin-sha — an edited copy carries
+        a stale label. Same sha + DIFFERENT corpus must not dedupe:
+        discarding the incoming chunks was silent data loss. The doc's
+        sha no longer describes its content, so the incoming source is
+        re-labeled from its own chunks and BOTH versions survive."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            kept = s.add_source(target.id, "txt", "doc", "mem://a", "sha-x")
+            s.add_chunks(kept.id, ["原文テキスト"])
+            src_nb = s.create_notebook("統合元")
+            edited = s.add_source(src_nb.id, "txt", "doc", "mem://b", "sha-x")
+            s.add_chunks(edited.id, ["原文テキスト"])
+            # edit the chunk in place — sha stays, text diverges
+            s.update_chunk_text(
+                s.chunks_for_source(edited.id)[0].id, "編集済みテキスト"
+            )
+
+            s.merge_notebooks(target.id, src_nb.id)
+
+            texts = sorted(
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT c.text FROM chunks c"
+                    " JOIN sources s2 ON c.source_id=s2.id"
+                    " WHERE s2.notebook_id=?",
+                    (target.id,),
+                )
+            )
+            self.assertEqual(texts, ["原文テキスト", "編集済みテキスト"])
+            self.assertEqual(s.counts(target.id)["sources"], 2)
+            shas = [
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT sha256 FROM sources WHERE notebook_id=?",
+                    (target.id,),
+                )
+            ]
+            self.assertEqual(
+                len(set(shas)), 2,
+                "the relabeled source must satisfy UNIQUE(notebook_id, sha256)",
+            )
+            # the edited corpus's chunks are FTS-searchable post-merge
+            hits = s.conn.execute(
+                "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH '編集済み'"
+            ).fetchone()[0]
+            self.assertEqual(hits, 1)
+
+    def test_import_relabels_in_doc_same_sha_different_text(self) -> None:
+        """v0.2.682: a crafted export listing the same sha for sources
+        with different chunks must not drop the diverging text either —
+        the same corpus check applies to in-document duplicates."""
+        with make_store() as s:
+            src_nb = seed(s)
+            doc = s._notebook_tree_dict(src_nb)
+            dup_src = dict(doc["sources"][0])
+            dup_src["id"] = "dup-id"
+            dup_src["title"] = "dup"
+            doc["sources"].append(dup_src)
+            dup_chunk = dict(doc["chunks"][0])
+            dup_chunk["source_id"] = "dup-id"
+            dup_chunk["text"] = "書き換えられた別テキスト"
+            doc["chunks"].append(dup_chunk)
+
+            nb = s.import_notebook(doc)
+            counts = s.counts(nb.id)
+            self.assertEqual(counts["sources"], 3)
+            texts = {
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT c.text FROM chunks c"
+                    " JOIN sources s2 ON c.source_id=s2.id"
+                    " WHERE s2.notebook_id=?",
+                    (nb.id,),
+                )
+            }
+            self.assertIn("書き換えられた別テキスト", texts)
 
     def test_merge_rejects_self_and_missing(self) -> None:
         with make_store() as s:
