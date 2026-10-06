@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.667
+## Version History: v0.1.37 → v0.2.668
+
+### v0.2.668 — 単一ファイル .pyz 配布経路(zipapp) + pkgutilアセット読取
+
+- **短所33解消(部分的)**: バイナリ配布経路なし——インストールが `git clone`+venv前提だった。Shoinはstdlib-onlyのため `zipapp` で**1ファイル shoin.pyz**(`python3 shoin.pyz <sub>` で動く)を実現。`scripts/build_pyz.py` が `shoin/` を staging へコピーし `__main__.py` を自書きして固める——zipappの `main=` kwarg は生成entryが `main()` の戻り値を捨て rc を全て 0 にするため不採用(`sys.exit(main())` でcoded rcを保全)
+- **zip内アセット問題の解消**: `_STATIC` の `Path(__file__)` 読取はzip内ではアーカイブメンバ参照になり全資産が欠落扱い——新設 `_read_packaged_asset` が `pkgutil.get_data("shoin", ...)` へ切替(FileLoader・zipimporter両対応)。欠落系例外は `FileNotFoundError` へ正規化し既存 `except OSError → STATIC_ASSET_NOT_FOUND` coded 404境界をそのまま維持
+- **importlib不採用**: `importlib.resources` が自然解だが capability-import catalog が `importlib` を動的読込として pin 対象——`pkgutil` はcatalog対象外のため能力ドリフトゼロで同じ目的を達成
+- **e2eピン**: subprocess pyz で `--help`(rc0+usage)と `serve`→health→`GET /`(書院)→`GET /static/{app.js,style.css}`(200)を実検証——zipメンバの静的資産が実際に届くことを固定。`--port 0`+起動バナー行読取で決定論的(port競合・stdoutバッファリング回避)
+- **新規短所52解消(e2e検証で発掘)**: e2e実測で serve 起動が ~35s を要する停滞を発見——stdlib `HTTPServer.server_bind` が bind 時に `socket.getfqdn(host)` の**逆引きDNS(PTR)**を実行し、リゾルバ低速/不在の環境で listen 自体が遅延していた(ソースツリーでも同一・環境起因)。`_HTTPServer.server_bind` を override し `TCPServer.server_bind`+リテラル `server_name`/`server_port` 設定へ置換——ループバック専用サーバに正規名は不要で、server_name の唯一の消費者は stdlib HTML エラーページ(本ハンドラは JSON エンベロープ send_error)。make_server 35.0s→0.05s・pyz 起動 ~35s→1.0s を実測
+- **残存制約(正直な部分解消)**: .pyzはネイティブバイナリではなく Python 3.11+ インタプリタが引き続き前提(requires-pythonと同一)。単一実行バイナリ(PyInstaller級)はビルド基盤・署名・三重OS検証を要し本プロダクトのstdlib-only制約と非対称——配布の最小経路として .pyz を採択
+- **カタログ追随**: except-inventory +1(`except (OSError, ImportError)` in server.py)・raise-inventory +1(FileNotFoundError in server.py)・gate scope +scripts/(mypy --strict拡張・coverage floorは製品コードのみ)
 
 ### v0.2.664 — FTS5索引の optimize セグメントマージ(索引肥大の構造抑止)
 

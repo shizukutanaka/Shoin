@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.667")
+        self.assertEqual(VERSION, "0.2.668")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12792,6 +12792,98 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[:400])
         self.assertIn("usage:", proc.stdout.lower())
 
+    def test_zipapp_pyz_runs_cli_and_serves_ui(self) -> None:
+        """v0.2.668 (product-review #33): the .pyz is the no-install
+        distribution — `python3 shoin.pyz` must run the CLI AND serve the UI.
+        Inside the archive `__file__`-relative paths are zip members, not
+        filesystem entries, so the UI 404s unless packaged assets are read
+        through pkgutil.get_data — this exercises both ends of that
+        contract in a fresh interpreter."""
+        import subprocess
+        import threading
+        import time
+        import urllib.request
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pyz = Path(tmp.name) / "shoin.pyz"
+        build = subprocess.run(
+            [sys.executable, str(root / "scripts" / "build_pyz.py"), str(pyz)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=root,
+            env=env,
+        )
+        self.assertEqual(build.returncode, 0, build.stderr[:400])
+        self.assertTrue(pyz.exists())
+        # CLI inside the archive: --help exits 0 with the argparse block,
+        # and the generated __main__.py keeps main()'s coded exit value.
+        help_run = subprocess.run(
+            [sys.executable, str(pyz), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=tmp.name,
+            env=env,
+        )
+        self.assertEqual(help_run.returncode, 0, help_run.stderr[:400])
+        self.assertIn("usage:", help_run.stdout.lower())
+        # UI inside the archive: serve --port 0 and read the bound port off
+        # the startup banner (deterministic — no bind/close race). With
+        # __file__-relative reads every asset here is STATIC_ASSET_NOT_FOUND.
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(pyz),
+                "--db",
+                str(Path(tmp.name) / "d.db"),
+                "serve",
+                "--port",
+                "0",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=tmp.name,
+            env=env,
+        )
+        self.addCleanup(proc.kill)
+        banner: list[str] = []
+        reader = threading.Thread(
+            target=lambda: banner.append(proc.stdout.readline()), daemon=True
+        )
+        reader.start()
+        reader.join(30)
+        try:
+            self.assertTrue(banner, "pyz serve printed no banner within 30s")
+            port = re.search(r"127\.0\.0\.1:(\d+)", banner[0])
+            self.assertIsNotNone(port, banner[0])
+            base = f"http://127.0.0.1:{port.group(1)}"
+            page = ""
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(base + "/", timeout=3) as resp:
+                        page = resp.read().decode("utf-8")
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            self.assertIn("書院", page)
+            for asset in ("app.js", "style.css"):
+                with urllib.request.urlopen(
+                    f"{base}/static/{asset}", timeout=5
+                ) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertGreater(len(resp.read()), 500)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc.stdout.close()
+
     def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
         import io
         import os
@@ -16187,7 +16279,11 @@ class TestResidualGuards(unittest.TestCase):
             )
         # Top-level dirs holding .py files directly (non-recursive): build
         # artifacts nest deeper (build/lib/...) and never appear here.
-        gate_scoped = {"shoin", "tests"}
+        # "scripts" was scoped in at v0.2.668: build_pyz.py is build tooling
+        # — mypy --strict now covers scripts/ too, while the coverage floor
+        # stays product-only (shoin/*) since a release helper ships no
+        # testable request path of its own.
+        gate_scoped = {"shoin", "tests", "scripts"}
         for d in root.iterdir():
             if not d.is_dir() or d.name.startswith(".") or d.name == "__pycache__":
                 continue
@@ -19147,6 +19243,12 @@ class TestResidualGuards(unittest.TestCase):
                 # health is the diagnostic surface and must still 200 when
                 # the DB it reports on is unopenable/broken.
                 "(OSError,StoreError,sqlite3.OperationalError)",
+                # v0.2.668: _read_packaged_asset normalizes get_data's
+                # missing-resource failures — FileNotFoundError on
+                # filesystem loaders, ZipImportError(->ImportError) inside a
+                # .pyz — to FileNotFoundError so the coded 404 boundary
+                # above it keeps one shape.
+                "(ImportError,OSError)",
             ],
             "store.py": [
                 # v0.2.654: trash_restore maps a corrupt/hand-edited
@@ -19382,6 +19484,11 @@ class TestResidualGuards(unittest.TestCase):
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
+                # +1: _read_packaged_asset's normalized missing-asset
+                #     signal — FileNotFoundError so the caller's existing
+                #     OSError -> STATIC_ASSET_NOT_FOUND coded 404 boundary
+                #     catches it unchanged inside a .pyz (v0.2.668)
+                "FileNotFoundError",
             ],
             "store.py": [
                 "AssertionError", "last_exc(ref)",

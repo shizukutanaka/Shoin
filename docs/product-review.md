@@ -172,7 +172,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 30 | ~~**モバイル/レスポンシブ未監査**~~ → **解消済み** (v0.2.641: ≤880px契約を監査・ピン固定。flex input溢れに`min-width:0`、viewer余白8pxへ。レスポンシブ骨格は既存タブ切替) |
 | 31 | ~~**印刷スタイル無し**~~ → **解消済み** (v0.2.640: `@media print`でchrome畳込み+3ペイン展開+強制ライト配色。`.msg`はpage-break-inside:avoid) |
 | 32 | ~~**ブランディング/テーマ変更機構無し**~~ → **解消済み** (v0.2.643: `GET /api/theme.css`が`~/.config/shoin/theme.css`をverbatim配信——パレットは`:root`変数化済みのため後勝ちlinkで完結。SHOIN_THEME_CSSでパス変更可・CSP 'self'許可) |
-| 33 | **バイナリ配布経路なし** | PyPI とは別に、brew/PyInstaller系の単一実行形式が無い。Python環境前提が参入障壁 |
+| 33 | ~~**バイナリ配布経路なし**~~ → **解消済み(部分的)** (v0.2.668) | `scripts/build_pyz.py` が stdlib `zipapp` で単一ファイル `shoin.pyz` を生成——`python3 shoin.pyz <sub>` で全機能が動作(subprocess e2eピン: `--help`+serve→UI/静的資産200)。zip内アセット読取は `pkgutil.get_data` へ切替(importlibはcapabilityカタログ対象のため不採用)。残存: Python 3.11+ インタプリタは引き続き前提(ネイティブバイナリではない——PyInstaller級はビルド基盤・署名・3OS検証を要しstdlib-only制約と非対称) |
 | 34 | ~~**利用メトリクス無し**~~ → **解消済み** (v0.2.653: `Store.bump_metrics`がsettings表へatomic加算(本文非含有・再起動横断)、`GET /api/metrics`/`shoin stats`利用ブロックへ露出。index.ok/fail/ms/embed_skip・ask.count/nohit/degraded/fail/ms。SHOIN_LOG_JSONと対——イベント行vs永続合計) |
 | 35 | ~~**LLMエンドポイントの認証非対応**~~ → **解消済み** (v0.2.644: `SHOIN_LLM_API_KEY`設定時に全リクエストへ`Authorization: Bearer`付与——未設定時はヘッダ自体を送らない) |
 | 36 | ~~**LLM呼出しにリトライ/バックオフ無し**~~ → **解消済み** (v0.2.639: `_post`が輸送系失敗(TIMEOUT/SERVICE_UNAVAILABLE)のみ指数バックオフで再試行。`SHOIN_LLM_RETRIES`既定2・0-5。chat_stream/availableは対象外——送出済みdeltaの複写防止) |
@@ -191,6 +191,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 49 | ~~**スケジュール/定期タスク機構なし**~~ → **解消済み** (v0.2.648: `POST /api/notebooks/{id}/refresh-all`/`shoin source refresh-all` が全refreshableソースを一括処理——cronに登録すれば定期再取込が完結。per-source結果収集で死んだorigin一つで全体が止まらない) |
 | 50 | **ローカルLLM以外の選択肢前提** | 組込みモデル同梱やクラウドAPIキー対応は設計外。ユーザーが別途 OpenAI 互換サーバを用意する必要がある |
 | ~~51~~ | ~~**削除undoがノートブックのみ**~~ → **解消済み(v0.2.667)** | ソクラテス監査で発掘: v0.2.654のtrash_itemsはnbのみをカバーし、`delete_source`(upload取込後はtmp origin消失で実質不可復旧)と`delete_note`が永久消失だった。trash_itemsへ`kind`列(migration 14)を追加し両動詞が同TXでアーカイブ——restoreはkind分岐(source=元id+FTS再索引・NOTEBOOK_NOT_FOUND親消失/SOURCE_ALREADY_EXISTS占有、note=新規idで衝突不能)。messages-clearは意図的cleanup+id再採番衝突のため設計上対象外 |
+| ~~52~~ | ~~**serve起動が逆引きDNSで~30s停滞**~~ → **解消済み(v0.2.668)** | pyz e2e検証で発掘: stdlib `HTTPServer.server_bind`がbind時に`socket.getfqdn(host)`のPTR参照を実行し、リゾルバ低速/不在環境でlisten自体が遅延(実測35s・ソースツリー同一)。`_HTTPServer.server_bind`をoverrideし`TCPServer.server_bind`+リテラル`server_name`へ置換——ループバック専用に正規名不要(server_nameの消費者はstdlib HTMLエラーページのみで本ハンドラはJSONエンベロープ)。実測 35.0s→0.05s |
 
 ### 解決済み(記録)
 

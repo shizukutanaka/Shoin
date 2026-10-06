@@ -1855,10 +1855,22 @@ class ServerTest(unittest.TestCase):
         asset sender degrades to a coded 404 instead."""
         import shoin.server as srv_mod
 
-        with patch.object(srv_mod, "_STATIC", Path("/nonexistent-dir/x")):
+        with patch.object(
+            srv_mod, "_read_packaged_asset", side_effect=FileNotFoundError("x")
+        ):
             status, body = self._json("GET", "/static/app.js")
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "STATIC_ASSET_NOT_FOUND")
+
+    def test_server_bind_keeps_literal_loopback_name(self) -> None:
+        """v0.2.668: stdlib server_bind resolves the bind host via
+        socket.getfqdn — a PTR lookup that stalls ~30s on machines with a
+        slow/absent resolver, delaying the listen itself. A loopback-only
+        server has no need for the canonical name; the literal host is
+        stored instead."""
+        self.assertIn(self.server.server_name, ("127.0.0.1", "::1"))
+        self.assertIsInstance(self.server.server_port, int)
+        self.assertGreater(self.server.server_port, 0)
 
     def test_ui_lang_meta_reflects_shoin_lang(self) -> None:
         """README documents SHOIN_LANG as controlling "UI言語", but the Web UI

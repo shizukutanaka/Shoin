@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.667 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.668 時点に同期)
 
 ## プロダクト定義
 
@@ -54,7 +54,7 @@
 | REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可)。LLM不通時はソースタイトル由来の決定論フォールバック質問(`「<題>」とは何ですか`/`What is "<title>"?`、i18n)を最大n件返し、到達不能を「質問ゼロ」と混同しない(v0.2.660) |
 | REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化(各出力カードから1クリック保存、v0.2.412)。削除はundo-logへ`kind='note'`でアーカイブし `trash restore` で新規id復元(note idはdelete/list以外に参照ゼロのため衝突不能・v0.2.667) |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
-| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/chunk/health/stats/backup。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459)。利用メトリクス(カウント+ms合計のみ・本文非含有)は`Store.bump_metrics`がsettings表へatomic加算し`GET /api/metrics`/`shoin stats`末尾の利用ブロックへ露出——index.ok/fail/ms/embed_skipとask.count/nohit/degraded/fail/msの8キー、再起動横断(v0.2.653) |
+| REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/chunk/health/stats/backup。UI不要の全自動操作。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459)。配布の最小経路として `scripts/build_pyz.py` がstdlib `zipapp` の単一ファイル `shoin.pyz` を生成——`python3 shoin.pyz <sub>` で全機能が動作(Python 3.11+前提、ネイティブバイナリではない)。zip内静的資産は `pkgutil.get_data` 経由で読取(`__file__`相対Pathはzipメンバで失敗するため、v0.2.668)。利用メトリクス(カウント+ms合計のみ・本文非含有)は`Store.bump_metrics`がsettings表へatomic加算し`GET /api/metrics`/`shoin stats`末尾の利用ブロックへ露出——index.ok/fail/ms/embed_skipとask.count/nohit/degraded/fail/msの8キー、再起動横断(v0.2.653) |
 | REQ-106 | レキシカルリランカ + MMR | 上位候補の多様性確保(冗長チャンク抑制) |
 
 ### P2 (Future / アーキ上の予約)

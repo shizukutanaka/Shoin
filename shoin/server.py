@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import math
+import pkgutil
 import re
+import socketserver
 import sqlite3
 import sys
 import tempfile
@@ -91,7 +93,24 @@ def _t(key: str) -> str:
     lang = ui_lang()
     return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
-_STATIC = Path(__file__).resolve().parent / "static" / "index.html"
+
+def _read_packaged_asset(name: str) -> bytes:
+    # Packaged-asset read through the import machinery, not __file__-relative
+    # Paths: inside a zipapp (.pyz, v0.2.668) `__file__` is an archive member,
+    # not a filesystem entry, so Path reads always miss. pkgutil.get_data works
+    # for both source-tree/wheel installs (FileLoader) and zipimporter.
+    # Missing entries raise FileNotFoundError on filesystem loaders and
+    # ZipImportError(->ImportError) in archives — normalize both to
+    # FileNotFoundError so callers keep one coded boundary.
+    try:
+        data = pkgutil.get_data("shoin", f"static/{name}")
+    except (OSError, ImportError):
+        data = None
+    if data is None:
+        raise FileNotFoundError(name)
+    return data
+
+
 # v0.2.643: bound the user-theme response — a cosmetic hook must not be a
 # DoS backdoor by pointing SHOIN_THEME_CSS at a giant file.
 _THEME_CSS_LIMIT = 256 * 1024
@@ -640,13 +659,14 @@ class _Handler(BaseHTTPRequestHandler):
         # test_ui_contract.py pins that the placeholder appears exactly once in
         # the shipped file, so a future edit can't silently reintroduce a second
         # occurrence for this blind byte replace to also corrupt.
-        # Strictly allowlisted (not merely escaped): CSP already permits inline
-        # scripts (script-src 'unsafe-inline'), so an unsanitized value in the
-        # replaced attribute could break out of it; only a bare "ja"/"en" is
+        # Strictly allowlisted (not merely escaped): an unsanitized value in
+        # the replaced attribute could break out of it; only a bare "ja"/"en" is
         # ever substituted, anything else silently falls back to "ja".
         lang = ui_lang()
         safe_lang = lang if lang in ("ja", "en") else "ja"
-        body = _STATIC.read_bytes().replace(b"__SHOIN_LANG__", safe_lang.encode("ascii"))
+        body = _read_packaged_asset("index.html").replace(
+            b"__SHOIN_LANG__", safe_lang.encode("ascii")
+        )
         self._headers(
             200,
             "text/html; charset=utf-8",
@@ -668,7 +688,7 @@ class _Handler(BaseHTTPRequestHandler):
         # packaged asset is a build defect — a coded 404 beats an empty body,
         # which would render as a silent blank UI with zero signal.
         try:
-            body = (_STATIC.parent / name).read_bytes()
+            body = _read_packaged_asset(name)
         except OSError:
             self._error(404, "STATIC_ASSET_NOT_FOUND", f"packaged asset missing: {name}")
             return
@@ -1614,6 +1634,18 @@ class _HTTPServer(ThreadingHTTPServer):
     # dead-at-exit thread strictly correct (the same choice python -m
     # http.server makes).
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # stdlib HTTPServer.server_bind calls socket.getfqdn(host) — a PTR
+        # (reverse-DNS) lookup that stalls ~30s before the socket listens on
+        # machines with a slow or absent resolver. A loopback-only server
+        # needs no canonical name at all: server_name/server_port only ever
+        # feed stdlib's HTML error page, and this handler's send_error is a
+        # JSON envelope, so skipping the lookup loses nothing (v0.2.668).
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # A client that stalls mid-request simply hits the per-request socket

@@ -24,6 +24,12 @@ shoin serve              # 起動したら http://localhost:7440 をブラウザ
 
 `pip install` せずにソースツリーから直接動かす場合は `python -m shoin serve` も使えます(v0.2.459 以降、両者は同一エントリに委譲)。
 
+```bash
+# 単一ファイル .pyz (インストール不要・Python 3.11+ のみ必要, v0.2.668)
+python3 scripts/build_pyz.py        # dist/shoin.pyz を生成
+python3 dist/shoin.pyz serve        # 全機能が1ファイルで動く
+```
+
 > **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
 > メンテナの認証情報が必要)。リポジトリから直接入れる場合は **ref を明示**してください —
 > 既定ブランチは古い版を指していることがあります:
