@@ -19,7 +19,13 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 
-from .config import MAX_UPLOAD_BYTES, URL_MAX_REDIRECTS, URL_TIMEOUT_SEC, VERSION
+from .config import (
+    MAX_UPLOAD_BYTES,
+    URL_MAX_REDIRECTS,
+    URL_TIMEOUT_SEC,
+    VERSION,
+    redact_url_credentials,
+)
 
 _EXT_KIND = {
     ".txt": "txt",
@@ -97,12 +103,57 @@ def _decode(data: bytes, charset: str | None = None) -> str:
         candidates.append("utf-32")
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         candidates.append("utf-16")
+    # v0.2.673: BOM-less UTF-16/32 — a wide encoding saved without its
+    # signature leaks NUL bytes in a fixed position pattern (every other
+    # byte for UTF-16, three of four for UTF-32, on the side opposite the
+    # payload). utf-8 would decode UTF-16 ASCII text as alternating NULs
+    # (readable only after the post-strip) and cp932 would decode UTF-16
+    # CJK as mojibake — guess the wide codec from the dominant NUL side
+    # BEFORE the lossy fallbacks. Honored only without an explicit
+    # charset declaration. Longest-unit first, mirroring the BOM order.
+    if not charset:
+        sample = data[:4096]
+        quads = len(sample) // 4
+        if quads >= 8:
+            nul4 = [
+                sum(1 for i in range(r, len(sample), 4) if sample[i] == 0)
+                / quads
+                for r in range(4)
+            ]
+            if (
+                nul4[0] < 0.05
+                and nul4[1] > 0.25
+                and nul4[2] > 0.25
+                and nul4[3] > 0.25
+            ):
+                candidates.append("utf-32-le")
+            elif (
+                nul4[3] < 0.05
+                and nul4[0] > 0.25
+                and nul4[1] > 0.25
+                and nul4[2] > 0.25
+            ):
+                candidates.append("utf-32-be")
+        pairs = len(sample) // 2
+        if pairs >= 4:
+            nul_even = sum(
+                1 for i in range(0, len(sample), 2) if sample[i] == 0
+            ) / pairs
+            nul_odd = sum(
+                1 for i in range(1, len(sample), 2) if sample[i] == 0
+            ) / pairs
+            if nul_odd > 0.08 and nul_even < 0.05:
+                candidates.append("utf-16-le")
+            elif nul_even > 0.08 and nul_odd < 0.05:
+                candidates.append("utf-16-be")
     # utf-8-sig handles plain UTF-8 and BOM-prefixed UTF-8 (Windows Notepad);
     # cp932 covers Shift-JIS, the dominant legacy encoding for Japanese content.
     candidates.extend(["utf-8-sig", "cp932"])
+    text = ""
     for enc in candidates:
         try:
-            return data.decode(enc)
+            text = data.decode(enc)
+            break
         except (ValueError, LookupError):
             # UnicodeDecodeError is a ValueError subclass; the plain-ValueError
             # branch covers malformed codec names — a charset parameter with an
@@ -110,7 +161,31 @@ def _decode(data: bytes, charset: str | None = None) -> str:
             # header) raises ValueError("embedded null character"), not the
             # LookupError an unknown-but-wellformed name raises.
             continue
-    return data.decode("utf-8", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    # v0.2.673: binary guard — utf-8/cp932 plus errors="replace" mean EVERY
+    # byte stream decodes to *something*, so binary content indexed as
+    # mojibake chunks (replacement chars, C0/C1 control runs) that wasted
+    # the chunk budget and poisoned BM25. The signature is replacement +
+    # control density; \n\r\t are legit text controls and real binary is
+    # far denser than 20%. Checked on the first 4K decoded chars — magic
+    # headers live at the head.
+    probe = text[:4096]
+    if probe:
+        noise = sum(
+            1
+            for ch in probe
+            if ch == "\ufffd"
+            or (ord(ch) < 32 and ch not in "\n\r\t")
+            or 127 <= ord(ch) <= 159
+        )
+        if noise / len(probe) > 0.20:
+            raise IngestError(
+                "INGEST_BINARY",
+                "content appears to be binary"
+                " (replacement/control characters exceed 20%)",
+            )
+    return text
 
 
 class _HTMLText(HTMLParser):
@@ -589,14 +664,26 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
                 current = urllib.parse.urljoin(current, location)
                 continue
             if resp.status >= 400:
-                raise IngestError("INGEST_FETCH_FAILED", f"HTTP {resp.status} for {current}")
+                raise IngestError(
+                    "INGEST_FETCH_FAILED",
+                    f"HTTP {resp.status} for {redact_url_credentials(current)}",
+                )
             body = resp.read(MAX_UPLOAD_BYTES + 1)
             if not body:
-                raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
+                raise IngestError(
+                    "INGEST_EMPTY",
+                    "server returned empty body for"
+                    f" {redact_url_credentials(current)}",
+                )
             _check_size(body)
             body = _decode_content_encoding(resp.getheader("Content-Encoding"), body)
             ctype = resp.getheader("Content-Type") or ""
-            return body, ctype, current
+            # v0.2.677 (product-review #61): the returned URL becomes the
+            # source's stored origin — persisted in the DB and propagated
+            # to exports/backups. Userinfo credentials are never used for
+            # the fetch itself (requests carry no Authorization), so they
+            # are dead weight that must never be persisted.
+            return body, ctype, redact_url_credentials(current)
         except (OSError, http.client.HTTPException) as exc:
             raise IngestError("INGEST_FETCH_FAILED", f"fetch failed: {exc}") from exc
         finally:
@@ -622,6 +709,17 @@ def extract_file(path: Path | str) -> Extracted:
             raise IngestError(
                 "INGEST_FILE_TOO_LARGE",
                 f"source exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
+            )
+        # v0.2.680: refuse anything that is not a regular file before the
+        # read. A FIFO, device node, or unix socket named e.g. "x.txt"
+        # reports st_size 0 — passing the size gate above — then read_bytes()
+        # blocks forever waiting for a writer that never comes (a local-file
+        # read carries no timeout): the CLI hangs and a serve request thread
+        # is consumed for good. is_file() follows symlinks, so a symlink to
+        # a real document still extracts.
+        if not p.is_file():
+            raise IngestError(
+                "INGEST_FETCH_FAILED", f"not a regular file: {p}"
             )
         data = p.read_bytes()
     except OSError as exc:
@@ -672,5 +770,8 @@ def extract_url(url: str) -> Extracted:
     # unchanged.  The same guard was applied to extract_file() in v0.2.50.
     text = text.replace("\x00", "").strip()
     if not text:
-        raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
+        raise IngestError(
+            "INGEST_EMPTY",
+            f"no extractable text at {redact_url_credentials(url)}",
+        )
     return Extracted("url", title, text, final_url, _digest(body), pages_failed)

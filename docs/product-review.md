@@ -146,50 +146,64 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 4 | **トークン予算の制約** | 2400トークン総予算・TOP_K=8。長文ソースの切詰め、10ターン超会話の履歴脱落。軽量LLM前提の意図的設計だが限界でもある |
 | 5 | **ブラウザ描画の自動テストは無い**(さらに緩和) | レンダリング・レイアウト・イベント配線の回帰はライブ検証のみ。ただし静的契約テスト(`tests/test_ui_contract.py`, v0.2.154)が JS構文・data-i18n の ja/en 完備・UIが叩く `/api/…` のルート実在を恒久カバーし、v0.2.230 で初の**行動的 UI テスト**が加わり、以後の警告・非同期面は実関数をスタブDOMでnode実行して恒久固定する方式へ一般化した: `reportBadges` 連鎖の全フラグ行列(v0.2.235-236、チャットSSE/履歴/Studio 3面)、`openSeal` の同名ソース抜粋照合(v0.2.239)、SSE done 欠落時の永続回答復元(v0.2.246)、`openNotebook` の逆順応答破棄(v0.2.249)、`renderChatHistory` の履歴省略開示(v0.2.250)。v0.2.265-330 で残存全経路まで拡張——タブ列のWAI-ARIAキー操作実装(v0.2.311)、SSEフレームパーサ(v0.2.317)、作成・URL/ファイル追加・ノート・リインデックス・履歴消去・Studio生成・言語切替の全インタラクティブハンドラ(v0.2.318-320)、JS↔Python横断列挙の同値固定(KINDS/export FORMATS、v0.2.322)、viewerのabort guard・フォーカストラップ・遅延details toggle(v0.2.324/326)、ソース行の×削除/rename中ガード/dblclick(v0.2.330——これで全イベントハンドラ完結)、および横断定数の残2件+2契約(COVERAGE_LOW・api()エンベロープ・`report.*`⊆CitationReport・`t()`⊆I18N.ja+ja≡en対称、v0.2.325/328-329)。残る穴は実ブラウザでのレンダリング/操作系で、この限界の実害も2件確認済み: `SHOIN_LANG` が Web UI に効いていなかった欠陥(v0.2.177)と最後のノートブック削除後のエクスポートリンク陳腐化(v0.2.179)は実ブラウザでしか見つからなかった |
 | 6 | ~~UIのソース選択が無い~~ → **解消済み** (v0.2.632) | ソース行チェックボックスが `source_ids` スコープへ配線済み。全選択は省略・ゼロ選択はブロック、追加ソース既定ON・明示OFF維持 |
-| 7 | **ノートブック横断検索が無い** | 全検索経路は `s.notebook_id = ?` で単一ノートブックに硬結合。複数ノートブックに分散した資料を一括で引く手段が無い |
+| ~~7~~ | ~~ノートブック横断検索が無い~~ | **解消 (v0.2.649)**: `retrieve`/`bm25_search`/`vector_search` の `notebook_id` を `int | None` 化——`(? IS NULL OR s.notebook_id = ?)` で単一SQL形状のまま全nb横断。`POST /api/search` (nb_id/notebook/title provenance付きhits) + `shoin search <q>` でCLI/Web両面 |
 | 8 | **認証・マルチユーザー非対応** | 単一ユーザーの loopback 前提設計。LAN公開するだけで誰でも全ノートブックを読み書きできる(意図的だが、公開用途では致命的) |
 | 9 | **TLS 非対応** | stdlib `http.server` ベースで HTTPS を話せない。リモート配置・リバプロ前提の利用は外側の問題として未扱い |
 | 10 | **docx/epub/pptx 未対応** | `_EXT_KIND` は txt/md/html/pdf のみ。オフィス文書は前処理で変換が必要 |
 | 11 | **OCR 非対応** | スキャンPDFはテキストレイヤが無いと空チャンク化(pages_failed は露出するが内容は取れない) |
 | 12 | **画像・表の構造抽出が無い** | HTML img/表は alt テキスト程度まで。図表の意味は検索対象にならない |
 | 13 | ~~**CLI ask は非ストリーミング**~~ → **解消済み** (v0.2.635) | `ask()` が `on_delta` コールバックを受理し、chat_stream 搭載バックエンドでは逐字トークンを stdout へ即時転送(連結結果が永続回答と同一のため stdout バイト同一)。chat_stream 非搭載の最小 ChatBackend は従来の一括 chat() 経路へ自動退避 |
-| 14 | **同義語・語彙拡張が浅い** | term_variants は字形変換のみ。「車↔自動車」「PC↔パソコン」のような意味的同義語は BM25 では拾えず vector leg 頼み |
-| 15 | **英語ステミング無し** | run/running/ran のような活用は trgram/LIKE では別語扱い。EN コーパスの再現率を下げる |
-| 16 | **ベクトル埋込みのバッチ化なし** | `embed_one` は逐次呼出し。大規模取込の埋込み時間は線形でキャンセル不可 |
-| 17 | **埋込みモデル変更時の自動再索引なし** | `_check_embed_model_ok` は不一致検出→vector leg無効化まで。再indexは `reindex` の手動実行が要る |
+| ~~14~~ | ~~同義語・語彙拡張が浅い~~ → **解消済み(v0.2.662)** | term_variants に curated 同義語表(_SYNONYM_GROUPS: 189グループ・カタカナ外来語↔英語・JA↔EN・EN省略形)を追加。norm/casefold/カタカナ/stem の4経路でルックアップし、文字を共有しない 価格↔値段・エラー↔error 級を BM25 leg で橋渡し。open-world(大規模語彙網/LLM生成)は外部依存のため境界外 |
+| ~~15~~ | ~~**英語ステミング無し**~~ → **解消済み** (台帳誤記 — `_stem_variants` v0.2.536 で規則活用は橋渡し済: documents→document・running→run・quickly→quick・closed family のみ。ran→run の不規則形は残存) |
+| 16 | ~~**ベクトル埋込みのバッチ化なし**~~ → **解消済み** (台帳誤記 — `_embed_chunks` は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ `llm.embed(batch)` で既実装。v0.2.648 実測確認) |
+| ~~17~~ | ~~**埋込みモデル変更時の自動再索引なし**~~ → **解消済み** (v0.2.661: 不一致がクエリ時stderrヒント+`/api/health`の`indexed_embed_model`/`embed_model_changed`+`shoin health`で可視化・一発修復経路明示。自動再indexは索引全再計算の暗黙mutationのため採らず——静かに死ぬ状態を「可視+actionable」化する境界) |
 | 18 | ~~ファイルソースの refresh 非対応~~ → **解消済み** (v0.2.633) | ファイル源は記録 origin パスを再読込。消失済みは `INGEST_FETCH_FAILED`、detail の `refreshable` で UI の↻表示を制御 |
-| 19 | **ソース優先度付けが無い** | 全ソースは同権で扱われる。「信頼できる一次資料を重く」系の重み付け経路が無い |
-| 20 | **ノートブック単位設定が無い** | TOP_K・トークン予算・言語等はプロセスグローバル。プロジェクトごとに変えられない |
-| 21 | **削除は即物理削除** | trash/undo 層が無く、notebook/source/note の削除は cascade で不可逆 |
+| ~~19~~ | ~~**ソース優先度付けが無い**~~ | **解消 (v0.2.657)**: `sources.weight`(0..8・既定1.0)を融合rawスコアへ正規化前に乗算 (正規化後では床0.0が浮上不能)。w>1優遇・w<1降格・0床固定、`PATCH /api/sources/{id} {weight}` + `shoin source weight` の両面。全往復経路(export/import/trash/merge/duplicate)で保存 |
+| ~~20~~ | ~~**ノートブック単位設定が無い**~~ | **解消 (v0.2.659)**: `notebooks.settings`(ホワイトリスト: top_k・source_text_tokens)を migration 13 で追加——k未指定の retrieve 全経路が settings.top_k を解決し、ask/SSE の build_context が settings.source_text_tokens を予算化。`PATCH /api/notebooks/{id} {settings}` + `shoin notebook settings` の両面、全往復経路で保存 |
+| 21 | ~~**削除は即物理削除**~~ → **解消済み** (v0.2.654: nb削除が全子表を`trash_items`へJSON undo-log化——同一TXのため巻戻し不能なコミットは構造上存在しない。`GET /api/trash`+restore/purge・`shoin trash`。id衝突はALREADY_EXISTSで拒否=暗黙merge無し) |
 | 22 | ~~**DB全体のバックアップ/エクスポート経路なし**~~ → **解消済み** (v0.2.636: `shoin backup <dest>` が SQLite online backup API でライブ一貫スナップショットを作成。dest=0600・`~`展開・自己上書き拒否・coded失敗経路) |
-| 23 | **ノートブック統合・複製が無い** | merge/duplicate の経路が無く、再編は delete+add のやり直し |
-| 24 | **ソースのメタデータが薄い** | title/kind/origin/sha256 のみ。著者・発行日・タグ等の分類用メタ無し |
+| ~~23~~ | ~~ノートブック統合・複製が無い~~ | **解消 v0.2.656** — 複製 (v0.2.645) に続きmerge側も着地: `Store.merge_notebooks` が元nbの全子表を新規idで取込先へ再挿入 (chunk.source_id・citation_report.source_id_map を id_map で再写像・importと `_insert_tree_rows` 共有) した上で `delete_notebook` 経由で元nbをゴミ箱へアーカイブ=復元可能。`POST /api/notebooks/{id}/merge {"source_id"}` + `shoin notebook merge <target> <src>` のCLI/Web両面 |
+| ~~24~~ | ~~**ソースのメタデータが薄い**~~ | **解消 (v0.2.658)**: `sources.meta`(自由JSON・≤4KB)を追加——`PATCH /api/sources/{id} {meta}` + `shoin source meta` で whole-object REPLACE。meta.author/meta.year が BibTeX/RIS の author/AU・year/PY を駆動(取込日≠発行年を修正)。全往復経路で保存 |
 | 25 | ~~**全文検索 API が無い**~~ → **解消済み** (v0.2.637: `POST /api/notebooks/{id}/search` が /ask 同一retrieve経路のhitsを生成・永続化なしで返す。`k`は_optional_intで1..50・`source_ids`同一契約・history非展開) |
-| 26 | **detail応答のページネーション無し** | sources/messages/notes は 500 cap+omitted 計数のみ。全件取得のカーソル経路が無い |
-| 27 | **index.html の単一ファイル化** | ビルド不要と引き換えに、JS全実装が1ファイルへ凝集。差分レビュー・部分テストの粒度が粗い |
+| 26 | ~~**detail応答のページネーション無し**~~ → **解消済み** (v0.2.646: `GET /api/notebooks/{id}/messages|notes?offset&limit` が cap を超えた全量を newest-first で走査——limit 1..500・total開示・coded検証。sources は cap 対象外のため対象外) |
+| ~~27~~ | ~~index.html の単一ファイル化~~ | 解消済み v0.2.666: index.html+app.js+style.cssの3ファイル分割（ビルド不要・リテラルルート配信・CSP script-src self強化） |
 | 28 | ~~**ダークモード無し**~~ → **解消済み** (v0.2.638: `prefers-color-scheme` でパレット変数上書き。常時暗帯面は`--band`/`--band-ink`分離、tintリテラル面は個別上書き) |
-| 29 | **キーボードショートカットがタブのみ** | 検索フォーカス・送信・新規作成等のショートカット層が無い |
-| 30 | **モバイル/レスポンシブ未監査** | レイアウトはデスクトップ前提で実測済。狭幅viewportのピン無し |
-| 31 | **印刷スタイル無し** | `@media print` 不在。回答・ノートを紙/PDF出力するとUI骨格ごと出る |
-| 32 | **ブランディング/テーマ変更機構無し** | 配色・フォントはハードコード。ユーザーCSS差込み口が無い |
-| 33 | **バイナリ配布経路なし** | PyPI とは別に、brew/PyInstaller系の単一実行形式が無い。Python環境前提が参入障壁 |
-| 34 | **利用メトリクス無し** | プライバシー原則と引き換えに、実利用での失敗率・レイテンシ分布を観測する術が無い(ローカルログも任意) |
-| 35 | **LLMエンドポイントの認証非対応** | `SHOIN_LLM_URL` は URL のみで Authorization ヘッダ等の設定経路が無い。認証必須のゲートウェイには繋げない |
-| 36 | **LLM呼出しにリトライ/バックオフ無し** | 一時的失敗は即 LLMError → degraded 経路。指数バックオフの再試行層が無い |
-| 37 | **チャンクの手動編集不可** | 抽出テキストの誤りをユーザーが修正する経路が無い(ソースごと差替えのみ) |
-| 38 | **検索構文のUI露出なし** | `-term` 否定や将来のフィルタ記法は CLI/コード読みのみ発見可能。UI上のヘルプ/プレースホルダ説明が無い |
-| 39 | **ノートブックの共有/受け渡し機構なし** | export は人間向けレポートのみで、別マシンへ移行する import 経路が無い |
-| 40 | **API のバージョニング無し** | `/api/...` にはバージョン prefix が無く、後方互換ポリシーが暗黙 |
-| 41 | **FTS5 trigram の索引サイズ** | trigram 索引は3gram全展開で文書サイズに対し大きめ。超大容量ではDBサイズが膨らむ(50,000チャンク上限内では実害小) |
-| 42 | **スペルミス/クエリ訂正なし** | "did you mean" 系のtypo耐性が無い。短いtypoはゼロ件へ落ちる |
-| 43 | **推奨質問が LLM 依存** | questions の品質は接続先モデルの力量に依存。モデル不在時は空配列で機能しない |
-| 44 | **eval cases の生成支援なし** | 評価セットは手書き JSON。ノートブックからの自動生成経路が無い |
-| 45 | **観測性が SHOIN_DEBUG のみ** | 構造化ログ・メトリクス・トレースの層が無く、本番系の運用診断は出来ない |
+| 29 | ~~**キーボードショートカットがタブのみ**~~ → **解消済み** (v0.2.642: `/`で質問入力フォーカス・1/2/3でペイン選択。編集中/修飾キー/モーダル中は無効。chat.hintに記載) |
+| 30 | ~~**モバイル/レスポンシブ未監査**~~ → **解消済み** (v0.2.641: ≤880px契約を監査・ピン固定。flex input溢れに`min-width:0`、viewer余白8pxへ。レスポンシブ骨格は既存タブ切替) |
+| 31 | ~~**印刷スタイル無し**~~ → **解消済み** (v0.2.640: `@media print`でchrome畳込み+3ペイン展開+強制ライト配色。`.msg`はpage-break-inside:avoid) |
+| 32 | ~~**ブランディング/テーマ変更機構無し**~~ → **解消済み** (v0.2.643: `GET /api/theme.css`が`~/.config/shoin/theme.css`をverbatim配信——パレットは`:root`変数化済みのため後勝ちlinkで完結。SHOIN_THEME_CSSでパス変更可・CSP 'self'許可) |
+| 33 | ~~**バイナリ配布経路なし**~~ → **解消済み(部分的)** (v0.2.668) | `scripts/build_pyz.py` が stdlib `zipapp` で単一ファイル `shoin.pyz` を生成——`python3 shoin.pyz <sub>` で全機能が動作(subprocess e2eピン: `--help`+serve→UI/静的資産200)。zip内アセット読取は `pkgutil.get_data` へ切替(importlibはcapabilityカタログ対象のため不採用)。残存: Python 3.11+ インタプリタは引き続き前提(ネイティブバイナリではない——PyInstaller級はビルド基盤・署名・3OS検証を要しstdlib-only制約と非対称) |
+| 34 | ~~**利用メトリクス無し**~~ → **解消済み** (v0.2.653: `Store.bump_metrics`がsettings表へatomic加算(本文非含有・再起動横断)、`GET /api/metrics`/`shoin stats`利用ブロックへ露出。index.ok/fail/ms/embed_skip・ask.count/nohit/degraded/fail/ms。SHOIN_LOG_JSONと対——イベント行vs永続合計) |
+| 35 | ~~**LLMエンドポイントの認証非対応**~~ → **解消済み** (v0.2.644: `SHOIN_LLM_API_KEY`設定時に全リクエストへ`Authorization: Bearer`付与——未設定時はヘッダ自体を送らない) |
+| 36 | ~~**LLM呼出しにリトライ/バックオフ無し**~~ → **解消済み** (v0.2.639: `_post`が輸送系失敗(TIMEOUT/SERVICE_UNAVAILABLE)のみ指数バックオフで再試行。`SHOIN_LLM_RETRIES`既定2・0-5。chat_stream/availableは対象外——送出済みdeltaの複写防止) |
+| 37 | ~~**チャンクの手動編集不可**~~ → **解消済み** (v0.2.647: `PATCH /api/chunks/{id}`/`shoin chunk edit` で in-place 書換え——chunks_au trigger が FTS を同TX再索引・embedding は NULL 降格で reindex 再構築・questions cache 手動evict) |
+| 38 | ~~**検索構文のUI露出なし**~~ → **解消済み** (実測確認: `chat.hint`ツールチップ「ヒント: -語 で除外検索」がja/en両言語で実装済み。台帳のみ遅れ) |
+| ~~39~~ | ~~ノートブックの共有/受け渡し機構なし~~ | **解消 v0.2.655** — `export --format tree`/`GET .../export?format=tree` が undo-log 同一 envelope(`shoin-nb-tree-v1`)を返し `shoin import`/`POST /api/notebooks/import` が新規idで全行再挿入(chunk source_id・citation_report.source_id_map を id_map 再写像・embedding verbatim・異形文書は `NOTEBOOK_IMPORT_INVALID`) |
+| ~~40~~ | ~~API のバージョニング無し~~ → **解消済み(v0.2.663)** | 全応答(JSON/SSE/静的/エラー)に `X-Shoin-API` ヘッダを送出し `GET /api/health` の `api` フィールドでも発見可能に。パスprefixでなくヘッダ駆動——既存クライアント・ルート表・UI契約ピンを無変更に保つ最小侵襲形。互換ポリシーを spec.md へ明文化(additive=非破壊・変更/削除でbump) |
+| ~~41~~ | ~~**FTS5 trigram の索引サイズ**~~ → **解消済み** (v0.2.664: 全チャンク書込TX終端で 'optimize' セグメントマージ実行——未マージセグメント蓄積による可避免肥大を構造防止。trigram 3gram展開の固有コストは残存・設計上の境界) |
+| ~~42~~ | ~~スペルミス/クエリ訂正なし~~ | **解消 v0.2.650** — ゼロ件時`POST /api/search`・nb_search・`shoin search`へ`suggestions`フィールド追加 (corpus最近接表層形上限3) |
+| ~~43~~ | ~~**推奨質問が LLM 依存**~~ | **解消 (v0.2.660)**: LLM 不通時に `_title_questions` がソースタイトル由来の骨格質問(eval --gen と同型・i18n済)を最大n件返す——到達不能が「質問ゼロ」と混同されない。URL酷似/61字超/fold重複タイトルは skip、LLM 応答済みで質問形0行は従来通り[](到達したが何も選ばなかった≠到達不能) |
+| 44 | ~~**eval cases の生成支援なし**~~ → **解消済み** (v0.2.651: `shoin eval <nb> --gen` がチャンクを持つソース1件=1ケースの雛形を生成——`sources`は実際のidを運び質問文は手直し前提) |
+| 45 | ~~**観測性が SHOIN_DEBUG のみ**~~ → **解消済み** (v0.2.652: `SHOIN_LOG_JSON=1`でJSON Linesイベントログ——`source_indexed`/`ask_completed`がID・件数・ms・degradedをstderr emit。`_PRIVATE_FIELDS`フィルタで本文流出不可。trace層は設計上不要として残) |
 | 46 | **Windows 未検証** | 開発・検証は macOS/Linux 前提。`shell=False` 設計とパス処理は概ね移植可能だが実機検証履歴が無い |
 | 47 | **Python 3.11 フロア** | requires-python >=3.11 で更に古い distro 標準 Python では動かない(意図的だが利用層を狭める) |
-| 48 | **SSE再接続/再開なし** | ストリーム断は「done欠落→永続回答復元」で救済するのみ。`Last-Event-ID` 再開やclient-side resumeは無い |
-| 49 | **スケジュール/定期タスク機構なし** | URLソースの定期refresh等、cron的な自動再取込の経路が無い |
+| ~~48~~ | ~~**SSE再接続/再開なし**~~ → **解消済み(v0.2.665)** | delta書込のclient_gone後も生成を完了まで消費し**完全回答**を永続化——トークン消費はserialized lock内で確定済みのため中断は純損。done欠落時のUI回復は基線最終assistant本文との差分で新規行を検出するbounded poll(10×2s)へ拡張しpersist競合で前ターン行を凍結しない。Last-Event-ID再開はPOST+fetch形に標準EventSourceが無く非対象 |
+| 49 | ~~**スケジュール/定期タスク機構なし**~~ → **解消済み** (v0.2.648: `POST /api/notebooks/{id}/refresh-all`/`shoin source refresh-all` が全refreshableソースを一括処理——cronに登録すれば定期再取込が完結。per-source結果収集で死んだorigin一つで全体が止まらない) |
 | 50 | **ローカルLLM以外の選択肢前提** | 組込みモデル同梱やクラウドAPIキー対応は設計外。ユーザーが別途 OpenAI 互換サーバを用意する必要がある |
+| ~~51~~ | ~~**削除undoがノートブックのみ**~~ → **解消済み(v0.2.667)** | ソクラテス監査で発掘: v0.2.654のtrash_itemsはnbのみをカバーし、`delete_source`(upload取込後はtmp origin消失で実質不可復旧)と`delete_note`が永久消失だった。trash_itemsへ`kind`列(migration 14)を追加し両動詞が同TXでアーカイブ——restoreはkind分岐(source=元id+FTS再索引・NOTEBOOK_NOT_FOUND親消失/SOURCE_ALREADY_EXISTS占有、note=新規idで衝突不能)。messages-clearは意図的cleanup+id再採番衝突のため設計上対象外 |
+| ~~52~~ | ~~**serve起動が逆引きDNSで~30s停滞**~~ → **解消済み(v0.2.668)** | pyz e2e検証で発掘: stdlib `HTTPServer.server_bind`がbind時に`socket.getfqdn(host)`のPTR参照を実行し、リゾルバ低速/不在環境でlisten自体が遅延(実測35s・ソースツリー同一)。`_HTTPServer.server_bind`をoverrideし`TCPServer.server_bind`+リテラル`server_name`へ置換——ループバック専用に正規名不要(server_nameの消費者はstdlib HTMLエラーページのみで本ハンドラはJSONエンベロープ)。実測 35.0s→0.05s |
+| ~~53~~ | ~~**削除済みバイトの物理回収経路なし**~~ → **解消済み(v0.2.669)** | 「蓄積した全バイトは回収されるか」のソクラテス問いで発掘: ①ゴミ箱はpurgeが1件単位で一括emptyの経路が無かった ②SQLiteは削除済み領域をfreelistへ移すだけでDBファイルが物理的に縮小せず、purgeしても消費ディスクが戻らなかった。`trash_purge_all`(1TX全件削除)+`vacuum()`(wal_checkpoint後にVACUUM、before/after/freed報告)+`freelist_bytes()`で回収可能量を`stats`へ可視化。`DELETE /api/trash`+`shoin trash empty`、`POST /api/vacuum`+`shoin vacuum`のREQ-103パリティ |
+| ~~54~~ | ~~**破損DBの診断経路なし**~~ → **解消済み(v0.2.670)** | 「破損したDBを診断する経路はあるか」のソクラテス問いで発掘: healthは設定/LLM到達性の面で、「ファイル自体の健全性」の経路がゼロ——corrupt .sqlite はStore()オープンで `sqlite3.DatabaseError: file is not a database` 即死しcoded経路が無かった。`Store.check()`(integrity_check+foreign_key_check+schema版)を新設し `shoin check`(健全rc0/破損・unopenable rc1——cron検知可)+`GET /api/check`(unopenableを200診断値として返す、500潰れなし)の両面へ |
+| ~~55~~ | ~~**埋込み欠落が取込toast一度きりで永続不可視**~~ → **解消済み(v0.2.671)** | 「物理健全でも論理欠損は診断できるか」の問いで発掘: 取込時 "N/M embedded" toastのみが欠落を報告し、以後ベクトル脚部分死を発見する経路がゼロ。check()へ `chunks`/`unembedded` 論理層を追加(全面CLI+API)・embed設定時のみreindex修復ヒント。FTS索引desync検出は外部コンテンツ表で原理的不能(rowid走査がcontent表を透過参照)のため非採用——証拠なき防御コードを入れない |
+| ~~56~~ | ~~**チャンク数上限がingest経路のみで強制**~~ → **解消済み(v0.2.672)** | 「上限と称する制約は全書込経路で同じ強度か」の問いで発掘: `MAX_CHUNKS_PER_NOTEBOOK`はindex/refresh(pipeline)のみ検査で、import/merge/duplicateの3経路は無検査——大容量export文書や満杯mergeで上限を素通りしベクトル脚が無制限コーパスで全走査。`_insert_tree_rows`(import/merge共有)先頭+`duplicate_notebook`の同TXガードへ `existing+incoming > MAX → INGEST_NOTEBOOK_FULL` で一本化 |
+| ~~57~~ | ~~**バイナリがモジバケとして索引される**~~ → **解消済み(v0.2.673)** | 「バイナリファイルはテキストとして索引されてしまうか」の問いで発掘: `_decode`のutf-8-sig→cp932→`errors="replace"`連鎖は**全バイト列を必ず文字列化**するため、.txt/.md名のバイナリが`\ufffd`まみれのゴミチャンクとして索引されBM25/ベクトル脚を汚染(実測50-100%置換)。デコード結果の置換+制御文字密度>20%で`INGEST_BINARY`拒否(file/URL/HTML一点)＋BOM無しUTF-16/32のNUL位置パターン検出で広codec救出(交互NULのロッシー経路を解消)。NUL-only/純置換フォールバックは誠実な再分類で契約追随 |
+| ~~58~~ | ~~**「データは端末を離れない」約束が設定で静かに破れうる**~~ → **解消済み(v0.2.674)** | 同問いで発掘: `SHOIN_LLM_URL`が非ループバックを指すと、チャンク本文(embeddings)と質問+コンテキスト(chat)が外部送信されるのに発見経路がゼロ。`endpoint_is_external`(localhost/.localhost/loopback/unspecifiedのみlocal——LAN IP・DNS名はexternal)を新設し、LLMClient構築時のstderr一回警告・`GET /api/health`の`llm_external`・`shoin health`のstderr警告(ja/en)で3面可視化。remote endpointは合法な選択のため拒否ではなく警告 |
+| ~~59~~ | ~~**URL userinfo資格情報が表示経路へ逐字漏洩**~~ → **解消済み(v0.2.675)** | 「機密はエラー/診断経路に漏れないか」の問いで発掘: `http://user:pass@host`形のエンドポイントURLが、LLMClient構築時警告(674で追加した自身の表面)・`SYSTEM_SERVICE_UNAVAILABLE`メッセージ(chat/stream両面——SSE/UI/stderr/ログへ伝播)・`shoin health`行へ資格込みで逐字表示。`redact_url_credentials`(authority内の`@`のみ除去——host/port/path/query保持・query内`@`は非資格で温存・malformedでも無raise)を新設し表示のみに適用(リクエストは生URL継続) |
+| ~~60~~ | ~~**平文HTTP経路へBearer資格情報が流出**~~ → **解消済み(v0.2.676)** | 「秘密の送信経路は暗号化されているか」の問いで発掘: `http://`+外部エンドポイント+APIキーの組合せで Bearer トークンが平文でワイヤを流れる構成——各要素は合法だが合成で漏洩。`LLMClient.__init__`で3条件揃合時のみstderr警告(https://とloopback httpは免除——TLS保護済/マシンを出ない)。拒否でなく警告(信頼済みLAN構成は合法選択) |
+| ~~61~~ | ~~**URL資格情報が永続化・エクスポートへ伝播**~~ → **解消済み(v0.2.677)** | 「取込元URLの資格情報は永続化・エクスポートされるか」の問いで発掘: `shoin add nb http://u:p@host/f` が `sources.origin`(`final_url`)へ資格込み書込み——DB/export/backupへ伝播。fetchはuserinfoを一切送信しない(認証ヘッダ無し)ため資格は機能しない死に重り。`fetch_url`返却+fetch/extractのエラーメッセージ3面でredact(リクエストは生URL継続) |
+| ~~62~~ | ~~**HTTPエラー本文が秘密をエコーし得る**~~ → **解消済み(v0.2.678)** | 「サーバー由来のエラー本文に秘密が映り込まないか」の問いで発掘(v0.2.675の記録境界を閉塞): `SYSTEM_LLM_HTTP_ERROR`は応答本文300Bをdetail添付——不良なゲートウェイがBearerキーやURL資格をエコーすると秘密がSSE/UI/stderr/log全面へ伝播。`_post_once`で`llm_api_key()`+`url_userinfo(base_url)`を`***`置換(送信した秘密のみ、host/path温存)。stream経路は本文非読で対象外 |
+| ~~63~~ | ~~**同一sha merge/importがraw IntegrityErrorで死ぬ**~~ → **解消済み(v0.2.679)** | 「同一内容のソースを含む2ノートブックのmergeはどうなるか」の問いで発掘: `UNIQUE(notebook_id,sha256)`に裸INSERT——共有sha mergeや文書内dup shaが500化(部分挿入はTX巻戻し)。`_insert_tree_rows`でsha dedupe: 同一sha=同一text=同一決定的chunkのため既存sourceへid_map折返し・chunk INSERT skip・citation_report remap経由で引用解決・cap計算は実挿入数 |
+| ~~64~~ | ~~**非正規ファイルが永久ブロックでハングする**~~ → **解消済み(v0.2.680)** | 「ローカルファイルらしきものは全て安全に読めるか」の問いで発掘: `extract_file`は拡張子とst_sizeのみ検査——FIFO/デバイス/ソケットはst_size 0でsize gateを素通りし`read_bytes()`がwriter未到着で永久ブロック(ローカルreadにtimeout不可)。serveでは要求スレッド消費・CLIはハング。`is_file()`で読取前に`INGEST_FETCH_FAILED`拒否——symlinkはfollowして抽出(後者を陽性対照でピン) |
 
 ### 解決済み(記録)
 

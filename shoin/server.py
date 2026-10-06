@@ -2,13 +2,18 @@
 
 Single-user local app. Each request opens its own Store (SQLite/WAL), the LLM
 backend is shared and injectable for tests. `ask` streams over SSE; everything
-else is plain JSON. No path-based static serving: only the embedded index.html.
+else is plain JSON. Static serving is the three packaged UI files under
+literal routes only (index.html + app.js + style.css) — no path traversal.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import pkgutil
 import re
+import socketserver
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -20,6 +25,8 @@ from typing import Any
 
 from .citation import make_report
 from .config import (
+    API_VERSION,
+    EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
@@ -27,20 +34,35 @@ from .config import (
     NB_NOTES_LIMIT,
     REQUEST_SOCKET_SEC,
     SEARCH_K_MAX,
+    SOURCE_WEIGHT_MAX,
     TOP_K,
     VERSION,
     db_path,
+    endpoint_is_external,
+    llm_url,
     multi_query_enabled,
+    theme_css_path,
     ui_lang,
 )
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
-from .pipeline import index_source, refresh_source, reindex_notebook, rename_source
+from .pipeline import (
+    index_source,
+    refresh_all_sources,
+    refresh_source,
+    reindex_notebook,
+    rename_source,
+    source_is_refreshable,
+)
+from .qa import (
+    SOURCE_TEXT_TOKENS as _QA_SOURCE_TEXT_TOKENS,
+)
 from .qa import (
     ChatBackend,
     _check_embed_model_ok,
     _degraded_text,
+    _embed_model_stale,
     _query_vector,
     build_context,
     build_messages,
@@ -51,6 +73,7 @@ from .qa import (
 from .qa import (
     _t as _qa_t,
 )
+from .search import suggest_corrections
 from .store import Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
@@ -72,7 +95,43 @@ def _t(key: str) -> str:
     lang = ui_lang()
     return _STRINGS[key].get(lang, _STRINGS[key]["en"])
 
-_STATIC = Path(__file__).resolve().parent / "static" / "index.html"
+
+def _read_packaged_asset(name: str) -> bytes:
+    # Packaged-asset read through the import machinery, not __file__-relative
+    # Paths: inside a zipapp (.pyz, v0.2.668) `__file__` is an archive member,
+    # not a filesystem entry, so Path reads always miss. pkgutil.get_data works
+    # for both source-tree/wheel installs (FileLoader) and zipimporter.
+    # Missing entries raise FileNotFoundError on filesystem loaders and
+    # ZipImportError(->ImportError) in archives — normalize both to
+    # FileNotFoundError so callers keep one coded boundary.
+    try:
+        data = pkgutil.get_data("shoin", f"static/{name}")
+    except (OSError, ImportError):
+        data = None
+    if data is None:
+        raise FileNotFoundError(name)
+    return data
+
+
+# v0.2.643: bound the user-theme response — a cosmetic hook must not be a
+# DoS backdoor by pointing SHOIN_THEME_CSS at a giant file.
+_THEME_CSS_LIMIT = 256 * 1024
+_IMPORTED_ORIGIN_PREFIX = "imported:"
+
+
+def _neutralize_import_origins(doc: Json) -> Json:
+    """File-path origins in an HTTP-supplied export must not become
+    refreshable: refresh re-reads file origins from disk, so the HTTP API
+    would read arbitrary server-side files (the confused deputy _h_src_add
+    refuses). Non-URL origins are kept, prefixed, for display only."""
+    sources = doc.get("sources")
+    if isinstance(sources, list):
+        for s in sources:
+            origin = s.get("origin") if isinstance(s, dict) else None
+            if isinstance(origin, str) and not origin.startswith(("http://", "https://")):
+                s["origin"] = _IMPORTED_ORIGIN_PREFIX + origin
+    return doc
+
 
 _EXPORT_MIME = {
     "md": "text/markdown; charset=utf-8",
@@ -159,6 +218,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     return {
         "id": nb.id,
         "name": nb.name,
+        "settings": nb.settings,
         "counts": store.counts(nb_id),
         "sources": [
             {
@@ -166,13 +226,15 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 "kind": s.kind,
                 "title": s.title,
                 "origin": s.origin,
+                "weight": s.weight,
+                "meta": s.meta,
                 # Refreshability is decided by what the origin can still be
                 # read from, not by kind: URL sources always qualify; a file
                 # source qualifies only while its recorded path still exists
                 # (an upload's tmp copy is unlinked after ingest, so it reads
                 # false and the UI hides a button that could only error).
-                "refreshable": s.origin.startswith(("http://", "https://"))
-                or Path(s.origin).is_file(),
+                # Shared with the batch path — see pipeline.source_is_refreshable.
+                "refreshable": source_is_refreshable(s),
             }
             for s in store.sources_for_notebook(nb_id)
         ],
@@ -230,6 +292,10 @@ class _Handler(BaseHTTPRequestHandler):
         # build serving it (stale JS vs new API), and API responses are
         # live notebook state. Was SSE-only; hoisted to cover every response.
         self.send_header("Cache-Control", "no-store")
+        # Every response class (JSON, SSE, static, errors) declares the API
+        # contract it speaks — clients can detect a breaking-change boundary
+        # without parsing bodies (v0.2.663).
+        self.send_header("X-Shoin-API", API_VERSION)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -392,9 +458,21 @@ class _Handler(BaseHTTPRequestHandler):
         of _optional_str/_optional_id_list — a JSON list/dict/bool or an
         out-of-range value must be a coded 400, not a raw comparison or a
         silently unbounded read."""
+        value = self._optional_int_or_none(data, key, lo, hi)
+        if value is None:
+            return default
+        return value
+
+    def _optional_int_or_none(
+        self, data: Json, key: str, lo: int, hi: int
+    ) -> int | None:
+        """k-resolution sibling of _optional_int (v0.2.659): absent -> None,
+        so the caller can hand the decision to the notebook's own settings
+        (nb_search's k — an explicit field still gets the same bounds
+        validation)."""
         raw = data.get(key)
         if raw is None:
-            return default
+            return None
         if not isinstance(raw, int) or isinstance(raw, bool):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
@@ -407,24 +485,96 @@ class _Handler(BaseHTTPRequestHandler):
             )
         return raw
 
+    def _required_int(self, data: Json, key: str) -> int:
+        """Required positive-int field — the numeric sibling of _require:
+        absent -> VALIDATION_REQUIRED_FIELD_MISSING; present -> the same
+        positive/bounded validation _optional_int applies."""
+        if data.get(key) is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}"
+            )
+        return self._optional_int(data, key, 1, 2**63 - 1, 0)
+
+    def _optional_float(
+        self, data: Json, key: str, lo: float, hi: float
+    ) -> float | None:
+        """Optional bounded-float field: absent -> None; present -> a finite
+        float in [lo, hi] or VALIDATION_FIELD_FORMAT_INVALID. The float
+        sibling of _optional_int: JSON has one number type so ints are
+        accepted, bools/non-numbers are rejected, and a non-finite or
+        out-of-range value is a coded 400 — never a raw comparison or a
+        silent clamp."""
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a number, got {type(raw).__name__}",
+            )
+        value = float(raw)
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a finite number in {lo}..{hi}",
+            )
+        return value
+
+    def _optional_json_obj(self, data: Json, key: str) -> dict[str, Any] | None:
+        """Optional JSON-object field: absent -> None; present -> the dict
+        itself or VALIDATION_FIELD_FORMAT_INVALID. Type-shape only —
+        serializability and the byte bound are the store writer's
+        contract (update_source_meta), so the same limit governs every
+        write path instead of drifting per surface."""
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a JSON object, got {type(raw).__name__}",
+            )
+        return raw
+
     # --- routing --------------------------------------------------------
 
     _ROUTES: tuple[tuple[str, str, str], ...] = (
         ("GET", r"^/$", "ui"),
+        ("GET", r"^/api/theme\.css$", "theme_css"),
+        # v0.2.666: the UI's script and stylesheet ship as packaged siblings
+        # of index.html — literal filenames on the route table, so no path
+        # component ever reaches the filesystem lookup.
+        ("GET", r"^/static/app\.js$", "static_app_js"),
+        ("GET", r"^/static/style\.css$", "static_style_css"),
         ("GET", r"^/api/health$", "health"),
+        ("GET", r"^/api/check$", "check"),
+        ("GET", r"^/api/metrics$", "metrics"),
+        ("GET", r"^/api/trash$", "trash_list"),
+        ("POST", r"^/api/trash/(\d+)/restore$", "trash_restore"),
+        ("DELETE", r"^/api/trash/(\d+)$", "trash_purge"),
+        ("DELETE", r"^/api/trash$", "trash_empty"),
+        ("POST", r"^/api/vacuum$", "vacuum"),
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
         ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
+        ("POST", r"^/api/notebooks/(\d+)/duplicate$", "nb_duplicate"),
+        ("POST", r"^/api/notebooks/(\d+)/merge$", "nb_merge"),
+        ("POST", r"^/api/notebooks/import$", "nb_import"),
+        ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
+        ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
         ("DELETE", r"^/api/sources/(\d+)$", "src_delete"),
         ("GET", r"^/api/sources/(\d+)/text$", "src_text"),
+        ("PATCH", r"^/api/chunks/(\d+)$", "chunk_patch"),
         ("POST", r"^/api/sources/(\d+)/refresh$", "src_refresh"),
+        ("POST", r"^/api/notebooks/(\d+)/refresh-all$", "nb_refresh_all"),
         ("POST", r"^/api/notebooks/(\d+)/ask$", "ask_sse"),
         ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
+        ("POST", r"^/api/search$", "global_search"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
         ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
@@ -530,21 +680,22 @@ class _Handler(BaseHTTPRequestHandler):
         # test_ui_contract.py pins that the placeholder appears exactly once in
         # the shipped file, so a future edit can't silently reintroduce a second
         # occurrence for this blind byte replace to also corrupt.
-        # Strictly allowlisted (not merely escaped): CSP already permits inline
-        # scripts (script-src 'unsafe-inline'), so an unsanitized value in the
-        # replaced attribute could break out of it; only a bare "ja"/"en" is
+        # Strictly allowlisted (not merely escaped): an unsanitized value in
+        # the replaced attribute could break out of it; only a bare "ja"/"en" is
         # ever substituted, anything else silently falls back to "ja".
         lang = ui_lang()
         safe_lang = lang if lang in ("ja", "en") else "ja"
-        body = _STATIC.read_bytes().replace(b"__SHOIN_LANG__", safe_lang.encode("ascii"))
+        body = _read_packaged_asset("index.html").replace(
+            b"__SHOIN_LANG__", safe_lang.encode("ascii")
+        )
         self._headers(
             200,
             "text/html; charset=utf-8",
             {
                 "Content-Length": str(len(body)),
                 "Content-Security-Policy": (
-                    "default-src 'none'; style-src 'unsafe-inline';"
-                    " script-src 'unsafe-inline'; connect-src 'self'; img-src data:;"
+                    "default-src 'none'; style-src 'unsafe-inline' 'self';"
+                    " script-src 'self'; connect-src 'self'; img-src data:;"
                     " frame-ancestors 'none'"
                 ),
                 "X-Frame-Options": "DENY",
@@ -552,17 +703,84 @@ class _Handler(BaseHTTPRequestHandler):
         )
         self.wfile.write(body)
 
+    def _serve_packaged_asset(self, name: str, content_type: str) -> None:
+        # Shipped sibling of index.html (v0.2.666). The route table allowlists
+        # the two literal names, so `name` is never user-controlled. A missing
+        # packaged asset is a build defect — a coded 404 beats an empty body,
+        # which would render as a silent blank UI with zero signal.
+        try:
+            body = _read_packaged_asset(name)
+        except OSError:
+            self._error(404, "STATIC_ASSET_NOT_FOUND", f"packaged asset missing: {name}")
+            return
+        self._headers(
+            200,
+            content_type,
+            {"Content-Length": str(len(body))},
+        )
+        self.wfile.write(body)
+
+    def _h_static_app_js(self) -> None:
+        self._serve_packaged_asset("app.js", "text/javascript; charset=utf-8")
+
+    def _h_static_style_css(self) -> None:
+        self._serve_packaged_asset("style.css", "text/css; charset=utf-8")
+
+    def _h_theme_css(self) -> None:
+        # User theme hook: the palette is already :root variables, so a file
+        # dropped next to config.json restyles the app without a build.
+        # Missing/unreadable/oversized all degrade to an empty stylesheet —
+        # a 5xx or truncated tail would only break the optional hook.
+        try:
+            path = theme_css_path()
+            body = b"" if path.stat().st_size > _THEME_CSS_LIMIT else path.read_bytes()
+        except OSError:
+            body = b""
+        self._headers(
+            200,
+            "text/css; charset=utf-8",
+            {"Content-Length": str(len(body))},
+        )
+        self.wfile.write(body)
+
     def _h_health(self) -> None:
         avail = getattr(self.llm, "available", lambda: False)()
         model = getattr(self.llm, "model", "")
         embed_model = getattr(self.llm, "embedding_model", "")
+        # Surface the stored-vector builder model and the staleness flag so
+        # a model swap is diagnosable without reading server stderr
+        # (v0.2.661, product-review #17). Health must keep answering even
+        # when the DB itself is the broken thing being diagnosed, so the
+        # read is best-effort: blank fields then still say "unknown".
+        indexed_embed_model = ""
+        embed_stale = False
+        try:
+            with Store(self.db) as store:
+                indexed_embed_model = (
+                    store.get_setting(EMBED_MODEL_SETTING_KEY) or ""
+                ).strip()
+                embed_stale = _embed_model_stale(store, embed_model)
+        except (OSError, StoreError, sqlite3.OperationalError):
+            # sqlite3.connect propagates raw OSErrors for unopenable paths
+            # (directory, permission) alongside its own OperationalError.
+            pass
         self._json(
             {
                 "status": "ok",
                 "version": VERSION,
+                "api": API_VERSION,
                 "llm": avail,
                 "model": model,
                 "embed_model": embed_model,
+                "indexed_embed_model": indexed_embed_model,
+                "embed_model_changed": embed_stale,
+                # v0.2.674 (product-review #58): the product promise is that
+                # document text and questions never leave this machine — a
+                # non-loopback base_url silently breaks it. The client's own
+                # URL when it has one, else the configured default.
+                "llm_external": endpoint_is_external(
+                    getattr(self.llm, "base_url", "") or llm_url()
+                ),
                 # Surfaces the SHOIN_MULTI_QUERY opt-in state (v0.2.126) so a user
                 # debugging "why is retrieval slow / why isn't recall improving"
                 # doesn't have to know the env var exists — same diagnostic-first
@@ -570,6 +788,50 @@ class _Handler(BaseHTTPRequestHandler):
                 "multi_query": multi_query_enabled(),
             }
         )
+
+    def _h_metrics(self) -> None:
+        # Content-free usage counters (counts / millisecond sums written by
+        # Store.bump_metrics) — the in-product half of the SHOIN_LOG_JSON
+        # observability pair: durable totals vs per-event lines.
+        with Store(self.db) as store:
+            self._json({"metrics": store.usage_metrics()})
+
+    def _h_check(self) -> None:
+        try:
+            with Store(self.db) as store:
+                self._json(store.check())
+        except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+            # A file that cannot open at all is itself the finding — report
+            # it as the diagnostic payload, not a generic 500 (the same
+            # best-effort contract _h_health keeps). DatabaseError covers
+            # OperationalError.
+            self._json(
+                {"ok": False, "integrity": "unopenable", "error": str(exc)}
+            )
+
+    def _h_trash_list(self) -> None:
+        with Store(self.db) as store:
+            self._json({"trash": store.trash_list()})
+
+    def _h_trash_restore(self, item_id: int) -> None:
+        with Store(self.db) as store:
+            restored = store.trash_restore(item_id)
+        self._json(restored, 201)
+
+    def _h_trash_purge(self, item_id: int) -> None:
+        with Store(self.db) as store:
+            store.trash_purge(item_id)
+        self._json({"purged": item_id})
+
+    def _h_trash_empty(self) -> None:
+        with Store(self.db) as store:
+            n = store.trash_purge_all()
+        self._json({"purged": n})
+
+    def _h_vacuum(self) -> None:
+        with Store(self.db) as store:
+            res = store.vacuum()
+        self._json(res)
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:
@@ -586,15 +848,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(_notebook_json(store, nb_id))
 
     def _h_nb_rename(self, nb_id: int) -> None:
-        name = self._require(self._read_json(), "name")
-        # Echo the normalized name, not the raw request value — store strips
-        # whitespace before persisting, so echoing `name` would report a name
-        # the row never had (same response-vs-stored class as v0.2.93's
-        # _h_src_patch truncation).
-        name = name.strip()
+        # PATCH accepts {name} and/or {settings} (v0.2.659) — either field
+        # alone is valid; an empty object is the coded missing-field 400.
+        data = self._read_json()
+        name = self._optional_str(data, "name") or None
+        settings = self._optional_json_obj(data, "settings")
+        if name is None and settings is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING",
+                "missing field: name or settings",
+            )
         with Store(self.db) as store:
-            store.rename_notebook(nb_id, name)
-        self._json({"id": nb_id, "name": name})
+            nb = store.get_notebook(nb_id)
+            if name is not None:
+                # Echo the normalized name, not the raw request value — store
+                # strips whitespace before persisting, so echoing `name` would
+                # report a name the row never had (same response-vs-stored
+                # class as v0.2.93's _h_src_patch truncation).
+                name = name.strip()
+                store.rename_notebook(nb_id, name)
+            if settings is not None:
+                store.update_notebook_settings(nb_id, settings)
+                nb = store.get_notebook(nb_id)
+        self._json(
+            {
+                "id": nb_id,
+                "name": name if name is not None else nb.name,
+                "settings": nb.settings,
+            }
+        )
 
     def _h_nb_delete(self, nb_id: int) -> None:
         with Store(self.db) as store:
@@ -607,6 +889,95 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             store.clear_messages(nb_id)
         self._json({"cleared": nb_id})
+
+    def _h_nb_import(self) -> None:
+        with Store(self.db) as store:
+            nb = store.import_notebook(_neutralize_import_origins(self._read_json()))
+            self._json({"id": nb.id, "name": nb.name}, status=201)
+
+    def _h_nb_duplicate(self, nb_id: int) -> None:
+        # Optional {"name": "..."} — absent/empty body forks as "<name> (copy)".
+        name = self._optional_str(self._read_json(), "name") or None
+        with Store(self.db) as store:
+            nb = store.duplicate_notebook(nb_id, name)
+            self._json({"id": nb.id, "name": nb.name}, 201)
+
+    def _h_nb_merge(self, nb_id: int) -> None:
+        # {"source_id": N} — folds nb N's tree into this one, then archives
+        # and deletes N via the trash undo-log (merge is recoverable).
+        source_id = self._required_int(self._read_json(), "source_id")
+        with Store(self.db) as store:
+            nb = store.merge_notebooks(nb_id, source_id)
+            self._json({"id": nb.id, "name": nb.name})
+
+    def _q_int(self, key: str, lo: int, hi: int, default: int) -> int:
+        """Query-string bounded int: absent -> default; non-numeric or
+        out-of-range -> coded 400. The _optional_* siblings read JSON
+        bodies; URL params need the same typed boundary so 'limit=abc' is
+        a 400, not a ValueError 500 (v0.2.646)."""
+        raw_list = self._query.get(key)
+        raw = raw_list[0] if raw_list else None
+        if raw is None:
+            return default
+        try:
+            val = int(raw, 10)
+        except ValueError:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID", f"{key} must be an integer"
+            ) from None
+        if not lo <= val <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be within {lo}..{hi}",
+            )
+        return val
+
+    def _h_nb_messages(self, nb_id: int) -> None:
+        # Cursor the detail cap doesn't reach: newest-first offset/limit
+        # over the full chat history, with total for progress display.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_MESSAGES_LIMIT, NB_MESSAGES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "messages": [
+                        {
+                            "id": m["id"],
+                            "role": m["role"],
+                            "body": m["body"],
+                            "report": _safe_report(m["citation_report"]),
+                            "created_at": m["created_at"],
+                        }
+                        for m in store.list_messages_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_messages(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+
+    def _h_nb_notes(self, nb_id: int) -> None:
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_NOTES_LIMIT, NB_NOTES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "notes": [
+                        {
+                            "id": n["id"],
+                            "title": n["title"],
+                            "body": n["body"],
+                            "created_at": n["created_at"],
+                        }
+                        for n in store.list_notes_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_notes(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_src_add(self, nb_id: int) -> None:
         target = self._require(self._read_json(), "target")
@@ -695,27 +1066,52 @@ class _Handler(BaseHTTPRequestHandler):
                 tmp_path.unlink(missing_ok=True)
 
     def _h_src_patch(self, src_id: int) -> None:
-        title = self._require(self._read_json(), "title")
+        data = self._read_json()
+        title = self._optional_str(data, "title") or None
+        weight = self._optional_float(data, "weight", 0.0, SOURCE_WEIGHT_MAX)
+        meta = self._optional_json_obj(data, "meta")
+        if title is None and weight is None and meta is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING",
+                "missing field: title, weight, or meta",
+            )
         with Store(self.db) as store:
             src = store.get_source(src_id)
-            # rename_source, not store.update_source_title, so the embeddings that
-            # bake in the old title are refreshed too (v0.2.160); the rename itself
-            # commits regardless of whether embedding succeeds.
-            rename_source(store, src_id, title, src.origin, self.llm)
-        # Use src_id and title from the request — no second get_source() to avoid
-        # a TOCTOU window where a concurrent delete would return HTTP 404 despite
-        # the update having already committed successfully. But update_source_title()
-        # itself silently truncates to MAX_TITLE_LEN before persisting (same class of
-        # bug v0.2.93 fixed in _h_src_upload) — apply the identical truncation here so
-        # the response matches what was actually written, without a second DB round trip.
-        title = title[:MAX_TITLE_LEN]
+            if weight is not None:
+                store.update_source_weight(src_id, weight)
+            if meta is not None:
+                store.update_source_meta(src_id, meta)
+            if title is not None:
+                # rename_source, not store.update_source_title, so the embeddings
+                # that bake in the old title are refreshed too (v0.2.160); the
+                # rename itself commits regardless of whether embedding succeeds.
+                rename_source(store, src_id, title, src.origin, self.llm)
+        # Use src_id and title/weight from the request — no second get_source() to
+        # avoid a TOCTOU window where a concurrent delete would return HTTP 404
+        # despite the update having already committed successfully. But
+        # update_source_title() itself silently truncates to MAX_TITLE_LEN before
+        # persisting (same class of bug v0.2.93 fixed in _h_src_upload) — apply
+        # the identical truncation here so the response matches what was actually
+        # written, without a second DB round trip. A weight-only PATCH echoes the
+        # pre-read src.title — a racing rename in the same window resolves to
+        # whichever committed last, and the DB row (not this echo) is the truth.
+        echo_title = (title if title is not None else src.title)[:MAX_TITLE_LEN]
         # A renamed title changes the prompt build_context() sends to the LLM the
         # same way a content refresh does (same fix as _h_src_refresh, v0.2.36):
         # evict stale question suggestions, since the cache key is source IDs only
-        # and a rename doesn't change those, so it would never self-expire.
-        with self.questions_cache_lock:
-            self.questions_cache.pop(src.notebook_id, None)
-        self._json({"id": src_id, "title": title})
+        # and a rename doesn't change those, so it would never self-expire. A
+        # weight/meta change never reaches the generation prompt — no evict.
+        if title is not None:
+            with self.questions_cache_lock:
+                self.questions_cache.pop(src.notebook_id, None)
+        self._json(
+            {
+                "id": src_id,
+                "title": echo_title,
+                "weight": weight if weight is not None else src.weight,
+                "meta": meta if meta is not None else src.meta,
+            }
+        )
 
     def _h_src_delete(self, src_id: int) -> None:
         with Store(self.db) as store:
@@ -744,6 +1140,15 @@ class _Handler(BaseHTTPRequestHandler):
             200,
         )
 
+    def _h_nb_refresh_all(self, nb_id: int) -> None:
+        with Store(self.db) as store:
+            results = refresh_all_sources(store, nb_id, self.llm)
+        # Any source's content may have changed: evict cached suggestions
+        # (same staleness class as the per-source refresh, v0.2.36).
+        with self.questions_cache_lock:
+            self.questions_cache.pop(nb_id, None)
+        self._json({"results": results})
+
     def _h_src_text(self, src_id: int) -> None:
         with Store(self.db) as store:
             store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
@@ -753,6 +1158,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(
                 {"chunks": [{"id": cid, "seq": seq, "text": text} for cid, seq, text in rows]}
             )
+
+    def _h_chunk_patch(self, chunk_id: int) -> None:
+        text = self._require(self._read_json(), "text")
+        with Store(self.db) as store:
+            chunk = store.update_chunk_text(chunk_id, text)
+            # A chunk edit changes retrievable content without moving the
+            # source sha256 the questions fingerprint keys on — the cache
+            # would never self-expire (same staleness class as a rename,
+            # v0.2.36), so evict it here.
+            nb_id = store.get_source(chunk.source_id).notebook_id
+            with self.questions_cache_lock:
+                self.questions_cache.pop(nb_id, None)
+        self._json(
+            {"id": chunk.id, "source_id": chunk.source_id, "seq": chunk.seq,
+             "text": chunk.text}
+        )
 
     def _h_studio(self, nb_id: int) -> None:
         kind = self._require(self._read_json(), "kind")
@@ -816,6 +1237,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_export(self, nb_id: int) -> None:
         fmt = (self._query.get("format") or ["md"])[0]
+        if fmt == "tree":
+            # Machine-transfer document (v0.2.655): the trash undo-log's
+            # envelope — pairs with POST /api/notebooks/import. Kept OUT
+            # of export.FORMATS: that tuple is pinned in lockstep with
+            # the mime/ext tables and the UI's download links, none of
+            # which apply to a JSON tree (it is a response body, not an
+            # attachment users pick from the export menu).
+            with Store(self.db) as store:
+                self._json(store.export_notebook(nb_id))
+            return
         if fmt not in FORMATS:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"format must be one of {FORMATS}")
         with Store(self.db) as store:
@@ -883,7 +1314,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"question too long (max {MAX_QUESTION_LEN} characters)",
             )
-        k = self._optional_int(body, "k", lo=1, hi=SEARCH_K_MAX, default=TOP_K)
+        # _or_none hands k-resolution to retrieve_for_question: a
+        # notebook-level settings.top_k wins over TOP_K when the request
+        # body carries no explicit k (v0.2.659).
+        k = self._optional_int_or_none(body, "k", lo=1, hi=SEARCH_K_MAX)
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404, same contract as /ask
@@ -901,15 +1335,79 @@ class _Handler(BaseHTTPRequestHandler):
                 store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
             )
             titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
+            # Zero hits is a dead end (product-review #42): offer the nearest
+            # in-corpus spellings so a typo'd query has somewhere to go. Only
+            # emitted on the empty path — a non-empty list never needs it.
+            suggestions = (
+                suggest_corrections(store, nb_id, question) if not hits else []
+            )
             self._json(
                 {
                     "question": question,
+                    "suggestions": suggestions,
                     "hits": [
                         {
                             "rank": i + 1,
                             "chunk_id": h.chunk_id,
                             "source_id": h.source_id,
                             "title": titles.get(h.source_id, ""),
+                            "section": h.context,
+                            "seq": h.seq,
+                            "score": round(h.score, 6),
+                            "bm25": round(h.bm25, 6),
+                            "vec": round(h.vec, 6),
+                            "text": h.text,
+                        }
+                        for i, h in enumerate(hits)
+                    ],
+                }
+            )
+
+    def _h_global_search(self) -> None:
+        """Cross-notebook sibling of /notebooks/{id}/search (v0.2.649,
+        product-review #7): the same retrieve_for_question pipeline with
+        notebook_id=None — every source in the DB is a candidate and each
+        hit carries its notebook identity so the caller can route back to
+        the owning notebook. Stateless like nb_search: no history, nothing
+        persisted, retrieval only (no answer generated)."""
+        body = self._read_json()
+        question = self._require(body, "question")
+        if len(question) > MAX_QUESTION_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"question too long (max {MAX_QUESTION_LEN} characters)",
+            )
+        k = self._optional_int(body, "k", lo=1, hi=SEARCH_K_MAX, default=TOP_K)
+        with Store(self.db) as store:
+            retrieval_q = expand_query(question, [])
+            qvec = (
+                _query_vector(self.llm, retrieval_q)
+                if _check_embed_model_ok(store, self.llm)
+                else None
+            )
+            hits = retrieve_for_question(
+                store, self.llm, None, retrieval_q, qvec, k=k
+            )
+            meta = store.notebooks_for_sources([h.source_id for h in hits])
+            # A source deleted by a concurrent request between the search and
+            # this provenance lookup is dropped rather than KeyErroring — the
+            # same toleration nb_search's titles.get() already applies.
+            hits = [h for h in hits if h.source_id in meta]
+            suggestions = (
+                suggest_corrections(store, None, question) if not hits else []
+            )
+            self._json(
+                {
+                    "question": question,
+                    "suggestions": suggestions,
+                    "hits": [
+                        {
+                            "rank": i + 1,
+                            "chunk_id": h.chunk_id,
+                            "notebook_id": meta[h.source_id][0],
+                            "notebook": meta[h.source_id][1],
+                            "source_id": h.source_id,
+                            "title": meta[h.source_id][2],
                             "section": h.context,
                             "seq": h.seq,
                             "score": round(h.score, 6),
@@ -990,7 +1488,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                context = build_context(store, hits)
+                # Per-notebook retrieval budget override (v0.2.659) — the
+                # same knob qa.ask() applies on its own build_context call.
+                nb_budget = int(
+                    store.notebook_settings(nb_id).get(
+                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=nb_budget)
             except Exception as exc:
                 # Headers already committed; must not let this propagate to _dispatch
                 # (it would write a new HTTP status line into the SSE body stream).
@@ -1054,7 +1559,20 @@ class _Handler(BaseHTTPRequestHandler):
                 with self.generation_lock:
                     for token in self._stream_chat(build_messages(question, context, history)):
                         parts.append(token)
-                        self._sse("delta", {"text": token})
+                        if client_gone:
+                            continue
+                        try:
+                            self._sse("delta", {"text": token})
+                        except ConnectionError:
+                            # Client dropped mid-answer — keep consuming the
+                            # generator to completion anyway: the token spend
+                            # is already sunk inside the serialized lock, and
+                            # the persist below then writes the COMPLETE
+                            # answer, so the client's done-miss recovery and
+                            # any page reload see the full answer rather than
+                            # the prefix that happened to fit before the cut
+                            # (v0.2.665).
+                            client_gone = True
                     # Read last_finish_reason while still holding the lock — the
                     # shared llm resets it at the start of every chat/stream call,
                     # so reading after release races with the next queued request.
@@ -1167,6 +1685,18 @@ class _HTTPServer(ThreadingHTTPServer):
     # dead-at-exit thread strictly correct (the same choice python -m
     # http.server makes).
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # stdlib HTTPServer.server_bind calls socket.getfqdn(host) — a PTR
+        # (reverse-DNS) lookup that stalls ~30s before the socket listens on
+        # machines with a slow or absent resolver. A loopback-only server
+        # needs no canonical name at all: server_name/server_port only ever
+        # feed stdlib's HTML error page, and this handler's send_error is a
+        # JSON envelope, so skipping the lookup loses nothing (v0.2.668).
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # A client that stalls mid-request simply hits the per-request socket

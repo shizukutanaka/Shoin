@@ -12,7 +12,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│           Web UI (single-file HTML)             │ User-facing
+│        Web UI (index.html + app.js + style.css)  │ User-facing
 ├─────────────────────────────────────────────────┤
 │  Web Server (HTTP/SSE)  + CLI (subcommands)    │ API & I/O
 ├─────────────────────────────────────────────────┤
@@ -302,20 +302,21 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - Single-threaded HTTP handler per request (`ThreadingHTTPServer`)
 - Bound to 127.0.0.1 only; rejects non-local Hostnames (DNS rebinding defense)
 - Routes:
-  - GET `/` → static index.html
+  - GET `/` → static index.html (+ literal routes `/static/app.js`, `/static/style.css` — v0.2.666 split; no path-based traversal)
   - GET/POST/DELETE `/api/notebooks/*` → CRUD
   - POST `/api/notebooks/{id}/sources` → ingest (file upload or URL)
   - GET `/api/notebooks/{id}` → full notebook payload; chat history is embedded as its `"messages"` array (there is no dedicated GET route for messages alone — a prior version of this doc incorrectly claimed one existed, v0.2.75)
   - DELETE `/api/notebooks/{id}/messages` → clear chat history
   - POST `/api/notebooks/{id}/ask` → SSE stream (delta + meta + done)
   - POST `/api/notebooks/{id}/search` → ranked hits only (no generation, no persistence; v0.2.637)
+  - POST `/api/search` → the notebook-less sibling: scope `notebook_id=None`, hits carry (notebook_id, notebook, title) provenance (v0.2.649)
   - POST `/api/notebooks/{id}/reindex` → rebuild embeddings (CLI/Web parity, v0.2.67)
   - GET `/api/health` → LLM status, embedding model (GET only; no POST route is registered)
 - SSE Streaming: sends meta event (with citation report skeleton), delta events (tokens), done event (final report + status)
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook, add, ask, studio, questions, export, serve, reindex, note (add/list/delete), source (delete/rename/refresh) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
+- Subcommands: notebook (new/list/delete/rename/duplicate/merge/settings — merge v0.2.656, settings v0.2.659), add, ask, search (v0.2.649), studio, questions, export (`--format tree` for the portable notebook tree — v0.2.655), import (v0.2.655), serve, reindex, note (add/list/delete), source (delete/rename/refresh/refresh-all/weight/meta — weight v0.2.657, meta v0.2.658) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), chunk (edit — v0.2.647), trash (list/restore/purge — v0.2.654; source/note undo via `kind` column v0.2.667), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -343,7 +344,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.638** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.680** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

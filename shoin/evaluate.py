@@ -377,3 +377,21 @@ def diff_reports(before: EvalReport, after: EvalReport) -> EvalDiff:
         new_questions=[c.question for c in after.cases if c.question not in before_qs],
         dropped_questions=[c.question for c in before.cases if c.question not in after_qs],
     )
+
+
+def gen_cases(store: Store, notebook_id: int) -> list[dict[str, object]]:
+    """Scaffold eval cases from the notebook's own sources (product-review #44).
+
+    One ``{"q", "sources"}`` object per source that has at least one chunk —
+    a hand-editing scaffold, not a measured ground truth. The ``sources``
+    array carries the real data (this notebook's actual ids — the part
+    hand-authoring gets wrong); the title-derived question is a seed the
+    user rewrites into a genuine probe. Sources with zero chunks are
+    skipped: nothing retrieves them, so their case could never win."""
+    store.get_notebook(notebook_id)  # coded 404, same contract as evaluate()
+    out: list[dict[str, object]] = []
+    for src in store.sources_for_notebook(notebook_id):
+        if not store.chunks_for_source(src.id):
+            continue
+        out.append({"q": f"「{src.title}」について教えて", "sources": [src.id]})
+    return out

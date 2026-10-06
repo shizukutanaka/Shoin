@@ -24,6 +24,12 @@ shoin serve              # 起動したら http://localhost:7440 をブラウザ
 
 `pip install` せずにソースツリーから直接動かす場合は `python -m shoin serve` も使えます(v0.2.459 以降、両者は同一エントリに委譲)。
 
+```bash
+# 単一ファイル .pyz (インストール不要・Python 3.11+ のみ必要, v0.2.668)
+python3 scripts/build_pyz.py        # dist/shoin.pyz を生成
+python3 dist/shoin.pyz serve        # 全機能が1ファイルで動く
+```
+
 > **PyPI は未公開です。** `pip install shoin` はまだ動きません(公開には
 > メンテナの認証情報が必要)。リポジトリから直接入れる場合は **ref を明示**してください —
 > 既定ブランチは古い版を指していることがあります:
@@ -44,12 +50,18 @@ ollama pull nomic-embed-text      # 埋め込み用(任意。無くてもBM25検
 ```bash
 shoin serve                           # Web UI起動
 shoin notebook new "研究ノート"        # CLIでも操作可
+shoin notebook duplicate 1             # ノートブックを複製(ソース/チャンク/ノート全コピー)
+shoin notebook merge 1 2               # nb2をnb1へ統合(元nbはゴミ箱へアーカイブ)
+shoin notebook settings 1 top_k=4 source_text_tokens=512  # nb単位の検索上書き(未設定=グローバル既定)
 shoin add 1 ./paper.pdf https://example.com/article
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
 shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
-# その他: questions / messages / note / source (rename・refresh・delete) / reindex
+# その他: search / questions / messages / note / source (rename・refresh・refresh-all・weight・meta・delete) / chunk edit / reindex
+#         stats(利用メトリクス表示。GET /api/metricsでも同一カウンタを返す) / trash(list|restore|purge|empty 削除済みnbのundo) / backup
+#         vacuum(削除済み領域をOSへ返却——DB物理縮小) / check(DB診断——物理整合性+埋込み欠落、破損時rc=1)
+#         export --format tree → shoin import で別マシン/別DBへnbを受け渡し (shoin-nb-tree-v1)
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
@@ -69,17 +81,21 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 
 | 変数 | 既定値 | 説明 |
 |------|--------|------|
-| `SHOIN_LLM_URL` | `http://localhost:11434/v1` | OpenAI互換エンドポイント |
+| `SHOIN_LLM_URL` | `http://localhost:11434/v1` | OpenAI互換エンドポイント。非ローカル指定時は起動時/`shoin health`/`/api/health`(`llm_external`)に警告——文書は外部送信される。URL内資格情報(user:pass@)は表示時に除去され秘密は出ない |
 | `SHOIN_LLM_MODEL` | `qwen3:4b` | 生成モデル |
+| `SHOIN_LLM_API_KEY` | (無効) | 設定すると全LLMリクエストへ`Authorization: Bearer <key>`を付与。認証必須のゲートウェイ(vLLM+proxy・ホスト型OpenAI互換)向け。未設定時はヘッダ自体を送らない。`http://`外部エンドポイントと併用時は起動時に平文転送の警告が出る(https://推奨) |
 | `SHOIN_EMBED_MODEL` | `nomic-embed-text` | 埋め込みモデル(空でBM25のみ) |
 | `SHOIN_DATA_DIR` | `~/.local/share/shoin` | SQLiteデータ保存先 |
 | `SHOIN_PORT` | `7440` | リッスンポート(127.0.0.1固定) |
 | `SHOIN_LANG` | `ja` | UI言語(ja/en)。CLI・エクスポート・Web UI 全てに適用。Web UI は初回表示時の既定値としてのみ使う — ヘッダーの言語切替ボタンを押すとブラウザに記憶され、以後はその選択が優先される(v0.2.177) |
 | `SHOIN_MULTI_QUERY` | (無効) | `1`でマルチクエリRAG-Fusion検索を有効化。質問をLLMで複数の言い換えに展開し検索結果をRRF統合(再現率向上。ask毎にLLM呼び出しが1回増える) |
 | `SHOIN_EMBED_BATCH` | `16` | 埋め込みリクエストのバッチサイズ(エンドポイント能力に合わせて調整) |
+| `SHOIN_LLM_RETRIES` | `2` | chat/embed呼出しの追加リトライ回数(0-5)。接続拒否・タイムアウト等の一時的輸送失敗のみ指数バックオフで再試行。HTTPエラー・応答異常は再試行しない。0で無効、不正値は既定に戻る |
 | `SHOIN_CHUNK_TOKENS` | `512` | チャンク分割の目安トークン数。`shoin eval` の前後で変えて自分の文書での効果を測定できる(次回の取込/再インデックスから有効) |
 | `SHOIN_CHUNK_OVERLAP` | `64` | チャンク間のオーバーラップトークン数(チャンクサイズ未満、負値・超過は既定に戻る)。オーバーラップの効果は文書依存で一律ではないため測定推奨 |
 | `SHOIN_DEBUG` | (無効) | `1`で検索の診断情報(BM25/vectorヒット数、RRF順位、最終スコア)を標準エラー出力に表示 |
+| `SHOIN_LOG_JSON` | (無効) | `1`で取込・回答イベントをJSON Linesで標準エラー出力へemit(`{"ts","event",…}`、`source_indexed`/`ask_completed`——ID・件数・msのみ、本文非含有) |
+| `SHOIN_THEME_CSS` | `~/.config/shoin/theme.css` | ユーザーテーマCSSのパス。配色は全てCSS変数のため `:root{--washi:…}` を上書きするだけで見た目を変えられる。Web UIが`/api/theme.css`経由で読込む(未存在・256KiB超は空スタイルシートに降格) |
 
 `shoin eval` の cases.json 例 — 設定変更(例: `SHOIN_MULTI_QUERY=1`)の前後で実行すれば、
 文献の数値ではなく**自分の文書での効果**を比較できる:
@@ -96,7 +112,11 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 (質問文の一致で対応付けるため、casesファイルの行順変更や編集で偽の回帰は出ない)。
 同一質問の重複は出現順にペアリングされる。
 
+`--gen` でノートブックからケース雛形を生成できる(チャンクを持つソース1件=1ケース、
+`sources` は実際のid——手直し前提の雛形):
+
 ```bash
+shoin eval 1 --gen > cases.json                # 雛形を生成してから手直し
 shoin eval 1 cases.json --save before.json   # 設定変更前
 shoin eval 1 cases.json --diff before.json   # 設定変更後: recall/MRR の ± を表示
 ```

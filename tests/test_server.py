@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -19,7 +20,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shoin.server import make_server  # noqa: E402
+from shoin.config import API_VERSION  # noqa: E402
+from shoin.server import _THEME_CSS_LIMIT, make_server  # noqa: E402
 
 
 class FakeLLM:
@@ -116,6 +118,16 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(data["llm"])
         self.assertIn("multi_query", data)
         self.assertFalse(data["multi_query"])  # default OFF
+        # v0.2.661 (product-review #17): staleness surface — FakeLLM has
+        # embedding_model="" so nothing can be stale here.
+        self.assertEqual(data["indexed_embed_model"], "")
+        self.assertFalse(data["embed_model_changed"])
+        # v0.2.663 (product-review #40): the API contract version is
+        # discoverable from the health surface too.
+        self.assertEqual(data["api"], API_VERSION)
+        # v0.2.674 (product-review #58): a non-loopback LLM endpoint
+        # silently breaks the local-only promise — health must say so.
+        self.assertFalse(data["llm_external"])
         status, headers, page = self._req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("書院", page.decode())
@@ -246,6 +258,63 @@ class ServerTest(unittest.TestCase):
         # delete notebook
         status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
         self.assertEqual(status, 200)
+
+    def test_health_reports_embed_model_staleness(self) -> None:
+        """v0.2.661 (product-review #17): /api/health names the model that
+        built the stored vectors and flags the mismatch — the stderr hint
+        emitted at query time never reaches a Web-UI user."""
+        import threading as _th
+
+        import shoin.server as srv_mod
+        from shoin.store import Store
+
+        class EmbedLLM(FakeLLM):
+            embedding_model = "model-B"
+
+        db = str(Path(self.tmp.name) / "s-embed.db")
+        with Store(db) as s:
+            s.set_setting("embed_model", "model-A")
+        srv = srv_mod.make_server(port=0, db=db, llm=EmbedLLM())
+        th = _th.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/api/health"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+        self.assertEqual(data["embed_model"], "model-B")
+        self.assertEqual(data["indexed_embed_model"], "model-A")
+        self.assertTrue(data["embed_model_changed"])
+
+    def test_health_survives_unopenable_db(self) -> None:
+        """v0.2.661: health is the diagnostic surface — a data dir that
+        cannot even be opened must not take the health check down with it.
+        Blank staleness fields then correctly read as "unknown"."""
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        srv = srv_mod.make_server(port=0, db=self.tmp.name, llm=FakeLLM())
+        th = _th.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/api/health"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["indexed_embed_model"], "")
+        self.assertFalse(data["embed_model_changed"])
 
     def test_upload_response_title_matches_persisted_truncated_title(self) -> None:
         """_h_src_upload()'s response must report the TRUNCATED title actually
@@ -417,6 +486,193 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_global_search_endpoint_crosses_notebooks(self) -> None:
+        """v0.2.649: POST /api/search is the notebook-less sibling of
+        /notebooks/{id}/search — the same retrieve pipeline with scope
+        notebook_id=None, so sources in EVERY notebook are candidates and
+        each hit carries (notebook_id, notebook, title) so the caller can
+        route back to the owning notebook (product-review #7)."""
+        status, nb1 = self._json("POST", "/api/notebooks", {"name": "sea"})
+        status, nb2 = self._json("POST", "/api/notebooks", {"name": "sky"})
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            s1 = store.add_source(nb1["id"], "txt", "ocean.txt", "mem://o", "sha-o")
+            store.add_chunks(s1.id, ["海洋酸性化は炭酸塩飽和度を低下させる。"])
+            s2 = store.add_source(nb2["id"], "txt", "orbit.txt", "mem://s", "sha-s")
+            store.add_chunks(s2.id, ["気象衛星は赤外放射量を観測する。"])
+
+        status, out = self._json("POST", "/api/search", {"question": "気象衛星"})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["question"], "気象衛星")
+        self.assertTrue(out["hits"])
+        hit = out["hits"][0]
+        self.assertEqual(hit["rank"], 1)
+        self.assertEqual(hit["source_id"], s2.id)
+        self.assertEqual(hit["notebook_id"], nb2["id"])
+        self.assertEqual(hit["notebook"], "sky")
+        self.assertEqual(hit["title"], "orbit.txt")
+        self.assertIn("気象衛星", hit["text"])
+        # Same question scoped to nb1 cannot see the nb2 source.
+        status, scoped = self._json(
+            "POST", f"/api/notebooks/{nb1['id']}/search", {"question": "気象衛星"}
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn(s2.id, {h["source_id"] for h in scoped["hits"]})
+        # Missing question shares the coded envelope.
+        status, err = self._json("POST", "/api/search", {"k": 3})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json(
+            "POST", "/api/search", {"question": "q", "k": 51}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_search_zero_hit_returns_suggestions(self) -> None:
+        """v0.2.650 (product-review #42): a zero-hit query is no dead end —
+        both search routes echo `suggestions` carrying the nearest in-corpus
+        spelling; a hitting query emits the key as []."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "気象"})
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(
+                nb["id"], "txt", "気象衛星メモ", "mem://m", "sha-m"
+            )
+            store.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+
+        for path in (f"/api/notebooks/{nb['id']}/search", "/api/search"):
+            status, out = self._json("POST", path, {"question": "気海衛生"})
+            self.assertEqual(status, 200)
+            self.assertEqual(out["hits"], [])
+            self.assertEqual(out["suggestions"], ["気象衛星"])
+            status, hit = self._json("POST", path, {"question": "気象衛星"})
+            self.assertEqual(status, 200)
+            self.assertTrue(hit["hits"])
+            self.assertEqual(hit["suggestions"], [])
+
+    def test_nb_duplicate_forks_notebook_and_stays_coded(self) -> None:
+        """v0.2.645: POST /api/notebooks/{id}/duplicate forks the notebook —
+        empty body yields '<name> (copy)', {"name": "..."} is honored, and
+        a dead id is a coded 404, never a 500."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "複製元"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+
+        status, dup = self._json("POST", f"/api/notebooks/{nb_id}/duplicate")
+        self.assertEqual(status, 201)
+        self.assertEqual(dup["name"], "複製元 (copy)")
+        self.assertNotEqual(dup["id"], nb_id)
+
+        status, named = self._json(
+            "POST", f"/api/notebooks/{nb_id}/duplicate", {"name": "複製先"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(named["name"], "複製先")
+
+        status, detail = self._json("GET", f"/api/notebooks/{dup['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["name"], "複製元 (copy)")
+
+        status, err = self._json("POST", "/api/notebooks/999999/duplicate")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_nb_messages_and_notes_pagination(self) -> None:
+        """v0.2.646: GET .../messages and .../notes page the full record the
+        detail cap can't reach — newest-first, offset/limit bounded, total
+        disclosed, invalid params coded 400, dead notebook 404."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "paged"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            for i in range(5):
+                store.add_message(nb_id, "user", f"m{i}")
+            for i in range(3):
+                store.add_note(nb_id, f"n{i}", "b")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/messages?offset=1&limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual([m["body"] for m in page["messages"]], ["m3", "m2"])
+        self.assertIn("id", page["messages"][0])
+        self.assertIn("created_at", page["messages"][0])
+
+        status, page = self._json("GET", f"/api/notebooks/{nb_id}/messages")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page["messages"]), 5)
+        self.assertEqual(page["messages"][0]["body"], "m4")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/notes?limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 3)
+        self.assertEqual([n["title"] for n in page["notes"]], ["n2", "n1"])
+
+        for bad in ("offset=-1", "offset=abc", "limit=0", "limit=501"):
+            status, err = self._json(
+                "GET", f"/api/notebooks/{nb_id}/messages?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/notebooks/999999/messages")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, err = self._json("GET", "/api/notebooks/999999/notes")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_chunk_patch_updates_text_and_stays_coded(self) -> None:
+        """v0.2.647: PATCH /api/chunks/{id} rewrites the chunk in place —
+        echo carries {id, source_id, seq, text}, the reader endpoint shows
+        the new text, dead chunk 404s, empty/missing text is a coded 400."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "edit"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "mem://d", "sha1")
+            store.add_chunks(src.id, ["typo'd extract"])
+            cid = store.chunks_for_source(src.id)[0].id
+
+        status, body = self._json(
+            "PATCH", f"/api/chunks/{cid}", {"text": "corrected extract"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["id"], cid)
+        self.assertEqual(body["source_id"], src.id)
+        self.assertEqual(body["seq"], 0)
+        self.assertEqual(body["text"], "corrected extract")
+
+        status, view = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertEqual(status, 200)
+        self.assertEqual(view["chunks"][0]["text"], "corrected extract")
+
+        status, err = self._json("PATCH", "/api/chunks/999999", {"text": "x"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "CHUNK_NOT_FOUND")
+        status, err = self._json("PATCH", f"/api/chunks/{cid}", {"text": "  "})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json("PATCH", f"/api/chunks/{cid}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+
     def test_upload_response_reports_pages_failed(self) -> None:
         """v0.2.256: a PDF whose pages partially fail extraction must surface
         pages_failed in the upload response — otherwise a partial index is
@@ -476,6 +732,27 @@ class ServerTest(unittest.TestCase):
             status, body = self._json("POST", "/api/sources/1/refresh")
         self.assertEqual(status, 200)
         self.assertEqual(body["pages_failed"], 3)
+
+    def test_nb_refresh_all_collects_statuses(self) -> None:
+        """v0.2.648: POST /api/notebooks/{id}/refresh-all is the Web-side batch
+        refresh — echoes the per-source outcome list and keeps the coded
+        NOTEBOOK_NOT_FOUND contract on a dead notebook."""
+        import shoin.server as srv
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "ra"})
+        nb_id = nb["id"]
+        fake = [
+            {"id": 1, "title": "a", "status": "refreshed",
+             "n_chunks": 2, "n_embedded": 0},
+            {"id": 2, "title": "b", "status": "skipped"},
+        ]
+        with patch.object(srv, "refresh_all_sources", return_value=fake):
+            status, body = self._json("POST", f"/api/notebooks/{nb_id}/refresh-all")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["results"], fake)
+        status, body = self._json("POST", "/api/notebooks/9999/refresh-all")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
     def test_unexpected_exception_in_handler_returns_500(self) -> None:
         """Unexpected exceptions not subclassing StoreError/IngestError/LLMError
@@ -1317,6 +1594,356 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["multi_query"])
 
+    def test_metrics_endpoint_returns_counter_dict(self) -> None:
+        """GET /api/metrics exposes Store.usage_metrics() (v0.2.653) — a
+        dict of floats only: counts and millisecond sums, never content."""
+        status, body = self._json("GET", "/api/metrics")
+        self.assertEqual(status, 200)
+        self.assertIn("metrics", body)
+        self.assertIsInstance(body["metrics"], dict)
+        self.assertTrue(
+            all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                for v in body["metrics"].values()
+            ),
+            body["metrics"],
+        )
+
+    def test_trash_endpoints_round_trip(self) -> None:
+        """DELETE archives to trash; GET /api/trash lists it; restore brings
+        the notebook back with its id; purge removes the archive (v0.2.654)."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "trashed"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        status, body = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        items = [t for t in body["trash"] if t["notebook_id"] == nb_id]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "trashed")
+        tid = items[0]["id"]
+        status, body = self._json("POST", f"/api/trash/{tid}/restore")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["id"], nb_id)
+        status, body = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["name"], "trashed")
+        status, body = self._json("DELETE", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        tid2 = [
+            t for t in self._json("GET", "/api/trash")[1]["trash"]
+            if t["notebook_id"] == nb_id
+        ][0]["id"]
+        status, body = self._json("DELETE", f"/api/trash/{tid2}")
+        self.assertEqual(status, 200)
+        status, body = self._json("POST", f"/api/trash/{tid2}/restore")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
+        status, body = self._json("DELETE", "/api/trash/99999")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
+
+    def test_trash_empty_and_vacuum_endpoints(self) -> None:
+        """v0.2.669: DELETE /api/trash empties the whole undo log in one
+        call; POST /api/vacuum rebuilds the file and reports db_bytes
+        before/after around it."""
+        status, before = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        status, body = self._json("DELETE", "/api/trash")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["purged"], len(before["trash"]))
+        status, body = self._json("GET", "/api/trash")
+        self.assertEqual(body["trash"], [])
+        status, body = self._json("POST", "/api/vacuum")
+        self.assertEqual(status, 200)
+        self.assertLessEqual(body["after"], body["before"])
+        self.assertEqual(body["freed"], body["before"] - body["after"])
+
+    def test_check_endpoint_reports_health_and_unopenable(self) -> None:
+        """v0.2.670: GET /api/check returns the physical-DB diagnostic;
+        a file that cannot even open reports ok:false + 'unopenable'
+        instead of a generic 500."""
+        status, body = self._json("GET", "/api/check")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["integrity"], "ok")
+        self.assertEqual(body["fk_violations"], 0)
+        self.assertEqual(body["schema_version"], body["expected_version"])
+        # v0.2.671: logical layer — seeded chunks are all unembedded.
+        self.assertEqual(body["unembedded"], body["chunks"])
+
+        import threading as _th
+
+        bad = str(Path(self.tmp.name) / "bad.db")
+        Path(bad).write_bytes(b"not a sqlite file " * 100)
+        srv2 = make_server(port=0, db=bad, llm=FakeLLM())
+        th = _th.Thread(target=srv2.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv2.server_address[1]}/api/check"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv2.shutdown()
+            srv2.server_close()
+            th.join(timeout=5)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["integrity"], "unopenable")
+
+    def test_trash_source_and_note_round_trip(self) -> None:
+        """v0.2.667: source/note deletes archive with their own kind — the
+        undo-log covers every destructive entity delete, not just nb."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "t"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "memo.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["猫は液体である。"])
+            src_id = src.id
+        status, body = self._json(
+            "POST", f"/api/notebooks/{nb_id}/notes",
+            {"title": "memo", "body": "本文"},
+        )
+        self.assertEqual(status, 201)
+        note_id = body["id"]
+        status, _ = self._json("DELETE", f"/api/sources/{src_id}")
+        self.assertEqual(status, 200)
+        status, _ = self._json("DELETE", f"/api/notes/{note_id}")
+        self.assertEqual(status, 200)
+        status, body = self._json("GET", "/api/trash")
+        items = {
+            t["kind"]: t
+            for t in body["trash"]
+            if t["notebook_id"] == nb_id
+        }
+        self.assertEqual(sorted(items), ["note", "source"])
+        status, body = self._json(
+            "POST", f"/api/trash/{items['source']['id']}/restore"
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["kind"], "source")
+        self.assertEqual(body["id"], src_id)
+        status, body = self._json(
+            "POST", f"/api/trash/{items['note']['id']}/restore"
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["kind"], "note")
+        status, body = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual([s["title"] for s in body["sources"]], ["memo.txt"])
+        self.assertEqual([n["title"] for n in body["notes"]], ["memo"])
+
+    def test_nb_tree_export_and_import_round_trip(self) -> None:
+        """GET .../export?format=tree emits the portable document; POST
+        /api/notebooks/import re-inserts it under fresh ids (v0.2.655)."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "portable"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "cats.txt", "mem://cats", "sha-c")
+            store.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+        status, doc = self._json(
+            "GET", f"/api/notebooks/{nb_id}/export?format=tree"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+        self.assertEqual(doc["notebook"]["name"], "portable")
+        self.assertEqual(len(doc["sources"]), 1)
+        status, body = self._json("POST", "/api/notebooks/import", doc)
+        self.assertEqual(status, 201)
+        self.assertNotEqual(body["id"], nb_id)
+        self.assertEqual(body["name"], "portable")
+        status, det = self._json("GET", f"/api/notebooks/{body['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(det["sources"]), 1)
+        # a file-path origin in an HTTP import must not be re-readable via
+        # refresh (confused deputy: the HTTP API never reads server files)
+        secret = Path(self.tmp.name) / "server-secret.txt"
+        secret.write_text("server-side secret body text", encoding="utf-8")
+        doc["sources"][0]["origin"] = str(secret)
+        status, body = self._json("POST", "/api/notebooks/import", doc)
+        self.assertEqual(status, 201)
+        status, det = self._json("GET", f"/api/notebooks/{body['id']}")
+        self.assertEqual(status, 200)
+        self.assertFalse(det["sources"][0]["refreshable"])
+        self.assertTrue(det["sources"][0]["origin"].startswith("imported:"))
+        status, _ = self._json(
+            "POST", f"/api/sources/{det['sources'][0]['id']}/refresh"
+        )
+        self.assertNotEqual(status, 200)
+        status, body = self._json(
+            "POST", f"/api/notebooks/{body['id']}/refresh-all"
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("refreshed", [r.get("status") for r in body["results"]])
+        # malformed payloads -> 400 coded, never a traceback
+        status, err = self._json(
+            "POST", "/api/notebooks/import", {"notebook": {}}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_IMPORT_INVALID")
+        # non-dict body -> the envelope guard rejects before the store
+        status, err = self._json("POST", "/api/notebooks/import", ["x"])
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        # a dead notebook exports as a coded 404 in the tree format too
+        status, err = self._json(
+            "GET", "/api/notebooks/99999/export?format=tree"
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_nb_merge_endpoint(self) -> None:
+        """POST /api/notebooks/{id}/merge (v0.2.656): folds the source
+        notebook's tree in under fresh ids and archives the emptied
+        source to trash — echoes the surviving target."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "T"})
+        self.assertEqual(status, 201)
+        t = body["id"]
+        status, body = self._json("POST", "/api/notebooks", {"name": "S"})
+        self.assertEqual(status, 201)
+        src = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            ss = store.add_source(src, "txt", "sdoc", "mem://s", "sha-s")
+            store.add_chunks(ss.id, ["ソース側本文です。"])
+        status, body = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": src}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"id": t, "name": "T"})
+        status, det = self._json("GET", f"/api/notebooks/{t}")
+        self.assertEqual(status, 200)
+        self.assertEqual([s["title"] for s in det["sources"]], ["sdoc"])
+        # the emptied source is gone (archived under trash, not lost)
+        status, err = self._json("GET", f"/api/notebooks/{src}")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, trash = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        items = [t for t in trash["trash"] if t["notebook_id"] == src]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "S")
+        # validator boundary: absent / wrong type / dead / self
+        status, err = self._json("POST", f"/api/notebooks/{t}/merge", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": "x"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": 999}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": t}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
+        """GET /api/theme.css (v0.2.643): the user-theme hook serves
+        SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.
+        Missing, unreadable, or oversized files all degrade to an empty
+        stylesheet — a cosmetic hook must never 5xx a page load."""
+        # default: no theme file -> 200 + empty CSS (a <link> never fails)
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(Path(self.tmp.name) / "nope.css")}):
+            status, headers, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+        self.assertIn("text/css", headers.get("Content-Type", ""))
+
+        # user file -> served verbatim
+        theme = Path(self.tmp.name) / "theme.css"
+        theme.write_bytes(b":root{--washi:#000}\n")
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(theme)}):
+            status, headers, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b":root{--washi:#000}\n")
+
+        # oversized -> empty, not a truncated tail that corrupts a rule
+        theme.write_bytes(b"x" * (_THEME_CSS_LIMIT + 1))
+        with patch.dict(os.environ, {"SHOIN_THEME_CSS": str(theme)}):
+            status, _, body = self._req("GET", "/api/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+
+    def test_ui_serves_theme_link_and_csp_allows_self_styles(self) -> None:
+        """The theme hook needs both ends wired: index.html <link>s to
+        /api/theme.css, and the CSP must permit same-origin stylesheets —
+        'unsafe-inline' alone would block the linked file."""
+        status, headers, page = self._req("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<link rel="stylesheet" href="/api/theme.css">', page)
+        csp = headers.get("Content-Security-Policy", "")
+        style = re.search(r"style-src\s+([^;]+)", csp)
+        self.assertIsNotNone(style)
+        assert style is not None
+        self.assertIn("'self'", style.group(1))
+
+    def test_packaged_ui_assets_are_served_and_linked(self) -> None:
+        """v0.2.666 (product-review #27): index.html no longer inlines its
+        script/style — the app lives in two packaged siblings served by
+        literal same-origin routes. Both ends must stay wired: the files are
+        200 under /static/*, and the page links them so a build that drops
+        one renders a blank, not a 404 discovered only by clicking."""
+        status, headers, js = self._req("GET", "/static/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get("Content-Type", ""))
+        self.assertIn(b"const I18N", js)
+        status, headers, css = self._req("GET", "/static/style.css")
+        self.assertEqual(status, 200)
+        self.assertIn("text/css", headers.get("Content-Type", ""))
+        self.assertIn(b"--sumi", css)
+        status, headers, page = self._req("GET", "/")
+        self.assertIn(b'<script src="/static/app.js"></script>', page)
+        self.assertIn(b'<link rel="stylesheet" href="/static/style.css">', page)
+        # script-src moved to 'self' — external assets load, inline JS stays
+        # denied, and the CSP pin keeps the tightening explicit.
+        csp = headers.get("Content-Security-Policy", "")
+        scripts = re.search(r"script-src\s+([^;]+)", csp)
+        self.assertIsNotNone(scripts)
+        assert scripts is not None
+        self.assertIn("'self'", scripts.group(1))
+        self.assertNotIn("unsafe-inline", scripts.group(1))
+
+    def test_missing_packaged_asset_is_a_coded_404(self) -> None:
+        """A wheel that fails to ship app.js must not serve a silent empty
+        body — the UI would render blank with zero signal. The packaged-
+        asset sender degrades to a coded 404 instead."""
+        import shoin.server as srv_mod
+
+        with patch.object(
+            srv_mod, "_read_packaged_asset", side_effect=FileNotFoundError("x")
+        ):
+            status, body = self._json("GET", "/static/app.js")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "STATIC_ASSET_NOT_FOUND")
+
+    def test_server_bind_keeps_literal_loopback_name(self) -> None:
+        """v0.2.668: stdlib server_bind resolves the bind host via
+        socket.getfqdn — a PTR lookup that stalls ~30s on machines with a
+        slow/absent resolver, delaying the listen itself. A loopback-only
+        server has no need for the canonical name; the literal host is
+        stored instead."""
+        self.assertIn(self.server.server_name, ("127.0.0.1", "::1"))
+        self.assertIsInstance(self.server.server_port, int)
+        self.assertGreater(self.server.server_port, 0)
+
     def test_ui_lang_meta_reflects_shoin_lang(self) -> None:
         """README documents SHOIN_LANG as controlling "UI言語", but the Web UI
         is served as pure static bytes and previously ignored it entirely,
@@ -1357,6 +1984,173 @@ class ServerTest(unittest.TestCase):
             page,
             "an unsupported-but-harmless language code must also fall back to ja",
         )
+
+    def test_src_patch_weight(self) -> None:
+        """v0.2.657: PATCH /api/sources/{id} with {"weight"} sets the
+        retrieval weight (product-review #19) — no title needed, and the
+        value surfaces on the notebook detail read."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "weight-nb"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "w.txt", "mem://w", "sha-w")
+            store.add_chunks(src.id, ["重みの説明文"])
+
+        # weight-only PATCH — no title field at all.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"weight": 3.0}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["id"], src.id)
+        self.assertEqual(out["weight"], 3.0)
+        self.assertEqual(out["title"], "w.txt")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["weight"], 3.0)
+
+        # Combined title+weight — both apply, weight echoes the request.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"title": "w2.txt", "weight": 2}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["title"], "w2.txt")
+        self.assertEqual(out["weight"], 2.0)
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["title"], "w2.txt")
+        self.assertEqual(detail["sources"][0]["weight"], 2.0)
+
+        # Neither field present is the coded missing-field 400.
+        status, err = self._json("PATCH", f"/api/sources/{src.id}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        # Non-numeric / out-of-range / non-finite are coded 400s.
+        for bad in ("heavy", 9.0, -0.5, True):
+            status, err = self._json(
+                "PATCH", f"/api/sources/{src.id}", {"weight": bad}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # Dead source id is the coded 404.
+        status, err = self._json("PATCH", "/api/sources/99999", {"weight": 2})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
+
+    def test_src_patch_meta(self) -> None:
+        """v0.2.658: PATCH /api/sources/{id} with {"meta"} replaces the
+        descriptive metadata object (product-review #24) — echoed back,
+        surfaced on the notebook detail read, whole-object REPLACE."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "meta-nb"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "m.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["メタデータの説明文"])
+
+        # meta-only PATCH — no title/weight fields.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}",
+            {"meta": {"author": "Doe", "year": "2020"}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {"author": "Doe", "year": "2020"})
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(
+            detail["sources"][0]["meta"], {"author": "Doe", "year": "2020"}
+        )
+        # REPLACE semantics — keys absent from the second object are gone.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"meta": {"year": "2021"}}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {"year": "2021"})
+        # Empty object clears everything.
+        status, out = self._json("PATCH", f"/api/sources/{src.id}", {"meta": {}})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {})
+        # Non-object meta is the coded 400, not a 500.
+        for bad in ("freeform", [1], 7, True):
+            status, err = self._json(
+                "PATCH", f"/api/sources/{src.id}", {"meta": bad}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # Oversized serialized object is the same coded 400 via the store.
+        status, err = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"meta": {"k": "x" * 5000}}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
+    def test_nb_patch_settings(self) -> None:
+        """v0.2.659: PATCH /api/notebooks/{id} accepts {"settings"} — the
+        per-notebook retrieval overrides (product-review #20), echoed back
+        and surfaced on the detail read; {name, settings} may combine."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "set-nb"})
+        nb_id = nb["id"]
+
+        # settings-only PATCH — no name field.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"settings": {"top_k": 3, "source_text_tokens": 256}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["name"], "set-nb")
+        self.assertEqual(
+            out["settings"], {"top_k": 3, "source_text_tokens": 256}
+        )
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(
+            detail["settings"], {"top_k": 3, "source_text_tokens": 256}
+        )
+        # name+settings combine in one PATCH; REPLACE semantics drop keys
+        # absent from the second object.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "set-nb2", "settings": {"top_k": 2}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["name"], "set-nb2")
+        self.assertEqual(out["settings"], {"top_k": 2})
+        # Empty object clears every override.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}", {"settings": {}}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["settings"], {})
+        # An empty PATCH is the coded missing-field 400, not a silent no-op.
+        status, err = self._json("PATCH", f"/api/notebooks/{nb_id}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        # Unknown keys, non-object, non-int, and out-of-bounds values are all
+        # the coded 400 path — a silently inert key is worse than a refusal.
+        for bad_settings in (
+            {"nope": 1},
+            {"top_k": "3"},
+            {"top_k": 0},
+            {"source_text_tokens": 99999},
+            "freeform",
+            [1],
+        ):
+            status, err = self._json(
+                "PATCH", f"/api/notebooks/{nb_id}", {"settings": bad_settings}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # A dead notebook is still the coded 404.
+        status, err = self._json(
+            "PATCH", "/api/notebooks/99999", {"settings": {"top_k": 2}}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
 
 class NonStreamingLLMTest(unittest.TestCase):
@@ -1688,6 +2482,9 @@ class CacheControlTest(unittest.TestCase):
                 ("Cache-Control", "no-store"),
                 ("X-Content-Type-Options", "nosniff"),
                 ("Referrer-Policy", "no-referrer"),
+                # v0.2.663 (product-review #40): every response class names
+                # the API contract version it speaks.
+                ("X-Shoin-API", API_VERSION),
             ):
                 self.assertEqual(
                     want,
@@ -2018,6 +2815,54 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         self.assertNotIn("Traceback", err.getvalue())
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
+
+    def test_delta_write_death_still_persists_the_complete_answer(self) -> None:
+        """v0.2.665 (product-review #48): once a delta write dies, the handler
+        keeps consuming the LLM stream to completion — the token spend is
+        already sunk inside generation_lock — and the persisted assistant row
+        holds the FULL answer. The UI's done-miss poll and any reload must not
+        find only the prefix that fit before the cut."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delta-full"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        def delta_boom(event, payload):
+            if event == "delta":
+                raise ConnectionError("gone")
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=delta_boom),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        with Store(str(Path(self.tmp.name) / "ps.db")) as s:
+            rows = [
+                m for m in s.list_messages(nb_id) if m["role"] == "assistant"
+            ]
+        self.assertEqual(len(rows), 1)
+        # Every streamed part survived — a mid-loop abort would have left the
+        # empty or single-token prefix instead.
+        self.assertEqual(rows[0]["body"], "".join(self.llm.reply_parts))
 
     def test_send_error_survives_a_dead_connection(self) -> None:
         """send_error on a socket that died mid-response must swallow the write
@@ -3535,3 +4380,4 @@ class GenerationSerializationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=0)
+

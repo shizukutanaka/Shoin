@@ -6,7 +6,7 @@ import json
 
 from .citation import COVERAGE_LOW, found_bits
 from .config import ui_lang
-from .store import Store
+from .store import Source, Store
 
 _STRINGS: dict[str, dict[str, str]] = {
     "sources_section": {"ja": "ソース", "en": "Sources"},
@@ -294,6 +294,24 @@ def _ris_escape(text: str) -> str:
     return " ".join(text.splitlines())
 
 
+def _meta_year(src: Source) -> str:
+    """Publication year for a citation export (v0.2.658).
+
+    meta["year"] — written by the user via PATCH/CLI — is the real
+    publication year and wins over added_at (which is the ingest date,
+    not the document's). Falls back to added_at's leading 4 digits, and
+    to "" when neither yields a plausible year so callers emit no field
+    rather than a wrong one.
+    """
+    raw = src.meta.get("year")
+    if raw is not None:
+        text = str(raw).strip()
+        if text.isdigit() and len(text) == 4:
+            return text
+    year = (src.added_at or "")[:4]
+    return year if year.isdigit() and len(year) == 4 else ""
+
+
 def export_bibtex(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
@@ -302,14 +320,26 @@ def export_bibtex(store: Store, notebook_id: int) -> str:
         date = (src.added_at or "")[:10] or "unknown"
         # Emit a structured `year` field (not just the free-text note) so
         # reference managers can render author-year citations and sort by year —
-        # the note field is opaque free text they don't parse. added_at is an
-        # ISO timestamp ("2026-07-14T…"); a 4-digit leading year is the only
-        # thing worth trusting, so emit the field only when it's actually there.
-        year = (src.added_at or "")[:4]
-        year_line = f"  year = {{{year}}},\n" if year.isdigit() and len(year) == 4 else ""
+        # the note field is opaque free text they don't parse. meta["year"] (the
+        # source's actual publication year, v0.2.658) outranks the ingest
+        # timestamp; emit the field only when a 4-digit year is actually there.
+        year = _meta_year(src)
+        year_line = f"  year = {{{year}}},\n" if year else ""
+        # meta["author"] feeds the real `author` field — without it BibTeX
+        # degrades to anonymous entries and every exported citation renders
+        # "n.d." regardless of how well-catalogued the source is (the #24
+        # weakness: descriptive metadata had nowhere to live). BibTeX
+        # convention carries several authors as "A and B" verbatim.
+        author = src.meta.get("author")
+        author_line = (
+            f"  author = {{{_bib_escape(author)}}},\n"
+            if isinstance(author, str) and author.strip()
+            else ""
+        )
         entries.append(
             "@misc{" + key + ",\n"
             f"  title = {{{_bib_escape(src.title)}}},\n"
+            f"{author_line}"
             f"  howpublished = {{{_bib_escape(src.origin)}}},\n"
             f"{year_line}"
             f"  note = {{Shoin source, added {date}}}\n"
@@ -336,13 +366,22 @@ def export_ris(store: Store, notebook_id: int) -> str:
             f"TI  - {_ris_escape(src.title)}",
             f"UR  - {_ris_escape(src.origin)}",
         ]
+        # AU is one line per author in RIS; meta["author"] follows the
+        # BibTeX "A and B" spelling, so split it the same way BibTeX
+        # would (v0.2.658).
+        author = src.meta.get("author")
+        if isinstance(author, str) and author.strip():
+            for name in author.split(" and "):
+                name = name.strip()
+                if name:
+                    lines.append(f"AU  - {_ris_escape(name)}")
         # PY (publication year) is the canonical year field reference managers
         # (Zotero, Mendeley) use for author-year citation and sorting — DA is a
-        # generic date they don't reliably derive the year from. Emit it only for
-        # a genuine 4-digit leading year, mirroring the BibTeX `year` field
-        # (v0.2.133); a malformed/empty added_at produces no stray PY line.
-        year = (src.added_at or "")[:4]
-        if year.isdigit() and len(year) == 4:
+        # generic date they don't reliably derive the year from. meta["year"]
+        # outranks the ingest timestamp; emit it only when a 4-digit year
+        # exists, mirroring the BibTeX `year` field (v0.2.133, meta v0.2.658).
+        year = _meta_year(src)
+        if year:
             lines.append(f"PY  - {year}")
         lines.append(f"DA  - {date}")
         lines.append("ER  -")

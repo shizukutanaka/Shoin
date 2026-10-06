@@ -370,6 +370,147 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
 _STEM_INVARIANT = frozenset({"news"})
 
 
+# Meaning-level synonyms the BM25 leg cannot otherwise reach (v0.2.662,
+# product-review #14).  term_variants bridges spelling (width, script,
+# kyujitai, inflection); this table bridges *words* — a source that says
+# 自動車 is invisible to a 車 query only in the degenerate substring sense,
+# but 価格↔値段 and エラー↔error share no characters at all, so without a
+# vocabulary bridge such pairs retrieve only through the vector leg, which
+# is absent whenever embeddings are off.  The table is deliberately small
+# and curated to high-precision pairs: every member of a group is OR'd as
+# an extra needle for a query term equal to any other member, so a wrong
+# pair would inject live noise rather than a dead pattern — when a pairing
+# is debatable it is left out.  English members are lowercase canonical
+# forms; the inflection/stem bridges in term_variants cover their
+# inflected spellings, and the lookup below also stems the query side.
+_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
+    # Katakana loanwords ↔ their English words (bilingual corpora).
+    ("エラー", "error"), ("サーバ", "サーバー", "server"),
+    ("データ", "data"), ("モデル", "model"), ("ネットワーク", "network"),
+    ("セキュリティ", "security"), ("パスワード", "password"),
+    ("ユーザー", "user"), ("ファイル", "file"), ("システム", "system"),
+    ("テスト", "test"), ("ライブラリ", "library"),
+    ("データベース", "database"), ("キャッシュ", "cache"),
+    ("メモリ", "memory"), ("バックアップ", "backup"),
+    ("トークン", "token"), ("プロンプト", "prompt"),
+    ("ベクトル", "vector"), ("ログ", "log"), ("スキーマ", "schema"),
+    ("バージョン", "version"), ("タグ", "tag"), ("キー", "key"),
+    ("ビルド", "build"), ("リリース", "release"), ("レビュー", "review"),
+    ("マージ", "merge"), ("ブランチ", "branch"), ("コミット", "commit"),
+    ("デプロイ", "deploy"), ("コンテナ", "container"),
+    ("インスタンス", "instance"), ("プロセス", "process"),
+    ("スレッド", "thread"), ("キュー", "queue"), ("バッファ", "buffer"),
+    ("エンコーディング", "encoding"), ("フィールド", "field"),
+    ("ハンドラ", "handler"), ("パーサ", "parser"), ("エクスポート", "export"),
+    ("インポート", "import"),
+    # Japanese terms ↔ English words (non-loanword pairs).
+    ("検索", "search"), ("索引", "index"), ("質問", "question"),
+    ("回答", "answer"), ("引用", "citation"), ("要約", "summary"),
+    ("翻訳", "translation"), ("推論", "inference"),
+    ("埋め込み", "embedding"), ("評価", "evaluation"),
+    ("性能", "performance"),
+    ("暗号", "encryption"), ("署名", "signature"),
+    ("証明書", "certificate"), ("脆弱性", "vulnerability"),
+    ("脅威", "threat"), ("監査", "audit"),
+    ("障害", "outage", "incident"), ("復旧", "recovery"),
+    ("圧縮", "compression"), ("更新", "update"), ("変換", "conversion"),
+    ("重複", "duplicate"), ("同期", "synchronization"),
+    ("並列", "parallel"), ("遅延", "latency"), ("要求", "request"),
+    ("応答", "response"), ("入力", "input"), ("出力", "output"),
+    ("実行", "execution"), ("権限", "permission"),
+    ("設定", "config", "configuration", "settings"), ("管理", "management"),
+    ("開発", "development"), ("設計", "design"),
+    ("実装", "implementation"), ("仕様", "specification"),
+    ("要件", "requirement"), ("方法", "method"), ("手順", "procedure"),
+    ("方針", "policy"), ("品質", "quality"), ("保守", "maintenance"),
+    ("改善", "improvement"), ("最適化", "optimization"),
+    ("効率", "efficiency"), ("予算", "budget"), ("契約", "contract"),
+    ("顧客", "customer"), ("市場", "market"), ("機能", "feature"),
+    ("保存", "save"), ("送信", "send"), ("受信", "receive"),
+    ("登録", "registration"), ("警告", "warning"),
+    ("通知", "notification"), ("承認", "approval"),
+    ("必須", "required"), ("任意", "optional"), ("初期", "initial"),
+    ("最大", "maximum"), ("最小", "minimum"), ("平均", "average"),
+    ("合計", "total"), ("画面", "screen"), ("印刷", "print"),
+    ("起動", "startup"), ("停止", "shutdown"), ("共有", "shared"),
+    ("論文", "paper"), ("書籍", "book"),
+    ("記事", "article"), ("画像", "image"), ("音声", "audio"),
+    ("動画", "video"), ("地図", "map"), ("住所", "address"),
+    ("時刻", "time"), ("場所", "location"), ("会社", "company"),
+    ("仕事", "work"), ("言語", "language"), ("数値", "numeric"),
+    ("文字列", "string"), ("配列", "array"), ("辞書", "dictionary"),
+    ("関数", "function"), ("変数", "variable"),
+    ("定数", "constant"), ("例外", "exception"), ("接続", "connection"),
+    ("再試行", "retry"), ("永続", "persistent"), ("明示", "explicit"),
+    ("暗黙", "implicit"), ("内部", "internal"), ("外部", "external"),
+    ("公開", "public"), ("秘密", "secret"), ("正常", "normal"),
+    ("異常", "abnormal"), ("成功", "success"),
+    ("失敗", "failure", "fail"), ("完了", "completion"),
+    ("中断", "abort"), ("再開", "resume"), ("詳細", "detail"),
+    ("概要", "overview"), ("目的", "purpose"), ("対象", "target"),
+    ("範囲", "range"), ("条件", "condition"), ("結果", "result"),
+    ("原因", "cause"), ("理由", "reason"), ("変更", "change"),
+    ("追加", "addition"), ("削除", "deletion"), ("作成", "create"),
+    ("生成", "generation"), ("取得", "fetch"), ("利用", "usage"),
+    ("提供", "provision"), ("確認", "check"), ("拒否", "deny"),
+    ("許可", "permit"), ("禁止", "prohibit"),
+    ("既定", "デフォルト", "default"), ("価格", "値段", "price"),
+    ("費用", "コスト", "cost"), ("製品", "商品", "product"),
+    ("資料", "doc", "ドキュメント", "document"), ("会議", "ミーティング", "meeting"),
+    ("認証", "auth", "authentication"), ("運用", "ops", "operations"),
+    ("引数", "arg", "argument"),
+    # English abbreviations whose expansion is not a substring match.
+    ("repo", "repository"), ("param", "parameter"),
+    ("env", "environment"), ("info", "information"),
+    ("stats", "statistics"), ("admin", "administrator"),
+    ("bug", "defect"), ("dir", "directory"),
+)
+
+
+def _build_synonyms() -> dict[str, tuple[str, ...]]:
+    """term -> other members of its meaning group (v0.2.662).
+
+    A member listed in two groups unions both co-member sets rather than
+    the later group silently replacing the earlier mapping.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for group in _SYNONYM_GROUPS:
+        for member in group:
+            others = list(out.get(member, ()))
+            for co in group:
+                if co != member and co not in others:
+                    others.append(co)
+            out[member] = tuple(others)
+    return out
+
+
+_SYNONYMS = _build_synonyms()
+
+
+def _synonym_variants(norm: str) -> list[str]:
+    """Meaning-level spellings of *norm* from the curated synonym table.
+
+    *norm* is the query term's NFKC form (term_variants already computed it).
+    Lookup keys: the NFKC form itself, its casefold (so 'ERROR' reaches the
+    lowercase English members), its katakana spelling (hiragana query ->
+    loanword row), and the English stems _stem_variants emits (so 'errors'
+    reaches 'error' -> エラー).  Members are emitted verbatim — they are not
+    re-expanded, so a synonym's own width/stem spellings do not join in:
+    the FTS trigram folds case anyway, and the LIKE fallback shares the
+    same case-fold limit every other variant does.  Each synonym is an
+    OR'd extra needle — a dead spelling costs one pattern, a wrong pairing
+    is excluded from the table rather than tolerated.
+    """
+    keys = [norm, norm.casefold(), _to_katakana(norm)]
+    keys.extend(_stem_variants(norm))
+    out: list[str] = []
+    for key in keys:
+        for member in _SYNONYMS.get(key, ()):
+            if member != norm and member not in out:
+                out.append(member)
+    return out
+
+
 def _stem_variants(term: str) -> list[str]:
     """Singular/base spellings of an English ASCII term (v0.2.536).
 
@@ -546,6 +687,7 @@ def term_variants(term: str) -> list[str]:
     if ascii_folded != norm and ascii_folded.isascii():
         candidates.append(ascii_folded)
     candidates.extend(_stem_variants(norm))
+    candidates.extend(_synonym_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
@@ -583,6 +725,11 @@ def fts_query(query: str) -> str:
         # trigrams while its own raw form stays one quoted word.  FTS5 matches a
         # quoted string of 3+ characters through the trigram index either way.
         cjk_term = is_cjk(raw_term[0])
+        # Synonym members are whole different words, not spellings of the
+        # term — exploding one into trigrams would OR each gram as an
+        # independent needle ('kata' in a context hits the 'ata' gram of
+        # 'database'), so they emit whole only, like an ASCII term.
+        synonyms = set(_synonym_variants(unicodedata.normalize("NFKC", raw_term)))
         for variant in term_variants(raw_term):
             term = _fts_escape(variant)
             # Shorter-than-trigram variants contribute nothing here (the gram
@@ -590,7 +737,7 @@ def fts_query(query: str) -> str:
             # knows this and keeps the LIKE fallback alive for them.
             if len(term) < 3:
                 continue
-            if cjk_term:
+            if cjk_term and variant not in synonyms:
                 grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
             else:
                 grams = [term]
@@ -647,8 +794,14 @@ def _fallback_needles(query: str) -> list[str]:
             continue
         if not keep_stopwords and raw_term.lower() in _ASCII_STOPWORDS:
             continue
+        synonyms = set(_synonym_variants(unicodedata.normalize("NFKC", raw_term)))
         for term in term_variants(raw_term):
-            if is_cjk(term[0]):
+            if term in synonyms:
+                # Whole-word needles only: a synonym's bigrams would substring-
+                # collide with unrelated words ('コード' contains 'ード', one
+                # bigram of 'パスワード').
+                needles.append(term)
+            elif is_cjk(term[0]):
                 if len(term) >= 2:
                     needles.extend(term[i : i + 2] for i in range(len(term) - 1))
                 else:
@@ -678,11 +831,14 @@ def _source_scope_params(source_ids: list[int] | None) -> list[str]:
 
 def bm25_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     k: int,
     source_ids: list[int] | None = None,
 ) -> list[Hit]:
+    # notebook_id=None is the cross-notebook form (v0.2.649, product-review
+    # #7): `? IS NULL` makes the scoping clause vacuous so one SQL text
+    # serves both call shapes — no interpolated branching, same bound params.
     # Strip negated tokens before building FTS5/LIKE queries.
     negs = neg_terms(query)
     clean_query = strip_neg_terms(query) if negs else query
@@ -696,11 +852,11 @@ def bm25_search(
             f" bm25(chunks_fts, {_CTX_BM25_WEIGHT}, 1.0) AS rank"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN sources s ON s.id = c.source_id"
-            " WHERE chunks_fts MATCH ? AND s.notebook_id = ?"
+            " WHERE chunks_fts MATCH ? AND (? IS NULL OR s.notebook_id = ?)"
             " AND (json_array_length(?) = 0"
             " OR s.id IN (SELECT value FROM json_each(?)))"
             " ORDER BY rank, c.id LIMIT ?",
-            (expr, notebook_id, *scope_params, k),
+            (expr, notebook_id, notebook_id, *scope_params, k),
         ).fetchall()
         fts_hits.extend(
             Hit(
@@ -765,11 +921,11 @@ def bm25_search(
         rows = store.conn.execute(
             "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
             " JOIN sources s ON s.id = c.source_id"
-            " WHERE s.notebook_id = ?"
+            " WHERE (? IS NULL OR s.notebook_id = ?)"
             " AND (json_array_length(?) = 0"
             " OR s.id IN (SELECT value FROM json_each(?)))"
             " ORDER BY c.id LIMIT ?",
-            (notebook_id, *scope_params, max(k * 10, 2000)),
+            (notebook_id, notebook_id, *scope_params, max(k * 10, 2000)),
         ).fetchall()
         pool = [
             Hit(r["id"], r["source_id"], str(r["text"]), 0.0,
@@ -806,12 +962,12 @@ def bm25_search(
     rows = store.conn.execute(
         f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
         f" JOIN sources s ON s.id = c.source_id"
-        f" WHERE s.notebook_id = ? AND ({conditions})"
+        f" WHERE (? IS NULL OR s.notebook_id = ?) AND ({conditions})"
         " AND (json_array_length(?) = 0"
         " OR s.id IN (SELECT value FROM json_each(?)))"
         f" ORDER BY {score_expr} DESC, c.id"
         f" LIMIT ?",
-        [notebook_id, *like_params, *scope_params, *score_params, like_cap],
+        [notebook_id, notebook_id, *like_params, *scope_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []
     for r in rows:
@@ -1034,7 +1190,7 @@ def _prf_terms(hits: list[Hit], query: str) -> list[str]:
 
 def bm25_prf_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     k: int,
     source_ids: list[int] | None = None,
@@ -1129,7 +1285,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 def vector_search(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query_vec: list[float] | None,
     k: int,
     source_ids: list[int] | None = None,
@@ -1147,10 +1303,10 @@ def vector_search(
     cur = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"
-        " WHERE s.notebook_id = ? AND c.embedding IS NOT NULL"
+        " WHERE (? IS NULL OR s.notebook_id = ?) AND c.embedding IS NOT NULL"
         " AND (json_array_length(?) = 0"
         " OR s.id IN (SELECT value FROM json_each(?)))",
-        (notebook_id, *scope_params),
+        (notebook_id, notebook_id, *scope_params),
     )
     # Hoisted out of the per-chunk loop: the query's norm is the same for every
     # row, and unpacking straight into an array('f') avoids building a 768-float
@@ -1596,9 +1752,42 @@ def _debug_print(
 # --- top-level ------------------------------------------------------------
 
 
+def _apply_source_weights(
+    store: Store, notebook_id: int | None, hits: list[Hit]
+) -> None:
+    """Multiply each fused hit's raw score by its source's weight (v0.2.657).
+
+    Called BEFORE _minmax — the weighted ordering must be the one min-max
+    normalization sees. Applied after normalization it could only demote
+    (x×w stays ≤1 for w≤1) and could never promote: the pool floor is always
+    stretched to exactly 0.0, so a barely-retrieved chunk of a weight-8
+    source would stay pinned at 0×8=0 forever. Pre-normalization, a weight-8
+    source's low-rank chunk outscores an unweighted top hit — promotion and
+    demotion both work, and the [0,1] blend calibration is preserved because
+    _minmax still runs last. One indexed lookup covers the whole notebook
+    (per-hit cost is a dict read); a hit whose source row was deleted
+    mid-request falls back to neutral 1.0 via .get() — a racing delete must
+    neither re-weight nor drop surviving hits. Same `(? IS NULL OR …)`
+    scoping idiom as the retrieval queries, so a cross-notebook (None) call
+    reads every notebook's weights in one pass.
+    """
+    weights = {
+        int(r["id"]): float(r["weight"])
+        for r in store.conn.execute(
+            "SELECT s.id, s.weight FROM sources s"
+            " WHERE (? IS NULL OR s.notebook_id = ?)",
+            (notebook_id, notebook_id),
+        ).fetchall()
+    }
+    if not weights:
+        return
+    for h in hits:
+        h.score *= weights.get(h.source_id, 1.0)
+
+
 def retrieve(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     query: str,
     query_vec: list[float] | None = None,
     k: int = TOP_K,
@@ -1644,6 +1833,7 @@ def retrieve(
     # retrieval. rrf_fuse() emits raw rank-reciprocal values, so _minmax here
     # rescales them to [0,1] before the lexical blend.
     if fused:
+        _apply_source_weights(store, notebook_id, fused)
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed, strict=True):
             h.score = n
@@ -1661,7 +1851,7 @@ def retrieve(
 
 def retrieve_multi(
     store: Store,
-    notebook_id: int,
+    notebook_id: int | None,
     queries: list[str],
     query_vecs: list[list[float] | None] | None = None,
     k: int = TOP_K,
@@ -1721,6 +1911,7 @@ def retrieve_multi(
 
     fused = rrf_fuse_lists(lists)
     if fused:
+        _apply_source_weights(store, notebook_id, fused)
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed, strict=True):
             h.score = n
@@ -1733,3 +1924,125 @@ def retrieve_multi(
             primary, negs, total_bm25, total_vec, result,
         )
     return result
+
+
+# --- zero-hit spelling suggestions (v0.2.650) -------------------------------
+
+
+_SUGGEST_SCAN_LIMIT = 20_000
+_SUGGEST_MIN_TERMLEN = 3
+_SUGGEST_MAX = 3
+_CJK_RUN_RE = re.compile(rf"[{_CJK_WORD_NEG_CLASS}]+")
+
+
+def _lev_within(a: str, b: str, cap: int) -> int | None:
+    """Levenshtein distance with early exit; None once it provably exceeds cap."""
+    if abs(len(a) - len(b)) > cap:
+        return None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        row = [i]
+        best = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            v = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost)
+            row.append(v)
+            if v < best:
+                best = v
+        if best > cap:
+            return None
+        prev = row
+    return prev[-1] if prev[-1] <= cap else None
+
+
+def _corpus_strings(store: Store, notebook_id: int | None) -> list[str]:
+    """Corpus carrier strings for the suggestion oracle: source titles plus
+    chunk contexts (section breadcrumbs) — the corpus's salient vocabulary
+    without scanning every chunk's full text. Bounded at _SUGGEST_SCAN_LIMIT
+    context rows. notebook_id=None is the cross-notebook form — the same
+    `(? IS NULL OR …)` scoping idiom the retrieval queries use."""
+    strings = [
+        str(r["title"])
+        for r in store.conn.execute(
+            "SELECT s.title FROM sources s"
+            " WHERE (? IS NULL OR s.notebook_id = ?)",
+            (notebook_id, notebook_id),
+        ).fetchall()
+    ]
+    strings += [
+        str(r["context"])
+        for r in store.conn.execute(
+            "SELECT c.context FROM chunks c"
+            " JOIN sources s ON s.id = c.source_id"
+            " WHERE (? IS NULL OR s.notebook_id = ?) AND c.context != ''"
+            " ORDER BY c.id LIMIT ?",
+            (notebook_id, notebook_id, _SUGGEST_SCAN_LIMIT),
+        ).fetchall()
+    ]
+    return strings
+
+
+def _nearest_corpus_term(
+    term: str, strings_low: list[str], vocab_words: set[str], cap: int
+) -> str | None:
+    """The closest corpus surface form within `cap` edits of `term`.
+
+    Candidates are discrete vocabulary words (ASCII tokens, title/context
+    terms) plus every CJK substring of length len(term)±cap inside a corpus
+    CJK run — contiguous-CJK runs tokenize as one long term, so the word-level
+    vocabulary alone can never name the fragment a typo actually aimed at.
+    """
+    best: tuple[int, int, str] | None = None
+    for w in vocab_words:
+        d = _lev_within(term, w, cap)
+        if d is not None and (best is None or (d, -len(w), w) < best):
+            best = (d, -len(w), w)
+    n = len(term)
+    for s in strings_low:
+        for m in _CJK_RUN_RE.finditer(s):
+            run = m.group(0)
+            for ln in range(max(_SUGGEST_MIN_TERMLEN, n - cap), n + cap + 1):
+                for i in range(len(run) - ln + 1):
+                    cand = run[i : i + ln]
+                    d = _lev_within(term, cand, cap)
+                    if d is not None and (best is None or (d, -ln, cand) < best):
+                        # Equal distance prefers the longer surface form: the
+                        # whole term the typo aimed at over its own prefix
+                        # fragment ("気象衛星" over "気象衛").
+                        best = (d, -ln, cand)
+    return best[2] if best is not None else None
+
+
+def suggest_corrections(
+    store: Store,
+    notebook_id: int | None,
+    question: str,
+    limit: int = _SUGGEST_MAX,
+) -> list[str]:
+    """Did-you-mean corpus terms for a zero-hit query (product-review #42).
+
+    Only terms *absent* from the corpus (no substring match anywhere) are
+    rewritten — a term the corpus contains cannot be the miss, and rewriting
+    it would hallucinate a different intent. Terms shorter than
+    _SUGGEST_MIN_TERMLEN are skipped: edit distance on 1-2 characters is
+    noise. A genuinely out-of-domain query yields [] — never a forced,
+    unrelated suggestion."""
+    strings = _corpus_strings(store, notebook_id)
+    if not strings:
+        return []
+    strings_low = [s.casefold() for s in strings]
+    vocab_words: set[str] = set()
+    for s in strings_low:
+        vocab_words.update(t.casefold() for t in query_terms(s))
+    out: list[str] = []
+    for term in query_terms(question):
+        t = term.casefold()
+        if len(t) < _SUGGEST_MIN_TERMLEN:
+            continue
+        if any(t in s for s in strings_low):
+            continue  # present in the corpus — cannot be the miss
+        cap = max(1, min(3, len(t) // 2))
+        near = _nearest_corpus_term(t, strings_low, vocab_words, cap)
+        if near is not None and near not in out:
+            out.append(near)
+    return out[:limit]

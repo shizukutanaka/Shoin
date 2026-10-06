@@ -1586,6 +1586,49 @@ class TestCheckEmbedModelOk(unittest.TestCase):
             s.set_setting("embed_model", "model-A")
             self.assertTrue(_check_embed_model_ok(s, self._make_llm("  ")))
 
+    def test_mismatch_prints_reindex_hint_to_stderr(self) -> None:
+        """v0.2.661 (product-review #17): the query-time check must name the
+        repair path on stderr — before this, the vector leg just went silent
+        and ask/search degraded with no visible cause."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.qa import _check_embed_model_ok
+
+        s, _ = seeded_store()
+        err = io.StringIO()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            with patch("sys.stderr", err):
+                self.assertFalse(
+                    _check_embed_model_ok(s, self._make_llm("model-B"))
+                )
+        text = err.getvalue()
+        self.assertIn("model-A", text)
+        self.assertIn("model-B", text)
+        self.assertIn("reindex", text)
+
+    def test_embed_model_stale_is_the_quiet_predicate(self) -> None:
+        """v0.2.661: health surfaces poll, so they read _embed_model_stale
+        without the stderr side-effect of _check_embed_model_ok."""
+        import io
+        from unittest.mock import patch
+
+        from shoin.qa import _embed_model_stale
+
+        s, _ = seeded_store()
+        err = io.StringIO()
+        with s:
+            s.set_setting("embed_model", "model-A")
+            with patch("sys.stderr", err):
+                self.assertTrue(_embed_model_stale(s, "model-B"))
+                self.assertFalse(_embed_model_stale(s, "model-A"))
+                self.assertFalse(_embed_model_stale(s, ""))
+            s.set_setting("embed_model", "")
+            with patch("sys.stderr", err):
+                self.assertFalse(_embed_model_stale(s, "model-B"))
+        self.assertEqual(err.getvalue(), "")
+
     def test_ask_skips_vector_on_mismatch(self) -> None:
         """ask() falls back to BM25-only when stored embed model != current model."""
         from unittest.mock import patch

@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import threading
+import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable
@@ -29,6 +31,7 @@ from .config import (
     ui_lang,
 )
 from .llm import LLMError, Message
+from .log import emit
 from .search import Hit, retrieve, retrieve_multi
 from .store import Store, StoreError
 
@@ -91,6 +94,19 @@ _STRINGS: dict[str, dict[str, str]] = {
     "degraded_prefix": {
         "ja": "LLMエンドポイントに接続できないため、回答生成を省略。関連箇所のみ提示:\n",
         "en": "LLM endpoint unreachable; skipping answer generation. Showing relevant excerpts:\n",
+    },
+    # v0.2.661 (product-review #17): query-time hint naming the disabled leg
+    # and its one-command repair — the index-time Warning pipeline prints
+    # never reaches a query-only session.
+    "embed_model_changed": {
+        "ja": (
+            "Warning: 埋め込みモデルが {old} から {new} に変更されました — "
+            "ベクトル検索停止中。`shoin reindex <nb>` で再構築"
+        ),
+        "en": (
+            "Warning: embedding model changed from {old} to {new} — vector "
+            "search paused. Run `shoin reindex <nb>` to rebuild."
+        ),
     },
     "system_prompt": {
         "ja": (
@@ -550,17 +566,37 @@ def expand_query(question: str, history: list[Message]) -> str:
     return f"{prev[: MAX_QUESTION_LEN - len(question) - 1]} {question}"
 
 
+def _embed_model_stale(store: Store, current_model: str) -> bool:
+    """True when the DB's stored vectors were built by a different model.
+
+    The quiet half of _check_embed_model_ok()'s predicate — health surfaces
+    poll, so they must read the flag without the stderr hint (v0.2.661).
+    """
+    current = current_model.strip()
+    if not current:
+        return False
+    stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
+    return bool(stored) and stored != current
+
+
 def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     """Return False when the DB contains embeddings from a different model.
 
     Mixing embeddings from two models makes cosine scores meaningless, so
-    vector search is disabled until the notebook is re-indexed.
+    vector search is disabled until the notebook is re-indexed. Since
+    v0.2.661 the mismatch also prints a stderr hint naming the repair
+    (`shoin reindex`) — before that, the leg simply went silent at query
+    time and ask/search degraded with no visible cause (product-review #17).
     """
     current = (llm.embedding_model or "").strip()
-    if not current:
-        return True  # embedding disabled: nothing to mismatch
+    if not _embed_model_stale(store, current):
+        return True
     stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
-    return not stored or stored == current
+    print(
+        _t("embed_model_changed").format(old=stored, new=current),
+        file=sys.stderr,
+    )
+    return False
 
 
 # Embedding the question is the single most repeated LLM call in the app: every
@@ -649,13 +685,20 @@ def rewrite_queries(
 def retrieve_for_question(
     store: Store,
     llm: ChatBackend,
-    notebook_id: int,
+    notebook_id: int | None,
     retrieval_q: str,
     qvec: list[float] | None,
-    k: int = TOP_K,
+    k: int | None = None,
     source_ids: list[int] | None = None,
 ) -> list[Hit]:
     """Retrieval entry point for ask(): single-query, or RAG-Fusion when opted in.
+
+    k=None means "let the notebook decide" (v0.2.659): a per-notebook
+    settings.top_k override wins over the TOP_K global default, so a
+    project can retrieve deeper or shallower than the process default.
+    notebook_id=None (cross-notebook search) has no settings owner and
+    always falls back to TOP_K. Callers that accept an explicit k (the
+    API's k field, CLI -k) pass it through and it wins over the setting.
 
     With SHOIN_MULTI_QUERY unset (the default) this is exactly retrieve() —
     byte-identical behavior and zero extra LLM traffic. When enabled, the LLM
@@ -675,6 +718,12 @@ def retrieve_for_question(
     lock hold could be spent on a request whose client had already
     disconnected. Skipping serialization here removes both problems.
     """
+    if k is None:
+        if notebook_id is None:
+            k = TOP_K
+        else:
+            settings = store.notebook_settings(notebook_id)
+            k = int(settings.get("top_k") or TOP_K)
     if not multi_query_enabled():
         return retrieve(
             store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
@@ -715,7 +764,7 @@ def ask(
     llm: ChatBackend,
     notebook_id: int,
     question: str,
-    k: int = TOP_K,
+    k: int | None = None,
     persist: bool = True,
     source_ids: list[int] | None = None,
     on_delta: Callable[[str], None] | None = None,
@@ -729,77 +778,110 @@ def ask(
     same answer llm.chat() would have returned. When unset (or the backend
     cannot stream) the single-shot chat() path runs byte-identically.
     """
-    history = history_messages(store, notebook_id)  # before persisting this turn
-    retrieval_q = expand_query(question, history)
-    qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
-    hits = retrieve_for_question(
-        store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
-    )
-    if persist:
-        store.add_message(notebook_id, "user", question, "{}")
+    t0 = time.monotonic()
+    try:
+        history = history_messages(store, notebook_id)  # before persisting this turn
+        retrieval_q = expand_query(question, history)
+        qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
+        hits = retrieve_for_question(
+            store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
+        )
+        if persist:
+            store.add_message(notebook_id, "user", question, "{}")
 
-    if not hits:
-        no_hit = _t("no_hit")
-        answer = Answer(no_hit, [], make_report(no_hit, []))
-    else:
-        try:
-            context = build_context(store, hits)
-        except sqlite3.OperationalError as exc:
-            raise StoreError(
-                "SYSTEM_DB_LOCKED",
-                f"database locked during context build: {exc}",
-            ) from exc
-        try:
-            messages = build_messages(question, context, history)
-            stream = getattr(llm, "chat_stream", None)
-            if on_delta is not None and callable(stream):
-                parts: list[str] = []
-                for delta in stream(messages):
-                    parts.append(delta)
-                    on_delta(delta)
-                text = "".join(parts)
-            else:
-                text = llm.chat(messages)
-            answer = Answer(
-                text,
-                hits,
-                make_report(
+        if not hits:
+            no_hit = _t("no_hit")
+            answer = Answer(no_hit, [], make_report(no_hit, []))
+        else:
+            try:
+                # settings.source_text_tokens overrides the global
+                # SOURCE_TEXT_TOKENS budget for this notebook (v0.2.659).
+                budget = int(
+                    store.notebook_settings(notebook_id).get(
+                        "source_text_tokens", SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=budget)
+            except sqlite3.OperationalError as exc:
+                raise StoreError(
+                    "SYSTEM_DB_LOCKED",
+                    f"database locked during context build: {exc}",
+                ) from exc
+            try:
+                messages = build_messages(question, context, history)
+                stream = getattr(llm, "chat_stream", None)
+                if on_delta is not None and callable(stream):
+                    parts: list[str] = []
+                    for delta in stream(messages):
+                        parts.append(delta)
+                        on_delta(delta)
+                    text = "".join(parts)
+                else:
+                    text = llm.chat(messages)
+                answer = Answer(
+                    text,
+                    hits,
+                    make_report(
+                        text,
+                        context.source_titles,
+                        context.source_ids,
+                        context.source_bodies,
+                        context.source_contexts,
+                        context.source_chunk_ids,
+                        context.source_detail,
+                        # Prior assistant text lets degenerate_spans catch a
+                        # cross-turn parrot loop (same paragraph re-emitted every
+                        # turn) that a per-message check structurally cannot see.
+                        history="\n".join(
+                            m["content"] for m in history if m["role"] == "assistant"
+                        ),
+                    ),
+                )
+                # finish_reason "length" means the answer hit MAX_TOKENS mid-
+                # generation — the text is real but silently clipped. Flag it so
+                # every surface can warn instead of presenting it as complete.
+                # getattr-guarded: ChatBackend stubs do not carry the attribute.
+                if getattr(llm, "last_finish_reason", None) == "length":
+                    answer.report["truncated"] = True
+            except LLMError:
+                text = _degraded_text(hits)
+                report = make_report(
                     text,
                     context.source_titles,
                     context.source_ids,
                     context.source_bodies,
                     context.source_contexts,
-                    context.source_chunk_ids,
-                    context.source_detail,
-                    # Prior assistant text lets degenerate_spans catch a
-                    # cross-turn parrot loop (same paragraph re-emitted every
-                    # turn) that a per-message check structurally cannot see.
-                    history="\n".join(
-                        m["content"] for m in history if m["role"] == "assistant"
-                    ),
-                ),
-            )
-            # finish_reason "length" means the answer hit MAX_TOKENS mid-
-            # generation — the text is real but silently clipped. Flag it so
-            # every surface can warn instead of presenting it as complete.
-            # getattr-guarded: ChatBackend stubs do not carry the attribute.
-            if getattr(llm, "last_finish_reason", None) == "length":
-                answer.report["truncated"] = True
-        except LLMError:
-            text = _degraded_text(hits)
-            report = make_report(
-                text,
-                context.source_titles,
-                context.source_ids,
-                context.source_bodies,
-                context.source_contexts,
-                    context.source_chunk_ids,
-                    context.source_detail,
-                check_uncited=False,
-            )
-            report["degraded"] = True
-            answer = Answer(text, hits, report, degraded=True)
+                        context.source_chunk_ids,
+                        context.source_detail,
+                    check_uncited=False,
+                )
+                report["degraded"] = True
+                answer = Answer(text, hits, report, degraded=True)
 
-    if persist:
-        store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
+        if persist:
+            store.add_message(notebook_id, "assistant", answer.text, json.dumps(answer.report))
+    except Exception:
+        # Catch-all by contract, not by accident: every failure escaping
+        # ask() — coded or not — is a real usage failure worth one counter
+        # tick, then the original exception propagates unchanged.
+        store.bump_metrics({"ask.fail": 1.0})
+        raise
+    ms = round((time.monotonic() - t0) * 1000)
+    store.bump_metrics(
+        {
+            "ask.count": 1.0,
+            "ask.ms": float(ms),
+            "ask.nohit": 0.0 if answer.hits else 1.0,
+            "ask.degraded": 1.0 if answer.degraded else 0.0,
+        }
+    )
+    emit(
+        "ask_completed",
+        nb=notebook_id,
+        q_len=len(question),
+        hits=len(answer.hits),
+        ans_len=len(answer.text),
+        degraded=answer.degraded,
+        ms=ms,
+    )
     return answer

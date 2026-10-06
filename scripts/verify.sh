@@ -62,8 +62,8 @@ else
 fi
 
 if have mypy; then
-    printf '\n=== types (mypy --strict shoin/) ===\n'
-    if out=$("$PY" -m mypy --strict shoin/ 2>&1); then
+    printf '\n=== types (mypy --strict shoin/ scripts/) ===\n'
+    if out=$("$PY" -m mypy --strict shoin/ scripts/ 2>&1); then
         printf '%s\n  OK: types\n' "$out"
     elif ! printf '%s' "$out" | grep -q 'error:' \
       || ! printf '%s' "$out" | grep 'error:' | grep -qv 'import-not-found'; then

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoin"
-version = "0.2.638"
+version = "0.2.680"
 
 description = "Local, citation-verified NotebookLM alternative for lightweight LLMs"
 readme = "README.md"
@@ -30,7 +30,7 @@ classifiers = [
 include = ["shoin*"]
 
 [tool.setuptools.package-data]
-shoin = ["static/*.html"]
+shoin = ["static/*.html", "static/*.css", "static/*.js"]
 
 [project.scripts]
 shoin = "shoin.cli:main"

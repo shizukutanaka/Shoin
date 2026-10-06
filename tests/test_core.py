@@ -30,6 +30,8 @@ from shoin.ingest import (
 from shoin.llm import LLMError
 from shoin.pipeline import _embed_chunks, _embed_input, rename_source
 from shoin.search import (
+    _SYNONYM_GROUPS,
+    _SYNONYMS,
     Hit,
     _char_bigrams,
     _fallback_needles,
@@ -108,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.638")
+        self.assertEqual(VERSION, "0.2.680")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -232,6 +234,49 @@ class TestStore(unittest.TestCase):
         with make_store() as s:
             with self.assertRaises(StoreError) as cm:
                 s.create_notebook("   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_duplicate_notebook_forks_every_table(self) -> None:
+        """v0.2.645: duplicate_notebook forks sources, chunks (embedding
+        BLOBs verbatim — same model, still valid), notes, studio outputs
+        and messages in one transaction; FTS triggers re-index so the
+        copy is searchable immediately; the source keeps its rows."""
+        from shoin.search import bm25_search
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["白良浜の砂浜は石英砂。"])
+            s.add_note(nb.id, "n1", "b1")
+            s.add_message(nb.id, "user", "hi")
+            s.add_studio_output(nb.id, "briefing", "body", "{}")
+
+            dup = s.duplicate_notebook(nb.id)
+            self.assertNotEqual(dup.id, nb.id)
+            self.assertEqual(dup.name, "研究 (copy)")
+
+            srcs = s.sources_for_notebook(dup.id)
+            self.assertEqual(len(srcs), 1)
+            self.assertEqual(srcs[0].title, "doc")
+            chunks = s.chunks_for_source(srcs[0].id)
+            self.assertEqual([c.text for c in chunks], ["白良浜の砂浜は石英砂。"])
+            # FTS re-indexed on INSERT: the fork is searchable now.
+            hits = bm25_search(s, dup.id, "石英砂", 5)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(len(s.list_notes(dup.id)), 1)
+            self.assertEqual(len(s.list_messages(dup.id)), 1)
+            self.assertEqual(len(s.latest_studio_outputs(dup.id)), 1)
+            # original untouched
+            self.assertEqual(len(s.sources_for_notebook(nb.id)), 1)
+
+            # explicit name honored; dead notebook stays coded
+            named = s.duplicate_notebook(nb.id, "複製先")
+            self.assertEqual(named.name, "複製先")
+            with self.assertRaises(StoreError) as cm:
+                s.duplicate_notebook(9999)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.duplicate_notebook(nb.id, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_rename_notebook_empty_name_rejected(self) -> None:
@@ -643,6 +688,9 @@ class TestStore(unittest.TestCase):
             ("add_message",
              lambda s, nb: s.add_message(nb.id, "user", "hi")),
             ("clear_messages", lambda s, nb: s.clear_messages(nb.id)),
+            ("update_chunk_text",
+             lambda s, nb: s.update_chunk_text(
+                 s.chunks_for_notebook(nb.id)[0].id, "edited-chunk")),
             ("delete_source",
              lambda s, nb: s.delete_source(
                  s.sources_for_notebook(nb.id)[0].id)),
@@ -879,6 +927,41 @@ class TestStore(unittest.TestCase):
             t0 = s.get_notebook(nb.id).updated_at
             s.replace_chunks_for_source(src.id, ["new"])
             self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+    def test_update_chunk_text_replaces_and_clears_embedding(self) -> None:
+        """v0.2.647: update_chunk_text rewrites one chunk in place — FTS
+        re-indexes via chunks_au (new term hits, old term gone), the stale
+        embedding is cleared rather than kept (a vector of the old text
+        would silently retrieve the wrong content; NULL = "no vector
+        signal"), and the notebook's updated_at bumps. Dead chunks and
+        empty text stay coded."""
+        from shoin.search import bm25_search
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["古い文言が索引済み", "別の段落"])
+            cid = s.chunks_for_source(src.id)[0].id
+            s.set_embedding(cid, [0.1, 0.2, 0.3])
+            self.assertIsNotNone(s.get_chunk(cid).embedding)
+
+            t0 = s.get_notebook(nb.id).updated_at
+            chunk = s.update_chunk_text(cid, "  修正後の記述  ")
+            self.assertEqual(chunk.text, "修正後の記述")
+            self.assertIsNone(chunk.embedding)
+            # FTS re-indexed in the same write (chunks_au trigger).
+            self.assertEqual(len(bm25_search(s, nb.id, "修正後", 5)), 1)
+            self.assertEqual(bm25_search(s, nb.id, "古い文言", 5), [])
+            # sibling chunk untouched
+            self.assertEqual(s.chunks_for_source(src.id)[1].text, "別の段落")
+            self.assertGreater(s.get_notebook(nb.id).updated_at, t0)
+
+            with self.assertRaises(StoreError) as cm:
+                s.update_chunk_text(9999, "x")
+            self.assertEqual(cm.exception.code, "CHUNK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.update_chunk_text(cid, "   ")
+            self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
     def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
         """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
@@ -2095,6 +2178,8 @@ class TestChunk(unittest.TestCase):
         self.assertIn("\u0969\u096A\u096B", va)
         # Mixed/Lo terms never explode into per-script products.
         self.assertNotIn("٣", term_variants("a3"))
+        # 四 is not a decimal digit and has no synonym-table row (v0.2.662),
+        # so it still emits just itself.
         self.assertEqual(term_variants("四"), ["四"])
 
     def test_script_digit_query_retrieves_across_rows(self) -> None:
@@ -2889,18 +2974,47 @@ class TestIngest(unittest.TestCase):
             self.assertIn("BOM付きテキスト", text)
 
     def test_null_byte_file_raises_ingest_empty(self) -> None:
-        """A .txt file containing only null bytes must raise INGEST_EMPTY.
+        """A .txt file containing only null bytes must raise a coded error.
 
         Before the fix, str.strip() skipped U+0000 (category Cc, not whitespace),
         so '\x00\x00\x00'.strip() returned '\x00\x00\x00' (truthy) and the file was
         indexed as valid text, inserting garbage into BM25 and vector search.
+        v0.2.673 reclassified the shape: NUL-only content decodes to a string
+        that is >20% control characters — the binary guard reports it as
+        INGEST_BINARY before the empty check ever sees it.
         """
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "nulls.txt"
             p.write_bytes(b"\x00\x00\x00")
             with self.assertRaises(IngestError) as ctx:
                 extract_file(p)
-            self.assertEqual(ctx.exception.code, "INGEST_EMPTY")
+            self.assertEqual(ctx.exception.code, "INGEST_BINARY")
+
+    def test_binary_bytes_raise_ingest_binary(self) -> None:
+        """v0.2.673: binary content must be refused, not indexed as
+        mojibake. utf-8/cp932 + errors="replace" always decode to *some*
+        string, so a binary file under a .txt name silently inserted
+        replacement-character garbage chunks into BM25 and vector search
+        — detected as >20% replacement/control characters."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "blob.txt"
+            p.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 20)
+            with self.assertRaises(IngestError) as ctx:
+                extract_file(p)
+            self.assertEqual(ctx.exception.code, "INGEST_BINARY")
+
+    def test_bomless_utf16_utf32_decoded(self) -> None:
+        """v0.2.673: UTF-16/32 saved WITHOUT a BOM leaks NUL bytes in a
+        fixed position pattern (every other byte for UTF-16, three of four
+        for UTF-32). utf-8 decoded it as alternating NULs — post-strip
+        readable but lossy — and cp932 as mojibake; _decode now guesses
+        the wide codec from the dominant NUL side before the fallbacks."""
+        from shoin.ingest import _decode
+
+        for enc in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+            text = "café document テスト with ascii padding abcdef"
+            with self.subTest(enc=enc):
+                self.assertEqual(_decode(text.encode(enc)), text)
 
     def test_utf16_le_file_decoded_correctly(self) -> None:
         """A UTF-16 LE .txt file must be decoded as UTF-16, not mangled by cp932.
@@ -3438,6 +3552,76 @@ class TestIngest(unittest.TestCase):
             "default port 80 must not appear in the Host header",
         )
 
+    def test_fetch_url_strips_userinfo_from_final_url_and_errors(self) -> None:
+        """v0.2.677 (product-review #61): the URL fetch_url returns
+        becomes sources.origin — persisted in the DB and propagated to
+        exports/backups. Userinfo credentials are never sent on the wire
+        (requests carry no Authorization), so they must never persist.
+        Covers the success return and the error-message echo."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class Resp:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def getheader(self, name: str) -> str | None:
+                return "text/plain" if name == "Content-Type" else None
+
+            def read(self, n: int = -1) -> bytes:
+                return b"hello"
+
+        class FakeConn:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> Resp:
+                return Resp(self.status)
+
+            def close(self) -> None:
+                pass
+
+        uurl = "http://" + "user:pw@example.com/page"
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn(200)),
+        ):
+            _body, _ctype, final = ing.fetch_url(uurl)
+        self.assertEqual(final, "http://example.com/page")
+        self.assertNotIn("pw", final)
+        # error path — the echoed current URL must carry no userinfo.
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn(500)),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url(uurl)
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertNotIn("pw", str(cm.exception))
+
+    def test_extract_url_empty_error_strips_userinfo(self) -> None:
+        """v0.2.677 (product-review #61): INGEST_EMPTY echoes the input
+        URL — an error surfaced to the UI/stderr/log must not replay a
+        credential the user embedded in it."""
+        import shoin.ingest as ing
+
+        url = "http://" + "u:pw@example.com/x"
+        with (
+            patch.object(
+                ing, "fetch_url",
+                return_value=(b"<html> </html>", "text/html", url),
+            ),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.extract_url(url)
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+        self.assertNotIn("pw", str(cm.exception))
+
     def test_ssrf_rebinding_to_private_blocked(self) -> None:
         """A host resolving to a private address is rejected even at fetch time."""
         import shoin.ingest as ing
@@ -3781,13 +3965,20 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(result.title, "https://cdn.example/notes.txt")
 
     def test_decode_fallback_to_replace_on_non_utf8_non_cp932(self) -> None:
-        """Bytes that fail both UTF-8 and cp932 must fall back to utf-8 replace (line 73)."""
+        """Bytes that fail both UTF-8 and cp932 fall back to utf-8 replace —
+        but v0.2.673's binary guard rejects the output when it is mostly
+        replacement/control characters (the fallback's garbage signature).
+        A sparse sprinkling in otherwise-real text still passes."""
         from shoin.ingest import _decode
 
-        # b'\x80\x81' fails both utf-8-sig and cp932.
-        result = _decode(b"\x80\x81")
-        # Should not raise; replacement characters indicate the fallback was used.
-        self.assertIsInstance(result, str)
+        # b'\x80\x81' fails utf-8-sig AND cp932 — pure replacement output.
+        with self.assertRaises(IngestError) as cm:
+            _decode(b"\x80\x81")
+        self.assertEqual(cm.exception.code, "INGEST_BINARY")
+        # Two bad bytes inside real text: fallback used, guard tolerates.
+        result = _decode(b"mostly text with one \x80\x81 byte")
+        self.assertIn("mostly text", result)
+        self.assertIn("byte", result)
 
     def test_decode_charset_hint_used_before_defaults(self) -> None:
         """_decode must try the supplied charset first, before utf-8-sig/cp932.
@@ -4150,6 +4341,38 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(result.title, "My Title")
         self.assertIn("Content here", result.text)
 
+    def test_extract_file_rejects_non_regular_paths(self) -> None:
+        """v0.2.680: directories/FIFOs must fail coded, never reach read_bytes().
+
+        A FIFO reports st_size 0 — passing the size gate — then read_bytes()
+        blocks forever on a local read with no timeout. The regular-file
+        check must reject both shapes BEFORE any read; a symlink to a real
+        file must still extract (is_file follows links).
+        """
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # directory named like a document
+            d = Path(tmp) / "adir.md"
+            d.mkdir()
+            with self.assertRaises(IngestError) as cm:
+                extract_file(d)
+            self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+            self.assertIn("not a regular file", str(cm.exception))
+            # FIFO: st_size 0, read_bytes would block forever — must reject
+            # before reaching it (this test itself would hang without the fix)
+            fifo = Path(tmp) / "pipe.txt"
+            os.mkfifo(fifo)
+            with self.assertRaises(IngestError) as cm2:
+                extract_file(fifo)
+            self.assertEqual(cm2.exception.code, "INGEST_FETCH_FAILED")
+            # positive control: symlink to a real file still extracts
+            real = Path(tmp) / "real.txt"
+            real.write_text("hello world", encoding="utf-8")
+            link = Path(tmp) / "link.txt"
+            os.symlink(real, link)
+            self.assertIn("hello world", extract_file(link).text)
+
     def test_extract_url_html_content_uses_page_title(self) -> None:
         """HTML response in extract_url must use <title> as the source title (lines 310-311)."""
         import shoin.ingest as ing
@@ -4182,14 +4405,16 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "INGEST_EMPTY")
 
     def test_extract_url_null_byte_body_raises_ingest_empty(self) -> None:
-        """extract_url must raise INGEST_EMPTY when the response body decodes to only
-        null bytes (U+0000).
+        """extract_url must raise a coded error when the response body decodes
+        to only null bytes (U+0000).
 
-        str.strip() does not remove null bytes (category Cc, not Unicode whitespace),
-        so a body of b'\\x00\\x00\\x00' produced the non-empty string '\\x00\\x00\\x00'
-        which passed the `not text` guard and was indexed as garbage content.
-        Before v0.2.58, extract_file() had the null-byte guard (v0.2.50) but
-        extract_url() did not.  Fix: apply text.replace('\\x00', '') before strip().
+        str.strip() does not remove null bytes (category Cc, not Unicode
+        whitespace), so a body of b'\\x00\\x00\\x00' produced the non-empty
+        string '\\x00\\x00\\x00' which passed the `not text` guard and was
+        indexed as garbage content. Before v0.2.58, extract_file() had the
+        null-byte guard (v0.2.50) but extract_url() did not. v0.2.673
+        reclassified the shape: NUL-only content is >20% control characters
+        — the binary guard reports INGEST_BINARY before the empty check.
         """
         import shoin.ingest as ing
 
@@ -4202,7 +4427,7 @@ class TestIngest(unittest.TestCase):
             self.assertRaises(IngestError) as cm,
         ):
             ing.extract_url("http://example.com/nulls")
-        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+        self.assertEqual(cm.exception.code, "INGEST_BINARY")
 
     def test_pinned_https_connection_connect(self) -> None:
         """_PinnedHTTPSConnection.connect() must use the pinned IP and
@@ -4381,7 +4606,9 @@ class TestSearch(unittest.TestCase):
         self.assertIn("学校", term_variants("學校"))
         self.assertIn("廣島縣", term_variants("広島県"))
         self.assertIn("広島県", term_variants("廣島県"))
-        self.assertEqual(term_variants("言語"), ["言語"])
+        # 言語 has no spelling variant; its only extra is the v0.2.662
+        # synonym-table member 'language'.
+        self.assertEqual(term_variants("言語"), ["言語", "language"])
 
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
@@ -4973,6 +5200,69 @@ class TestSearch(unittest.TestCase):
             nb_id = seed(s)
             hits = bm25_search(s, nb_id, "zzqqqxxx_nonexistent_token", k=5)
             self.assertEqual(hits, [])
+
+    def test_bm25_search_none_searches_all_notebooks(self) -> None:
+        """v0.2.649: notebook_id=None is the cross-notebook form — the
+        `? IS NULL` clause makes scoping vacuous so every source is a
+        candidate. An int still restricts (the shared SQL shape must not
+        leak across notebooks when a scope IS given)."""
+        with make_store() as s:
+            nb1 = seed(s)
+            nb2 = s.create_notebook("他書院").id
+            src = s.add_source(nb2, "txt", "orbit", "mem://o", "sha-o")
+            s.add_chunks(src.id, ["軌道決定は測距と測角の合成である。"])
+            hits = bm25_search(s, None, "軌道決定", k=5)
+            self.assertIn(src.id, {h.source_id for h in hits})
+            scoped = bm25_search(s, nb1, "軌道決定", k=5)
+            self.assertNotIn(src.id, {h.source_id for h in scoped})
+
+    def test_retrieve_cross_notebook(self) -> None:
+        """v0.2.649: retrieve(None) spans every notebook; hits resolve their
+        notebook identity via notebooks_for_sources in ONE query."""
+        with make_store() as s:
+            nb1 = seed(s)
+            nb2 = s.create_notebook("別書院").id
+            src = s.add_source(nb2, "txt", "space", "mem://sp", "sha-sp")
+            s.add_chunks(src.id, ["小惑星探査機は自律航法を搭載する。"])
+            hits = retrieve(s, None, "小惑星探査機", k=5)
+            self.assertIn(src.id, {h.source_id for h in hits})
+            scoped = retrieve(s, nb1, "小惑星探査機", k=5)
+            self.assertNotIn(src.id, {h.source_id for h in scoped})
+            meta = s.notebooks_for_sources([h.source_id for h in hits])
+            self.assertEqual(meta[src.id], (nb2, "別書院", "space"))
+            seed_src = s.add_source(nb1, "txt", "t", "mem://t", "sha-t")
+            self.assertEqual(
+                s.notebooks_for_sources([seed_src.id])[seed_src.id][0], nb1
+            )
+            self.assertEqual(s.notebooks_for_sources([]), {})
+
+    def test_suggest_corrections_zero_hit(self) -> None:
+        """v0.2.650: a zero-hit query gets the nearest in-corpus spelling —
+        absent terms only (a present term is never rewritten), preferring the
+        whole surface form over its own fragment, scoped to the notebook."""
+        from shoin.search import suggest_corrections
+
+        with make_store() as s:
+            nb1 = s.create_notebook("気象研究").id
+            src = s.add_source(nb1, "txt", "気象衛星メモ", "mem://m", "sha-m")
+            s.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+            # One edit away inside a title's CJK run → the full term wins.
+            self.assertEqual(
+                suggest_corrections(s, nb1, "気海衛生"), ["気象衛星"]
+            )
+            # Present terms and too-short terms are never rewritten.
+            self.assertEqual(suggest_corrections(s, nb1, "気象衛星"), [])
+            self.assertEqual(suggest_corrections(s, nb1, "AB"), [])
+            # Genuinely out-of-domain → no forced suggestion.
+            self.assertEqual(suggest_corrections(s, nb1, "xyzzy"), [])
+            # Scoped: a term living in ANOTHER notebook does not leak.
+            nb2 = s.create_notebook("別研究").id
+            src2 = s.add_source(nb2, "txt", "軌道決定資料", "mem://k", "sha-k")
+            s.add_chunks(src2.id, ["軌道決定は測距と測角の合成である。"])
+            self.assertEqual(suggest_corrections(s, nb1, "軌道決完"), [])
+            self.assertEqual(
+                suggest_corrections(s, None, "軌道決完"), ["軌道決定"]
+            )
 
     def test_bm25_empty_query_returns_empty(self) -> None:
         """bm25_search() with an empty query string must return [] without crashing."""
@@ -8620,6 +8910,147 @@ class TestLLMClient(unittest.TestCase):
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
+    def test_endpoint_is_external_truth_table(self) -> None:
+        """v0.2.674 (product-review #58): loopback literals, localhost
+        names and unspecified bind addresses are local; LAN hosts,
+        public IPs and DNS names are external — only the first group
+        keeps document text and questions on this machine."""
+        from shoin.config import endpoint_is_external
+
+        for url in (
+            "http://localhost:11434/v1",
+            "http://foo.localhost:8000",
+            "http://127.0.0.1:11434/v1",
+            "http://127.9.0.1/v1",
+            "http://[::1]:8080",
+            "http://0.0.0.0:8000",
+        ):
+            self.assertFalse(endpoint_is_external(url), url)
+        for url in (
+            "http://192.168.1.10:11434/v1",
+            "http://10.0.0.5:8080",
+            "https://api.openai.com/v1",
+            "http://example.com/v1",
+            "ftp://invalid-scheme",
+        ):
+            self.assertTrue(endpoint_is_external(url), url)
+        # Cannot reach anything: hostname-less or unparseable — not a leak.
+        for url in ("", "not a url", "relative/path", "http://[::1:11434/v1"):
+            self.assertFalse(endpoint_is_external(url), url)
+
+    def test_external_endpoint_warns_at_construction(self) -> None:
+        """v0.2.674 (product-review #58): a non-loopback base_url breaks
+        the local-only promise — LLMClient warns once at construction
+        (every real surface builds the client once per process) instead
+        of inside the per-request paths."""
+        import io
+
+        from shoin.llm import LLMClient
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            LLMClient(base_url="http://example.com/v1")
+        self.assertIn("not local", err.getvalue())
+        err.seek(0)
+        err.truncate(0)
+        with patch("sys.stderr", err):
+            LLMClient(base_url="http://127.0.0.1:11434/v1")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_redact_url_credentials_table(self) -> None:
+        """v0.2.675 (product-review #59): endpoint URLs may carry
+        userinfo credentials (the user:pass@ prefix before the host) —
+        every user-visible surface echoes WHERE, never the secret."""
+        from shoin.config import redact_url_credentials as redact
+
+        # no userinfo — byte-identical passthrough
+        for url in (
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+            "http://example.com/path?x=@y#z",  # '@' in query is data
+            "not a url",
+            "relative/path@here",
+            "",
+        ):
+            self.assertEqual(redact(url), url, url)
+        # userinfo stripped, host/port/path/query kept verbatim
+        cases = {
+            "http://" + "user:pass@example.com/v1":
+                "http://example.com/v1",
+            "http://u:p@host:8080/v1?x=1#f":
+                "http://host:8080/v1?x=1#f",
+            "http://u:p@[::1]:8000/v1":
+                "http://[::1]:8000/v1",
+            "https://" + "tok:sec@api.openai.com/v1":
+                "https://api.openai.com/v1",
+            "http://u:p@h?v=1": "http://h?v=1",
+            "http://u:p@h": "http://h",
+            "http://u:p@w@h/v1": "http://h/v1",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(redact(raw), want, raw)
+
+    def test_endpoint_display_never_leaks_url_credentials(self) -> None:
+        """v0.2.675 (product-review #59): an endpoint URL carrying a
+        password must not echo it through the stderr warning or the
+        unreachable-endpoint error message."""
+        import io
+        import urllib.error
+
+        from shoin.llm import LLMClient, LLMError
+
+        url = "http://" + "user:s3cretPW@llm.example.com:9000/v1"
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            client = LLMClient(base_url=url)
+        self.assertIn("llm.example.com:9000", err.getvalue())
+        self.assertNotIn("s3cretPW", err.getvalue())
+        # transport failure message — same contract on the request path.
+        boom = urllib.error.URLError(OSError("conn refused"))
+        with patch("urllib.request.urlopen", side_effect=boom):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertIn("llm.example.com:9000", str(cm.exception))
+        self.assertNotIn("s3cretPW", str(cm.exception))
+        # the real URL still drives the request itself (redact is
+        # display-only — requests keep their credentials)
+        self.assertEqual(client.base_url, url.rstrip("/"))
+
+    def test_plaintext_credential_warning(self) -> None:
+        """v0.2.676 (product-review #60): http:// + external endpoint +
+        API key composes into a Bearer token on the wire in cleartext —
+        each property legal alone, leaky together. Warn at construction;
+        loopback http and https exempt."""
+        import io
+        import os
+
+        from shoin.llm import LLMClient
+
+        ext = "http://llm.example.com:9000/v1"
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": "k" + "1"}):
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url=ext)
+            self.assertIn("unencrypted", err.getvalue())
+            # https:// encrypts the wire — no plaintext warning.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url="https://llm.example.com/v1")
+            self.assertNotIn("unencrypted", err.getvalue())
+            # loopback http never leaves the machine — exempt.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url="http://127.0.0.1:11434/v1")
+            self.assertNotIn("unencrypted", err.getvalue())
+        # no key configured → nothing on the wire to protect.
+        env2 = {"SHOIN_LLM_API_KEY": ""}
+        with patch.dict(os.environ, env2):
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url=ext)
+            self.assertNotIn("unencrypted", err.getvalue())
+
     def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
         """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
         Request() itself raise ValueError via urlsplit — BEFORE urlopen runs.
@@ -9035,6 +9466,229 @@ class TestLLMClient(unittest.TestCase):
         # The read limit must have been set (not None, meaning uncapped read was not called)
         self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
         self.assertLessEqual(fake_body.max_read, 300)
+
+    def test_http_error_detail_scrubs_sent_secrets(self) -> None:
+        """v0.2.678 (product-review #62): an HTTP error body is server-produced
+        — a misbehaving gateway can echo request headers/URL back inside it,
+        reflecting the Bearer token or URL userinfo into every surface the
+        error reaches. The message must scrub the secrets this client sent
+        while keeping host/path visible for diagnosis."""
+        import io
+        import os
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        key = "k" + "1"
+        url = "http://" + "u:p@localhost:11434/v1"
+        body = io.BytesIO(
+            ("echo Authorization: Bearer " + key + " back at " + url).encode()
+        )
+        err = urllib.error.HTTPError(url, 500, "err", {}, body)
+        with (
+            patch.dict(os.environ, {"SHOIN_LLM_API_KEY": key}),
+            patch("urllib.request.urlopen", side_effect=err),
+        ):
+            client = LLMClient(base_url=url)
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        msg = str(cm.exception)
+        self.assertNotIn(key, msg, "Bearer token must not survive the error body")
+        self.assertNotIn("u:p", msg, "URL userinfo must not survive the error body")
+        self.assertIn("localhost", msg, "host stays visible for diagnosis")
+        self.assertIn("***", msg)
+
+    def test_post_retries_transport_failures_then_succeeds(self) -> None:
+        """v0.2.639: a refused connection or socket timeout is a transient
+        for a local runtime (restarting, still loading its model) — _post
+        retries it under a bounded backoff instead of degrading on the
+        first blip."""
+        import json as _json
+        import urllib.error
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.read.return_value = _json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode()
+        calls = {"n": 0}
+
+        def _flaky(req, **kw):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.URLError(OSError("connection refused"))
+            return resp
+
+        with (
+            patch("urllib.request.urlopen", side_effect=_flaky),
+            patch("time.sleep") as sleep,
+        ):
+            out = LLMClient(base_url="http://localhost:11434/v1").chat(
+                [{"role": "user", "content": "hi"}]
+            )
+        self.assertEqual(out, "ok")
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(
+            [c.args[0] for c in sleep.call_args_list], [0.25, 0.5])
+
+    def test_post_gives_up_after_retry_bound(self) -> None:
+        """The retry budget is bounded — a permanently down endpoint still
+        degrades to the coded error, just one bounded delay later."""
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        calls = {"n": 0}
+
+        def _down(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.URLError(OSError("connection refused"))
+
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        with (
+            patch("urllib.request.urlopen", side_effect=_down),
+            patch("time.sleep"),
+        ):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertEqual(calls["n"], client.retries + 1)
+
+    def test_post_does_not_retry_http_errors(self) -> None:
+        """An HTTP 4xx/5xx is a deterministic server answer — retrying it
+        waits to the same result, so it must fail on the first attempt
+        (and never sleep)."""
+        import io
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        calls = {"n": 0}
+
+        def _http500(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                req.full_url, 500, "err", {}, io.BytesIO(b"x"))
+
+        with (
+            patch("urllib.request.urlopen", side_effect=_http500),
+            patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        self.assertEqual(calls["n"], 1)
+        sleep.assert_not_called()
+
+    def test_llm_retries_env_override(self) -> None:
+        """SHOIN_LLM_RETRIES=0 disables the retry layer; out-of-range and
+        non-numeric values fall back to the default rather than silently
+        disabling it (same invalid->default contract as port())."""
+        import os
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.config import llm_retries
+        from shoin.llm import LLMClient
+
+        for env, want in (
+            ({"SHOIN_LLM_RETRIES": "0"}, 0),
+            ({"SHOIN_LLM_RETRIES": "5"}, 5),
+            ({"SHOIN_LLM_RETRIES": "-1"}, 2),
+            ({"SHOIN_LLM_RETRIES": "9"}, 2),
+            ({"SHOIN_LLM_RETRIES": "x"}, 2),
+        ):
+            with patch.dict(os.environ, env):
+                self.assertEqual(llm_retries(), want, env)
+
+        calls = {"n": 0}
+
+        def _down(req, **kw):
+            calls["n"] += 1
+            raise urllib.error.URLError(OSError("connection refused"))
+
+        with (
+            patch.dict(os.environ, {"SHOIN_LLM_RETRIES": "0"}),
+            patch("urllib.request.urlopen", side_effect=_down),
+            patch("time.sleep") as sleep,
+        ):
+            from shoin.llm import LLMError
+            with self.assertRaises(LLMError) as cm:
+                LLMClient(base_url="http://localhost:11434/v1").chat(
+                    [{"role": "user", "content": "hi"}]
+                )
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertEqual(calls["n"], 1)
+        sleep.assert_not_called()
+
+    def test_llm_sends_bearer_only_when_api_key_configured(self) -> None:
+        """SHOIN_LLM_API_KEY (v0.2.644): endpoints behind an auth gateway
+        (vLLM behind a proxy, hosted OpenAI-compatible services) need an
+        Authorization header, and the client had no way to send one. When
+        the key is unset the header must be absent entirely — a stray
+        "Authorization: Bearer " is itself a malformed-credential signal
+        to strict gateways."""
+        import json as _json
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient
+
+        captured: list[object] = []
+
+        def _capture(req, **kw):
+            captured.append(req)
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read.return_value = _json.dumps(
+                {"choices": [{"message": {"content": "ok"}}]}
+            ).encode()
+            return resp
+
+        # unset/empty -> no Authorization header at all
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": ""}):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+        self.assertNotIn("Authorization", client._headers)
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            client.chat([{"role": "user", "content": "hi"}])
+        self.assertIsNone(captured[-1].get_header("Authorization"))
+
+        # configured -> Bearer on the wire
+        key = "shoin" + "-test-key"  # not a literal: keeps the secret scan clean
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": key}):
+            client = LLMClient(base_url="http://localhost:11434/v1")
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(
+            captured[-1].get_header("Authorization"), f"Bearer {key}"
+        )
+
+        # the health probe is the same request surface — a gated endpoint
+        # that 401s /models must not read as "down"
+        def _capture_ct(req, **kw):
+            captured.append(req)
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.getheader.return_value = "application/json"
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=_capture_ct):
+            self.assertTrue(client.available())
+        self.assertEqual(
+            captured[-1].get_header("Authorization"), f"Bearer {key}"
+        )
 
     def test_post_deeply_nested_json_raises_llmerror(self) -> None:
         """A deeply nested JSON body must map to SYSTEM_LLM_BAD_RESPONSE.
@@ -9967,6 +10621,65 @@ class TestPipeline(unittest.TestCase):
         )
         self.assertEqual(res1.n_embedded, 0)
 
+    def test_refresh_all_sources_collects_per_source_status(self) -> None:
+        """v0.2.648: refresh_all_sources is the batch path a scheduled job
+        (cron) needs — it must collect per-source outcomes instead of dying
+        on the first bad origin, and skip origins that can no longer be read
+        (same refreshable predicate the Web UI's ↻ button hides on)."""
+        from unittest.mock import patch
+
+        from shoin.ingest import Extracted, IngestError
+        from shoin.pipeline import index_source, refresh_all_sources
+
+        def ext(origin: str, sha: str, text: str) -> Extracted:
+            return Extracted(
+                kind="url", title=origin, origin=origin, sha256=sha, text=text
+            )
+
+        a_v1 = ext("http://a.test", "sha-a1", "alpha " * 50)
+        a_v2 = ext("http://a.test", "sha-a2", "alpha changed " * 50)
+        b_same = ext("http://b.test", "sha-b", "bravo " * 50)
+        c_v1 = ext("http://c.test", "sha-c", "charlie " * 50)
+        with make_store() as s:
+            nb_id = s.create_notebook("ra-nb").id
+            with patch("shoin.pipeline.extract_url", return_value=a_v1):
+                a_id = index_source(s, nb_id, "http://a.test").source.id
+            with patch("shoin.pipeline.extract_url", return_value=b_same):
+                b_id = index_source(s, nb_id, "http://b.test").source.id
+            with patch("shoin.pipeline.extract_url", return_value=c_v1):
+                c_id = index_source(s, nb_id, "http://c.test").source.id
+            # A file source whose recorded path no longer exists: not
+            # refreshable, so it must land 'skipped', not 'failed'.
+            skip_id = s.add_source(
+                nb_id, "txt", "gone", "/nonexistent/dead-path.txt", "sha-skip"
+            ).id
+
+            def fake_fetch(url: str) -> Extracted:
+                if url == "http://a.test":
+                    return a_v2
+                if url == "http://b.test":
+                    return b_same
+                raise IngestError("INGEST_FETCH_FAILED", "down")
+
+            with patch("shoin.pipeline.extract_url", side_effect=fake_fetch):
+                results = refresh_all_sources(s, nb_id)
+        by_id = {int(r["id"]): r for r in results}
+        self.assertEqual(by_id[a_id]["status"], "refreshed")
+        self.assertEqual(by_id[a_id]["n_chunks"], 1)
+        self.assertEqual(by_id[b_id]["status"], "unchanged")
+        self.assertEqual(by_id[skip_id]["status"], "skipped")
+        self.assertEqual(by_id[c_id]["status"], "failed")
+        self.assertEqual(by_id[c_id]["code"], "INGEST_FETCH_FAILED")
+
+    def test_refresh_all_sources_unknown_notebook_raises_coded(self) -> None:
+        """The batch path must keep the same coded contract as the rest of the
+        store API — a dead notebook is NOTEBOOK_NOT_FOUND, not an empty list."""
+        from shoin.pipeline import refresh_all_sources
+
+        with make_store() as s, self.assertRaises(StoreError) as cm:
+            refresh_all_sources(s, 9999)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+
     def test_refresh_source_preserves_user_renamed_title(self) -> None:
         """A user's custom rename (PATCH /api/sources/{id}) must survive a
         subsequent refresh, even when the re-fetched page has a different
@@ -10381,6 +11094,68 @@ class TestChunkLimit(unittest.TestCase):
                 with patch("shoin.pipeline.extract_url", return_value=same_size):
                     result = refresh_source(s, res0.source.id)  # must not raise
                 self.assertEqual(result.n_chunks, 1)
+
+    def test_tree_write_paths_enforce_chunk_cap(self) -> None:
+        """The cap is a per-notebook invariant (the vector leg scans every
+        chunk), not an ingest-rate limit — yet until v0.2.672 only the
+        ingest writers enforced it. import_notebook and merge_notebooks
+        (via _insert_tree_rows) and duplicate_notebook (INSERT..SELECT)
+        all bypassed it, so a large export document or a merge into a
+        near-full target silently produced an over-cap notebook."""
+        from unittest.mock import patch
+
+        def _nb_with_chunks(s: Store, name: str, n: int) -> int:
+            nb_id = s.create_notebook(name).id
+            src = s.add_source(nb_id, "txt", name, f"mem://{name}", f"sha-{name}")
+            s.add_chunks(src.id, [f"{name} chunk {i}" for i in range(n)])
+            return nb_id
+
+        with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 5):
+            with make_store() as s:
+                # merge: 3 existing + 3 incoming = 6 > 5 → coded refusal,
+                # target untouched AND the source notebook not deleted
+                # (merge's copy-then-delete must not run its delete leg).
+                target = _nb_with_chunks(s, "target", 3)
+                source = _nb_with_chunks(s, "source", 3)
+                with self.assertRaises(StoreError) as cm:
+                    s.merge_notebooks(target, source)
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(s.counts(target)["chunks"], 3)
+                self.assertEqual(s.counts(source)["chunks"], 3)
+
+                # merge boundary: 3 + 2 = 5 == cap → allowed.
+                small = _nb_with_chunks(s, "small", 2)
+                s.merge_notebooks(target, small)  # must not raise
+                self.assertEqual(s.counts(target)["chunks"], 5)
+
+                # import: a document whose tree alone exceeds the cap →
+                # refused BEFORE the notebook row commits (no half-import).
+                # (add_chunks is the low-level writer and holds no cap, so
+                # an over-cap document is buildable directly — the same way
+                # a foreign export file arrives.)
+                big = _nb_with_chunks(s, "big", 6)
+                doc = s.export_notebook(big)
+                nb_count = len(s.list_notebooks())
+                with self.assertRaises(StoreError) as cm2:
+                    s.import_notebook(doc)
+                self.assertEqual(cm2.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(len(s.list_notebooks()), nb_count)
+
+                # duplicate: the target notebook is exactly at the cap, not
+                # over — duplication is legal and must still work...
+                dup = s.duplicate_notebook(target)
+                self.assertEqual(s.counts(dup.id)["chunks"], 5)
+
+        # ...but duplicating an ALREADY over-limit notebook (created under
+        # a looser cap — the only way one exists) replicates the broken
+        # invariant → refused.
+        with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 100):
+            with make_store() as s:
+                fat = _nb_with_chunks(s, "fat", 10)
+                with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 5):
+                    with self.assertRaises(StoreError) as cm3:
+                        s.duplicate_notebook(fat)
+                    self.assertEqual(cm3.exception.code, "INGEST_NOTEBOOK_FULL")
 
 
 class TestExport(unittest.TestCase):
@@ -11905,6 +12680,78 @@ class TestCLI(unittest.TestCase):
             rc = main(["serve"])
         self.assertEqual(rc, 1)
 
+    def test_cli_search_crosses_notebooks(self) -> None:
+        """v0.2.649: `shoin search <q>` runs the global pipeline — hits are
+        stamped with the owning notebook so the user can route to `ask`.
+        Same coded path as ask for a rejected question."""
+        import io
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb1 = s.create_notebook("sea").id
+                src1 = s.add_source(nb1, "txt", "ocean.txt", "mem://o", "sha-o")
+                s.add_chunks(src1.id, ["海洋酸性化は炭酸塩飽和度を低下させる。"])
+                nb2 = s.create_notebook("sky").id
+                src2 = s.add_source(nb2, "txt", "orbit.txt", "mem://s", "sha-s")
+                s.add_chunks(src2.id, ["気象衛星は赤外放射量を観測する。"])
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "search", "気象衛星"], llm=FakeLLM())
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn(f"nb{nb2}", text)
+            self.assertIn("sky", text)
+            self.assertIn("orbit.txt", text)
+            self.assertIn("気象衛星", text)
+            # And the coded path: whitespace-only question → err envelope.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = main(["--db", db_file, "search", "   "], llm=FakeLLM())
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+        finally:
+            import os
+
+            os.unlink(db_file)
+
+    def test_cli_search_suggests_on_zero_hits(self) -> None:
+        """v0.2.650: `shoin search` turns a zero-hit typo into the nearest
+        in-corpus spelling (もしかして) instead of a bare empty list."""
+        import io
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("気象").id
+                src = s.add_source(nb, "txt", "気象衛星メモ", "mem://m", "sha-m")
+                s.add_chunks(src.id, ["気象衛星は赤外放射量を観測する。"])
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "search", "気海衛生"], llm=FakeLLM())
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("もしかして", text)
+            self.assertIn("気象衛星", text)
+        finally:
+            import os
+
+            os.unlink(db_file)
+
     def test_ask_rejects_whitespace_question_like_the_api(self) -> None:
         """v0.2.286: _cmd_ask must strip + refuse an empty question, matching
         the API's _require("question") — otherwise a whitespace-only question is
@@ -12254,6 +13101,119 @@ class TestCLI(unittest.TestCase):
         self.assertIn(VERSION, text)
         self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
 
+    def test_cli_health_surfaces_embed_model_staleness(self) -> None:
+        """v0.2.661 (product-review #17): `shoin health` names the indexed
+        model and emits the reindex hint on stderr when it diverges from the
+        configured one — CLI parity with /api/health's new fields."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "h.db")
+            with Store(db) as s:
+                s.set_setting("embed_model", "model-A")
+            out, err = io.StringIO(), io.StringIO()
+            # The CLI compares the stored builder model against the configured
+            # one (embed_model()/SHOIN_EMBED_MODEL), not the llm attribute.
+            env = {"SHOIN_EMBED_MODEL": "model-B"}
+            with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+                "sys.stderr", err
+            ):
+                rc = main(["--db", db, "health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("model-A", out.getvalue())
+        self.assertIn("reindex", err.getvalue())
+
+    def test_cli_health_warns_on_external_endpoint(self) -> None:
+        """v0.2.674 (product-review #58): `shoin health` surfaces a
+        non-loopback SHOIN_LLM_URL on stderr — the local-only promise
+        breaks silently otherwise. CLI parity with /api/health's
+        llm_external field."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out, err = io.StringIO(), io.StringIO()
+        env = {"SHOIN_LLM_URL": "http://192.168.1.10:11434/v1"}
+        with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+            "sys.stderr", err
+        ):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("ローカルではありません", err.getvalue())
+        # The default endpoint is loopback — no warning there.
+        out2, err2 = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out2), patch("sys.stderr", err2):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ローカルではありません", err2.getvalue())
+
+    def test_cli_health_redacts_url_credentials(self) -> None:
+        """v0.2.675 (product-review #59): `shoin health` prints the
+        endpoint URL — a userinfo password inside it must never reach
+        stdout/stderr."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out, err = io.StringIO(), io.StringIO()
+        env = {
+            "SHOIN_LLM_URL": "http://" + "u:s3cretPW@192.168.1.10:11434/v1"
+        }
+        with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+            "sys.stderr", err
+        ):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        shown = out.getvalue() + err.getvalue()
+        self.assertIn("192.168.1.10:11434", shown)
+        self.assertNotIn("s3cretPW", shown)
+
     def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
         """`python -m shoin` must reach the same CLI as the `shoin` script.
 
@@ -12280,6 +13240,98 @@ class TestCLI(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr[:400])
         self.assertIn("usage:", proc.stdout.lower())
+
+    def test_zipapp_pyz_runs_cli_and_serves_ui(self) -> None:
+        """v0.2.668 (product-review #33): the .pyz is the no-install
+        distribution — `python3 shoin.pyz` must run the CLI AND serve the UI.
+        Inside the archive `__file__`-relative paths are zip members, not
+        filesystem entries, so the UI 404s unless packaged assets are read
+        through pkgutil.get_data — this exercises both ends of that
+        contract in a fresh interpreter."""
+        import subprocess
+        import threading
+        import time
+        import urllib.request
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pyz = Path(tmp.name) / "shoin.pyz"
+        build = subprocess.run(
+            [sys.executable, str(root / "scripts" / "build_pyz.py"), str(pyz)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=root,
+            env=env,
+        )
+        self.assertEqual(build.returncode, 0, build.stderr[:400])
+        self.assertTrue(pyz.exists())
+        # CLI inside the archive: --help exits 0 with the argparse block,
+        # and the generated __main__.py keeps main()'s coded exit value.
+        help_run = subprocess.run(
+            [sys.executable, str(pyz), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=tmp.name,
+            env=env,
+        )
+        self.assertEqual(help_run.returncode, 0, help_run.stderr[:400])
+        self.assertIn("usage:", help_run.stdout.lower())
+        # UI inside the archive: serve --port 0 and read the bound port off
+        # the startup banner (deterministic — no bind/close race). With
+        # __file__-relative reads every asset here is STATIC_ASSET_NOT_FOUND.
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(pyz),
+                "--db",
+                str(Path(tmp.name) / "d.db"),
+                "serve",
+                "--port",
+                "0",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=tmp.name,
+            env=env,
+        )
+        self.addCleanup(proc.kill)
+        banner: list[str] = []
+        reader = threading.Thread(
+            target=lambda: banner.append(proc.stdout.readline()), daemon=True
+        )
+        reader.start()
+        reader.join(30)
+        try:
+            self.assertTrue(banner, "pyz serve printed no banner within 30s")
+            port = re.search(r"127\.0\.0\.1:(\d+)", banner[0])
+            self.assertIsNotNone(port, banner[0])
+            base = f"http://127.0.0.1:{port.group(1)}"
+            page = ""
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(base + "/", timeout=3) as resp:
+                        page = resp.read().decode("utf-8")
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            self.assertIn("書院", page)
+            for asset in ("app.js", "style.css"):
+                with urllib.request.urlopen(
+                    f"{base}/static/{asset}", timeout=5
+                ) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertGreater(len(resp.read()), 500)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc.stdout.close()
 
     def test_health_command_reflects_multi_query_and_embed_batch_env(self) -> None:
         import io
@@ -12504,6 +13556,117 @@ class TestCLI(unittest.TestCase):
             err = io.StringIO()
             with patch("sys.stderr", err):
                 rc2 = main(["--db", db_file, "stats", "9999"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_notebook_duplicate_forks_and_reports(self) -> None:
+        """v0.2.645: `shoin notebook duplicate <id>` forks the notebook —
+        the printed name is the persisted '<name> (copy)' (explicit name
+        honored), and a dead id is a coded error, never a traceback."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("研究")
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "notebook", "duplicate", str(nb.id)])
+            self.assertEqual(rc, 0)
+            self.assertIn("複製完了", out.getvalue())
+            self.assertIn("研究 (copy)", out.getvalue())
+            with Store(db_file) as s:
+                self.assertEqual(len(s.list_notebooks()), 2)
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "notebook", "duplicate", "9999"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_chunk_edit_updates_and_reports(self) -> None:
+        """v0.2.647: `shoin chunk edit <id> <text>` rewrites the chunk via
+        the same store path the API uses (REQ-103 parity) — the edit
+        persists, the report is printed, and a dead id is a coded error,
+        never a traceback."""
+        import io
+        import tempfile
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+                s.add_chunks(src.id, ["old text"])
+                cid = s.chunks_for_source(src.id)[0].id
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch("sys.stdout", out):
+                    rc = main(
+                        ["--db", db_file, "chunk", "edit", str(cid), "新しい本文"]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertIn(str(cid), out.getvalue())
+            with Store(db_file) as s:
+                self.assertEqual(s.get_chunk(cid).text, "新しい本文")
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "chunk", "edit", "9999", "x"])
+            self.assertEqual(rc2, 1)
+            self.assertIn("CHUNK_NOT_FOUND", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_source_refresh_all_reports_tally(self) -> None:
+        """v0.2.648: `shoin source refresh-all <nb>` is the cron-friendly batch
+        entry point — prints one status line per source plus a tally, and keeps
+        the coded NOTEBOOK_NOT_FOUND contract on a dead id."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        db_file = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False).name
+        try:
+            fake = [
+                {"id": 1, "title": "a", "status": "refreshed",
+                 "n_chunks": 2, "n_embedded": 0},
+                {"id": 2, "title": "b", "status": "unchanged",
+                 "n_chunks": 3, "n_embedded": 0},
+                {"id": 3, "title": "c", "status": "skipped"},
+                {"id": 4, "title": "d", "status": "failed",
+                 "code": "INGEST_FETCH_FAILED"},
+            ]
+            out = io.StringIO()
+            with patch("shoin.cli.refresh_all_sources", return_value=fake):
+                with patch("sys.stdout", out):
+                    rc = main(["--db", db_file, "source", "refresh-all", "1"])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("[1] a: refreshed", text)
+            self.assertIn("[4] d: failed (INGEST_FETCH_FAILED)", text)
+            self.assertIn("4", text)
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc2 = main(["--db", db_file, "source", "refresh-all", "9999"])
             self.assertEqual(rc2, 1)
             self.assertIn("NOTEBOOK_NOT_FOUND", err.getvalue())
             self.assertNotIn("Traceback", err.getvalue())
@@ -13925,8 +15088,11 @@ class TestWidthVariants(unittest.TestCase):
         # v0.2.528: the NFD variant bridges canonically-decomposed text
         # (macOS NFD filenames; a dakuten spelled base+゙) — 'データ' is
         # テ + combining voiced mark, a legitimate extra recall channel.
+        # v0.2.662 appended 'data' — the curated synonym table bridges
+        # データ↔data at the meaning level, a channel the spelling
+        # variants could not produce.
         self.assertEqual(
-            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた"]
+            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた", "data"]
         )
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
@@ -13952,6 +15118,62 @@ class TestWidthVariants(unittest.TestCase):
         finally:
             st.close()
 
+    def test_synonym_variants_bridge_meaning_level_words(self) -> None:
+        """v0.2.662 (product-review #14): the curated synonym table emits
+        every other group member as an OR'd needle for a term equal to one
+        member, so BM25 bridges meaning-level pairs (値段↔価格, エラー↔error)
+        that share no spelling — the exact gap that previously required the
+        vector leg.  Lookup keys cover the NFKC form, its casefold, the
+        katakana spelling, and the English stems."""
+        self.assertIn("価格", term_variants("値段"))
+        self.assertIn("値段", term_variants("価格"))
+        self.assertIn("price", term_variants("価格"))
+        self.assertIn("エラー", term_variants("error"))
+        self.assertIn("error", term_variants("エラー"))
+        # Halfwidth query -> NFKC key; hiragana query -> katakana key.
+        self.assertIn("error", term_variants("ｴﾗｰ"))
+        self.assertIn("error", term_variants("えらー"))
+        # Inflected EN -> stem key ('errors' -> 'error' -> エラー).
+        self.assertIn("エラー", term_variants("errors"))
+        # A term outside the table gains nothing.
+        self.assertEqual(term_variants("squash"), ["squash", "ｓｑｕａｓｈ"])
+        # The table is a clique list: symmetric membership, no self-pairs.
+        for group in _SYNONYM_GROUPS:
+            self.assertGreaterEqual(len(group), 2)
+            for member in group:
+                others = _SYNONYMS[member]
+                self.assertNotIn(member, others)
+                self.assertEqual(sorted(others),
+                                 sorted(m for m in group if m != member))
+
+    def test_synonym_retrieval_both_directions(self) -> None:
+        """e2e: a query on one member retrieves docs that wrote another."""
+        st, nb_id, _ = self._seeded_store()
+        s_ja_price = st.add_source(nb_id, "md", "ja_p", "ja_p.md", "jp")
+        st.add_chunks(s_ja_price.id, ["この製品の価格は三万円です。"],
+                      contexts=["ja_p"])
+        s_en_err = st.add_source(nb_id, "md", "en_e", "en_e.md", "ee")
+        st.add_chunks(s_en_err.id, ["error handling patterns in the client"],
+                      contexts=["en_e"])
+        s_ja_err = st.add_source(nb_id, "md", "ja_e", "ja_e.md", "je")
+        st.add_chunks(s_ja_err.id, ["エラー発生時の復旧手順をまとめた。"],
+                      contexts=["ja_e"])
+        try:
+            # JA->JA: no shared characters — substring/width cannot bridge.
+            got = {h.source_id for h in bm25_search(st, nb_id, "値段", 9)}
+            self.assertEqual(got, {s_ja_price.id})
+            # EN->JA loanword + EN->EN, both directions of one query.
+            for q in ("error", "errors"):
+                got = {h.source_id
+                       for h in bm25_search(st, nb_id, q, 9)}
+                self.assertEqual(got, {s_en_err.id, s_ja_err.id}, q)
+            # An out-of-table query stays exactly as selective as before.
+            got = {h.source_id
+                   for h in bm25_search(st, nb_id, "squash", 9)}
+            self.assertEqual(got, set())
+        finally:
+            st.close()
+
     def test_term_variants_numeric_spellings(self) -> None:
         """v0.2.213: a digit term should also retrieve its shorthand spellings."""
         v = term_variants("32000")
@@ -13959,8 +15181,9 @@ class TestWidthVariants(unittest.TestCase):
             self.assertIn(want, v)
         # Non-digit and non-numeric terms emit no numeric spellings.
         self.assertEqual(term_variants("python"), ["python", "ｐｙｔｈｏｎ"])
-        # "言語" has no variant of any kind (v0.2.227: kyujitai would add one).
-        self.assertEqual(term_variants("言語"), ["言語"])
+        # "言語" has no *spelling* variant — but v0.2.662's curated synonym
+        # table bridges the meaning-level pair 言語↔language.
+        self.assertEqual(term_variants("言語"), ["言語", "language"])
 
     def test_numeric_retrieval_both_directions(self) -> None:
         """Digit query finds shorthand sources; shorthand query finds digit sources."""
@@ -14693,20 +15916,36 @@ _EXCEPT_CATALOG = {
     "ingest.py": 4,
     "server.py": 9,
     "cli.py": 2,
-    "pipeline.py": 3,
+    # +1: index_source's metrics wrapper — every escaping failure counts once
+    # as index.fail, then the original exception propagates (v0.2.653).
+    "pipeline.py": 4,
+    # +1: ask()'s metrics wrapper — same count-then-propagate contract for
+    # ask.fail (v0.2.653).
+    "qa.py": 1,
 }
 _DYNAMIC_COMPILE_CATALOG = {
     "chunk.py:212",
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:73", "search.py:949",
+    "search.py:73",
+    # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105).
+    "search.py:1105",
+    # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
+    # character class (v0.2.650 suggestion oracle; shifted to 1935 by
+    # the v0.2.662 synonym-table block).
+    "search.py:1935",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
     "CHUNK_NOT_FOUND",
     "EMBEDDING_INVALID",
+    # v0.2.654: trash restore refuses to merge over an occupied id.
+    "NOTEBOOK_ALREADY_EXISTS",
     "NOTEBOOK_EMPTY",
+    # v0.2.655: a malformed/foreign export document is a 400-class input
+    # defect (import), never a raw KeyError/TypeError traceback.
+    "NOTEBOOK_IMPORT_INVALID",
     "NOTEBOOK_NOT_FOUND",
     "NOTE_NOT_FOUND",
     "SOURCE_ALREADY_EXISTS",
@@ -14715,7 +15954,12 @@ _ERROR_CODE_CATALOG = {
     "SYSTEM_DB_LOCKED",
     "SYSTEM_IO_ERROR",
     "SYSTEM_SERVICE_UNAVAILABLE",
+    # v0.2.654: missing trash archive row on restore/purge.
+    "TRASH_NOT_FOUND",
     # ingest.py / pipeline.py / server.py raises (IngestError)
+    # v0.2.673: decoded content denser than 20% replacement/control
+    # characters is binary, not text — refused before indexing.
+    "INGEST_BINARY",
     "INGEST_EMPTY",
     "INGEST_FILE_TOO_LARGE",
     "INGEST_NOTEBOOK_FULL",
@@ -14733,6 +15977,9 @@ _ERROR_CODE_CATALOG = {
     "METHOD_NOT_ALLOWED",
     "ROUTE_NOT_FOUND",
     "SECURITY_CROSS_ORIGIN_BLOCKED",
+    # v0.2.666: a missing packaged static asset (app.js/style.css) is a
+    # coded 404 — an empty body would render as a silent blank UI.
+    "STATIC_ASSET_NOT_FOUND",
     "SECURITY_HOST_NOT_ALLOWED",
     "SYSTEM_INTERNAL_ERROR",
     "VALIDATION_FIELD_FORMAT_INVALID",
@@ -15296,7 +16543,10 @@ class TestResidualGuards(unittest.TestCase):
         corpus = "\n".join(
             f.read_text(encoding="utf-8")
             for f in list(root.glob("shoin/*.py")) + list(root.glob("tests/*.py"))
-        ) + (root / "shoin" / "static" / "index.html").read_text(encoding="utf-8")
+        ) + "\n".join(
+            f.read_text(encoding="utf-8")
+            for f in sorted((root / "shoin" / "static").iterdir())
+        )
         untraced = [r for r in reqs if r not in corpus]
         self.assertEqual(untraced, [], f"REQ ids with no code/test trace: {untraced}")
 
@@ -15481,7 +16731,11 @@ class TestResidualGuards(unittest.TestCase):
             )
         # Top-level dirs holding .py files directly (non-recursive): build
         # artifacts nest deeper (build/lib/...) and never appear here.
-        gate_scoped = {"shoin", "tests"}
+        # "scripts" was scoped in at v0.2.668: build_pyz.py is build tooling
+        # — mypy --strict now covers scripts/ too, while the coverage floor
+        # stays product-only (shoin/*) since a release helper ships no
+        # testable request path of its own.
+        gate_scoped = {"shoin", "tests", "scripts"}
         for d in root.iterdir():
             if not d.is_dir() or d.name.startswith(".") or d.name == "__pycache__":
                 continue
@@ -16168,8 +17422,14 @@ class TestResidualGuards(unittest.TestCase):
             "_set_embedding_pair": 2,  # caller-transacted when commit=False
             "create_notebook": 1,
             "rename_notebook": 1,
-            "delete_notebook": 1,
+            "trash_purge": 1,  # single-statement writer like rename_notebook
             "set_setting": 1,
+            # v0.2.656: 5 bare INSERT executes, all inside the CALLER's
+            # `with self.conn:` — the import/merge shared insert half.
+            "_insert_tree_rows": 5,
+            # v0.2.664: 1 bare 'optimize' INSERT — callee-transacted like
+            # _rewrite_chunk_context_titles (callers own the with).
+            "_optimize_fts": 1,
         }
         root = Path(__file__).resolve().parent.parent / "shoin"
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
@@ -16233,7 +17493,8 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_callee_transaction_contract_call_sites_covered(self) -> None:
         """Callee-transacted helpers (`touch_notebook`,
-        `_rewrite_chunk_context_titles`, `_set_embedding_pair`) contain
+        `_rewrite_chunk_context_titles`, `_set_embedding_pair`,
+        `_insert_tree_rows`, `_optimize_fts`) contain
         bare write-executes by design — their docstrings make the CALLER
         own the transaction. The C250 pin checks the callees' statements
         against the allowlist, but cannot see whether every call site
@@ -16248,7 +17509,8 @@ class TestResidualGuards(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent / "shoin"
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
         call = re.compile(
-            r"self\.(touch_notebook|_rewrite_chunk_context_titles|_set_embedding_pair)\s*\("
+            r"self\.(touch_notebook|_rewrite_chunk_context_titles|"
+            r"_set_embedding_pair|_insert_tree_rows|_optimize_fts)\s*\("
         )
         method = ""
         in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
@@ -16316,6 +17578,7 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertTrue(sites.get("_rewrite_chunk_context_titles"), "non-vacuous")
         self.assertTrue(sites.get("_set_embedding_pair"), "non-vacuous")
+        self.assertTrue(sites.get("_optimize_fts"), "non-vacuous")  # v0.2.664
 
     def test_no_nested_with_conn_call_sites(self) -> None:
         """sqlite3's context manager commits on __exit__ — a `with self.conn:`
@@ -17210,7 +18473,10 @@ class TestResidualGuards(unittest.TestCase):
         declared = _ERROR_CODE_CATALOG
         taxonomy = re.compile(
             r"^(?:CHUNK|EMBEDDING|INGEST|METHOD|NOTEBOOK|NOTE|ROUTE|"
-            r"SECURITY|SOURCE|STUDIO|SYSTEM|VALIDATION)_[A-Z_]+$"
+            r"SECURITY|SOURCE|STUDIO|SYSTEM|TRASH|VALIDATION)_[A-Z_]+$"
+            # +TRASH family: undo-log archive rows are a first-class
+            # resource (v0.2.654) — its TRASH_NOT_FOUND belongs to the
+            # same *_NOT_FOUND -> 404 taxonomy as every other entity.
         )
         root = Path(__file__).resolve().parent.parent
         found: set[str] = set()
@@ -17551,8 +18817,10 @@ class TestResidualGuards(unittest.TestCase):
             ):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
+        # v0.2.662: the synonym-table block shifted the MATCH site
+        # +153 lines (702 -> 855).
         self.assertEqual(
-            sites, ["search.py:699"],
+            sites, ["search.py:855"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -17564,12 +18832,13 @@ class TestResidualGuards(unittest.TestCase):
         canonical markers, word-boundary, comment or not — an inline "TODO:"
         in a docstring or a stray <!-- TODO --> in index.html is the same
         violation. Test fixtures live in tests/, so this file is naturally
-        exempt."""
+        exempt. Scan covers every shipped static asset type (v0.2.666: the
+        UI is now index.html + app.js + style.css)."""
         marker = re.compile(r"\b(?:TODO|FIXME)\b")
         root = Path(__file__).resolve().parent.parent / "shoin"
         offenders = []
         for f in sorted(root.rglob("*")):
-            if f.suffix not in (".py", ".html"):
+            if f.suffix not in (".py", ".html", ".js", ".css"):
                 continue
             for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                 if marker.search(line):
@@ -17616,7 +18885,10 @@ class TestResidualGuards(unittest.TestCase):
         offenders = []
         for var, lo, hi in spans:
             ok = re.compile(
-                rf"self\._(?:require|optional_str|optional_id_list|optional_int)\(\s*{var}\b"
+                rf"self\._(?:require|required_int|optional_str|optional_id_list|"
+                # v0.2.659: _optional_int_or_none (nb settings k-resolution)
+                # added to the alternation.
+                rf"optional_int|optional_int_or_none|optional_float|optional_json_obj)\(\s*{var}\b"
             )
             for i in range(lo, hi):
                 line = lines[i]
@@ -17846,9 +19118,12 @@ class TestResidualGuards(unittest.TestCase):
                     continue
                 if (
                     isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "sleep"
+                    and node.func.attr in {"sleep", "monotonic", "perf_counter"}
                 ):
-                    continue  # time.sleep is the busy-retry, not a clock
+                    # Durations, not timestamps: time.sleep is the busy-retry
+                    # and monotonic/perf_counter measure latency spans —
+                    # none emits a wall-clock value needing _now's format.
+                    continue
                 if (
                     isinstance(node.func, ast.Attribute)
                     and node.func.attr in verbs
@@ -18129,7 +19404,8 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "cli.py": 1,     # Path(args.save).write_text — eval baseline export
+            "cli.py": 2,     # Path(args.save).write_text — eval baseline export
+            # +1: Path(args.gen).write_text — eval --gen case-scaffold (v0.2.651)
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)
@@ -18287,25 +19563,53 @@ class TestResidualGuards(unittest.TestCase):
                 "(IngestError,LLMError,StoreError)",
                 "(UnicodeDecodeError,json.JSONDecodeError)",
                 "(UnicodeDecodeError,json.JSONDecodeError)",
+                # +1: _cmd_import maps a non-UTF-8/non-JSON export file to
+                # NOTEBOOK_IMPORT_INVALID — same coded contract (v0.2.655).
+                "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 # v0.2.627: process-boundary catch-all in main() — a custom
                 # ChatBackend raising a non-LLMError escaped every handler as
                 # a raw traceback; same coded SYSTEM_INTERNAL_ERROR mapping
                 # _dispatch applies to strays (CLI/API parity).
                 "Exception",
-                "OSError", "OSError", "OSError", "OSError",
+                # +1: _cmd_import's file read shares the coded OSError ->
+                # SYSTEM_IO_ERROR contract with _cmd_eval's cases file
+                # (v0.2.655).
+                "OSError", "OSError", "OSError", "OSError", "OSError",
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
                 # crash print() on strict-UTF-8 stdout — boundary catch in
                 # main() like OverflowError, coded err.prefix not a traceback.
                 "UnicodeEncodeError",
-                "ValueError", "ValueError",
+                # v0.2.659: _cmd_notebook settings maps a non-integer value
+                # in key=value to VALIDATION_FIELD_FORMAT_INVALID — same
+                # classify-then-wrap contract as the pair-shape guard.
+                "ValueError", "ValueError", "ValueError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
+                # v0.2.661: _cmd_health's indexed-model read is best-effort
+                # — health must keep answering when the data dir itself is
+                # the broken thing being diagnosed (raw OSError for
+                # unopenable paths alongside OperationalError/StoreError).
+                "(OSError,StoreError,sqlite3.OperationalError)",
+                # v0.2.670: _cmd_check reports an unopenable DB as its own
+                # finding — DatabaseError (covers OperationalError) catches
+                # 'file is not a database' raised at Store()'s first PRAGMA.
+                "(OSError,StoreError,sqlite3.DatabaseError)",
             ],
             "config.py": [
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
-                "OSError", "json.JSONDecodeError",
+                # v0.2.639: llm_retries()'s int() parse shares the
+                # invalid->default contract with port().
+                "(TypeError,ValueError)",
+                "OSError",
+                # v0.2.674: endpoint_is_external's two narrow probes —
+                # urlsplit ValueError (unclosed bracket) degrades to
+                # "local" verdict (cannot transmit = not a leak);
+                # ip_address ValueError means a DNS name, which by
+                # definition is not this machine → external.
+                "ValueError", "ValueError",
+                "json.JSONDecodeError",
             ],
             "evaluate.py": ["UnicodeEncodeError"],
             "export.py": ["(ValueError,json.JSONDecodeError)"],
@@ -18334,13 +19638,34 @@ class TestResidualGuards(unittest.TestCase):
                 # a deeply nested delta is a parse failure like JSONDecodeError.
                 "(IndexError,KeyError,RecursionError,TypeError,json.JSONDecodeError)",
                 "LLMError",
+                # v0.2.639: _post's retry loop catches LLMError to gate it on
+                # _RETRYABLE — a code outside the set re-raises immediately.
+                "LLMError",
                 # v0.2.620: deeply nested bodies raise RecursionError, not
                 # JSONDecodeError — same malformed-response mapping.
                 "(RecursionError,json.JSONDecodeError)",
                 "urllib.error.HTTPError", "urllib.error.HTTPError",
             ],
-            "pipeline.py": ["Exception", "Exception", "Exception", "LLMError"],
+            "log.py": [
+                # v0.2.652: emit() must never break the operation it reports —
+                # a broken or strict-codec stderr is swallowed, not propagated.
+                "(OSError,UnicodeEncodeError,ValueError)",
+            ],
+            "pipeline.py": [
+                "Exception", "Exception", "Exception",
+                # v0.2.653: index_source's usage-metrics wrapper counts every
+                # escaping failure once (index.fail), then re-raises it.
+                "Exception",
+                # v0.2.648: refresh_all_sources degrades a per-source coded
+                # failure to a 'failed' row — one dead origin must not abort
+                # the batch a cron caller scheduled.
+                "(IngestError,LLMError,StoreError)",
+                "LLMError",
+            ],
             "qa.py": [
+                # v0.2.653: ask()'s usage-metrics wrapper counts every
+                # escaping failure once (ask.fail), then re-raises it.
+                "Exception",
                 "LLMError", "LLMError", "LLMError",
                 "StoreError", "sqlite3.OperationalError",
             ],
@@ -18353,6 +19678,11 @@ class TestResidualGuards(unittest.TestCase):
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError",
+                # v0.2.665: per-delta write guard inside the generation loop —
+                # a dead client must not abort the paid-for stream; the
+                # handler finishes generating so the persisted row is the
+                # COMPLETE answer (resume via re-fetch, product-review #48).
+                "ConnectionError",
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
                 "Exception", "Exception",
@@ -18363,9 +19693,60 @@ class TestResidualGuards(unittest.TestCase):
                 # payload field carries a lone surrogate — without it the
                 # error-envelope path itself would emit zero HTTP response.
                 "UnicodeEncodeError",
-                "ValueError", "ValueError", "ValueError",
+                "ValueError", "ValueError", "ValueError", "ValueError",
+                # v0.2.643: _h_theme_css degrades a missing/unreadable theme
+                # file to an empty stylesheet — the cosmetic hook must never
+                # 5xx a page load.
+                "OSError",
+                # v0.2.666: _serve_packaged_asset maps a missing packaged
+                # app.js/style.css to STATIC_ASSET_NOT_FOUND — a silent
+                # empty body would render a blank UI with zero signal.
+                "OSError",
+                # v0.2.661: _h_health's staleness read is best-effort —
+                # health is the diagnostic surface and must still 200 when
+                # the DB it reports on is unopenable/broken.
+                "(OSError,StoreError,sqlite3.OperationalError)",
+                # v0.2.668: _read_packaged_asset normalizes get_data's
+                # missing-resource failures — FileNotFoundError on
+                # filesystem loaders, ZipImportError(->ImportError) inside a
+                # .pyz — to FileNotFoundError so the coded 404 boundary
+                # above it keeps one shape.
+                "(ImportError,OSError)",
+                # v0.2.670: _h_check answers {ok:false,'unopenable'} when
+                # the DB file itself cannot open — the diagnostic surface
+                # must not collapse to a generic 500 (mirrors _h_health).
+                "(OSError,StoreError,sqlite3.DatabaseError)",
             ],
             "store.py": [
+                # v0.2.654: trash_restore maps a corrupt/hand-edited
+                # archive payload to a coded error instead of leaking
+                # a raw JSONDecodeError/b64 KeyError.
+                "(KeyError,TypeError,ValueError)",
+                # v0.2.655: import_notebook maps a malformed export
+                # document (missing keys, non-dict rows, bad b64) to
+                # NOTEBOOK_IMPORT_INVALID — same classify-then-wrap.
+                "(KeyError,TypeError,ValueError)",
+                # v0.2.656: merge_notebooks' own tree serialization /
+                # insert path — internal rows, classified SYSTEM_*. Same
+                # corrupt-row signature shape as restore/import.
+                "(KeyError,TypeError,ValueError)",
+                # v0.2.655: unbindable value types inside a foreign
+                # document are malformed input, not a DB failure.
+                "sqlite3.InterfaceError",
+                # v0.2.655: _remap_report_source_ids passes a corrupt or
+                # non-dict citation_report through verbatim — the same
+                # corrupt-report convention restore already keeps.
+                "(AttributeError,TypeError,ValueError)",
+                # v0.2.653: bump_metrics is best-effort — a counter write
+                # must never break the operation it counts.
+                "(OSError,sqlite3.Error)",
+                # v0.2.653: usage_metrics skips a hand-corrupted (non-numeric)
+                # metric row instead of failing the whole surface.
+                "(TypeError,ValueError)",
+                # v0.2.658: update_source_meta maps an unserializable meta
+                # object (json.dumps TypeError/ValueError) to the coded
+                # field-format error — same classify-then-wrap shape.
+                "(TypeError,ValueError)",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
@@ -18389,10 +19770,27 @@ class TestResidualGuards(unittest.TestCase):
             ],
         }
         trivial_baseline = {
-            "config.py": 6, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
+            # config.py +1: llm_retries()'s parse failure falls back to the
+            # default 2, same contract as port()'s range fallback.
+            # config.py +2: endpoint_is_external's probes degrade to a
+            # verdict (v0.2.674) — unparseable URL → local (cannot
+            # transmit = not a leak); non-IP hostname → external.
+            "config.py": 9, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
             "llm.py": 2,
-            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
-            "studio.py": 1,
+            # log.py +1: emit()'s stderr-write guard — logging must never
+            # break the operation it reports (v0.2.652).
+            "log.py": 1,
+            # cli.py +1: _cmd_health's best-effort staleness read (v0.2.661).
+            "cli.py": 1,
+            # server.py +1: _h_health's best-effort staleness read (v0.2.661).
+            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 12,
+            # store.py +2: bump_metrics' best-effort pass and usage_metrics'
+            # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
+            # corrupt-report verbatim passthrough (v0.2.655).
+            "store.py": 3,
+            # studio.py -1→0: suggest_questions' LLMError handler no longer
+            # returns a literal [] — it calls _title_questions (real fallback
+            # work, v0.2.660), so it leaves the silent-default class entirely.
         }
         actual: dict[str, list[str]] = {}
         trivial: dict[str, int] = {}
@@ -18508,17 +19906,35 @@ class TestResidualGuards(unittest.TestCase):
                 "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
+                # +2: _cmd_search's question/length guards (v0.2.649)
+                # +1: _cmd_eval's missing-cases guard (v0.2.651)
+                # +2: _cmd_import's file-read / not-JSON guards (v0.2.655)
+                # +1: _cmd_source meta's malformed key=value pair (v0.2.658)
+                # +2: _cmd_notebook settings' pair-shape / int-value guards
+                #     (v0.2.659)
+                "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
-            "ingest.py": ["IngestError"] * 26 + ["zlib.error", "RE-RAISE"],
-            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"],
+            # +1: _decode's binary guard (INGEST_BINARY) — v0.2.673.
+            "ingest.py": ["IngestError"] * 28 + ["zlib.error", "RE-RAISE"],
+             # +1: extract_file's non-regular-file guard — a FIFO/device
+             #     passes st_size 0 then blocks read_bytes forever (v0.2.680)
+            "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,
+            # +1 RE-RAISE: _post retry loop re-raises the same coded error
             "pipeline.py": [
                 "IngestError", "IngestError", "IngestError", "IngestError",
                 "LLMError", "LLMError", "LLMError",
+                # +1 RE-RAISE: the metrics wrapper re-raises after counting
+                # index.fail (v0.2.653).
+                "RE-RAISE",
                 "StoreError",
             ],
-            "qa.py": ["StoreError"],
+            # +1 RE-RAISE: the metrics wrapper re-raises after counting
+            # ask.fail (v0.2.653).
+            "qa.py": ["RE-RAISE", "StoreError"],
             "server.py": [
                 "IngestError", "IngestError", "IngestError",
                 "IngestError", "IngestError",
@@ -18527,14 +19943,65 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
+                # +1: _h_global_search question-length guard (v0.2.649)
+                # +1: _required_int's missing-field guard (v0.2.656)
+                # +3: _optional_float type/range guards + _h_src_patch's
+                #     no-field-sentinel guard (v0.2.657)
+                # +1: _optional_json_obj's non-dict field guard (v0.2.658)
+                # +1: _h_nb_rename's empty-PATCH sentinel (name/settings
+                #     at least one required) (v0.2.659)
+                "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
+                "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
+                # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
+                # +1: _read_packaged_asset's normalized missing-asset
+                #     signal — FileNotFoundError so the caller's existing
+                #     OSError -> STATIC_ASSET_NOT_FOUND coded 404 boundary
+                #     catches it unchanged inside a .pyz (v0.2.668)
+                "FileNotFoundError",
             ],
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 51,  # +1: _utf8's coded surrogate rejection
+                # v0.2.658: _meta_text rejects non-object meta payloads — a
+                # programmer-error builtin, same class as the existing
+                # internal-validator ValueErrors (never reaches the request
+                # path: callers classify it coded inside their own guards).
+                "ValueError", "ValueError",
+                # v0.2.667: trash_restore's malformed-payload guards —
+                # non-dict JSON and unknown `kind` funnel into the existing
+                # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
+                # corrupt boundary, never onto the request path.
+                "ValueError", "ValueError",
+            ] + ["StoreError"] * 81,  # +1: _utf8's coded surrogate rejection
+                                      # +2: _insert_tree_rows / duplicate_notebook
+                                      #     chunk-cap guards (v0.2.672)
+                                      # +4: update_notebook_settings non-dict /
+                                      #     unknown-key / out-of-bounds / missing-
+                                      #     row guards (v0.2.659)
+                                      # +2: merge_notebooks self-merge /
+                                      #     corrupt-tree guards (v0.2.656)
+                                      # +3: update_source_weight type/range/
+                                      #     missing-row guards (v0.2.657)
+                                      # +4: update_source_meta non-dict /
+                                      #     unserializable / oversize / missing-
+                                      #     row guards (v0.2.658)
                                       # +1: backup_to's live-path guard
+                                      # +2: duplicate_notebook empty/too-long name
+                                      # +3: update_chunk_text empty/missing/deleted
+                                      # +4: trash raises (TRASH_NOT_FOUND x2,
+                                      #     ALREADY_EXISTS, corrupt payload)
+                                      # +3: per-entity trash restores —
+                                      #     NOTEBOOK_NOT_FOUND x2 (gone parent)
+                                      #     + SOURCE_ALREADY_EXISTS (v0.2.667)
+                                      # -1: delete_notebook's own NOT_FOUND
+                                      #     raise now delegated to get_notebook
+                                      # +4: import_notebook (name-not-str, dangling
+                                      #     chunk source_id, malformed payload,
+                                      #     unbindable rows) (v0.2.655)
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -18646,7 +20113,14 @@ class TestResidualGuards(unittest.TestCase):
             "non-vacuous: ASCII overlap still scores",
         )
         baseline = {
-            "config.py": 1, "ingest.py": 4, "search.py": 4,
+            # config.py +1: log_json_enabled env compare (v0.2.652)
+            # config.py +1: endpoint_is_external's hostname compare —
+            # DNS names are ASCII-case-insensitive by spec (v0.2.674).
+            "config.py": 3, "ingest.py": 4, "search.py": 4,
+            # llm.py +1: cleartext-credential warning's scheme compare —
+            # URI schemes are ASCII-case-insensitive by RFC 3986 §3.1
+            # (v0.2.676).
+            "llm.py": 1,
             "server.py": 3, "store.py": 2,
         }
         actual: dict[str, int] = {}
@@ -19138,7 +20612,14 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        baseline = {"ingest.py": 4, "search.py": 1}
+        baseline = {
+            # config.redact_url_credentials' authority-scan guards the
+            # -1 sentinel inline (`0 <= i < end` — a miss is negative
+            # and never reaches `rest[:end]`) (v0.2.675)
+            "config.py": 1,
+            "ingest.py": 4,
+            "search.py": 1,
+        }
         found: dict[str, int] = {}
         problems: list[str] = []
         for path in sorted(shoin_dir.glob("*.py")):
@@ -19221,8 +20702,13 @@ class TestResidualGuards(unittest.TestCase):
         }
 
         baseline = {
+            # v0.2.639: geometric backoff between _post retries.
+            "llm.py": ["time.sleep"],
             "store.py": ["datetime.now", "time.sleep"],
-            "qa.py": ["threading.Lock"],
+            # v0.2.652: index_source/ask latency spans (structured-log ms
+            # fields) — monotonic durations, not clock reads.
+            "pipeline.py": ["time.monotonic", "time.monotonic"],
+            "qa.py": ["threading.Lock", "time.monotonic", "time.monotonic"],
             "server.py": ["threading.Lock", "threading.Lock"],
         }
         actual: dict[str, list[str]] = {}
@@ -19350,6 +20836,9 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": ["pathlib.Path"],
             "config.py": ["pathlib.Path"],
             "ingest.py": ["io.BytesIO", "pathlib.Path"],
+            # v0.2.648: source_is_refreshable's is_file() check — the dead-path
+            # branch of the shared refreshable predicate.
+            "pipeline.py": ["pathlib.Path"],
             "server.py": ["pathlib.Path"],
             "store.py": ["datetime.UTC", "datetime.datetime",
                          "pathlib.Path"],
@@ -19986,7 +21475,11 @@ class TestResidualGuards(unittest.TestCase):
         baseline: dict[str, list[int]] = {
             "chunk.py": [212],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
-            "search.py": [73, 949],
+            # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
+            # constant character class — same static-constant category as
+            # the other sites (v0.2.650 suggestion oracle). Both search.py
+            # sites shifted +153 by the v0.2.662 synonym-table block.
+            "search.py": [73, 1935, 1105],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -20033,8 +21526,9 @@ class TestResidualGuards(unittest.TestCase):
                             escaped_interps.append(
                                 f"{path.name}:{node.lineno}"
                             )
+        # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105).
         self.assertEqual(
-            escaped_interps, ["search.py:949"],
+            escaped_interps, ["search.py:1105"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
@@ -20104,7 +21598,7 @@ class TestResidualGuards(unittest.TestCase):
         )
 
     def test_ui_selectors_are_cataloged(self) -> None:
-        """`querySelector`/`querySelectorAll` literals in index.html:
+        """`querySelector`/`querySelectorAll` literals in app.js:
         renaming a class/attribute without updating the selector makes
         it silently return null — the feature goes dead with no test
         or console signal. The full literal set is cataloged; a new
@@ -20114,7 +21608,7 @@ class TestResidualGuards(unittest.TestCase):
 
         html = (
             Path(__file__).resolve().parent.parent
-            / "shoin" / "static" / "index.html"
+            / "shoin" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         found: set[str] = set()
         for m in _re.finditer(
@@ -20147,19 +21641,19 @@ class TestResidualGuards(unittest.TestCase):
         )
 
     def test_css_var_refs_are_defined(self) -> None:
-        """Every `var(--x)` reference in index.html must resolve to a
+        """Every `var(--x)` reference in the UI must resolve to a
         `--x:` definition — an undefined custom property silently
         falls back to `initial`/inherit, degrading the style with no
         signal (the v0.2.523 `--ink` defect: the source-rename input
-        showed default text color instead of --sumi)."""
+        showed default text color instead of --sumi). Definitions live
+        in style.css (v0.2.666); refs can appear in either file."""
         import re as _re
 
-        html = (
-            Path(__file__).resolve().parent.parent
-            / "shoin" / "static" / "index.html"
-        ).read_text(encoding="utf-8")
-        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", html))
-        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", html))
+        static_dir = Path(__file__).resolve().parent.parent / "shoin" / "static"
+        style = (static_dir / "style.css").read_text(encoding="utf-8")
+        app = (static_dir / "app.js").read_text(encoding="utf-8")
+        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", style))
+        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", style + "\n" + app))
         missing = sorted(refs - defs)
         self.assertGreater(len(defs), 5)
         self.assertGreater(len(refs), 5)
@@ -20174,3 +21668,1647 @@ class TestResidualGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+# ---------------------------------------------------------------------------
+# v0.2.651: eval --gen case-scaffold tests
+# ---------------------------------------------------------------------------
+
+class TestCliEvalGen(unittest.TestCase):
+    """`shoin eval <nb> --gen` scaffolds one skeleton case per chunked source."""
+
+    def _db(self) -> tuple[str, int]:
+        import tempfile
+
+        from shoin.store import Store
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        with Store(f.name) as s:
+            nb = s.create_notebook("nb")
+            a = s.add_source(nb.id, "txt", "設計メモ", "mem://a", "h1")
+            s.add_chunks(a.id, ["本文一", "本文二"])
+            # zero-chunk source — nothing retrieves it, so no case
+            s.add_source(nb.id, "txt", "空ソース", "mem://b", "h2")
+        return f.name, nb.id
+
+    def test_gen_stdout_lists_one_case_per_chunked_source(self) -> None:
+        import io
+        import json
+        import os
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+        from shoin.evaluate import parse_cases
+
+        db_file, nb_id = self._db()
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = main(["--db", db_file, "eval", str(nb_id), "--gen"])
+            self.assertEqual(rc, 0)
+            cases = json.loads(out.getvalue())
+            # the generated file must itself pass the eval parser
+            parsed = parse_cases(cases)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].expected_source_ids, [1])
+            self.assertIn("設計メモ", parsed[0].question)
+        finally:
+            os.unlink(db_file)
+
+    def test_gen_file_writes_parseable_json(self) -> None:
+        import io
+        import json
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db_file, nb_id = self._db()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                target = str(Path(td) / "gen.json")
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = main(["--db", db_file, "eval", str(nb_id), "--gen", target])
+                self.assertEqual(rc, 0)
+                self.assertTrue(Path(target).exists())
+                self.assertIn("設計メモ", Path(target).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    len(json.loads(Path(target).read_text(encoding="utf-8"))), 1
+                )
+                self.assertIn("1", out.getvalue())  # {n} in the saved line
+        finally:
+            os.unlink(db_file)
+
+    def test_eval_without_cases_or_gen_is_coded(self) -> None:
+        import io
+        import os
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db_file, nb_id = self._db()
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main(["--db", db_file, "eval", str(nb_id)])
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_REQUIRED_FIELD_MISSING", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+    def test_gen_dead_notebook_is_coded_404(self) -> None:
+        import io
+        import os
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db_file, _ = self._db()
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main(["--db", db_file, "eval", "99", "--gen"])
+            self.assertEqual(rc, 1)
+            self.assertIn("NOT_FOUND", err.getvalue())
+        finally:
+            os.unlink(db_file)
+
+# ---------------------------------------------------------------------------
+# v0.2.652: structured JSON event log (SHOIN_LOG_JSON)
+# ---------------------------------------------------------------------------
+
+class TestStructuredLog(unittest.TestCase):
+    """emit(): one JSON line per event on stderr, opt-in via SHOIN_LOG_JSON."""
+
+    def _with_env(self, val: str | None):
+        import os
+
+        class _Env:
+            def __enter__(self):
+                self.old = os.environ.get("SHOIN_LOG_JSON")
+                if val is None:
+                    os.environ.pop("SHOIN_LOG_JSON", None)
+                else:
+                    os.environ["SHOIN_LOG_JSON"] = val
+            def __exit__(self, *a):
+                if self.old is None:
+                    os.environ.pop("SHOIN_LOG_JSON", None)
+                else:
+                    os.environ["SHOIN_LOG_JSON"] = self.old
+        return _Env()
+
+    def test_disabled_is_silent(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env(None):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", n=1)
+            self.assertEqual(err.getvalue(), "")
+
+    def test_enabled_emits_json_line(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env("1"):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", n=1, flag=True)
+            line = err.getvalue().strip()
+            self.assertTrue(line.startswith("{"), err.getvalue())
+            obj = json.loads(line)
+            self.assertEqual(obj["event"], "probe")
+            self.assertEqual(obj["n"], 1)
+            self.assertIs(obj["flag"], True)
+            # ts is the store._now ISO-8601 string — the product's single
+            # clock source, so log lines match every DB row's format.
+            self.assertRegex(obj["ts"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_private_fields_are_dropped(self) -> None:
+        """A future call site must not be able to leak user content — keys in
+        _PRIVATE_FIELDS are dropped from every event line."""
+        import io
+        import json
+        from contextlib import redirect_stderr
+
+        from shoin.log import emit
+
+        with self._with_env("1"):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                emit("probe", question="秘密の質問", text="本文", ok=1)
+            obj = json.loads(err.getvalue())
+            self.assertNotIn("question", obj)
+            self.assertNotIn("text", obj)
+            self.assertEqual(obj["ok"], 1)
+
+    def test_index_source_emits_source_indexed(self) -> None:
+        """End-to-end: `shoin add` goes through index_source -> emit, so both
+        CLI and API ingests produce the same event."""
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            doc = str(Path(td) / "d.txt")
+            Path(doc).write_text("構造化ログのテスト本文。", encoding="utf-8")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+            with self._with_env("1"):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    rc = main(["--db", db_file, "add", str(nb.id), doc])
+            self.assertEqual(rc, 0)
+            events = [
+                json.loads(ln) for ln in err.getvalue().splitlines()
+                if ln.strip().startswith("{")
+            ]
+            hits = [e for e in events if e.get("event") == "source_indexed"]
+            self.assertEqual(len(hits), 1, err.getvalue())
+            e = hits[0]
+            self.assertEqual(e["nb"], nb.id)
+            self.assertEqual(e["kind"], "txt")
+            self.assertGreaterEqual(e["chunks"], 1)
+            self.assertIn("ms", e)
+
+    def test_ask_emits_ask_completed(self) -> None:
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin.cli import main
+        from shoin.store import Store
+        from tests.test_qa import FakeLLM
+
+        with tempfile.TemporaryDirectory() as td:
+            db_file = str(Path(td) / "t.sqlite3")
+            with Store(db_file) as s:
+                nb = s.create_notebook("nb")
+                src = s.add_source(nb.id, "txt", "doc", "mem://d", "h")
+                s.add_chunks(src.id, ["回答の根拠となる本文。"])
+            with self._with_env("1"):
+                err, out = io.StringIO(), io.StringIO()
+                with redirect_stderr(err), redirect_stdout(out):
+                    rc = main(
+                        ["--db", db_file, "ask", str(nb.id), "本文について"],
+                        llm=FakeLLM(),
+                    )
+            self.assertEqual(rc, 0)
+            events = [
+                json.loads(ln) for ln in err.getvalue().splitlines()
+                if ln.strip().startswith("{")
+            ]
+            hits = [e for e in events if e.get("event") == "ask_completed"]
+            self.assertEqual(len(hits), 1, err.getvalue())
+            e = hits[0]
+            self.assertEqual(e["nb"], nb.id)
+            self.assertIn("degraded", e)
+            self.assertIn("ms", e)
+            self.assertNotIn("q", e)  # no question text leaked
+
+class TestUsageMetrics(unittest.TestCase):
+    """Store.bump_metrics/usage_metrics — durable content-free usage counters
+    (v0.2.653, weakness #34): settings-row accumulation that survives
+    restarts, index/ask wiring, and the /api/metrics + `shoin stats`
+    surfaces. Counters are product constants and counts — never content."""
+
+    def _tmpdb(self) -> str:
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        return f.name
+
+    def test_bump_accumulates_and_persists(self) -> None:
+        """Deltas add up across calls AND across connections (settings rows),
+        and live under the metric.* namespace."""
+        db = self._tmpdb()
+        with Store(db) as s:
+            s.bump_metrics({"probe.count": 1.0, "probe.ms": 12.5})
+            s.bump_metrics({"probe.count": 2.0, "probe.ms": 7.5})
+            m = s.usage_metrics()
+            self.assertEqual(m["probe.count"], 3.0)
+            self.assertEqual(m["probe.ms"], 20.0)
+            self.assertEqual(s.get_setting("metric.probe.count"), "3.0")
+            # nothing escapes the namespace
+            self.assertIsNone(s.get_setting("probe.count"))
+        with Store(db) as s2:
+            self.assertEqual(s2.usage_metrics()["probe.count"], 3.0)
+
+    def test_bump_never_breaks_the_caller(self) -> None:
+        """A metrics write must never break the operation it counts —
+        on a broken connection the bump is swallowed, not raised."""
+        with make_store() as s:
+            s.conn.close()
+            s.bump_metrics({"x": 1.0})
+
+    def test_index_success_and_failure_counters(self) -> None:
+        """index_source: ok + ms + embed_skip on success; index.fail once on
+        any raised failure (here: unreadable file → IngestError)."""
+        import tempfile
+
+        from shoin.pipeline import index_source
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb = s.create_notebook("nb")
+            p = tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", delete=False, encoding="utf-8"
+            )
+            p.write("本文です。二度目の文。")
+            p.close()
+            res = index_source(s, nb.id, p.name)
+            m = s.usage_metrics()
+            self.assertEqual(m["index.ok"], 1.0)
+            self.assertGreaterEqual(m["index.ms"], 0.0)
+            # no LLM passed → _NoEmbed → every chunk counted as embed-skipped
+            self.assertEqual(m["index.embed_skip"], float(res.n_chunks))
+            with self.assertRaises(IngestError) as cm:
+                index_source(s, nb.id, "/nonexistent/definitely-missing.txt")
+            self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+            m2 = s.usage_metrics()
+            self.assertEqual(m2["index.fail"], 1.0)
+            self.assertEqual(m2["index.ok"], 1.0)  # fail does not touch ok
+
+    def test_ask_counters(self) -> None:
+        """ask(): count + nohit + ms on a normal answer; degraded on LLM
+        failure; ask.fail only when the call escapes with an exception."""
+        from shoin.qa import ask
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+            ans = ask(s, FakeLLM(), nb_id, "天気", persist=False)
+            m = s.usage_metrics()
+            self.assertEqual(m["ask.count"], 1.0)
+            self.assertEqual(m["ask.nohit"], 0.0 if ans.hits else 1.0)
+            self.assertEqual(m["ask.degraded"], 0.0)
+            self.assertIn("ask.ms", m)
+            self.assertNotIn("ask.fail", m)
+            ask(s, FakeLLM(chat_error=True), nb_id, "天気", persist=False)
+            m2 = s.usage_metrics()
+            self.assertEqual(m2["ask.count"], 2.0)
+            self.assertEqual(m2["ask.degraded"], 1.0)
+            # escaping exception (here: DB lock inside the call) → ask.fail
+            fake_hit = Hit(chunk_id=1, source_id=1, text="t", score=0.9)
+            with patch("shoin.qa.retrieve", return_value=[fake_hit]):
+                with patch(
+                    "shoin.qa.build_context",
+                    side_effect=sqlite3.OperationalError("database is locked"),
+                ):
+                    with self.assertRaises(StoreError) as cm:
+                        ask(s, FakeLLM(), nb_id, "天気", persist=False)
+                    self.assertEqual(cm.exception.code, "SYSTEM_DB_LOCKED")
+            self.assertEqual(s.usage_metrics()["ask.fail"], 1.0)
+
+    def test_cli_stats_shows_metrics_block(self) -> None:
+        """`shoin stats` appends the usage block once counters exist —
+        asks+indexes performed through the CLI path itself."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "ask", str(nb_id), "天気"], llm=FakeLLM()), 0
+            )
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "stats", str(nb_id)]), 0)
+        body = out2.getvalue()
+        self.assertIn("利用メトリクス:", body)
+        self.assertIn("ask: 1 回", body)
+        self.assertIn("index: 0 回", body)
+
+    def test_usage_metrics_skips_corrupt_rows(self) -> None:
+        """A hand-edited non-numeric metric.* row is skipped, not fatal."""
+        with make_store() as s:
+            s.set_setting("metric.bogus", "not-a-number")
+            s.bump_metrics({"good": 2.0})
+            m = s.usage_metrics()
+            self.assertEqual(m, {"good": 2.0})
+
+
+class TestTrash(unittest.TestCase):
+    """Undo-log trash (v0.2.654): delete archives the whole tree in the same
+    transaction; restore re-inserts it with original ids (chunks re-fire the
+    FTS triggers, embedding BLOBs decode back verbatim)."""
+
+    def _tmpdb(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
+
+    def test_delete_archives_and_restore_recovers_byte_identical(self) -> None:
+        with make_store() as s:
+            nb_id = seed(s)
+            note_id = s.add_note(nb_id, "memo", "本文メモ")
+            s.add_message(nb_id, "user", "質問", "{}")
+            chunk_id = int(
+                s.conn.execute("SELECT id FROM chunks LIMIT 1").fetchone()["id"]
+            )
+            s.set_embedding(chunk_id, [0.1, 0.2, 0.3])
+            before = s.counts(nb_id)
+            saved = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk_id,),
+            ).fetchone()
+            s.delete_notebook(nb_id)
+            # live view: gone. archive: present.
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(nb_id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            items = s.trash_list()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["name"], "研究")
+            self.assertEqual(items[0]["notebook_id"], nb_id)
+            nb = s.trash_restore(items[0]["id"])
+            self.assertEqual(nb["id"], nb_id)
+            self.assertEqual(nb["kind"], "notebook")
+            self.assertEqual(s.counts(nb_id), before)
+            row = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk_id,),
+            ).fetchone()
+            # BLOB bytes + cached norm round-tripped verbatim
+            self.assertEqual(row["embedding"], saved["embedding"])
+            self.assertEqual(row["embedding_norm"], saved["embedding_norm"])
+            # INSERT re-fired the FTS triggers — searchable immediately
+            hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts"
+                " WHERE chunks_fts MATCH '猫は液'"
+            ).fetchone()["n"]
+            self.assertEqual(int(hits), 1)
+            # notes/messages restored with original ids
+            self.assertEqual(
+                int(
+                    s.conn.execute(
+                        "SELECT COUNT(*) AS n FROM notes WHERE id=?", (note_id,)
+                    ).fetchone()["n"]
+                ),
+                1,
+            )
+            self.assertEqual(s.trash_list(), [])  # archive consumed
+
+    def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
+        """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take
+        the freed id. Restore must refuse ALREADY_EXISTS (never a silent
+        merge or id rewrite) and keep the archive for a later purge."""
+        with make_store() as s:
+            nb = s.create_notebook("old")
+            s.delete_notebook(nb.id)
+            nb2 = s.create_notebook("new")
+            self.assertEqual(nb2.id, nb.id)  # id reuse is the premise
+            item = s.trash_list()[0]
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(item["id"])
+            self.assertEqual(cm.exception.code, "NOTEBOOK_ALREADY_EXISTS")
+            self.assertEqual(len(s.trash_list()), 1)  # archive intact
+
+    def test_trash_purge_and_missing_codes(self) -> None:
+        with make_store() as s:
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(99999)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.trash_purge(99999)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+            nb_id = seed(s)
+            s.delete_notebook(nb_id)
+            tid = s.trash_list()[0]["id"]
+            s.trash_purge(tid)
+            self.assertEqual(s.trash_list(), [])
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
+
+    def test_trash_purge_all_empties_log(self) -> None:
+        """v0.2.669: one call drops every archive — per-item purge was the
+        only path, so emptying a large trash took N round-trips."""
+        with make_store() as s:
+            nb_id = seed(s)
+            nb2 = s.create_notebook("extra")
+            s.delete_notebook(nb_id)
+            s.delete_notebook(nb2.id)
+            self.assertEqual(len(s.trash_list()), 2)
+            self.assertEqual(s.trash_purge_all(), 2)
+            self.assertEqual(s.trash_list(), [])
+            self.assertEqual(s.trash_purge_all(), 0)
+
+    def test_vacuum_hands_deleted_pages_back(self) -> None:
+        """v0.2.669: DELETEs move pages onto SQLite's freelist, where they
+        keep occupying disk until vacuum() rebuilds the file — freelist
+        collapses and the db shrinks."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "v.db")
+            with Store(db) as s:
+                nb = s.create_notebook("big")
+                src = s.add_source(nb.id, "txt", "big.txt", "mem://b", "sha-b")
+                s.add_chunks(src.id, ["x" * 4000] * 40)  # ~160KB of chunk text
+                s.delete_source(src.id)  # chunk rows -> freelist
+                s.trash_purge_all()  # archive payload -> freelist too
+                free_before = s.freelist_bytes()
+                self.assertGreater(free_before, 0)
+                before = s.db_bytes()
+                res = s.vacuum()
+                self.assertEqual(res["before"], before)
+                self.assertLessEqual(res["after"], res["before"])
+                self.assertEqual(res["freed"], res["before"] - res["after"])
+                self.assertGreater(res["freed"], 0)
+                self.assertLess(s.freelist_bytes(), free_before)
+                res2 = s.vacuum()
+                self.assertLessEqual(res2["freed"], res["freed"])
+
+    def test_check_reports_physical_health(self) -> None:
+        """v0.2.670: check() is the physical-DB diagnostic — the
+        integrity verdict, FK-violation count, and applied-vs-expected
+        schema version. A planted FK violation flips ok to False."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "c.db")
+            with Store(db) as s:
+                seed(s)
+                res = s.check()
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["integrity"], "ok")
+                self.assertEqual(res["integrity_errors"], [])
+                self.assertEqual(res["fk_violations"], 0)
+                self.assertEqual(res["schema_version"], res["expected_version"])
+                # Plant an orphan chunk through a raw connection — every
+                # production path keeps PRAGMA foreign_keys=ON, so the only
+                # way a violation can exist is outside the product's writes.
+                raw = sqlite3.connect(db)
+                try:
+                    raw.execute("PRAGMA foreign_keys = OFF")
+                    raw.execute(
+                        "INSERT INTO chunks(source_id, seq, text, context)"
+                        " VALUES(?,?,?,?)",
+                        (99999, 0, "orphan", ""),
+                    )
+                    raw.commit()
+                finally:
+                    raw.close()
+                res2 = s.check()
+                self.assertFalse(res2["ok"])
+                self.assertGreaterEqual(res2["fk_violations"], 1)
+
+    def test_check_reports_unembedded_chunks(self) -> None:
+        """v0.2.671: check() reports the logical layer — total chunks and
+        the count with no embedding (a dead vector leg the ingest-time
+        'N embedded' toast leaves undiscoverable afterwards)."""
+        with make_store() as s:
+            seed(s)
+            res = s.check()
+            self.assertGreater(res["chunks"], 0)
+            # seed() embeds nothing — every chunk is unembedded.
+            self.assertEqual(res["unembedded"], res["chunks"])
+            cur = s.conn.execute(
+                "SELECT id FROM chunks ORDER BY id LIMIT 1"
+            ).fetchone()
+            s.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=?", (b"blob", cur["id"])
+            )
+            s.conn.commit()
+            res2 = s.check()
+            self.assertEqual(res2["unembedded"], res2["chunks"] - 1)
+
+    def test_restore_corrupt_payload_is_coded(self) -> None:
+        """A hand-edited trash payload must surface as a coded error and
+        leave the archive row — never a raw JSONDecodeError traceback."""
+        with make_store() as s:
+            nb_id = seed(s)
+            s.delete_notebook(nb_id)
+            tid = s.trash_list()[0]["id"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?", ("not-json", tid)
+            )
+            s.conn.commit()
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertEqual(len(s.trash_list()), 1)
+
+    def test_source_and_note_delete_archive_and_restore(self) -> None:
+        """v0.2.667: source/note deletes archive to the same trash undo-log —
+        a deleted upload whose tmp origin is gone stays recoverable. Restore
+        keeps the source id (chunks re-fire FTS, embeddings verbatim) and
+        gives the note a fresh id (nothing references note ids)."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "cats.txt", "mem://cats", "sha-c")
+            s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+            chunk = s.conn.execute(
+                "SELECT id, embedding, embedding_norm FROM chunks WHERE source_id=?",
+                (src.id,),
+            ).fetchone()
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_source(src.id)
+            s.delete_note(nid)
+            items = s.trash_list()
+            self.assertEqual(sorted(t["kind"] for t in items), ["note", "source"])
+            by_kind = {t["kind"]: t for t in items}
+            res = s.trash_restore(by_kind["source"]["id"])
+            self.assertEqual(res["kind"], "source")
+            self.assertEqual(res["id"], src.id)
+            self.assertEqual(s.get_source(src.id).title, "cats.txt")
+            row = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk["id"],),
+            ).fetchone()
+            self.assertEqual(row["embedding"], chunk["embedding"])
+            self.assertEqual(row["embedding_norm"], chunk["embedding_norm"])
+            # INSERT re-fired the FTS triggers — searchable immediately
+            hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts"
+                " WHERE chunks_fts MATCH '猫は液'"
+            ).fetchone()["n"]
+            self.assertEqual(int(hits), 1)
+            res2 = s.trash_restore(by_kind["note"]["id"])
+            self.assertEqual(res2["kind"], "note")
+            notes = s.list_notes(nb.id)
+            self.assertEqual([n["title"] for n in notes], ["memo"])
+            self.assertEqual([n["body"] for n in notes], ["本文"])
+            self.assertEqual(s.trash_list(), [])
+
+    def test_source_restore_missing_parent_or_occupied_id_is_coded(self) -> None:
+        """v0.2.667: a source archive cannot restore into a vanished
+        notebook (NOTEBOOK_NOT_FOUND) nor over a re-occupied source id
+        (SOURCE_ALREADY_EXISTS) — never a silent merge; archive kept."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "a.txt", "mem://a", "sha-a")
+            s.add_chunks(src.id, ["テキスト"])
+            s.delete_source(src.id)
+            tid = s.trash_list()[0]["id"]
+            s.delete_notebook(nb.id)
+            # Parent gone — restore refuses NOTEBOOK_NOT_FOUND, archive kept
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(len(s.trash_list()), 2)
+            # Bring the parent back — the source id stays free (the nb
+            # archive was taken after the source delete), so refill it
+            # with a new source: the occupied id is the binding refusal.
+            nb_item = [t for t in s.trash_list() if t["kind"] == "notebook"][0]
+            s.trash_restore(nb_item["id"])
+            src2 = s.add_source(nb.id, "txt", "b.txt", "mem://b", "sha-b")
+            self.assertEqual(src2.id, src.id)
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+            self.assertEqual(len(s.trash_list()), 1)  # archive intact
+            s.trash_purge(tid)
+            self.assertEqual(s.trash_list(), [])
+
+    def test_note_restore_gets_fresh_id_never_conflicts(self) -> None:
+        """v0.2.667: note restore re-assigns the id — deleting note 5 and
+        adding a new note that reuses id 5 does not block the undo."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            nid = s.add_note(nb.id, "old", "b")
+            s.delete_note(nid)
+            nid2 = s.add_note(nb.id, "new", "b2")
+            self.assertEqual(nid2, nid)  # id reuse is the premise
+            tid = s.trash_list()[0]["id"]
+            res = s.trash_restore(tid)
+            self.assertEqual(res["kind"], "note")
+            self.assertNotEqual(res["id"], nid)
+            titles = sorted(n["title"] for n in s.list_notes(nb.id))
+            self.assertEqual(titles, ["new", "old"])
+
+    def test_trash_unknown_kind_is_coded(self) -> None:
+        """v0.2.667: a hand-edited/foreign payload kind must surface as
+        SYSTEM_INTERNAL_ERROR (corrupt boundary), never dispatch blindly."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            s.delete_notebook(nb.id)
+            tid = s.trash_list()[0]["id"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?",
+                ('{"kind":"mystery"}', tid),
+            )
+            s.conn.commit()
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertEqual(len(s.trash_list()), 1)
+
+    def test_cli_trash_lifecycle(self) -> None:
+        """`shoin trash list|restore` round-trips a deleted notebook —
+        CLI parity with GET /api/trash + POST /api/trash/{id}/restore."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "trash", "list"]), 0)
+        self.assertIn("ゴミ箱は空です", out.getvalue())
+        self.assertEqual(main(["--db", db, "notebook", "delete", str(nb_id)]), 0)
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "trash", "list"]), 0)
+        body = out2.getvalue()
+        self.assertIn("研究", body)
+        tid = body.split("[")[1].split("]")[0]
+        out3 = io.StringIO()
+        with redirect_stdout(out3):
+            self.assertEqual(main(["--db", db, "trash", "restore", tid]), 0)
+        self.assertIn("復元完了", out3.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.get_notebook(nb_id).name, "研究")
+
+    def test_cli_trash_empty_and_vacuum(self) -> None:
+        """v0.2.669: `trash empty` purges every archive at once and
+        `vacuum` reports reclaimed bytes — CLI parity with
+        DELETE /api/trash + POST /api/vacuum."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+            nb2 = s.create_notebook("extra")
+        self.assertEqual(main(["--db", db, "notebook", "delete", str(nb_id)]), 0)
+        self.assertEqual(
+            main(["--db", db, "notebook", "delete", str(nb2.id)]), 0
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "trash", "empty"]), 0)
+        self.assertIn("2件", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.trash_list(), [])
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "vacuum"]), 0)
+        self.assertIn("VACUUM完了", out2.getvalue())
+
+    def test_cli_check_reports_health_and_unopenable(self) -> None:
+        """v0.2.670: `shoin check` returns rc0 with integrity/FK/schema on
+        a healthy DB, and rc1 + a clean unopenable line on a corrupt file
+        — never a raw sqlite3 traceback."""
+        import io
+        import shutil
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin.cli import main
+        from shoin.store import MIGRATIONS
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "check"]), 0)
+        body = out.getvalue()
+        self.assertIn("整合性: ok", body)
+        self.assertIn("外部キー違反: 0件", body)
+        head = MIGRATIONS[-1][0]
+        self.assertIn(f"スキーマ版: {head}/{head}", body)
+        self.assertIn("チャンク: ", body)
+        self.assertIn("ベクトル未付与: ", body)
+        # v0.2.671: the reindex hint only fires when embeddings are
+        # actually configured — an embed-off install legitimately has
+        # every chunk unembedded and must not be nagged about it.
+        err2 = io.StringIO()
+        with patch.dict(os.environ, {"SHOIN_EMBED_MODEL": "m"}), \
+            redirect_stderr(err2), redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--db", db, "check"]), 0)
+        self.assertIn("reindex", err2.getvalue())
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        bad = os.path.join(d, "bad.db")
+        Path(bad).write_bytes(b"not a sqlite file " * 100)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(main(["--db", bad, "check"]), 1)
+        self.assertIn("DBを開けません", err.getvalue())
+
+
+class TestNbExportImport(unittest.TestCase):
+    """Portable export/import (v0.2.655): `export --format tree` emits the
+    trash undo-log envelope verbatim; `import` re-inserts the tree under
+    fresh ids (file ids mean nothing in the target DB), decodes embedding
+    BLOBs back verbatim, and rewrites citation_report source_id_map through
+    the new ids — the same remap duplicate_notebook now shares (its former
+    verbatim copy left dead pointers)."""
+
+    def _tree_doc(self, store: Store, nb_id: int) -> dict[str, object]:
+        doc = store.export_notebook(nb_id)
+        # A document that cannot survive json.dumps is not an export.
+        return json.loads(json.dumps(doc, ensure_ascii=False))
+
+    def _seed_with_report(self, store: Store) -> tuple[int, list[int]]:
+        nb_id = seed(store)
+        src_ids = [int(s.id) for s in store.sources_for_notebook(nb_id)]
+        # S3 -> 999 is already a dead pointer in the source notebook:
+        # import must drop it rather than carry a dangling id.
+        report = json.dumps(
+            {"source_id_map": {"S1": src_ids[0], "S2": src_ids[1], "S3": 999}}
+        )
+        store.add_message(nb_id, "assistant", "答え [S1]", report)
+        store.add_studio_output(nb_id, "briefing", "概要", report)
+        store.add_note(nb_id, "memo", "本文メモ")
+        store.set_embedding(store.chunks_for_source(src_ids[0])[0].id, [0.1, 0.2])
+        return nb_id, src_ids
+
+    def test_export_document_shape(self) -> None:
+        with make_store() as s:
+            nb_id, _ = self._seed_with_report(s)
+            doc = self._tree_doc(s, nb_id)
+            self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+            self.assertEqual(
+                set(doc),
+                {"format", "notebook", "sources", "chunks", "notes",
+                 "studio_outputs", "messages"},
+            )
+            self.assertEqual(doc["notebook"]["name"], "研究")
+            self.assertEqual(len(doc["sources"]), 2)
+            # blob-encoded for JSON transport
+            with_blobs = [c for c in doc["chunks"] if c["embedding"] is not None]
+            self.assertEqual(len(with_blobs), 1)
+            self.assertIsInstance(with_blobs[0]["embedding"]["$blob"], str)
+
+    def test_import_round_trip_under_fresh_ids(self) -> None:
+        with make_store() as s:
+            nb_id, src_ids = self._seed_with_report(s)
+            doc = self._tree_doc(s, nb_id)
+            imp = s.import_notebook(doc)
+            self.assertNotEqual(imp.id, nb_id)
+            self.assertEqual(s.counts(imp.id), s.counts(nb_id))
+            imp_src_ids = sorted(
+                int(x.id) for x in s.sources_for_notebook(imp.id)
+            )
+            self.assertEqual(len(imp_src_ids), 2)
+            self.assertNotIn(imp_src_ids[0], src_ids)
+            # chunks re-fired the FTS triggers — searchable immediately
+            self.assertTrue(bm25_search(s, imp.id, "猫は液", 5))
+            # embedding BLOB decoded back verbatim (get_chunk unpacks it;
+            # float32 storage — compare at float32 precision)
+            imp_chunk = s.chunks_for_source(imp_src_ids[0])[0]
+            self.assertEqual(len(imp_chunk.embedding or []), 2)
+            self.assertAlmostEqual((imp_chunk.embedding or [0])[0], 0.1, places=6)
+            self.assertAlmostEqual((imp_chunk.embedding or [0])[1], 0.2, places=6)
+            # citation_report source_id_map rewritten through the new ids
+            row = s.list_messages(imp.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": imp_src_ids[0], "S2": imp_src_ids[1]})
+            row_o = s.latest_studio_outputs(imp.id)[0]
+            sim_o = json.loads(row_o["citation_report"])["source_id_map"]
+            self.assertEqual(sim_o, {"S1": imp_src_ids[0], "S2": imp_src_ids[1]})
+            self.assertEqual(len(s.list_notes(imp.id)), 1)
+
+    def test_import_rejects_malformed_documents(self) -> None:
+        with make_store() as s:
+            nb_id, src_ids = self._seed_with_report(s)
+            good = self._tree_doc(s, nb_id)
+            cases: list[object] = [
+                "not-a-dict",
+                {"notebook": {"name": "x"}},  # missing sections
+                {**good, "notebook": {"name": 7}},  # non-str name
+                {**good, "chunks": [
+                    {**good["chunks"][0], "source_id": 424242}
+                ]},  # dangling source ref
+                {**good, "chunks": [
+                    {**good["chunks"][0], "embedding": {"nope": 1}}
+                ]},  # no $blob key
+                {**good, "chunks": [
+                    {**good["chunks"][0],
+                     "embedding": {"$blob": "%%%not-b64"}}
+                ]},  # undecodable blob
+            ]
+            for bad in cases:
+                with self.subTest(bad=repr(bad)[:60]):
+                    with self.assertRaises(StoreError) as cm:
+                        s.import_notebook(bad)
+                    self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+            # nothing leaked in: only the seeded notebook exists
+            self.assertEqual(len(s.list_notebooks()), 1)
+
+    def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
+        """v0.2.664: every chunk-write transaction ends with the FTS5
+        'optimize' merge — each INSERT otherwise leaves an unmerged
+        index segment automerge only chips at incrementally. The trace
+        callback records issued SQL, so the pin checks the wire."""
+        calls: list[str] = []
+        with make_store() as s:
+            s.conn.set_trace_callback(calls.append)
+            try:
+                nb = s.create_notebook("n")
+                src = s.add_source(nb.id, "txt", "t", "o", "h")
+                s.add_chunks(src.id, ["alpha beta gamma"])          # 1
+                s.replace_chunks_for_source(src.id, ["delta eps"])  # 2
+                s.duplicate_notebook(nb.id)                         # 3
+                doc = s.export_notebook(nb.id)
+                s.import_notebook(doc)                              # 4
+                nb2 = s.create_notebook("n2")
+                src2 = s.add_source(nb2.id, "txt", "t2", "o2", "h2")
+                s.add_chunks(src2.id, ["eta theta iota"])           # 5
+                # trash_restore: archive then re-insert under old ids
+                # (before merge — merge deletes the source notebook)
+                s.delete_notebook(nb.id)
+                trash_id = int(s.conn.execute(
+                    "SELECT id FROM trash_items ORDER BY id DESC LIMIT 1"
+                ).fetchone()["id"])
+                s.trash_restore(trash_id)                           # 6
+                s.merge_notebooks(nb2.id, nb.id)                    # 7
+            finally:
+                s.conn.set_trace_callback(None)
+        n_opt = sum(1 for q in calls if "VALUES('optimize')" in q)
+        self.assertGreaterEqual(
+            n_opt, 7,
+            "add_chunks/replace/duplicate/import/merge/restore must each "
+            f"end their TX with the optimize merge — saw {n_opt}",
+        )
+        # ...and the index still answers after the merges
+        with make_store() as s2:
+            nb3 = s2.create_notebook("n3")
+            src3 = s2.add_source(nb3.id, "txt", "t3", "o3", "h3")
+            s2.add_chunks(src3.id, ["検索できること"])
+            self.assertTrue(bm25_search(s2, nb3.id, "検索", 5))
+
+    def test_duplicate_remapped_source_id_map(self) -> None:
+        """Regression pin for the drift this version fixed: a verbatim copy
+        of citation_report would point S# at the ORIGINAL source ids."""
+        with make_store() as s:
+            nb_id, _ = self._seed_with_report(s)
+            dup = s.duplicate_notebook(nb_id)
+            dup_src_ids = sorted(
+                int(x.id) for x in s.sources_for_notebook(dup.id)
+            )
+            row = s.list_messages(dup.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": dup_src_ids[0], "S2": dup_src_ids[1]})
+
+    def test_cli_export_tree_import_round_trip(self) -> None:
+        """`shoin export <nb> --format tree` | `shoin import <file>` —
+        REQ-103 parity with GET .../export?format=tree + POST /import."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "export", str(nb_id), "--format", "tree"]), 0
+            )
+        doc = json.loads(out.getvalue())
+        self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+        f = os.path.join(tempfile.mkdtemp(), "nb.json")
+        Path(f).write_text(json.dumps(doc), encoding="utf-8")
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "import", f]), 0)
+        self.assertIn("インポート完了", out2.getvalue())
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 2)
+
+    def _tmpdb_cli(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
+
+
+class TestNbMerge(unittest.TestCase):
+    """merge_notebooks (v0.2.656): folds one notebook's tree into another
+    under fresh ids — the merge half of ledger #23 duplicate_notebook
+    left open. The emptied source is archived to trash by
+    delete_notebook in the same delete TX, so a merge is recoverable;
+    copy commits before the delete begins, so a crash can duplicate
+    content but never lose it."""
+
+    def test_merge_folds_children_and_trashes_source(self) -> None:
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            t_src = s.add_source(target.id, "txt", "t-doc", "mem://t", "sha-t")
+            s.add_chunks(t_src.id, ["対象側の本文のみ存在。"])
+            src_nb = seed(s)
+            src_ids = [int(x.id) for x in s.sources_for_notebook(src_nb)]
+            report = json.dumps({"source_id_map": {"S1": src_ids[0]}})
+            s.add_message(src_nb, "assistant", "答え [S1]", report)
+            s.add_note(src_nb, "memo", "本文メモ")
+            s.add_studio_output(src_nb, "briefing", "概要", report)
+
+            merged = s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(merged.id, target.id)
+            titles = sorted(
+                x.title for x in s.sources_for_notebook(target.id)
+            )
+            self.assertEqual(titles, ["doc-en", "doc-ja", "t-doc"])
+            # FTS re-indexed on INSERT — merged content searchable at once.
+            self.assertTrue(bm25_search(s, target.id, "猫は液", 5))
+            # ... and the target's own content survived alongside it.
+            self.assertTrue(bm25_search(s, target.id, "対象側", 5))
+            # source_id_map now names the merged rows' FRESH ids.
+            fresh = {
+                x.title: int(x.id) for x in s.sources_for_notebook(target.id)
+            }
+            row = s.list_messages(target.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": fresh["doc-ja"]})
+            self.assertEqual(len(s.list_notes(target.id)), 1)
+            self.assertTrue(s.latest_studio_outputs(target.id))
+            # Source nb is gone — and archived, not lost.
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(src_nb)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            trash = s.trash_list()
+            self.assertEqual(len(trash), 1)
+            self.assertEqual(trash[0]["notebook_id"], src_nb)
+
+    def test_merge_dedupes_identical_sources(self) -> None:
+        """v0.2.679 (product-review #63): merging two notebooks sharing a
+        source sha256 used to die on a raw UNIQUE IntegrityError (HTTP
+        500, partial write rolled back). Same sha means identical text —
+        identical deterministic chunks — so the merge keeps the existing
+        row, remaps the incoming tree onto it via id_map, and skips its
+        chunk INSERTs; reports still resolve to the kept row."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            kept = s.add_source(target.id, "txt", "doc-ja-copy", "mem://ja2", "sha-ja")
+            s.add_chunks(kept.id, ["取込先の既存チャンク"])
+            src_nb = seed(s)
+            src_ids = {
+                x.title: int(x.id) for x in s.sources_for_notebook(src_nb)
+            }
+            report = json.dumps({"source_id_map": {"S1": src_ids["doc-ja"]}})
+            s.add_message(src_nb, "assistant", "答え [S1]", report)
+            s.add_note(src_nb, "memo", "本文メモ")
+
+            s.merge_notebooks(target.id, src_nb)
+
+            titles = sorted(
+                x.title for x in s.sources_for_notebook(target.id)
+            )
+            self.assertEqual(titles, ["doc-en", "doc-ja-copy"])
+            counts = s.counts(target.id)
+            # kept source (1 chunk) + doc-en (2 chunks); doc-ja's 3 chunks
+            # were content-identical and skipped.
+            self.assertEqual(counts["sources"], 2)
+            self.assertEqual(counts["chunks"], 3)
+            self.assertEqual(
+                s.conn.execute(
+                    "SELECT count(*) FROM chunks WHERE source_id=?",
+                    (kept.id,),
+                ).fetchone()[0],
+                1,
+                "deduped source must not gain the incoming chunks",
+            )
+            # citation_report remapped the deduped source onto the KEPT id.
+            row = s.list_messages(target.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": kept.id})
+            # notes still flow across the merge.
+            self.assertEqual(len(s.list_notes(target.id)), 1)
+
+    def test_import_dedupes_duplicate_sha_in_document(self) -> None:
+        """v0.2.679 (product-review #63): a crafted export listing the same
+        source sha256 twice also hit the UNIQUE constraint — the dedupe
+        pass treats in-document duplicates the same way (second source
+        folds onto the first; its chunks are skipped)."""
+        with make_store() as s:
+            src_nb = seed(s)
+            doc = s._notebook_tree_dict(src_nb)
+            # Clone doc-ja's source row (new id, same sha) + one chunk.
+            dup_src = dict(doc["sources"][0])
+            dup_src["id"] = "dup-id"
+            doc["sources"].append(dup_src)
+            dup_chunk = dict(doc["chunks"][0])
+            dup_chunk["source_id"] = "dup-id"
+            doc["chunks"].append(dup_chunk)
+
+            nb = s.import_notebook(doc)
+            counts = s.counts(nb.id)
+            self.assertEqual(counts["sources"], 2)
+            self.assertEqual(
+                counts["chunks"],
+                len(doc["chunks"]) - 1,
+                "the in-document duplicate contributes zero chunks",
+            )
+
+    def test_merge_rejects_self_and_missing(self) -> None:
+        with make_store() as s:
+            a = s.create_notebook("A")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(a.id, a.id)
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            b = s.create_notebook("B")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(999, b.id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(b.id, 999)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            # A failed merge writes nothing: both notebooks still live,
+            # nothing was archived.
+            self.assertEqual(len(s.list_notebooks()), 2)
+            self.assertEqual(s.trash_list(), [])
+
+    def test_cli_notebook_merge(self) -> None:
+        """`shoin notebook merge <target> <source>` — REQ-103 parity with
+        POST /api/notebooks/{id}/merge."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            t = s.create_notebook("A")
+            src = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(
+                    ["--db", db, "notebook", "merge", str(t.id), str(src)]
+                ),
+                0,
+            )
+        self.assertIn("統合完了", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 1)
+            self.assertEqual(len(s.trash_list()), 1)
+
+    def _tmpdb_cli(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
+
+
+class TestSourceWeight(unittest.TestCase):
+    """v0.2.657: per-source retrieval weight (product-review #19)."""
+
+    def test_weight_defaults_persists_and_validates(self) -> None:
+        from shoin.config import SOURCE_WEIGHT_MAX
+
+        store = make_store()
+        nb_id = seed(store)
+        src = store.sources_for_notebook(nb_id)
+        # Migration 11's NOT NULL DEFAULT keeps every pre-existing row neutral.
+        self.assertEqual([s.weight for s in src], [1.0, 1.0])
+        store.update_source_weight(src[0].id, 3.5)
+        self.assertEqual(store.get_source(src[0].id).weight, 3.5)
+        self.assertEqual(store.get_source(src[1].id).weight, 1.0)
+        # Boundary values are accepted; the out-of-range, non-finite, and
+        # wrong-type inputs all map to the coded validator error.
+        store.update_source_weight(src[0].id, 0.0)
+        store.update_source_weight(src[0].id, SOURCE_WEIGHT_MAX)
+        for bad in (-0.1, SOURCE_WEIGHT_MAX + 0.1, float("nan"), float("inf"), "2", True):
+            with self.assertRaises(StoreError) as cm:
+                store.update_source_weight(src[0].id, bad)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_weight(999, 2.0)
+        self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_weight_shifts_retrieval_order(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("w")
+        # A dense and a sparse match: BM25 density ranks `strong` first when
+        # every source is neutral — the baseline the weight pass must move.
+        strong = store.add_source(nb.id, "txt", "strong", "mem://s", "ss")
+        weak = store.add_source(nb.id, "txt", "weak", "mem://w", "sw")
+        store.add_chunks(strong.id, ["固有語XYZ 固有語XYZ 固有語XYZ 固有語XYZ"])
+        store.add_chunks(weak.id, ["固有語XYZ"])
+        base = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(len(base), 2)
+        self.assertEqual(base[0].source_id, strong.id)
+        # Promotion: weight-8 lifts the weakly-matching source above the
+        # dense unweighted one (pre-normalization application — a weight
+        # must be able to rescue a low-ranked hit, not just sink high ones).
+        store.update_source_weight(weak.id, 8.0)
+        boosted = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(boosted[0].source_id, weak.id)
+        self.assertEqual(boosted[-1].source_id, strong.id)
+        # Demotion: weight-0 from the other direction, same ordering.
+        store.update_source_weight(weak.id, 1.0)
+        store.update_source_weight(strong.id, 0.0)
+        demoted = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(demoted[0].source_id, weak.id)
+        # Cross-notebook (None scope) and multi-query paths apply the same
+        # weight pass — a floor-weighted source must never leapfrog.
+        cross = retrieve(store, None, "固有語XYZ")
+        self.assertEqual(cross[0].source_id, weak.id)
+        multi = retrieve_multi(store, nb.id, ["固有語XYZ"])
+        self.assertEqual(multi[0].source_id, weak.id)
+
+    def test_weight_survives_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("w")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        store.add_chunks(a.id, ["テキスト"])
+        store.update_source_weight(a.id, 2.0)
+        # duplicate preserves the weight.
+        dup = store.duplicate_notebook(nb.id, "w2")
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(dup.id)], [2.0]
+        )
+        # export -> import preserves it (the tree document carries weight).
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(imp.id)], [2.0]
+        )
+        # delete -> trash restore preserves it (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(nb.id)], [2.0]
+        )
+        # A pre-weight-column export (key absent) imports neutral.
+        for s in doc["sources"]:
+            del s["weight"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(imp2.id)], [1.0]
+        )
+        # A non-numeric weight in a foreign document is a coded refusal.
+        doc["sources"][0]["weight"] = "heavy"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_cli_source_weight(self) -> None:
+        """`shoin source weight <id> <w>` — REQ-103 parity with PATCH."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+            sid = s.sources_for_notebook(nb_id)[0].id
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "source", "weight", str(sid), "2.5"]), 0
+            )
+        self.assertIn("weight=2.5", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.get_source(sid).weight, 2.5)
+        # Out-of-range argparse float (nan slips type=float) is the coded
+        # StoreError path — stderr err.prefix + exit 1, never a traceback.
+        self.assertEqual(
+            main(["--db", db, "source", "weight", str(sid), "nan"]), 1
+        )
+        self.assertEqual(
+            main(["--db", db, "source", "weight", "999", "2"]), 1
+        )
+
+class TestSourceMeta(unittest.TestCase):
+    """v0.2.658: per-source descriptive metadata (product-review #24).
+
+    Weakness #24: title/origin/sha256 describe provenance, but nothing
+    carries the citation-descriptive fields (author, year) that BibTeX/RIS
+    exports need — every exported reference rendered anonymous and dated
+    by ingest day instead of publication. The `meta` JSON column holds the
+    freeform object; the store owns whole-object REPLACE semantics and the
+    serialized-byte bound; exports read `author`/`year` as the canonical
+    citation keys.
+    """
+
+    def test_meta_defaults_persists_and_validates(self) -> None:
+        store = make_store()
+        nb_id = seed(store)
+        srcs = store.sources_for_notebook(nb_id)
+        # Migration 12's '{}' default keeps every pre-existing row
+        # metadata-free — the column addition alone changes nothing visible.
+        self.assertEqual([s.meta for s in srcs], [{}, {}])
+        store.update_source_meta(srcs[0].id, {"author": "山田", "year": "2024"})
+        self.assertEqual(
+            store.get_source(srcs[0].id).meta, {"author": "山田", "year": "2024"}
+        )
+        self.assertEqual(store.get_source(srcs[1].id).meta, {})
+        # Whole-object REPLACE: a second write drops keys the first set.
+        store.update_source_meta(srcs[0].id, {"year": "2025"})
+        self.assertEqual(store.get_source(srcs[0].id).meta, {"year": "2025"})
+        # Non-dict, oversized, and missing-row inputs are all the coded path.
+        for bad in (["a"], "str", 7, None):
+            with self.assertRaises(StoreError) as cm:
+                store.update_source_meta(srcs[0].id, bad)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_meta(srcs[0].id, {"k": "x" * 5000})
+        self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_meta(999, {})
+        self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_meta_serialization_is_canonical(self) -> None:
+        # Logical equality must be byte equality — otherwise trash/export
+        # payloads churn on key order and duplicate detection breaks.
+        from shoin.store import _meta_dump
+
+        self.assertEqual(
+            _meta_dump({"b": 1, "a": 2}), _meta_dump({"a": 2, "b": 1})
+        )
+        self.assertEqual(_meta_dump({"a": "ä"}), '{"a":"ä"}')
+
+    def test_meta_survives_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        store.add_chunks(a.id, ["テキスト"])
+        store.update_source_meta(a.id, {"author": "著者", "year": "2023"})
+        # duplicate preserves meta.
+        dup = store.duplicate_notebook(nb.id, "m2")
+        self.assertEqual(
+            store.sources_for_notebook(dup.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # export -> import preserves meta.
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(
+            store.sources_for_notebook(imp.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # delete -> trash restore preserves meta (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(
+            store.sources_for_notebook(nb.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # A pre-meta-column export (key absent) imports metadata-free.
+        for s in doc["sources"]:
+            del s["meta"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(store.sources_for_notebook(imp2.id)[0].meta, {})
+        # A non-object meta in a foreign document is a coded refusal.
+        doc["sources"][0]["meta"] = "freeform"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_meta_feeds_bibtex_and_ris(self) -> None:
+        from shoin.export import export_bibtex, export_ris
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "paper", "mem://a", "sa")
+        # No meta: exports emit no author line and year falls back to
+        # added_at's leading digits (pre-existing contract, unchanged).
+        bib = export_bibtex(store, nb.id)
+        self.assertNotIn("author =", bib)
+        ris = export_ris(store, nb.id)
+        self.assertNotIn("AU  -", ris)
+        # meta.author/meta.year are the citation keys reference managers
+        # read — meta.year must win over the ingest timestamp.
+        store.update_source_meta(a.id, {"author": "Doe, J and Roe, A", "year": "2019"})
+        bib = export_bibtex(store, nb.id)
+        self.assertIn("author = {Doe, J and Roe, A}", bib)
+        self.assertIn("year = {2019}", bib)
+        ris = export_ris(store, nb.id)
+        self.assertIn("AU  - Doe, J", ris)
+        self.assertIn("AU  - Roe, A", ris)
+        self.assertIn("PY  - 2019", ris)
+        # A garbage meta.year falls back to added_at, not a bogus PY/year.
+        store.update_source_meta(a.id, {"year": "n.d."})
+        bib2 = export_bibtex(store, nb.id)
+        self.assertNotIn("year = {n.d.}", bib2)
+
+    def test_meta_patch_touches_notebook(self) -> None:
+        # Meta feeds export output — content-bearing like rename, so the
+        # notebook's updated_at must move (unlike weight, which is a
+        # retrieval preference only).
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        before = store.get_notebook(nb.id).updated_at
+        store.update_source_meta(a.id, {"author": "x"})
+        self.assertNotEqual(store.get_notebook(nb.id).updated_at, before)
+
+    def test_cli_source_meta(self) -> None:
+        """`shoin source meta` — REQ-103 parity with PATCH meta."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+            sid = s.sources_for_notebook(nb_id)[0].id
+        # Merge-style write via key=value pairs.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "source", "meta", str(sid),
+                      "author=山田", "year=2024"]), 0
+            )
+        with Store(db) as s:
+            self.assertEqual(
+                s.get_source(sid).meta, {"author": "山田", "year": "2024"}
+            )
+        # Bare call prints the current object.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "source", "meta", str(sid)]), 0)
+        import json as _j
+        self.assertEqual(
+            _j.loads(out.getvalue()), {"author": "山田", "year": "2024"}
+        )
+        # --clear resets to the empty object.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(["--db", db, "source", "meta", str(sid), "--clear"]), 0
+            )
+        with Store(db) as s:
+            self.assertEqual(s.get_source(sid).meta, {})
+        # A malformed pair and a dead id are both the coded StoreError
+        # path — stderr err.prefix + exit 1, never a traceback.
+        self.assertEqual(
+            main(["--db", db, "source", "meta", str(sid), "noeq"]), 1
+        )
+        self.assertEqual(
+            main(["--db", db, "source", "meta", "999", "a=b"]), 1
+        )
+
+
+class TestNotebookSettings(unittest.TestCase):
+    """v0.2.659: per-notebook retrieval overrides (product-review #20).
+
+    Weakness #20: TOP_K and the SOURCE_TEXT_TOKENS prompt budget were
+    process-global constants — a research notebook and a quick-facts
+    notebook could not differ. `notebooks.settings` carries a whitelisted
+    override object (top_k, source_text_tokens); retrieval resolves
+    k=None through it, and ask() hands the budget to build_context.
+    """
+
+    def test_settings_defaults_persist_and_validate(self) -> None:
+        store = make_store()
+        nb_id = seed(store)
+        # Migration 13's '{}' default: every pre-existing notebook reads
+        # no-override — global constants still decide everything.
+        self.assertEqual(store.get_notebook(nb_id).settings, {})
+        self.assertEqual(store.notebook_settings(nb_id), {})
+        store.update_notebook_settings(
+            nb_id, {"top_k": 3, "source_text_tokens": 256}
+        )
+        self.assertEqual(
+            store.get_notebook(nb_id).settings,
+            {"top_k": 3, "source_text_tokens": 256},
+        )
+        # Whole-object REPLACE: a second write drops keys the first set.
+        store.update_notebook_settings(nb_id, {"top_k": 2})
+        self.assertEqual(store.get_notebook(nb_id).settings, {"top_k": 2})
+        # Whitelist: an unknown key is a coded 400, not a silently inert
+        # setting. Same for non-dict, non-int, bool, and out-of-bounds.
+        for bad_val in (
+            {"nope": 1},
+            {"top_k": "3"},
+            {"top_k": True},
+            {"top_k": 0},
+            {"top_k": 51},
+            {"source_text_tokens": 63},
+            {"source_text_tokens": 2401},
+            ["top_k"],
+            7,
+            None,
+        ):
+            with self.assertRaises(StoreError) as cm:
+                store.update_notebook_settings(nb_id, bad_val)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_notebook_settings(999, {})
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+        # A dead notebook's settings READ is {} (never a 404): retrieval
+        # paths resolve k without manufacturing their own not-found path.
+        self.assertEqual(store.notebook_settings(999), {})
+
+    def test_settings_survive_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("m")
+        store.update_notebook_settings(nb.id, {"top_k": 5})
+        # duplicate preserves settings.
+        dup = store.duplicate_notebook(nb.id, "m2")
+        self.assertEqual(store.get_notebook(dup.id).settings, {"top_k": 5})
+        # export -> import preserves settings.
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp.id).settings, {"top_k": 5})
+        # delete -> trash restore preserves settings (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(store.get_notebook(nb.id).settings, {"top_k": 5})
+        # A pre-settings-column export (key absent) imports override-free.
+        del doc["notebook"]["settings"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp2.id).settings, {})
+        # A non-object settings in a foreign document is a coded refusal.
+        doc["notebook"]["settings"] = "freeform"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_top_k_setting_drives_retrieval(self) -> None:
+        from shoin.qa import retrieve_for_question
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        s = store.add_source(nb.id, "txt", "doc", "mem://d", "sd")
+        store.add_chunks(
+            s.id, ["りんごは赤い。", "りんごは甘い。", "りんごの木は大きい。"]
+        )
+        store.update_notebook_settings(nb.id, {"top_k": 1})
+        # k=None hands the decision to the notebook: its top_k=1 binds.
+        hits = retrieve_for_question(store, object(), nb.id, "りんご", None)
+        self.assertEqual(len(hits), 1)
+        # An explicit k wins over the notebook setting.
+        hits = retrieve_for_question(store, object(), nb.id, "りんご", None, k=3)
+        self.assertEqual(len(hits), 3)
+        # Cross-notebook retrieval (nb_id=None) has no settings owner —
+        # k=None there is just the TOP_K global default.
+        store.update_notebook_settings(nb.id, {"top_k": 1})
+        hits = retrieve_for_question(store, object(), None, "りんご", None)
+        self.assertEqual(len(hits), 3)
+
+    def test_source_text_tokens_bounds_ask_prompt(self) -> None:
+        from shoin.qa import ask
+
+        class _CapLLM:
+            embedding_model = ""
+
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, str]]] = []
+
+            def chat(self, messages, temperature=0.2):
+                self.calls.append(messages)
+                return "答[S1]"
+
+            def embed_one(self, text):
+                raise LLMError("SYSTEM_EMBED_DISABLED", "no embed")
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        s = store.add_source(nb.id, "txt", "doc", "mem://d", "sd")
+        store.add_chunks(s.id, ["テスト。" * 2000])
+        llm = _CapLLM()
+        ask(store, llm, nb.id, "テストとは？")
+        default_len = len(llm.calls[-1][-1]["content"])
+        store.update_notebook_settings(nb.id, {"source_text_tokens": 64})
+        ask(store, llm, nb.id, "テストとは？")
+        small_len = len(llm.calls[-1][-1]["content"])
+        # The notebook budget — not the global 1000-token one — bound the
+        # excerpts handed to the model.
+        self.assertGreater(default_len - small_len, 800)
+
+    def test_settings_update_touches_notebook(self) -> None:
+        # Settings change generated output (retrieval depth, prompt
+        # budget) — content-bearing like rename, not a retrieval-only
+        # preference like weight. updated_at must move.
+        store = make_store()
+        nb = store.create_notebook("m")
+        before = store.get_notebook(nb.id).updated_at
+        store.update_notebook_settings(nb.id, {"top_k": 2})
+        self.assertNotEqual(store.get_notebook(nb.id).updated_at, before)
+
+    def test_cli_notebook_settings(self) -> None:
+        """`shoin notebook settings` — REQ-103 parity with PATCH settings."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+        # Merge-style write via key=value pairs.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(
+                    [
+                        "--db", db, "notebook", "settings", str(nb_id),
+                        "top_k=3", "source_text_tokens=512",
+                    ]
+                ),
+                0,
+            )
+        with Store(db) as s:
+            self.assertEqual(
+                s.get_notebook(nb_id).settings,
+                {"top_k": 3, "source_text_tokens": 512},
+            )
+        # No pairs: prints the current object.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "notebook", "settings", str(nb_id)]), 0
+            )
+        self.assertEqual(
+            json.loads(out.getvalue()),
+            {"top_k": 3, "source_text_tokens": 512},
+        )
+        # --clear resets to the empty object.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(["--db", db, "notebook", "settings", str(nb_id), "--clear"]),
+                0,
+            )
+        with Store(db) as s:
+            self.assertEqual(s.get_notebook(nb_id).settings, {})
+        # Non-int values, unknown keys, malformed pairs, dead ids — all the
+        # coded StoreError path (stderr err.prefix + exit 1).
+        for extra in (["top_k=x"], ["nope=1"], ["noeq"]):
+            self.assertEqual(
+                main(
+                    ["--db", db, "notebook", "settings", str(nb_id), *extra]
+                ),
+                1,
+            )
+        self.assertEqual(
+            main(["--db", db, "notebook", "settings", "999", "top_k=2"]), 1
+        )

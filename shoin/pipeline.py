@@ -7,7 +7,9 @@ retrieval (degradation is a first-class mode, see spec REQ-004/008).
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .chunk import _MAX_CONTEXT_CHARS, split_text_with_context
 from .config import (
@@ -20,6 +22,7 @@ from .config import (
 )
 from .ingest import IngestError, extract_file, extract_url
 from .llm import LLMError
+from .log import emit
 from .qa import ChatBackend
 from .store import Source, Store, StoreError
 
@@ -203,36 +206,68 @@ def index_source(
     path), so the source row is committed with the correct title in a single
     transaction — no second update_source_title commit needed.
     """
-    if target.startswith(("http://", "https://")):
-        extracted = extract_url(target)
-    else:
-        extracted = extract_file(target)
-    # Guard before add_source so that zero-text documents don't leave an orphaned
-    # source row (no chunks → permanently invisible to all retrieval queries).
-    pairs = split_text_with_context(
-        extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
-    )
-    contexts = [c for c, _ in pairs]
-    texts = [t for _, t in pairs]
-    if not texts:
-        raise IngestError("INGEST_EMPTY", "no text content could be extracted from source")
-    # spec.md STRIDE DoS control: cap total chunks per notebook. Checked before
-    # add_source so an over-limit ingest never commits an orphaned source row.
-    existing_chunks = store.counts(notebook_id)["chunks"]
-    if existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
-        raise IngestError(
-            "INGEST_NOTEBOOK_FULL",
-            f"notebook chunk limit exceeded: {existing_chunks} existing + {len(texts)} new"
-            f" > {MAX_CHUNKS_PER_NOTEBOOK}",
+    t0 = time.monotonic()
+    try:
+        if target.startswith(("http://", "https://")):
+            extracted = extract_url(target)
+        else:
+            extracted = extract_file(target)
+        # Guard before add_source so that zero-text documents don't leave an
+        # orphaned source row (no chunks → permanently invisible to all
+        # retrieval queries).
+        pairs = split_text_with_context(
+            extracted.text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
         )
-    title_used = title or extracted.title
-    source = store.add_source(
-        notebook_id, extracted.kind, title_used, extracted.origin, extracted.sha256
+        contexts = [c for c, _ in pairs]
+        texts = [t for _, t in pairs]
+        if not texts:
+            raise IngestError(
+                "INGEST_EMPTY", "no text content could be extracted from source"
+            )
+        # spec.md STRIDE DoS control: cap total chunks per notebook. Checked
+        # before add_source so an over-limit ingest never commits an orphaned
+        # source row.
+        existing_chunks = store.counts(notebook_id)["chunks"]
+        if existing_chunks + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+            raise IngestError(
+                "INGEST_NOTEBOOK_FULL",
+                f"notebook chunk limit exceeded: {existing_chunks} existing +"
+                f" {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
+            )
+        title_used = title or extracted.title
+        source = store.add_source(
+            notebook_id, extracted.kind, title_used, extracted.origin, extracted.sha256
+        )
+        full_contexts = [_chunk_context(source.title, c) for c in contexts]
+        chunk_ids = store.add_chunks(source.id, texts, full_contexts)
+        embed_texts = [
+            _embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)
+        ]
+        n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+    except Exception:
+        # Catch-all by contract, not by accident: every ingest/index failure —
+        # coded or not — is a real usage failure worth one counter tick, then
+        # the original exception propagates unchanged.
+        store.bump_metrics({"index.fail": 1.0})
+        raise
+    ms = round((time.monotonic() - t0) * 1000)
+    store.bump_metrics(
+        {
+            "index.ok": 1.0,
+            "index.ms": float(ms),
+            "index.embed_skip": float(len(chunk_ids) - n_embedded),
+        }
     )
-    full_contexts = [_chunk_context(source.title, c) for c in contexts]
-    chunk_ids = store.add_chunks(source.id, texts, full_contexts)
-    embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
-    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+    emit(
+        "source_indexed",
+        nb=notebook_id,
+        id=source.id,
+        kind=extracted.kind,
+        chunks=len(chunk_ids),
+        embedded=n_embedded,
+        pages_failed=extracted.pages_failed,
+        ms=ms,
+    )
     return IndexResult(
         source, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
     )
@@ -381,6 +416,56 @@ def refresh_source(
     return IndexResult(
         updated_src, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
     )
+
+
+def source_is_refreshable(src: Source) -> bool:
+    """The GET-detail `refreshable` predicate, shared so the batch path and
+    the Web UI's ↻ button can never disagree: URL origins always qualify;
+    a file origin qualifies only while its recorded path still exists."""
+    return src.origin.startswith(("http://", "https://")) or Path(src.origin).is_file()
+
+
+def refresh_all_sources(
+    store: Store, notebook_id: int, llm: ChatBackend | None = None
+) -> list[dict[str, object]]:
+    """Refresh every refreshable source in a notebook (v0.2.648 — the batch
+    path a cron job or a one-shot UI action needs, product-review #49).
+
+    Per-source outcomes are collected, never raised mid-batch: one dead
+    origin must not stop the rest. Statuses — `refreshed` (sha changed),
+    `unchanged` (byte-identical re-read, refresh_source's no-op path),
+    `skipped` (origin no longer readable), `failed` (coded error).
+    """
+    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+    out: list[dict[str, object]] = []
+    for src in store.sources_for_notebook(notebook_id):
+        if not source_is_refreshable(src):
+            out.append({"id": src.id, "title": src.title, "status": "skipped"})
+            continue
+        before = src.sha256
+        try:
+            res = refresh_source(store, src.id, llm)
+        except (StoreError, IngestError, LLMError) as exc:
+            out.append(
+                {
+                    "id": src.id,
+                    "title": src.title,
+                    "status": "failed",
+                    "code": exc.code,
+                }
+            )
+            continue
+        item: dict[str, object] = {
+            "id": src.id,
+            "title": src.title,
+            "status": "unchanged" if res.source.sha256 == before else "refreshed",
+            "n_chunks": res.n_chunks,
+            "n_embedded": res.n_embedded,
+        }
+        if res.pages_failed:
+            item["pages_failed"] = res.pages_failed
+        out.append(item)
+    return out
 
 
 def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[int, int]:

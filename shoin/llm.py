@@ -9,12 +9,23 @@ from __future__ import annotations
 
 import http.client
 import json
+import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from .config import embed_model, llm_model, llm_url
+from .config import (
+    embed_model,
+    endpoint_is_external,
+    llm_api_key,
+    llm_model,
+    llm_retries,
+    llm_url,
+    redact_url_credentials,
+    url_userinfo,
+)
 
 CHAT_TIMEOUT_SEC = 180
 
@@ -36,6 +47,13 @@ HEALTH_TIMEOUT_SEC = 3
 # v0.2.85 — chat_stream() had no cap at all despite handling the identical
 # threat model _post() was fixed for in v0.2.37).
 _MAX_RESPONSE = 32 * 1024 * 1024
+
+# Retry budget for _post (v0.2.639): only transport-level codes — a refused
+# connection or socket timeout from a local runtime that is restarting or
+# still loading its model. HTTP_ERROR and BAD_RESPONSE are deterministic
+# server answers; retrying them just multiplies the wait to the same result.
+_RETRYABLE = frozenset({"SYSTEM_LLM_TIMEOUT", "SYSTEM_SERVICE_UNAVAILABLE"})
+_RETRY_BACKOFF_SEC = 0.25
 
 
 class LLMError(Exception):
@@ -99,6 +117,19 @@ class LLMClient:
         embedding_model: str | None = None,
     ) -> None:
         self.base_url = (base_url or llm_url()).rstrip("/")
+        # v0.2.674 (product-review #58): the product promise is that
+        # document text and questions never leave this machine — a
+        # non-loopback endpoint silently breaks it. Warn once at client
+        # construction (every real surface builds the client once per
+        # process) instead of inside the per-request paths.
+        if endpoint_is_external(self.base_url):
+            print(
+                "Warning: LLM endpoint is not local"
+                f" ({redact_url_credentials(self.base_url)})"
+                " — chunk text and questions"
+                " leave this machine",
+                file=sys.stderr,
+            )
         self.model = model or llm_model()
         self.embedding_model = embedding_model if embedding_model is not None else embed_model()
         # finish_reason of the most recent chat/chat_stream call ("stop",
@@ -106,10 +137,56 @@ class LLMClient:
         # "length" means the answer stopped at MAX_TOKENS — callers surface it
         # as report.truncated instead of presenting a clipped answer as whole.
         self.last_finish_reason: str | None = None
+        self.retries = llm_retries()
+        # Auth gateways (vLLM behind a proxy, hosted OpenAI-compatible) need
+        # a Bearer token; local runtimes ignore auth entirely. Attached only
+        # when configured — never logged (error paths report codes/details,
+        # not request headers).
+        key = llm_api_key()
+        self._headers = {"Content-Type": "application/json"}
+        if key:
+            self._headers["Authorization"] = f"Bearer {key}"
+        # v0.2.676 (product-review #60): each property alone looks fine —
+        # http:// is a legal scheme, an external endpoint is a legal
+        # choice (LAN LLM, hosted gateway), an API key is a legal
+        # credential — but composed they put the Bearer token on the
+        # wire in cleartext where any on-path observer can read it.
+        # Loopback http is exempt: plaintext there never leaves the
+        # machine.
+        if (
+            key
+            and self.base_url[:7].lower() == "http://"
+            and endpoint_is_external(self.base_url)
+        ):
+            print(
+                "Warning: LLM API key travels unencrypted"
+                f" ({redact_url_credentials(self.base_url)})"
+                " — use an https:// endpoint",
+                file=sys.stderr,
+            )
 
     # --- transport ---
 
     def _post(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
+        """_post_once + bounded retry on transport failures (v0.2.639).
+
+        Only idempotent callers route here (chat, embed — both unobservable
+        until return). chat_stream keeps its own no-retry path: deltas
+        already emitted are visible output a retry would duplicate.
+        available() is deliberately excluded too — the health probe exists
+        to answer "is it up" fast, not to wait for it to come up.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._post_once(path, payload, timeout)
+            except LLMError as exc:
+                if exc.code not in _RETRYABLE or attempt >= self.retries:
+                    raise
+                time.sleep(_RETRY_BACKOFF_SEC * (2**attempt))
+                attempt += 1
+
+    def _post_once(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
         try:
             # Request() itself parses base_url via urlsplit — a malformed one
             # (unclosed IPv6 bracket) raises ValueError here, not in urlopen,
@@ -117,7 +194,7 @@ class LLMClient:
             req = urllib.request.Request(
                 f"{self.base_url}{path}",
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=self._headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -130,6 +207,15 @@ class LLMClient:
                 return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             detail = exc.read(300).decode("utf-8", errors="replace")
+            # v0.2.678 (product-review #62): the error body is server-produced —
+            # a misbehaving gateway can echo the request's headers or URL back
+            # inside it, reflecting the Bearer token or URL userinfo into every
+            # surface this message reaches (SSE error frame, UI toast, stderr,
+            # log). Scrub the secrets this client sent before they propagate;
+            # host and path stay visible for diagnosis.
+            for secret in (llm_api_key(), url_userinfo(self.base_url)):
+                if secret:
+                    detail = detail.replace(secret, "***")
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
@@ -155,7 +241,8 @@ class LLMClient:
                 ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
-                f"LLM endpoint unreachable at {self.base_url}: {exc}",
+                "LLM endpoint unreachable at"
+                f" {redact_url_credentials(self.base_url)}: {exc}",
             ) from exc
 
     # --- capabilities ---
@@ -171,7 +258,9 @@ class LLMClient:
             # below already listing "ValueError: unknown URL scheme" as a case
             # it exists to catch — ADDRESS/SCHEME parsing errors happen at
             # Request() construction time, not just at urlopen() time.
-            req = urllib.request.Request(f"{self.base_url}/models")
+            req = urllib.request.Request(
+                f"{self.base_url}/models", headers=self._headers
+            )
             with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT_SEC) as resp:
                 # Check Content-Type to distinguish LLM API servers (application/json)
                 # from plain HTTP servers (text/html) that also return HTTP 200 on any
@@ -232,7 +321,7 @@ class LLMClient:
                         "max_tokens": MAX_TOKENS,
                     }
                 ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=self._headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT_SEC) as resp:
@@ -311,7 +400,8 @@ class LLMClient:
                 ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
-                f"LLM endpoint unreachable at {self.base_url}: {exc}",
+                "LLM endpoint unreachable at"
+                f" {redact_url_credentials(self.base_url)}: {exc}",
             ) from exc
 
     # --- embeddings ---
