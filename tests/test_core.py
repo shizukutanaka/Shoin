@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.670")
+        self.assertEqual(VERSION, "0.2.671")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -21738,6 +21738,26 @@ class TestTrash(unittest.TestCase):
                 self.assertFalse(res2["ok"])
                 self.assertGreaterEqual(res2["fk_violations"], 1)
 
+    def test_check_reports_unembedded_chunks(self) -> None:
+        """v0.2.671: check() reports the logical layer — total chunks and
+        the count with no embedding (a dead vector leg the ingest-time
+        'N embedded' toast leaves undiscoverable afterwards)."""
+        with make_store() as s:
+            seed(s)
+            res = s.check()
+            self.assertGreater(res["chunks"], 0)
+            # seed() embeds nothing — every chunk is unembedded.
+            self.assertEqual(res["unembedded"], res["chunks"])
+            cur = s.conn.execute(
+                "SELECT id FROM chunks ORDER BY id LIMIT 1"
+            ).fetchone()
+            s.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=?", (b"blob", cur["id"])
+            )
+            s.conn.commit()
+            res2 = s.check()
+            self.assertEqual(res2["unembedded"], res2["chunks"] - 1)
+
     def test_restore_corrupt_payload_is_coded(self) -> None:
         """A hand-edited trash payload must surface as a coded error and
         leave the archive row — never a raw JSONDecodeError traceback."""
@@ -21938,6 +21958,16 @@ class TestTrash(unittest.TestCase):
         self.assertIn("外部キー違反: 0件", body)
         head = MIGRATIONS[-1][0]
         self.assertIn(f"スキーマ版: {head}/{head}", body)
+        self.assertIn("チャンク: ", body)
+        self.assertIn("ベクトル未付与: ", body)
+        # v0.2.671: the reindex hint only fires when embeddings are
+        # actually configured — an embed-off install legitimately has
+        # every chunk unembedded and must not be nagged about it.
+        err2 = io.StringIO()
+        with patch.dict(os.environ, {"SHOIN_EMBED_MODEL": "m"}), \
+            redirect_stderr(err2), redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--db", db, "check"]), 0)
+        self.assertIn("reindex", err2.getvalue())
 
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)

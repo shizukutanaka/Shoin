@@ -1667,6 +1667,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["integrity"], "ok")
         self.assertEqual(body["fk_violations"], 0)
         self.assertEqual(body["schema_version"], body["expected_version"])
+        # v0.2.671: logical layer — seeded chunks are all unembedded.
+        self.assertEqual(body["unembedded"], body["chunks"])
 
         import threading as _th
 

@@ -112,6 +112,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "check.fk": "外部キー違反: {n}件",
         "check.schema": "スキーマ版: {n}",
         "check.unopenable": "DBを開けません: {msg}",
+        "check.chunks": "チャンク: {n}",
+        "check.unembedded": "ベクトル未付与: {n}件",
+        "check.embed_hint": (
+            "⚠ 一部チャンクにベクトルがありません——"
+            "`shoin reindex <書院ID>` で再付与できます"
+        ),
         "check.corrupt_hint": (
             "⚠ 破損の可能性——`shoin backup` やエクスポートからの"
             "復元を検討してください"
@@ -236,6 +242,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "check.fk": "Foreign-key violations: {n}",
         "check.schema": "Schema version: {n}",
         "check.unopenable": "Cannot open database: {msg}",
+        "check.chunks": "Chunks: {n}",
+        "check.unembedded": "Chunks without embeddings: {n}",
+        "check.embed_hint": (
+            "⚠ some chunks have no embedding —"
+            " run `shoin reindex <notebook-id>` to rebuild"
+        ),
         "check.corrupt_hint": (
             "⚠ possible corruption — consider restoring from"
             " `shoin backup` or an export."
@@ -1033,6 +1045,13 @@ def _cmd_check(db: str | None) -> int:
             n=f"{res['schema_version']}/{res['expected_version']}",
         )
     )
+    # v0.2.671: logical integrity — chunks with no embedding are a dead
+    # vector leg; the ingest-time toast is the only place that used to
+    # say so. The repair hint only matters when embeddings are enabled.
+    print(_t("check.chunks", n=str(res["chunks"])))
+    print(_t("check.unembedded", n=str(res["unembedded"])))
+    if res["unembedded"] and embed_model().strip():
+        print(_t("check.embed_hint"), file=sys.stderr)
     if not res["ok"]:
         print(_t("check.corrupt_hint"), file=sys.stderr)
     return 0 if res["ok"] else 1

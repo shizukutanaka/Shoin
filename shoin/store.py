@@ -2451,6 +2451,15 @@ class Store:
         row = self.conn.execute(
             "SELECT MAX(version) AS v FROM schema_migrations"
         ).fetchone()
+        # v0.2.671: logical integrity — a chunk with no embedding is a dead
+        # vector leg the ingest-time "0 embedded" toast leaves invisible
+        # afterwards. Counts only: `ok` stays the PHYSICAL verdict (an
+        # embed-disabled install legitimately has every chunk unembedded).
+        chunk_row = self.conn.execute(
+            "SELECT COUNT(*) AS n,"
+            " SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END) AS miss"
+            " FROM chunks"
+        ).fetchone()
         expected = MIGRATIONS[-1][0] if MIGRATIONS else 0
         return {
             "ok": integ_ok and not fk_rows,
@@ -2459,6 +2468,8 @@ class Store:
             "fk_violations": len(fk_rows),
             "schema_version": int(row["v"] or 0),
             "expected_version": expected,
+            "chunks": int(chunk_row["n"] or 0),
+            "unembedded": int(chunk_row["miss"] or 0),
         }
 
     def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:

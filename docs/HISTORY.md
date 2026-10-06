@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.670
+## Version History: v0.1.37 → v0.2.671
+
+### v0.2.671 — check()の論理整合性層(チャンク総数+埋込み欠落件数)
+
+- **新規短所55解消(ソクラテス監査で発掘)**: 「物理健全でも論理欠損は診断できるか」の問いで発見——取込時の "N/M embedded" toast が**一度きり**で、埋込み失敗したソースのベクトル脚が死んだまま(BM25のみで動作)後から発見する経路がゼロだった
+- **`Store.check()` に論理層追加**: `chunks`(総数) + `unembedded`(`embedding IS NULL` の件数)。`ok` は物理判定のまま——**embed無効インストールは全チャンク未付与が正常**であり、okを汚すと常時Falseになる。`GET /api/check` の応答には自動で同梱(加算フィールド=互換ポリシー上非破壊)
+- **`shoin check`**: `チャンク: N`/`ベクトル未付与: N件` を常時出力、**埋込みモデル設定時のみ**欠落があればstderrへ `shoin reindex <書院ID>` 修復ヒント——embed無効環境の警告ノイズを防ぐ
+- **非採用(記録)**: FTS索引desync検出は**外部コンテンツ表では原理的に不能**と判明——`SELECT rowid/COUNT(*) FROM chunks_fts` は索引でなくcontent表を透過的に読み、欠損行も行在する。`'integrity-check'`特殊コマンドも索引内部整合のみでコンテンツ照合しない。修復(`'rebuild'`)はあるが検出器が無いため両方不採用——証拠なき防御コードを入れない
+- **行動ピン3件**: store=seed全unembedded→1件付与で-1・CLI=2行常時+env条件ヒント・API=unembedded==chunks
 
 ### v0.2.670 — DB物理整合性の診断経路(shoin check + GET /api/check)
 
