@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.689"
+VERSION = "0.2.690"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -28,12 +28,12 @@ URL_MAX_REDIRECTS = 3
 # request thread forever — unbounded local connection leaks exhaust threads.
 REQUEST_SOCKET_SEC = 120
 MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
-# v0.2.681: bound on the `shoin import` document. The API path is capped by
-# _read_json at MAX_UPLOAD_BYTES; the CLI read the whole file/stdin into
-# memory uncapped, so a hostile or accidental giant export OOM-killed the
-# process mid-parse. 1 GiB leaves headroom over the largest legit export
-# (~50k chunks × text + base64 embedding ≈ a few hundred MB) while bounding
-# the resident set a hostile document can force.
+# v0.2.681: bound on a JSON document the CLI slurps into memory at once —
+# the `shoin import` file/stdin and (v0.2.690) the `shoin eval` cases file.
+# Both used to be read in full uncapped, so a hostile or accidental giant
+# document OOM-killed the process mid-parse. 1 GiB leaves headroom over
+# the largest legit export (~50k chunks × text + base64 embedding ≈ a few
+# hundred MB) while bounding the resident set a hostile document can force.
 MAX_IMPORT_BYTES = 1 << 30
 NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI history view)
 NB_NOTES_LIMIT = 500  # notes embedded in GET /api/notebooks/{id} (UI notes pane)

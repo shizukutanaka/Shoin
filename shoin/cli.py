@@ -859,12 +859,26 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             "VALIDATION_REQUIRED_FIELD_MISSING",
             "missing cases file (or --gen to scaffold one)",
         )
+    oversize = StoreError(
+        "VALIDATION_FIELD_FORMAT_INVALID",
+        f"cases file exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+    )
     try:
-        raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
+        # v0.2.690: same bound as _cmd_import — the cases file was read in
+        # full with no cap, so a giant file OOM-killed the process before
+        # the coded parse errors below could apply. Stat first, then bound
+        # the read for a file that grew between the two.
+        p = Path(str(args.cases)).expanduser()
+        if p.stat().st_size > MAX_IMPORT_BYTES:
+            raise oversize
+        raw_bytes = p.read_bytes()
+        if len(raw_bytes) > MAX_IMPORT_BYTES:
+            raise oversize
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # UnicodeDecodeError comes from read_text's strict UTF-8 decode — a
+        # UnicodeDecodeError comes from the strict UTF-8 decode — a
         # non-UTF-8 file is definitionally not JSON, and neither it nor
         # JSONDecodeError is an OSError, so without this both escape main()'s
         # handler chain as a raw traceback.
@@ -898,8 +912,18 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     if args.diff:
         from .evaluate import diff_reports, report_from_dict
 
+        base_oversize = StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"baseline file exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+        )
         try:
-            base_raw = json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
+            base_p = Path(str(args.diff)).expanduser()
+            if base_p.stat().st_size > MAX_IMPORT_BYTES:
+                raise base_oversize
+            base_bytes = base_p.read_bytes()
+            if len(base_bytes) > MAX_IMPORT_BYTES:
+                raise base_oversize
+            base_raw = json.loads(base_bytes.decode("utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

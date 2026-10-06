@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.689
+## Version History: v0.1.37 → v0.2.690
+
+### v0.2.690 — evalのcases/--diff baseline文書をMAX_IMPORT_BYTESで上限化
+
+- **新規短所74解消(ソクラテス問いで発掘)**: 「上限の無い全量読込は残っていないか」の残面——681で`shoin import`の文書を閉塞したが、`shoin eval`のcasesファイルと`--diff`ベースラインは依然read_text全量読込+無制限json.loadsだった。同一の「parse到達前のOOM死」欠陥クラスの残存経路(巨大cases/baselineでresident set爆走・codedエラー未到達)
+- **同一定数で3入口を制御**: `MAX_IMPORT_BYTES`(1GiB)は「CLIが一度にメモリへ読込むJSON文書の上限」の意味論へ一般化——cases文書はstat()事前検査+読取再検査の2層、baseline文書も同型(ファイルパス経路のみ・stdin面なし)。拒否は各文書名を名指ししたVALIDATION_FIELD_FORMAT_INVALID
+- **行動ピン1件**: MAX_IMPORT_BYTESをpatchで縮小しcases stat-gate・--diff baseline gateの両拒否(coded VALIDATION_FIELD_FORMAT_INVALID)を検証
+- **カタログ追随1件**: raise-inventory cli.py +4(oversize(ref)x2・base_oversize(ref)x2——coded実体1つずつを複数サイトでref-raise)
 
 ### v0.2.689 — source/note restoreの親nb同一性検証(rowid再利用誤帰属の閉塞)
 

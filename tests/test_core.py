@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.689")
+        self.assertEqual(VERSION, "0.2.690")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19916,6 +19916,10 @@ class TestResidualGuards(unittest.TestCase):
                 #     during-read, and stdin stream; the coded instance is
                 #     built once and re-raised by reference (v0.2.681)
                 "oversize(ref)", "oversize(ref)", "oversize(ref)",
+                # +4: _cmd_eval's same pair of gates on the cases file and
+                #     the --diff baseline file (v0.2.690)
+                "oversize(ref)", "oversize(ref)",
+                "base_oversize(ref)", "base_oversize(ref)",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -22965,6 +22969,46 @@ class TestNbExportImport(unittest.TestCase):
         # nothing was imported in either rejected run
         with Store(db) as s:
             self.assertEqual(len(s.list_notebooks()), 0)
+
+    def test_cli_eval_rejects_oversize_documents(self) -> None:
+        """v0.2.690: the eval cases and --diff baseline files get the same
+        MAX_IMPORT_BYTES bound as the import document — both were read in
+        full with no cap, the same OOM-before-parse defect class."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            nb = s.create_notebook("nb")
+        td = tempfile.mkdtemp()
+        cases = Path(td) / "cases.json"
+        cases.write_text('[{"q": "q", "sources": [1]}]', encoding="utf-8")
+        err = io.StringIO()
+        # stat gate on the cases file — patched cap smaller than the file
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 8),
+            redirect_stderr(err),
+        ):
+            rc = main(["--db", db, "eval", str(nb.id), str(cases)], llm=FakeLLM())
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
+        # the --diff baseline read takes the same bound (cases under cap)
+        base = Path(td) / "base.json"
+        base.write_bytes(b" " * 80)
+        err = io.StringIO()
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 64),
+            redirect_stderr(err),
+        ):
+            rc = main(
+                ["--db", db, "eval", str(nb.id), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
 
     def _tmpdb_cli(self) -> str:
         import shutil
