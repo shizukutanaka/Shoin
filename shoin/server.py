@@ -533,6 +533,8 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/api/trash$", "trash_list"),
         ("POST", r"^/api/trash/(\d+)/restore$", "trash_restore"),
         ("DELETE", r"^/api/trash/(\d+)$", "trash_purge"),
+        ("DELETE", r"^/api/trash$", "trash_empty"),
+        ("POST", r"^/api/vacuum$", "vacuum"),
         ("GET", r"^/api/notebooks$", "nb_list"),
         ("POST", r"^/api/notebooks$", "nb_create"),
         ("GET", r"^/api/notebooks/(\d+)$", "nb_get"),
@@ -781,6 +783,16 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             store.trash_purge(item_id)
         self._json({"purged": item_id})
+
+    def _h_trash_empty(self) -> None:
+        with Store(self.db) as store:
+            n = store.trash_purge_all()
+        self._json({"purged": n})
+
+    def _h_vacuum(self) -> None:
+        with Store(self.db) as store:
+            res = store.vacuum()
+        self._json(res)
 
     def _h_nb_list(self) -> None:
         with Store(self.db) as store:

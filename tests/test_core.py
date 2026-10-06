@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.668")
+        self.assertEqual(VERSION, "0.2.669")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -21657,6 +21657,45 @@ class TestTrash(unittest.TestCase):
                 s.trash_restore(tid)
             self.assertEqual(cm.exception.code, "TRASH_NOT_FOUND")
 
+    def test_trash_purge_all_empties_log(self) -> None:
+        """v0.2.669: one call drops every archive — per-item purge was the
+        only path, so emptying a large trash took N round-trips."""
+        with make_store() as s:
+            nb_id = seed(s)
+            nb2 = s.create_notebook("extra")
+            s.delete_notebook(nb_id)
+            s.delete_notebook(nb2.id)
+            self.assertEqual(len(s.trash_list()), 2)
+            self.assertEqual(s.trash_purge_all(), 2)
+            self.assertEqual(s.trash_list(), [])
+            self.assertEqual(s.trash_purge_all(), 0)
+
+    def test_vacuum_hands_deleted_pages_back(self) -> None:
+        """v0.2.669: DELETEs move pages onto SQLite's freelist, where they
+        keep occupying disk until vacuum() rebuilds the file — freelist
+        collapses and the db shrinks."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "v.db")
+            with Store(db) as s:
+                nb = s.create_notebook("big")
+                src = s.add_source(nb.id, "txt", "big.txt", "mem://b", "sha-b")
+                s.add_chunks(src.id, ["x" * 4000] * 40)  # ~160KB of chunk text
+                s.delete_source(src.id)  # chunk rows -> freelist
+                s.trash_purge_all()  # archive payload -> freelist too
+                free_before = s.freelist_bytes()
+                self.assertGreater(free_before, 0)
+                before = s.db_bytes()
+                res = s.vacuum()
+                self.assertEqual(res["before"], before)
+                self.assertLessEqual(res["after"], res["before"])
+                self.assertEqual(res["freed"], res["before"] - res["after"])
+                self.assertGreater(res["freed"], 0)
+                self.assertLess(s.freelist_bytes(), free_before)
+                res2 = s.vacuum()
+                self.assertLessEqual(res2["freed"], res["freed"])
+
     def test_restore_corrupt_payload_is_coded(self) -> None:
         """A hand-edited trash payload must surface as a coded error and
         leave the archive row — never a raw JSONDecodeError traceback."""
@@ -21806,6 +21845,34 @@ class TestTrash(unittest.TestCase):
         self.assertIn("復元完了", out3.getvalue())
         with Store(db) as s:
             self.assertEqual(s.get_notebook(nb_id).name, "研究")
+
+    def test_cli_trash_empty_and_vacuum(self) -> None:
+        """v0.2.669: `trash empty` purges every archive at once and
+        `vacuum` reports reclaimed bytes — CLI parity with
+        DELETE /api/trash + POST /api/vacuum."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            nb_id = seed(s)
+            nb2 = s.create_notebook("extra")
+        self.assertEqual(main(["--db", db, "notebook", "delete", str(nb_id)]), 0)
+        self.assertEqual(
+            main(["--db", db, "notebook", "delete", str(nb2.id)]), 0
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "trash", "empty"]), 0)
+        self.assertIn("2件", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.trash_list(), [])
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "vacuum"]), 0)
+        self.assertIn("VACUUM完了", out2.getvalue())
 
 
 class TestNbExportImport(unittest.TestCase):

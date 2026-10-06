@@ -1641,6 +1641,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
 
+    def test_trash_empty_and_vacuum_endpoints(self) -> None:
+        """v0.2.669: DELETE /api/trash empties the whole undo log in one
+        call; POST /api/vacuum rebuilds the file and reports db_bytes
+        before/after around it."""
+        status, before = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        status, body = self._json("DELETE", "/api/trash")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["purged"], len(before["trash"]))
+        status, body = self._json("GET", "/api/trash")
+        self.assertEqual(body["trash"], [])
+        status, body = self._json("POST", "/api/vacuum")
+        self.assertEqual(status, 200)
+        self.assertLessEqual(body["after"], body["before"])
+        self.assertEqual(body["freed"], body["before"] - body["after"])
+
     def test_trash_source_and_note_round_trip(self) -> None:
         """v0.2.667: source/note deletes archive with their own kind — the
         undo-log covers every destructive entity delete, not just nb."""

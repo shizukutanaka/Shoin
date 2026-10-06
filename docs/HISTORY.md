@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.668
+## Version History: v0.1.37 → v0.2.669
+
+### v0.2.669 — 削除済みバイトの物理回収(trash empty + vacuum)
+
+- **新規短所53解消(ソクラテス監査で発掘)**: 「蓄積した全バイトは回収されるか」の問いで発見した二つの未カバー経路——①ゴミ箱は1件ずつ `purge` するしか空にできず、N件のアーカイブはN回の往復が必要だった ②SQLiteは削除済み領域をfreelistへ移すだけで**DBファイルが物理的に縮小しない**ため、purgeしても消費ディスクは戻らなかった
+- **`Store.trash_purge_all`**: 全アーカイブを1TXでDELETEして件数を返す——`DELETE /api/trash`(`{"purged":N}`)+`shoin trash empty` のREQ-103パリティ
+- **`Store.vacuum`**: `PRAGMA wal_checkpoint(TRUNCATE)`(-walを主ファイルへ畳込み)後に `VACUUM` を実行し `db_bytes()` の before/after/freed を報告。VACUUMはTX内で拒否されるため execute は意図的に `with self.conn:` の外(呼出し側はidle接続前提をdocstringへ明記)
+- **`Store.freelist_bytes`**: freelist頁×page_sizeで「回収可能量」を事前に可視化——`shoin stats` へ行追加(実測: 76KB削除→statsが76KB報告→vacuumで正確に76KB回収・2回目は冪等0B)
+- **設計上の境界**: `auto_vacuum`はincremental(ページ再利用はするがファイル返却はしない)+スキーマ属性で全DB一括設定のため不採用——明示的 `vacuum` がローカル製品の正直な範囲。`incremental_vacuum` は `PRAGMA auto_vacuum=2` 前提のため対象外
+- **行動ピン4件**: store=purge_all件数+list空+冪等・vacuum=before/after/freed整合+freelist縮小+2回目冪等・CLI=`trash empty`出力+`vacuum`出力・API=`DELETE /api/trash`+`POST /api/vacuum`往復
+- **カタログ追随ゼロ**: 新規except/raiseなし・bare-write regex非該当(VACUUM/PRAGMAは対象外、DELETEはwith内)・parser↔dispatchピン両方向カバー(`vacuum`コマンド+`empty`アクション)・i18n ja/en対称キー3件追加
 
 ### v0.2.668 — 単一ファイル .pyz 配布経路(zipapp) + pkgutilアセット読取
 

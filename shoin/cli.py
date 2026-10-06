@@ -106,6 +106,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "trash.item": "[{id}] {kind} {name}  (nb_id {nb_id}・削除 {ts})",
         "trash.restored": "復元完了: [{id}] {name}",
         "trash.purged": "アーカイブを完全削除しました",
+        "trash.emptied": "ゴミ箱を空にしました: {n}件",
+        "vacuum.done": "VACUUM完了: {before} → {after} ({freed} 回収)",
+        "stats.freelist": "回収可能な空き領域: {n}",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
         "msg.empty": "チャット履歴がありません。",
@@ -219,6 +222,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "trash.item": "[{id}] {kind} {name}  (nb_id {nb_id}, deleted {ts})",
         "trash.restored": "Restored: [{id}] {name}",
         "trash.purged": "Trash archive purged.",
+        "trash.emptied": "Trash emptied: {n} archive(s).",
+        "vacuum.done": "Vacuum done: {before} → {after} ({freed} reclaimed).",
+        "stats.freelist": "Reclaimable free space: {n}",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
         "msg.empty": "No chat history.",
@@ -492,6 +498,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tr_res.add_argument("trash_id", type=int)
     tr_pur = trsub.add_parser("purge", help="アーカイブを完全削除(復元不可)")
     tr_pur.add_argument("trash_id", type=int)
+    trsub.add_parser("empty", help="ゴミ箱を空にする(全アーカイブ完全削除・復元不可)")
+
+    sub.add_parser("vacuum", help="DBをVACUUMして削除済み領域をOSへ返却")
     return p
 
 
@@ -683,6 +692,7 @@ def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
     print(_t("stats.messages", n=str(s["messages"])))
     print(_t("stats.studio_outputs", n=str(s["studio_outputs"])))
     print(_t("stats.db_bytes", n=_human_bytes(store.db_bytes())))
+    print(_t("stats.freelist", n=_human_bytes(store.freelist_bytes())))
     m = store.usage_metrics()
     if m:
         # Durable content-free counters (see Store.bump_metrics): totals since
@@ -972,6 +982,22 @@ def _cmd_trash(store: Store, args: argparse.Namespace) -> int:
     elif action == "purge":
         store.trash_purge(int(args.trash_id))
         print(_t("trash.purged"))
+    elif action == "empty":
+        n = store.trash_purge_all()
+        print(_t("trash.emptied", n=str(n)))
+    return 0
+
+
+def _cmd_vacuum(store: Store, args: argparse.Namespace) -> int:
+    res = store.vacuum()
+    print(
+        _t(
+            "vacuum.done",
+            before=_human_bytes(res["before"]),
+            after=_human_bytes(res["after"]),
+            freed=_human_bytes(res["freed"]),
+        )
+    )
     return 0
 
 
@@ -1322,6 +1348,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_backup(store, args)
             if command == "trash":
                 return _cmd_trash(store, args)
+            if command == "vacuum":
+                return _cmd_vacuum(store, args)
             if command == "export":
                 if str(args.format) == "tree":
                     import json

@@ -1148,6 +1148,13 @@ class Store:
         if cur.rowcount == 0:
             raise StoreError("TRASH_NOT_FOUND", f"trash item {trash_id} not found")
 
+    def trash_purge_all(self) -> int:
+        """Permanently drop every trash archive in one TX — empties the
+        undo log. Returns the number of archives dropped (v0.2.669)."""
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM trash_items")
+        return cur.rowcount
+
     def export_notebook(self, notebook_id: int) -> dict[str, Any]:
         """Portable notebook-tree document (v0.2.655) — the same envelope
         as the trash undo-log: a deleted notebook's archive is already a
@@ -2397,6 +2404,34 @@ class Store:
         page_count = int(self.conn.execute("PRAGMA page_count").fetchone()[0])
         page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0])
         return page_count * page_size
+
+    def freelist_bytes(self) -> int:
+        """Bytes sitting on SQLite's free page list — the share of the db
+        file that deleted rows left behind and only vacuum() hands back
+        to the OS (v0.2.669)."""
+        freelist = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0])
+        page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0])
+        return freelist * page_size
+
+    def vacuum(self) -> dict[str, int]:
+        """Hand deleted pages back to the OS and report db_bytes() around
+        the rebuild (v0.2.669).
+
+        SQLite never shrinks the db file on its own: every DELETE moves
+        pages onto the free list, where they keep occupying disk until a
+        full VACUUM rebuilds the file. wal_checkpoint(TRUNCATE) runs
+        first so pending -wal frames fold into the main file before the
+        rebuild (otherwise the checkpoint could resurrect a larger db).
+        VACUUM refuses to run inside a transaction by definition, so
+        these executes deliberately stay outside `with self.conn:` —
+        the caller must hold no open transaction (every call site here
+        runs on an idle connection)."""
+        before = self.db_bytes()
+        # Consume the checkpoint row so the cursor is fully read.
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        self.conn.execute("VACUUM")
+        after = self.db_bytes()
+        return {"before": before, "after": after, "freed": before - after}
 
     def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
         """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
