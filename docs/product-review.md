@@ -217,6 +217,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~75~~ | ~~**HTTP同時接続数に上限なし——接続フラッドでスレッド枯渇**~~ → **解消済み(v0.2.691)** | 「寿命が有界でも数が無制限の資源は残っていないか」の問いで発掘: `ThreadingHTTPServer`は接続毎に無制限スレッド生成——`REQUEST_SOCKET_SEC`は各接続の寿命のみ制限し接続「数」は無制限のまま、数千接続の保持でタイムアウト発動前にスレッド枯渇。`MAX_IN_FLIGHT_REQUESTS`(64)セマフォをaccept loopでacquireし過剩をカーネルbacklog滞留へ変換(finally解放・120s有界保持で不デッドロック) |
 | ~~76~~ | ~~**import文書がsource id重複を許容——id_map潰れでchunk/reportが別sourceへ無言誤帰属**~~ → **解消済み(v0.2.692)** | 「export→importで文書の整合性は検証されるか」の問いで発掘: 検証は `src_ids` をsetとして構築するため同idの2行を重複として検出せず、細工exportの同id source×2がid_map後勝ちでchunk+reportを最後のsourceへ誤帰属(先行行は0チャンク空殻)——検証ループ先頭のmembership検査で`NOTEBOOK_IMPORT_INVALID`拒否(入口のみ最小・TX未到達) |
 | ~~77~~ | ~~**import文書フィールドが書込経路の語彙/範囲/utf8検証を迂回——phantom行の永続化かraw sqlite error(500)**~~ → **解消済み(v0.2.693)** | 「import文書はwriterと同じ検証を受けるか」の問いで発掘: `_insert_tree_rows`のverbatim bindがSOURCE_KINDS/STUDIO_KINDS/role語彙・有限weight・_utf8を迂回——語彙外kind/roleが永続phantom行・Infinity格納・NaN/非str/サロゲートがraw error化。入口検証をwriter契約へ揃え同codedで拒否(_import_str新設) |
+| ~~78~~ | ~~**`GET /api/notebooks/{id}`の`sources`埋込みが無制限——detail応答がsource数に比例して永久に重くなる**~~ → **解消済み(v0.2.694)** | 「詳細応答の埋込みリストは全て有界か」の問いで発掘: notes/messagesはv0.2.250/409でcap済みだが`sources`だけ無制限残存——chunk上限は行数を制限するがsource数は制限しない。openNotebook・SSE復帰refetchの全detail取得が蓄積に比例増大。`NB_SOURCES_LIMIT`=2000(scope pane用途で寛容値)+`sources_omitted`開示+`GET /api/notebooks/{id}/sources?offset&limit`走査端点(v0.2.646同型)+UI`src.earlier`行 |
 
 ### 解決済み(記録)
 

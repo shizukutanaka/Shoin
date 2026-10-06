@@ -1856,29 +1856,8 @@ class Store:
                 (new_ctx[:_MAX_CONTEXT_CHARS], r["id"]),
             )
 
-    def sources_for_notebook(self, notebook_id: int) -> list[Source]:
-        rows = self.conn.execute(
-            "SELECT * FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,)
-        ).fetchall()
-        return [
-            Source(
-                r["id"],
-                r["notebook_id"],
-                r["kind"],
-                r["title"],
-                r["origin"],
-                r["sha256"],
-                r["added_at"],
-                float(r["weight"]),
-                json.loads(r["meta"]),
-            )
-            for r in rows
-        ]
-
-    def get_source(self, source_id: int) -> Source:
-        row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
-        if row is None:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
+    @staticmethod
+    def _source_of(row: sqlite3.Row) -> Source:
         return Source(
             row["id"],
             row["notebook_id"],
@@ -1890,6 +1869,39 @@ class Store:
             float(row["weight"]),
             json.loads(row["meta"]),
         )
+
+    def sources_for_notebook(self, notebook_id: int) -> list[Source]:
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,)
+        ).fetchall()
+        return [self._source_of(r) for r in rows]
+
+    def list_sources_page(
+        self, notebook_id: int, offset: int, limit: int
+    ) -> list[Source]:
+        # Newest-first: page 0 overlaps the detail payload's embedded sources.
+        return [
+            self._source_of(r)
+            for r in self.conn.execute(
+                "SELECT * FROM sources WHERE notebook_id=? ORDER BY id DESC"
+                " LIMIT ? OFFSET ?",
+                (notebook_id, limit, offset),
+            ).fetchall()
+        ]
+
+    def count_sources(self, notebook_id: int) -> int:
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM sources WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["n"]
+        )
+
+    def get_source(self, source_id: int) -> Source:
+        row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if row is None:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
+        return self._source_of(row)
 
     def notebooks_for_sources(
         self, source_ids: list[int]

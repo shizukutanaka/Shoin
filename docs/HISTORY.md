@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.693
+## Version History: v0.1.37 → v0.2.694
+
+### v0.2.694 — detail応答の最後の無制限embedを閉塞(sources上限+走査端点)
+
+- **新規短所78解消(ソクラテス問いで発掘)**: 「詳細応答の埋込みリストは全て有界か」——`GET /api/notebooks/{id}`の`notes`/`messages`はv0.2.250/409でcap済みだが`sources`だけは**無制限埋込みのまま**残存。source数は書込側にも上限がなく(chunk上限は行数であってsource数ではない)、openNotebook・SSE復帰refetch等の全detail取得がsource数に比例して永久に重くなる経路——1ソースあたり~300Bで数万sourceなら応答がMB級
+- **notes/messagesと同型の3層構成**: ①埋込みを最新`NB_SOURCES_LIMIT`(2000)件に制限し`sources_omitted`で非表示数を開示——scope pane用途のためnotes/messagesの500より寛容値、最新側を残すため追加直後のsourceは必ず可視 ②`GET /api/notebooks/{id}/sources?offset&limit`走査端点を新設——capで切られた全量はexportだけでなくAPI経路でも走査可能(v0.2.646のmessages|notes端点と同一契約: newest-first・offset 0..i64-1・limit 1..2000・total開示) ③UIは`src.earlier`行で省略を開示(notes.earlier同型・ja/en対称)
+- **副次整理**: row→Source写像を`_source_of`に集約——sources_for_notebook・新設list_sources_page・get_sourceの3箇所が同一コンストラクタを複製していた(drift予防、動作不変)
+- **行動ピン2件**: cap+omitted+newest保持+counts真値(patch縮小)・/sources端点(newest-first・offset/limit・total・400/404)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし(新端点はdispatch既存機構)
 
 ### v0.2.693 — import文書フィールドを書込経路と同一契約で検証(語彙・範囲・utf8)
 

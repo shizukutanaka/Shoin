@@ -3325,6 +3325,81 @@ class NotebookMessagesCapTest(unittest.TestCase):
         self.assertEqual(j2["notes_omitted"], 0)
         self.assertEqual(len(j2["notes"]), 12)
 
+    def test_notebook_payload_caps_sources_and_reports_omitted(self) -> None:
+        """v0.2.694: sources were the last unbounded embed on the detail
+        payload — every detail fetch (openNotebook, the SSE-drop recovery
+        refetch) grew with the source count, and nothing bounded it (the
+        chunk cap bounds rows, not sources). Mirrors the notes/messages
+        cap: newest NB_SOURCES_LIMIT embedded, sources_omitted discloses
+        the hidden count, the full list stays reachable via the paged
+        /sources endpoint and export()."""
+        import shoin.server as srv
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_source(nb_id, "txt", f"s{i}", f"o{i}", f"h{i}")
+        with patch.object(srv, "NB_SOURCES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["sources"]), 4)
+        self.assertEqual(j["sources_omitted"], 8)
+        # The newest sources are the embedded ones — the source a user
+        # just added must always be visible after its own refetch.
+        self.assertEqual(j["sources"][0]["title"], "s8")
+        self.assertEqual(j["sources"][-1]["title"], "s11")
+        # counts still reports the true total — the disclosure is honest.
+        self.assertEqual(j["counts"]["sources"], 12)
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["sources_omitted"], 0)
+        self.assertEqual(len(j2["sources"]), 12)
+
+    def test_nb_sources_pagination(self) -> None:
+        """v0.2.694: GET .../sources pages the full source list the detail
+        cap can't reach — newest-first (page 0 overlaps the embedded tail),
+        offset/limit bounded, total disclosed, invalid params coded 400,
+        dead notebook 404."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "paged"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "mc.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            for i in range(5):
+                store.add_source(nb_id, "txt", f"s{i}", f"o{i}", f"h{i}")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/sources?offset=1&limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual([s["title"] for s in page["sources"]], ["s3", "s2"])
+        self.assertIn("refreshable", page["sources"][0])
+
+        status, page = self._json("GET", f"/api/notebooks/{nb_id}/sources")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page["sources"]), 5)
+        self.assertEqual(page["sources"][0]["title"], "s4")
+
+        for bad in ("offset=-1", "offset=abc", "limit=0", "limit=2001"):
+            status, err = self._json(
+                "GET", f"/api/notebooks/{nb_id}/sources?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/notebooks/999999/sources")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
 
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""

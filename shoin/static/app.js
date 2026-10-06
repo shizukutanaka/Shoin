@@ -25,6 +25,7 @@ const I18N = {
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "notes.earlier":"— 以前の {n} 件は省略 —",
+    "src.earlier":"— 以前の {n} 件は省略 —",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
@@ -64,6 +65,7 @@ const I18N = {
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "notes.earlier":"— {n} earlier notes not shown —",
+    "src.earlier":"— {n} earlier sources not shown —",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
@@ -404,6 +406,11 @@ function renderNotebook(){
         restored.setSelectionRange(pendingRename.selStart, pendingRename.selEnd);
       }
     });
+    // Disclose the server-side sources cap (sources_omitted, v0.2.694)
+    // rather than silently dropping the oldest rows — the full list stays
+    // reachable via GET /api/notebooks/{id}/sources and export().
+    if (cur.sources_omitted)
+      list.prepend(el("div","empty", t("src.earlier").replace("{n}", cur.sources_omitted)));
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     updateScopeInfo();
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();

@@ -34,6 +34,7 @@ from .config import (
     MAX_UPLOAD_BYTES,
     NB_MESSAGES_LIMIT,
     NB_NOTES_LIMIT,
+    NB_SOURCES_LIMIT,
     REQUEST_SOCKET_SEC,
     SEARCH_K_MAX,
     SOURCE_WEIGHT_MAX,
@@ -76,7 +77,7 @@ from .qa import (
     _t as _qa_t,
 )
 from .search import suggest_corrections
-from .store import Store, StoreError
+from .store import Source, Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
 # Startup-log strings for serve(). Kept module-local (same minimal pattern as
@@ -196,6 +197,24 @@ def _safe_report(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _source_json(s: Source) -> Json:
+    return {
+        "id": s.id,
+        "kind": s.kind,
+        "title": s.title,
+        "origin": s.origin,
+        "weight": s.weight,
+        "meta": s.meta,
+        # Refreshability is decided by what the origin can still be
+        # read from, not by kind: URL sources always qualify; a file
+        # source qualifies only while its recorded path still exists
+        # (an upload's tmp copy is unlinked after ingest, so it reads
+        # false and the UI hides a button that could only error).
+        # Shared with the batch path — see pipeline.source_is_refreshable.
+        "refreshable": source_is_refreshable(s),
+    }
+
+
 def _notebook_json(store: Store, nb_id: int) -> Json:
     nb = store.get_notebook(nb_id)
     # Chats grow monotonically; without a cap every mutation round-trips the
@@ -217,29 +236,22 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     all_notes = store.list_notes(nb_id)
     notes_omitted = max(0, len(all_notes) - NB_NOTES_LIMIT)
     notes = all_notes[notes_omitted:]
+    # Same cap for sources (v0.2.694): the last unbounded embed on this
+    # payload — every detail fetch grew with the source count. Newest
+    # NB_SOURCES_LIMIT are kept so a just-added source is always visible;
+    # sources_omitted discloses the hidden count, counts.sources still
+    # reports the true total, and the full list remains reachable via
+    # GET /api/notebooks/{id}/sources and export().
+    all_sources = store.sources_for_notebook(nb_id)
+    sources_omitted = max(0, len(all_sources) - NB_SOURCES_LIMIT)
+    sources = all_sources[sources_omitted:]
     return {
         "id": nb.id,
         "name": nb.name,
         "settings": nb.settings,
         "counts": store.counts(nb_id),
-        "sources": [
-            {
-                "id": s.id,
-                "kind": s.kind,
-                "title": s.title,
-                "origin": s.origin,
-                "weight": s.weight,
-                "meta": s.meta,
-                # Refreshability is decided by what the origin can still be
-                # read from, not by kind: URL sources always qualify; a file
-                # source qualifies only while its recorded path still exists
-                # (an upload's tmp copy is unlinked after ingest, so it reads
-                # false and the UI hides a button that could only error).
-                # Shared with the batch path — see pipeline.source_is_refreshable.
-                "refreshable": source_is_refreshable(s),
-            }
-            for s in store.sources_for_notebook(nb_id)
-        ],
+        "sources": [_source_json(s) for s in sources],
+        "sources_omitted": sources_omitted,
         "notes": [
             {"id": n["id"], "title": n["title"], "body": n["body"]} for n in notes
         ],
@@ -571,6 +583,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("POST", r"^/api/notebooks/import$", "nb_import"),
         ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
         ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
+        ("GET", r"^/api/notebooks/(\d+)/sources$", "nb_sources"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
@@ -981,6 +994,23 @@ class _Handler(BaseHTTPRequestHandler):
                         for n in store.list_notes_page(nb_id, offset, limit)
                     ],
                     "total": store.count_notes(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+
+    def _h_nb_sources(self, nb_id: int) -> None:
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_SOURCES_LIMIT, NB_SOURCES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "sources": [
+                        _source_json(s)
+                        for s in store.list_sources_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_sources(nb_id),
                     "offset": offset,
                     "limit": limit,
                 }
