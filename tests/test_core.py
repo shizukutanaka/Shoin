@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.691")
+        self.assertEqual(VERSION, "0.2.692")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19987,7 +19987,9 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 81,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 82,  # +1: _utf8's coded surrogate rejection
+                                      # +1: import_notebook's duplicate
+                                      #     source-id rejection (v0.2.692)
                                       # +2: _insert_tree_rows / duplicate_notebook
                                       #     chunk-cap guards (v0.2.672)
                                       # +4: update_notebook_settings non-dict /
@@ -22844,6 +22846,12 @@ class TestNbExportImport(unittest.TestCase):
                     {**good["chunks"][0],
                      "embedding": {"$blob": "%%%not-b64"}}
                 ]},  # undecodable blob
+                # v0.2.692: duplicate source ids — id_map keeps the last
+                # duplicate, so chunks/reports would silently rebind to
+                # the wrong source (first row lands with zero chunks).
+                {**good, "sources": [
+                    good["sources"][0], good["sources"][0],
+                ]},
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):

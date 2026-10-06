@@ -29,14 +29,21 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.691
+## Version History: v0.1.37 → v0.2.692
+
+### v0.2.692 — import文書のsource id重複をcoded拒否(誤帰属の閉塞)
+
+- **新規短所76解消(ソクラテス問いで発掘)**: 「export→importで文書の整合性は検証されるか」——`_insert_tree_rows`は`id_map[doc_src_id]=新rowid`でchunkとcitation_report.source_id_mapを新idへ再写像するが、`import_notebook`の文書検証は`src_ids`をsetとして構築するため**同一idを2度持つsource行を重複として検出しない**。細工exportで`sources`に同idの2行を置くとid_mapが後勝ちで潰れ、そのidへ結合する全chunkとreport remapが無言で最後のsource行へ誤帰属(先行のsource行は0チャンクの空殻として残る)——「出典が違う文書の内容」を表示する永続的な誤属性
+- **入口検証で拒否**: 検証ループ先頭で`s["id"] in src_ids`をmembership検査し重複を`NOTEBOOK_IMPORT_INVALID`で拒否——TX未到達で部分importなし。merge/trash_restoreは自前の生存行/アーカイブ由来で一意idが構造保証されるため入口のみの最小変更(信頼境界はimport文書)
+- **行動ピン1件**: `test_import_rejects_malformed_documents`のcasesに「同一source dictを2度列挙した文書」を追加——coded拒否+nb数不変を他casesと同型で検証
+- **カタログ追随1件**: raise-inventory store.py +1(NOTEBOOK_IMPORT_INVALID)
 
 ### v0.2.691 — HTTP同時接続数をセマフォで上限化(MAX_IN_FLIGHT_REQUESTS)
 
 - **新規短所75解消(ソクラテス問いで発掘)**: 「寿命が有界でも数が無制限の資源は残っていないか」——`ThreadingHTTPServer`は接続ごとにスレッドを**無制限生成**する。`REQUEST_SOCKET_SEC`(120s)は各接続の寿命を制限するが接続「数」は無制限のまま、ローカルの暴走/敵性プロセスが数千接続を保持するとスレッド枯渇(約8MB/スレッドのスタック→メモリ枯渇またはcan't start new thread)——タイムアウトが効く前に全要求が失敗する回復不能経路
 - **`MAX_IN_FLIGHT_REQUESTS = 64`**: `process_request`でBoundedSemaphoreをaccept loop内acquire——過剩接続はカーネルlisten backlogへ滞留(無制限スレッドではなく有界待機)。スロットは`process_request_thread`のfinallyで確実解放、各保持はREQUEST_SOCKET_SECで有界のためプールは原理的にデッドロック不能
 - **行動ピン1件**: cap=1で第1接続(partial request占有)中に第2接続の完全要求が1秒で応答なし(ゲート滞留)→第1切断後にスロット解放・第2要求が200応答——滞留と解放の両面を実ソケットで検証
-- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(追加は既存stdlibメソッドのオーバーライドのみ)
+- **カタログ追随1件**: time/threading-call inventory server.py +1(`threading.BoundedSemaphore`——新スレッド源ではなく有界プリミティブ)
 
 ### v0.2.690 — evalのcases/--diff baseline文書をMAX_IMPORT_BYTESで上限化
 

@@ -215,6 +215,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~73~~ | ~~**source/note restoreの親確認がidのみ——再利用rowidで無関係nbへ誤帰属**~~ → **解消済み(v0.2.689)** | 「id再利用の影響はprobeの範囲内か」の残面(#70の別面)で発掘: 親nb存在確認が`SELECT 1 WHERE id=?`のみ——nb削除→`max(rowid)+1`再利用で無関係nbが同idを得るとプローブを素通りし、削除済みnb由来の子行が誤帰属。アーカイブへ`nb_created_at`同梱+restore時id/created_at組照合で「再利用=親消失」を`NOTEBOOK_NOT_FOUND`拒否化(旧payloadはidのみ検査へフォールバック=undo互換) |
 | ~~74~~ | ~~**evalのcases/--diff baseline文書が無制限読込——巨大JSON文書でOOM**~~ → **解消済み(v0.2.690)** | 「上限の無い全量読込は残っていないか」の問いで発掘: `shoin eval`のcases文書と`--diff`ベースラインがread_text全量+無制限json.loads——681のimport閉塞と同じOOM欠陥クラスの残存経路。`MAX_IMPORT_BYTES`を「CLIが一度に読込むJSON文書の上限」へ一般化し両入口をstat+読取の2層で閉塞(拒否はVALIDATION_FIELD_FORMAT_INVALID・文書別ラベル) |
 | ~~75~~ | ~~**HTTP同時接続数に上限なし——接続フラッドでスレッド枯渇**~~ → **解消済み(v0.2.691)** | 「寿命が有界でも数が無制限の資源は残っていないか」の問いで発掘: `ThreadingHTTPServer`は接続毎に無制限スレッド生成——`REQUEST_SOCKET_SEC`は各接続の寿命のみ制限し接続「数」は無制限のまま、数千接続の保持でタイムアウト発動前にスレッド枯渇。`MAX_IN_FLIGHT_REQUESTS`(64)セマフォをaccept loopでacquireし過剩をカーネルbacklog滞留へ変換(finally解放・120s有界保持で不デッドロック) |
+| ~~76~~ | ~~**import文書がsource id重複を許容——id_map潰れでchunk/reportが別sourceへ無言誤帰属**~~ → **解消済み(v0.2.692)** | 「export→importで文書の整合性は検証されるか」の問いで発掘: 検証は `src_ids` をsetとして構築するため同idの2行を重複として検出せず、細工exportの同id source×2がid_map後勝ちでchunk+reportを最後のsourceへ誤帰属(先行行は0チャンク空殻)——検証ループ先頭のmembership検査で`NOTEBOOK_IMPORT_INVALID`拒否(入口のみ最小・TX未到達) |
 
 ### 解決済み(記録)
 

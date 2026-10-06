@@ -1228,6 +1228,16 @@ class Store:
             nb_settings_text = _meta_text(nb.get("settings"))
             src_ids: set[Any] = set()
             for s in sources:
+                # v0.2.692: a crafted export may repeat a source id —
+                # _insert_tree_rows keys id_map by the doc id, so the LAST
+                # duplicate wins and every chunk/report bound to that id
+                # silently rebinds to the wrong source (the earlier row
+                # lands with zero chunks). Reject duplicates outright.
+                if s["id"] in src_ids:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export lists the same source id more than once",
+                    )
                 src_ids.add(s["id"])
                 for k in ("kind", "title", "origin", "sha256", "added_at"):
                     s[k]
