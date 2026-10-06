@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.679
+## Version History: v0.1.37 → v0.2.680
+
+### v0.2.680 — 非正規ファイルの永久ブロック経路を閉塞(is_file gate)
+
+- **新規短所64解消(ソクラテス監査で発掘)**: 「ローカルファイルらしきものは全て安全に読めるか」の問いで発掘——`extract_file` は拡張子と `stat().st_size` のみを検査するため、FIFO・デバイスノード・unixソケットを `.txt`/`.md` の名で渡すと st_size 0 でサイズゲートを素通りし、`read_bytes()` が**writer未到着で永久ブロック**(ローカルファイルreadにはsocket相当のtimeout機構がない)。serve経路では要求スレッドが永久消費、CLIはハングするのみ——回避不能な回復経路がゼロだった
+- **`p.is_file()` ゲート**: stat時点で通常ファイル以外(ディレクトリ・FIFO・デバイス・ソケット)を `INGEST_FETCH_FAILED`(coded 400)で拒否——一切の読取より先に判定。`is_file()` はシンボリックリンクをfollowするため、実ドキュメントへのリンクは従来通り抽出
+- **契約変化**: ディレクトリパスは従来 IsADirectoryError→同codeで別メッセージ——「cannot read」から「not a regular file」へ正直な分類に変更(同一codedエラー)
+- **境界(記録)**: stat→read間のTOCTOU競合はユーザー自身のfsのため対象外。OSレベルでread不能な正規ファイル(パーミッション)は従来通りOSError→INGEST_FETCH_FAILED
+- **行動ピン1件**: ディレクトリ+coded拒否・FIFO(修正無しではテスト自体がhangする性質)+symlink→実ファイルの陽性対照
+- **カタログ追随なし**: except/raiseは既存INGEST_FETCH_FAILED流用、`is_file()`はcapability非対象(stdlib既使用)
 
 ### v0.2.679 — merge/importのsha重複をdedupeへ(raw IntegrityError閉塞)
 

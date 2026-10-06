@@ -710,6 +710,17 @@ def extract_file(path: Path | str) -> Extracted:
                 "INGEST_FILE_TOO_LARGE",
                 f"source exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
             )
+        # v0.2.680: refuse anything that is not a regular file before the
+        # read. A FIFO, device node, or unix socket named e.g. "x.txt"
+        # reports st_size 0 — passing the size gate above — then read_bytes()
+        # blocks forever waiting for a writer that never comes (a local-file
+        # read carries no timeout): the CLI hangs and a serve request thread
+        # is consumed for good. is_file() follows symlinks, so a symlink to
+        # a real document still extracts.
+        if not p.is_file():
+            raise IngestError(
+                "INGEST_FETCH_FAILED", f"not a regular file: {p}"
+            )
         data = p.read_bytes()
     except OSError as exc:
         raise IngestError("INGEST_FETCH_FAILED", f"cannot read file: {exc}") from exc

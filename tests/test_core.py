@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.679")
+        self.assertEqual(VERSION, "0.2.680")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4340,6 +4340,38 @@ class TestIngest(unittest.TestCase):
             result = extract_file(p)
         self.assertEqual(result.title, "My Title")
         self.assertIn("Content here", result.text)
+
+    def test_extract_file_rejects_non_regular_paths(self) -> None:
+        """v0.2.680: directories/FIFOs must fail coded, never reach read_bytes().
+
+        A FIFO reports st_size 0 — passing the size gate — then read_bytes()
+        blocks forever on a local read with no timeout. The regular-file
+        check must reject both shapes BEFORE any read; a symlink to a real
+        file must still extract (is_file follows links).
+        """
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # directory named like a document
+            d = Path(tmp) / "adir.md"
+            d.mkdir()
+            with self.assertRaises(IngestError) as cm:
+                extract_file(d)
+            self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+            self.assertIn("not a regular file", str(cm.exception))
+            # FIFO: st_size 0, read_bytes would block forever — must reject
+            # before reaching it (this test itself would hang without the fix)
+            fifo = Path(tmp) / "pipe.txt"
+            os.mkfifo(fifo)
+            with self.assertRaises(IngestError) as cm2:
+                extract_file(fifo)
+            self.assertEqual(cm2.exception.code, "INGEST_FETCH_FAILED")
+            # positive control: symlink to a real file still extracts
+            real = Path(tmp) / "real.txt"
+            real.write_text("hello world", encoding="utf-8")
+            link = Path(tmp) / "link.txt"
+            os.symlink(real, link)
+            self.assertIn("hello world", extract_file(link).text)
 
     def test_extract_url_html_content_uses_page_title(self) -> None:
         """HTML response in extract_url must use <title> as the source title (lines 310-311)."""
@@ -19887,7 +19919,9 @@ class TestResidualGuards(unittest.TestCase):
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
             # +1: _decode's binary guard (INGEST_BINARY) — v0.2.673.
-            "ingest.py": ["IngestError"] * 27 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 28 + ["zlib.error", "RE-RAISE"],
+             # +1: extract_file's non-regular-file guard — a FIFO/device
+             #     passes st_size 0 then blocks read_bytes forever (v0.2.680)
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,
             # +1 RE-RAISE: _post retry loop re-raises the same coded error
             "pipeline.py": [
