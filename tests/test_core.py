@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.678")
+        self.assertEqual(VERSION, "0.2.679")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22661,6 +22661,76 @@ class TestNbMerge(unittest.TestCase):
             trash = s.trash_list()
             self.assertEqual(len(trash), 1)
             self.assertEqual(trash[0]["notebook_id"], src_nb)
+
+    def test_merge_dedupes_identical_sources(self) -> None:
+        """v0.2.679 (product-review #63): merging two notebooks sharing a
+        source sha256 used to die on a raw UNIQUE IntegrityError (HTTP
+        500, partial write rolled back). Same sha means identical text —
+        identical deterministic chunks — so the merge keeps the existing
+        row, remaps the incoming tree onto it via id_map, and skips its
+        chunk INSERTs; reports still resolve to the kept row."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            kept = s.add_source(target.id, "txt", "doc-ja-copy", "mem://ja2", "sha-ja")
+            s.add_chunks(kept.id, ["取込先の既存チャンク"])
+            src_nb = seed(s)
+            src_ids = {
+                x.title: int(x.id) for x in s.sources_for_notebook(src_nb)
+            }
+            report = json.dumps({"source_id_map": {"S1": src_ids["doc-ja"]}})
+            s.add_message(src_nb, "assistant", "答え [S1]", report)
+            s.add_note(src_nb, "memo", "本文メモ")
+
+            s.merge_notebooks(target.id, src_nb)
+
+            titles = sorted(
+                x.title for x in s.sources_for_notebook(target.id)
+            )
+            self.assertEqual(titles, ["doc-en", "doc-ja-copy"])
+            counts = s.counts(target.id)
+            # kept source (1 chunk) + doc-en (2 chunks); doc-ja's 3 chunks
+            # were content-identical and skipped.
+            self.assertEqual(counts["sources"], 2)
+            self.assertEqual(counts["chunks"], 3)
+            self.assertEqual(
+                s.conn.execute(
+                    "SELECT count(*) FROM chunks WHERE source_id=?",
+                    (kept.id,),
+                ).fetchone()[0],
+                1,
+                "deduped source must not gain the incoming chunks",
+            )
+            # citation_report remapped the deduped source onto the KEPT id.
+            row = s.list_messages(target.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": kept.id})
+            # notes still flow across the merge.
+            self.assertEqual(len(s.list_notes(target.id)), 1)
+
+    def test_import_dedupes_duplicate_sha_in_document(self) -> None:
+        """v0.2.679 (product-review #63): a crafted export listing the same
+        source sha256 twice also hit the UNIQUE constraint — the dedupe
+        pass treats in-document duplicates the same way (second source
+        folds onto the first; its chunks are skipped)."""
+        with make_store() as s:
+            src_nb = seed(s)
+            doc = s._notebook_tree_dict(src_nb)
+            # Clone doc-ja's source row (new id, same sha) + one chunk.
+            dup_src = dict(doc["sources"][0])
+            dup_src["id"] = "dup-id"
+            doc["sources"].append(dup_src)
+            dup_chunk = dict(doc["chunks"][0])
+            dup_chunk["source_id"] = "dup-id"
+            doc["chunks"].append(dup_chunk)
+
+            nb = s.import_notebook(doc)
+            counts = s.counts(nb.id)
+            self.assertEqual(counts["sources"], 2)
+            self.assertEqual(
+                counts["chunks"],
+                len(doc["chunks"]) - 1,
+                "the in-document duplicate contributes zero chunks",
+            )
 
     def test_merge_rejects_self_and_missing(self) -> None:
         with make_store() as s:

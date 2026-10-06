@@ -1271,14 +1271,38 @@ class Store:
         Chunk INSERTs re-fire the FTS triggers, so merged/imported
         content is searchable the moment the transaction commits.
         """
+        # v0.2.679: dedupe sources by sha256 before inserting. UNIQUE is
+        # (notebook_id, sha256), so a merge whose source notebook shares
+        # content with the target — or a crafted import listing the same
+        # sha twice — used to die on a raw IntegrityError (HTTP 500) after
+        # partially inserting. Identical sha means identical text, which
+        # the deterministic chunker turns into identical chunks: keep the
+        # existing row, remap the incoming tree onto it through id_map,
+        # and skip its chunk INSERTs (the index gains no duplicate
+        # content; citation_reports still resolve via the remap).
+        seen_sha: dict[str, int] = {
+            str(row[1]): int(row[0])
+            for row in self.conn.execute(
+                "SELECT id, sha256 FROM sources WHERE notebook_id=?",
+                (notebook_id,),
+            )
+        }
+        deduped: set[Any] = set()
+        for s in sources:
+            if s["sha256"] in seen_sha:
+                deduped.add(s["id"])
+            else:
+                seen_sha[str(s["sha256"])] = -1  # placeholder until INSERT
         # v0.2.672: the per-notebook chunk cap is a product invariant, not
         # an ingest-rate limit — the vector leg scans every chunk in a
         # notebook, so an over-cap corpus slows EVERY query on it. Until
         # now only the ingest writers (index_source/refresh_source, in
         # pipeline.py) enforced it; import and merge bypassed it entirely.
         # Guarding the shared tree writer covers both at one point.
+        # v0.2.679: only genuinely-new chunks count — deduped sources
+        # contribute none.
         existing = self.counts(notebook_id)["chunks"]
-        incoming = len(chunks)
+        incoming = sum(1 for c in chunks if c["source_id"] not in deduped)
         if existing + incoming > MAX_CHUNKS_PER_NOTEBOOK:
             raise StoreError(
                 "INGEST_NOTEBOOK_FULL",
@@ -1287,6 +1311,9 @@ class Store:
             )
         id_map: dict[Any, int] = {}
         for s in sources:
+            if s["id"] in deduped:
+                id_map[s["id"]] = seen_sha[str(s["sha256"])]
+                continue
             cur = self.conn.execute(
                 "INSERT INTO sources"
                 "(notebook_id, kind, title, origin, sha256, added_at, weight,"
@@ -1301,7 +1328,10 @@ class Store:
                 ),
             )
             id_map[s["id"]] = int(cur.lastrowid or 0)
+            seen_sha[str(s["sha256"])] = id_map[s["id"]]
         for c in chunks:
+            if c["source_id"] in deduped:
+                continue
             self.conn.execute(
                 "INSERT INTO chunks(source_id, seq, text, context,"
                 " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",

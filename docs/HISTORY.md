@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.678
+## Version History: v0.1.37 → v0.2.679
+
+### v0.2.679 — merge/importのsha重複をdedupeへ(raw IntegrityError閉塞)
+
+- **新規短所63解消(ソクラテス監査で発掘)**: 「同一内容のソースを含む2ノートブックのmergeはどうなるか」の問いで発掘——`UNIQUE(notebook_id, sha256)`に対し `_insert_tree_rows` が裸INSERTするため、取込先と元nbが同一shaを共有するmergeは `sqlite3.IntegrityError` で生死し(実検証で確認)、サーバ経路では coded 400 ではなく 500 SYSTEM_INTERNAL_ERROR。細工export(文書内に同一shaを2回列挙)のimportも同パスで衝突
+- **sha dedupe**: `_insert_tree_rows` 先頭で取込先の既存sha→id表を構築し、文書内の重複も含め pre-scan——同一shaのsourceは既存/先行挿入idへ `id_map` で折り返し、その chunk INSERT はskip(同一sha=同一text=決定的同一chunkのため索引に重複なし)。`citation_report.source_id_map` はid_map経由で既存sourceへ解決——マージした回答の引用が死なない
+- **cap整合**: chunk上限の incoming 計算は deduped source の chunk を除いた実挿入数——dedupeで収まるmergeを上限拒否しない
+- **境界(記録)**: notes/studio_outputs/messagesはdedupe対象外——nb単位の資産でありsource重複と無関係に伝達。export文書の正当性検証(src_ids整合等)は従前通り
+- **行動ピン2件**: merge=deduped source未挿入+chunk skip+report remap先が既存id・import=文書内dup shaも同一パスで折返し
+- **カタログ追随なし**: except/raise/.lower()/find/importsいずれもドリフトなし(raise StoreErrorは既存INGEST_NOTEBOOK_FULLの流用)
 
 ### v0.2.678 — HTTPエラー本文への資格情報エコー除去(detail scrub)
 
