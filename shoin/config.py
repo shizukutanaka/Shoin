@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.674"
+VERSION = "0.2.675"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -147,6 +147,33 @@ def endpoint_is_external(url: str) -> bool:
     except ValueError:
         return True  # a DNS name other than localhost — never this machine
     return not (ip.is_loopback or ip.is_unspecified)
+
+
+def redact_url_credentials(url: str) -> str:
+    """Strip userinfo (user:pass@) from a URL for display (v0.2.675).
+
+    OpenAI-compatible gateways behind proxies take credentials in the
+    endpoint URL userinfo (the user:pass@ prefix before the host).
+    Every user-visible surface
+    that echoes the endpoint — stderr warnings, LLMError messages, the
+    health line — must show WHERE requests go without echoing the secret.
+    Authority ends at the first '/', '?' or '#'; an '@' inside the query
+    or fragment is data, not a credential, and stays untouched. A URL
+    without '//' has no authority to carry userinfo — returned as-is
+    (the '@' a bare path contains is not a credential).
+    """
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    end = len(rest)
+    for delim in "/?#":
+        i = rest.find(delim)
+        if 0 <= i < end:
+            end = i
+    authority, tail = rest[:end], rest[end:]
+    if "@" not in authority:
+        return url
+    return f"{scheme}://{authority.rsplit('@', 1)[1]}{tail}"
 
 
 def llm_model() -> str:

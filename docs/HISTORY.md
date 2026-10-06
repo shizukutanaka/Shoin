@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.674
+## Version History: v0.1.37 → v0.2.675
+
+### v0.2.675 — エンドポイントURL資格情報の表示面からの除去(redact_url_credentials)
+
+- **新規短所59解消(ソクラテス監査で発掘)**: 「機密はエラー/診断経路に漏れないか」の問いで発見——`SHOIN_LLM_URL` に userinfo 資格情報(`http://user:pass@host/v1`、OpenAI互換ゲートウェイの正当な資格形態)を埋め込むと、その値が①`LLMClient`構築時警告(v0.2.674で追加した自身の表面) ②`SYSTEM_SERVICE_UNAVAILABLE`エラーメッセージ(chat/stream両経路——SSE error frame・UI toast・stderr・ログへ伝播) ③`shoin health`のエンドポイント行 に**逐字表示**されていた。`llm_api_key` の Bearer には「never logged」コメントがあったが、URL内資格には保護が一切なかった
+- **`redact_url_credentials(url)`**(config.py新設): authority(先頭の `/`/`?`/`#` まで)内の `@` のみを資格区切りとして扱い、userinfo部分を除去——host/port/path/query/fragmentは逐字保持。クエリやパス内の `@` は資格でなくデータ(非除去)。urlsplitを使わない構文抽出のため malformed URL でも raise せず常に除去可能
+- **表示のみ redact**: `self.base_url` は生値のままリクエストを駆動(資格は正しく届く)——除去はユーザー可視面のみ
+- **境界(記録)**: Bearer APIキー(`self._headers["Authorization"]`)は従来通り送信ヘッダ内のみ・エラー経路非含有——今回の隙間はURL userinfo形態のみ。HTTPエラー応答本文(detail、最大300B)はエンドポイント由来の内容でゲートウェイがヘッダをエコーする可能性は残るが、応答側に依存し確定的に除去不可のため未対応
+- **行動ピン3件**: redact表(無資格のbyte同一透過・userinfo除去・query/fragment内@保存・malformed無raise)・LLM警告+unreachableメッセージの非漏洩+生URLリクエスト継続・CLI healthの非漏洩
+- **カタログ追随1件**: find/index sentinel catalog config.py +1(`rest.find`の-1は`0 <= i < end`でガード)。raise/except/import/.lower()/min-maxいずれもゼロ(partition構文抽出のため)
 
 ### v0.2.674 — 非ローカルLLMエンドポイントの可視化(llm_external)
 

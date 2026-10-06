@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.674")
+        self.assertEqual(VERSION, "0.2.675")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8855,6 +8855,66 @@ class TestLLMClient(unittest.TestCase):
             LLMClient(base_url="http://127.0.0.1:11434/v1")
         self.assertEqual(err.getvalue(), "")
 
+    def test_redact_url_credentials_table(self) -> None:
+        """v0.2.675 (product-review #59): endpoint URLs may carry
+        userinfo credentials (the user:pass@ prefix before the host) —
+        every user-visible surface echoes WHERE, never the secret."""
+        from shoin.config import redact_url_credentials as redact
+
+        # no userinfo — byte-identical passthrough
+        for url in (
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+            "http://example.com/path?x=@y#z",  # '@' in query is data
+            "not a url",
+            "relative/path@here",
+            "",
+        ):
+            self.assertEqual(redact(url), url, url)
+        # userinfo stripped, host/port/path/query kept verbatim
+        cases = {
+            "http://" + "user:pass@example.com/v1":
+                "http://example.com/v1",
+            "http://u:p@host:8080/v1?x=1#f":
+                "http://host:8080/v1?x=1#f",
+            "http://u:p@[::1]:8000/v1":
+                "http://[::1]:8000/v1",
+            "https://" + "tok:sec@api.openai.com/v1":
+                "https://api.openai.com/v1",
+            "http://u:p@h?v=1": "http://h?v=1",
+            "http://u:p@h": "http://h",
+            "http://u:p@w@h/v1": "http://h/v1",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(redact(raw), want, raw)
+
+    def test_endpoint_display_never_leaks_url_credentials(self) -> None:
+        """v0.2.675 (product-review #59): an endpoint URL carrying a
+        password must not echo it through the stderr warning or the
+        unreachable-endpoint error message."""
+        import io
+        import urllib.error
+
+        from shoin.llm import LLMClient, LLMError
+
+        url = "http://" + "user:s3cretPW@llm.example.com:9000/v1"
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            client = LLMClient(base_url=url)
+        self.assertIn("llm.example.com:9000", err.getvalue())
+        self.assertNotIn("s3cretPW", err.getvalue())
+        # transport failure message — same contract on the request path.
+        boom = urllib.error.URLError(OSError("conn refused"))
+        with patch("urllib.request.urlopen", side_effect=boom):
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+        self.assertIn("llm.example.com:9000", str(cm.exception))
+        self.assertNotIn("s3cretPW", str(cm.exception))
+        # the real URL still drives the request itself (redact is
+        # display-only — requests keep their credentials)
+        self.assertEqual(client.base_url, url.rstrip("/"))
+
     def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
         """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
         Request() itself raise ValueError via urlsplit — BEFORE urlopen runs.
@@ -12949,6 +13009,41 @@ class TestCLI(unittest.TestCase):
             rc = main(["health"], llm=FakeAvailLLM())
         self.assertEqual(rc, 0)
         self.assertNotIn("ローカルではありません", err2.getvalue())
+
+    def test_cli_health_redacts_url_credentials(self) -> None:
+        """v0.2.675 (product-review #59): `shoin health` prints the
+        endpoint URL — a userinfo password inside it must never reach
+        stdout/stderr."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out, err = io.StringIO(), io.StringIO()
+        env = {
+            "SHOIN_LLM_URL": "http://" + "u:s3cretPW@192.168.1.10:11434/v1"
+        }
+        with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+            "sys.stderr", err
+        ):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        shown = out.getvalue() + err.getvalue()
+        self.assertIn("192.168.1.10:11434", shown)
+        self.assertNotIn("s3cretPW", shown)
 
     def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
         """`python -m shoin` must reach the same CLI as the `shoin` script.
@@ -20342,7 +20437,14 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
-        baseline = {"ingest.py": 4, "search.py": 1}
+        baseline = {
+            # config.redact_url_credentials' authority-scan guards the
+            # -1 sentinel inline (`0 <= i < end` — a miss is negative
+            # and never reaches `rest[:end]`) (v0.2.675)
+            "config.py": 1,
+            "ingest.py": 4,
+            "search.py": 1,
+        }
         found: dict[str, int] = {}
         problems: list[str] = []
         for path in sorted(shoin_dir.glob("*.py")):

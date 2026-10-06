@@ -30,6 +30,7 @@ from .config import (
     llm_url,
     multi_query_enabled,
     port,
+    redact_url_credentials,
     ui_lang,
 )
 from .export import FORMATS, export
@@ -677,7 +678,10 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
 
     avail = getattr(llm, "available", lambda: False)()
     print(_t("health.version", v=VERSION))
-    print(_t("health.llm_url", v=_one_line(llm_url())))
+    # v0.2.675 (product-review #59): the URL may carry userinfo
+    # credentials (the user:pass@ prefix before the host) — show the
+    # endpoint, never the secret.
+    print(_t("health.llm_url", v=_one_line(redact_url_credentials(llm_url()))))
     # v0.2.674 (product-review #58): the product promise is that document
     # text and questions never leave this machine — a non-loopback
     # endpoint silently breaks it. stderr, same pattern as the

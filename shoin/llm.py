@@ -23,6 +23,7 @@ from .config import (
     llm_model,
     llm_retries,
     llm_url,
+    redact_url_credentials,
 )
 
 CHAT_TIMEOUT_SEC = 180
@@ -123,7 +124,8 @@ class LLMClient:
         if endpoint_is_external(self.base_url):
             print(
                 "Warning: LLM endpoint is not local"
-                f" ({self.base_url}) — chunk text and questions"
+                f" ({redact_url_credentials(self.base_url)})"
+                " — chunk text and questions"
                 " leave this machine",
                 file=sys.stderr,
             )
@@ -211,7 +213,8 @@ class LLMClient:
                 ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
-                f"LLM endpoint unreachable at {self.base_url}: {exc}",
+                "LLM endpoint unreachable at"
+                f" {redact_url_credentials(self.base_url)}: {exc}",
             ) from exc
 
     # --- capabilities ---
@@ -369,7 +372,8 @@ class LLMClient:
                 ) from exc
             raise LLMError(
                 "SYSTEM_SERVICE_UNAVAILABLE",
-                f"LLM endpoint unreachable at {self.base_url}: {exc}",
+                "LLM endpoint unreachable at"
+                f" {redact_url_credentials(self.base_url)}: {exc}",
             ) from exc
 
     # --- embeddings ---
