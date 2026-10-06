@@ -477,16 +477,22 @@ def unpack_vector(blob: bytes) -> list[float]:
 
 
 def _remap_report_source_ids(
-    report_json: str | None, id_map: dict[Any, int]
+    report_json: str | None,
+    id_map: dict[Any, int],
+    chunk_map: dict[Any, int] | None = None,
 ) -> str | None:
-    """Rewrite a citation_report's source_id_map through an id remap.
+    """Rewrite a citation_report's id pointers through an id remap.
 
     Reports carry real source ids ({"S1": 4}) — a verbatim copy across
-    duplicate/import leaves dead or wrong pointers once the tree is
-    re-inserted under fresh ids. S# keys and every other field pass
-    through; an entry whose source did not come along is dropped rather
-    than left pointing at a dead row. A non-JSON or non-dict report
-    passes through verbatim (corrupt-report convention).
+    duplicate/import/restore leaves dead or wrong pointers once the
+    tree is re-inserted under fresh ids. S# keys and every other field
+    pass through; an entry whose source did not come along is dropped
+    rather than left pointing at a dead row. With `chunk_map`, each
+    source_chunk_ids list ({"S1": [12, 13]}) is rewritten the same way
+    (v0.2.686) — chunk rowids are re-assigned on every re-insert, so a
+    verbatim copy pointed at dead or unrelated chunks. A non-JSON or
+    non-dict report passes through verbatim (corrupt-report
+    convention).
     """
     if report_json is None:
         return None
@@ -500,6 +506,22 @@ def _remap_report_source_ids(
                 if isinstance(v, int) and not isinstance(v, bool) and v in id_map:
                     mapped[str(k)] = id_map[v]
             report["source_id_map"] = mapped
+        sci = report.get("source_chunk_ids")
+        if chunk_map is not None and isinstance(sci, dict):
+            mapped_sci: dict[str, list[int]] = {}
+            for k, ids in sci.items():
+                if not isinstance(ids, list):
+                    continue
+                kept = [
+                    chunk_map[i]
+                    for i in ids
+                    if isinstance(i, int)
+                    and not isinstance(i, bool)
+                    and i in chunk_map
+                ]
+                if kept:
+                    mapped_sci[str(k)] = kept
+            report["source_chunk_ids"] = mapped_sci
         return json.dumps(report, ensure_ascii=False)
     except (ValueError, TypeError, AttributeError):
         return report_json
@@ -926,13 +948,16 @@ class Store:
     def trash_restore(self, trash_id: int) -> dict[str, Any]:
         """Re-insert a trashed entity in one TX, dispatching on payload kind.
 
-        Notebook archives (v0.2.654) re-insert with their original ids —
-        chunk INSERTs re-fire the FTS triggers and base64 vectors land
-        verbatim, so a restored tree is searchable immediately at zero
-        re-embed cost. Source archives (v0.2.667) follow the same
-        contract inside their parent notebook, which must still exist
-        (NOTEBOOK_NOT_FOUND): an occupied source id refuses with
-        SOURCE_ALREADY_EXISTS, never a silent merge or id rewrite.
+        Notebook archives (v0.2.654) keep the notebook's own id and
+        re-insert children under fresh rowids via the shared tree
+        writer (v0.2.686) — chunk INSERTs re-fire the FTS triggers and
+        base64 vectors land verbatim, so a restored tree is searchable
+        immediately at zero re-embed cost, and recycled rowids can
+        never collide with the restore. Source archives (v0.2.667)
+        follow the same contract inside their parent notebook, which
+        must still exist (NOTEBOOK_NOT_FOUND): an occupied source id
+        refuses with SOURCE_ALREADY_EXISTS, never a silent merge or
+        id rewrite.
         Note archives get a fresh id — nothing outside delete/list
         references note ids, so re-assignment loses nothing and cannot
         collide. INTEGER PRIMARY KEY reuses max(id)+1, so every
@@ -1021,56 +1046,16 @@ class Store:
                 (nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
                  nb["settings"]),
             )
-            for s in sources:
-                self.conn.execute(
-                    "INSERT INTO sources(id, notebook_id, kind, title, origin,"
-                    " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        s["id"], s["notebook_id"], s["kind"], s["title"],
-                        s["origin"], s["sha256"], s["added_at"],
-                        # Archives written before migration 11/12 carry no
-                        # weight/meta key — restore them neutral rather
-                        # than refusing.
-                        float(s.get("weight", 1.0)),
-                        s["meta"],
-                    ),
-                )
-            for c in chunks:
-                self.conn.execute(
-                    "INSERT INTO chunks(id, source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
-                    (
-                        c["id"], c["source_id"], c["seq"], c["text"],
-                        c["context"], c["embedding"], c["embedding_norm"],
-                    ),
-                )
-            for n in notes:
-                self.conn.execute(
-                    "INSERT INTO notes(id, notebook_id, title, body, created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (
-                        n["id"], n["notebook_id"], n["title"],
-                        n["body"], n["created_at"],
-                    ),
-                )
-            for o in studio_outputs:
-                self.conn.execute(
-                    "INSERT INTO studio_outputs(id, notebook_id, kind, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        o["id"], o["notebook_id"], o["kind"], o["body"],
-                        o["citation_report"], o["created_at"],
-                    ),
-                )
-            for m in messages:
-                self.conn.execute(
-                    "INSERT INTO messages(id, notebook_id, role, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        m["id"], m["notebook_id"], m["role"], m["body"],
-                        m["citation_report"], m["created_at"],
-                    ),
-                )
+            # v0.2.686: children re-insert through the shared tree writer
+            # under FRESH ids. This path used to re-insert the archived
+            # ids verbatim, but INTEGER PRIMARY KEY rowids recycle as
+            # max(rowid)+1 — once a later insert took an archived
+            # source/chunk/note/studio/message id, restore died on a raw
+            # PRIMARY KEY conflict the probes never covered (the only
+            # probe checked the notebook id itself).
+            self._insert_tree_rows(
+                nb["id"], sources, chunks, notes, studio_outputs, messages
+            )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
             self._optimize_fts()
         return {"kind": "notebook", "id": nb["id"], "name": nb["name"]}
@@ -1118,11 +1103,14 @@ class Store:
                 ),
             )
             for c in chunks:
+                # v0.2.686: chunks take fresh rowids — deleted ids recycle
+                # as max(rowid)+1, so re-inserting the archived ids
+                # collided with whatever later insert reused them.
                 self.conn.execute(
-                    "INSERT INTO chunks(id, source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO chunks(source_id, seq, text, context,"
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
                     (
-                        c["id"], src["id"], c["seq"], c["text"],
+                        src["id"], c["seq"], c["text"],
                         c["context"], c["embedding"], c["embedding_norm"],
                     ),
                 )
@@ -1397,10 +1385,11 @@ class Store:
             )
             id_map[s["id"]] = int(cur.lastrowid or 0)
             seen_sha[str(s["sha256"])] = id_map[s["id"]]
+        chunk_id_map: dict[Any, int] = {}
         for c in chunks:
             if c["source_id"] in deduped:
                 continue
-            self.conn.execute(
+            cur = self.conn.execute(
                 "INSERT INTO chunks(source_id, seq, text, context,"
                 " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
                 (
@@ -1408,6 +1397,10 @@ class Store:
                     c["context"], c["embedding"], c["embedding_norm"],
                 ),
             )
+            # v0.2.686: reports also carry source_chunk_ids — remap the
+            # chunk pointers through a fresh-id map too, or re-inserted
+            # reports point at dead or unrelated rows.
+            chunk_id_map[c["id"]] = int(cur.lastrowid or 0)
         for n in notes:
             self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
@@ -1420,7 +1413,9 @@ class Store:
                 " citation_report, created_at) VALUES(?,?,?,?,?)",
                 (
                     notebook_id, o["kind"], o["body"],
-                    _remap_report_source_ids(o["citation_report"], id_map),
+                    _remap_report_source_ids(
+                        o["citation_report"], id_map, chunk_id_map
+                    ),
                     o["created_at"],
                 ),
             )
@@ -1430,7 +1425,9 @@ class Store:
                 " citation_report, created_at) VALUES(?,?,?,?,?)",
                 (
                     notebook_id, m["role"], m["body"],
-                    _remap_report_source_ids(m["citation_report"], id_map),
+                    _remap_report_source_ids(
+                        m["citation_report"], id_map, chunk_id_map
+                    ),
                     m["created_at"],
                 ),
             )

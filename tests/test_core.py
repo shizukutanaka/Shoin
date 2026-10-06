@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.685")
+        self.assertEqual(VERSION, "0.2.686")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22056,8 +22056,9 @@ class TestUsageMetrics(unittest.TestCase):
 
 class TestTrash(unittest.TestCase):
     """Undo-log trash (v0.2.654): delete archives the whole tree in the same
-    transaction; restore re-inserts it with original ids (chunks re-fire the
-    FTS triggers, embedding BLOBs decode back verbatim)."""
+    transaction; restore re-inserts it keeping the notebook id while
+    children take fresh rowids (chunks re-fire the FTS triggers,
+    embedding BLOBs decode back verbatim)."""
 
     def _tmpdb(self) -> str:
         import shutil
@@ -22069,7 +22070,7 @@ class TestTrash(unittest.TestCase):
     def test_delete_archives_and_restore_recovers_byte_identical(self) -> None:
         with make_store() as s:
             nb_id = seed(s)
-            note_id = s.add_note(nb_id, "memo", "本文メモ")
+            s.add_note(nb_id, "memo", "本文メモ")
             s.add_message(nb_id, "user", "質問", "{}")
             chunk_id = int(
                 s.conn.execute("SELECT id FROM chunks LIMIT 1").fetchone()["id"]
@@ -22077,9 +22078,14 @@ class TestTrash(unittest.TestCase):
             s.set_embedding(chunk_id, [0.1, 0.2, 0.3])
             before = s.counts(nb_id)
             saved = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                "SELECT source_id, seq, embedding, embedding_norm"
+                " FROM chunks WHERE id=?",
                 (chunk_id,),
             ).fetchone()
+            saved_sha = s.conn.execute(
+                "SELECT sha256 FROM sources WHERE id=?",
+                (saved["source_id"],),
+            ).fetchone()["sha256"]
             s.delete_notebook(nb_id)
             # live view: gone. archive: present.
             with self.assertRaises(StoreError) as cm:
@@ -22093,9 +22099,13 @@ class TestTrash(unittest.TestCase):
             self.assertEqual(nb["id"], nb_id)
             self.assertEqual(nb["kind"], "notebook")
             self.assertEqual(s.counts(nb_id), before)
+            # v0.2.686: children restore under FRESH rowids — locate the
+            # restored chunk by (source sha, seq), not the archived id.
             row = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
-                (chunk_id,),
+                "SELECT c.embedding, c.embedding_norm FROM chunks c"
+                " JOIN sources sc ON c.source_id = sc.id"
+                " WHERE sc.notebook_id=? AND sc.sha256=? AND c.seq=?",
+                (nb_id, saved_sha, saved["seq"]),
             ).fetchone()
             # BLOB bytes + cached norm round-tripped verbatim
             self.assertEqual(row["embedding"], saved["embedding"])
@@ -22106,11 +22116,13 @@ class TestTrash(unittest.TestCase):
                 " WHERE chunks_fts MATCH '猫は液'"
             ).fetchone()["n"]
             self.assertEqual(int(hits), 1)
-            # notes/messages restored with original ids
+            # notes/messages restored under fresh rowids (v0.2.686)
             self.assertEqual(
                 int(
                     s.conn.execute(
-                        "SELECT COUNT(*) AS n FROM notes WHERE id=?", (note_id,)
+                        "SELECT COUNT(*) AS n FROM notes"
+                        " WHERE notebook_id=? AND title=?",
+                        (nb_id, "memo"),
                     ).fetchone()["n"]
                 ),
                 1,
@@ -22203,8 +22215,6 @@ class TestTrash(unittest.TestCase):
             s.delete_source(src_id)
             note_id = s.add_note(nb_id, "m", "本文")
             s.delete_note(note_id)
-            s.delete_notebook(nb_id)
-            items = {t["kind"]: t["id"] for t in s.trash_list()}
 
             def probe() -> None:
                 seen.append(s.conn.in_transaction)
@@ -22215,11 +22225,103 @@ class TestTrash(unittest.TestCase):
             orig_touch = s.touch_notebook
             s.touch_notebook = lambda i: (probe(), orig_touch(i))
 
-            s.trash_restore(items["notebook"])  # probes via _optimize_fts
-            s.trash_restore(items["source"])    # probes via touch + optimize
-            s.trash_restore(items["note"])      # probes via touch_notebook
+            def tid(kind: str) -> int:
+                return next(
+                    t["id"] for t in s.trash_list() if t["kind"] == kind
+                )
+
+            # Source restore first: after the notebook restore its fresh
+            # child ids may occupy the archived source id, and the coded
+            # SOURCE_ALREADY_EXISTS refusal (not a probe failure) would
+            # end the scenario early.
+            s.trash_restore(tid("source"))    # probes via touch + optimize
+            s.delete_notebook(nb_id)
+            s.trash_restore(tid("notebook"))  # probes via _optimize_fts
+            s.trash_restore(tid("note"))      # probes via touch_notebook
 
         self.assertEqual(seen, [True, True] * 4)
+
+    def test_restore_rowid_reuse_restores_under_fresh_ids(self) -> None:
+        """v0.2.686: restore used to re-insert the ARCHIVED ids verbatim,
+        but INTEGER PRIMARY KEY rowids recycle as max(rowid)+1 — once a
+        later insert took an archived source/chunk/note/studio/message id,
+        restore died on a raw PRIMARY KEY conflict the probes never
+        covered (the only probe checked the notebook id itself). Children
+        now re-insert under fresh ids via the shared tree writer."""
+        with make_store() as s:
+            nb_id = seed(s)
+            before = s.counts(nb_id)
+            old_src_ids = {
+                int(r["id"])
+                for r in s.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (nb_id,)
+                )
+            }
+            nb2 = s.create_notebook("reuse")  # keep nb1's id free
+            s.delete_notebook(nb_id)
+            new_src = s.add_source(
+                nb2.id, "txt", "new.txt", "mem://new", "sha-new"
+            )
+            s.add_chunks(new_src.id, ["再利用されたrowidの検証本文。"])
+            # Premise: a freed rowid was actually re-occupied.
+            self.assertIn(new_src.id, old_src_ids)
+            res = s.trash_restore(s.trash_list()[0]["id"])
+            self.assertEqual(res["id"], nb_id)
+            self.assertEqual(s.counts(nb_id), before)
+            restored_ids = {
+                int(r["id"])
+                for r in s.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (nb_id,)
+                )
+            }
+            self.assertFalse(restored_ids & {new_src.id})
+
+    def test_restore_remaps_report_chunk_pointers(self) -> None:
+        """v0.2.686: citation_report's source_chunk_ids carried archived
+        chunk rowids — a verbatim copy left them pointing at dead or
+        unrelated rows once children re-insert under fresh ids. Reports
+        are now rewritten through the same remap as source_id_map."""
+        with make_store() as s:
+            nb_id = seed(s)
+            src = s.conn.execute(
+                "SELECT id, sha256 FROM sources WHERE notebook_id=?"
+                " ORDER BY id LIMIT 1",
+                (nb_id,),
+            ).fetchone()
+            chk = s.conn.execute(
+                "SELECT id FROM chunks WHERE source_id=? ORDER BY seq"
+                " LIMIT 1",
+                (src["id"],),
+            ).fetchone()
+            report = json.dumps(
+                {
+                    "source_id_map": {"S1": int(src["id"])},
+                    "source_chunk_ids": {"S1": [int(chk["id"])]},
+                }
+            )
+            s.add_message(nb_id, "assistant", "回答", report)
+            s.delete_notebook(nb_id)
+            s.trash_restore(s.trash_list()[0]["id"])
+            rep = json.loads(
+                s.conn.execute(
+                    "SELECT citation_report FROM messages"
+                    " WHERE notebook_id=?",
+                    (nb_id,),
+                ).fetchone()["citation_report"]
+            )
+            live_src = s.conn.execute(
+                "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
+                (nb_id, src["sha256"]),
+            ).fetchone()
+            live_chk = s.conn.execute(
+                "SELECT id FROM chunks WHERE source_id=? ORDER BY seq"
+                " LIMIT 1",
+                (live_src["id"],),
+            ).fetchone()
+            self.assertEqual(rep["source_id_map"], {"S1": int(live_src["id"])})
+            self.assertEqual(
+                rep["source_chunk_ids"], {"S1": [int(live_chk["id"])]}
+            )
 
     def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
         """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take
@@ -22372,7 +22474,8 @@ class TestTrash(unittest.TestCase):
             src = s.add_source(nb.id, "txt", "cats.txt", "mem://cats", "sha-c")
             s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
             chunk = s.conn.execute(
-                "SELECT id, embedding, embedding_norm FROM chunks WHERE source_id=?",
+                "SELECT id, seq, embedding, embedding_norm"
+                " FROM chunks WHERE source_id=?",
                 (src.id,),
             ).fetchone()
             nid = s.add_note(nb.id, "memo", "本文")
@@ -22385,9 +22488,12 @@ class TestTrash(unittest.TestCase):
             self.assertEqual(res["kind"], "source")
             self.assertEqual(res["id"], src.id)
             self.assertEqual(s.get_source(src.id).title, "cats.txt")
+            # v0.2.686: chunks restore under FRESH rowids — locate the
+            # restored chunk by (source, seq), not the archived id.
             row = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
-                (chunk["id"],),
+                "SELECT embedding, embedding_norm FROM chunks"
+                " WHERE source_id=? AND seq=?",
+                (src.id, chunk["seq"]),
             ).fetchone()
             self.assertEqual(row["embedding"], chunk["embedding"])
             self.assertEqual(row["embedding_norm"], chunk["embedding_norm"])
@@ -22686,7 +22792,7 @@ class TestNbExportImport(unittest.TestCase):
                 nb2 = s.create_notebook("n2")
                 src2 = s.add_source(nb2.id, "txt", "t2", "o2", "h2")
                 s.add_chunks(src2.id, ["eta theta iota"])           # 5
-                # trash_restore: archive then re-insert under old ids
+                # trash_restore: archive then re-insert under fresh ids
                 # (before merge — merge deletes the source notebook)
                 s.delete_notebook(nb.id)
                 trash_id = int(s.conn.execute(

@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.685
+## Version History: v0.1.37 → v0.2.686
+
+### v0.2.686 — nbツリーrestoreの子行をfresh rowid化(rowid再利用によるPK衝突閉塞)
+
+- **新規短所70解消(ソクラテス問いで発掘)**: 「id再利用の影響はprobeの範囲内か」——`_restore_notebook_tree`がsources/chunks/notes/studio_outputs/messagesの全idをアーカイブ値のまま逐字INSERTしていた。`INTEGER PRIMARY KEY`(rowid)は`max(rowid)+1`で再利用されるため、削除後に別nb/別ソースが同じidを取ると、nb idのみをプローブした範囲外でINSERTがraw `IntegrityError`(PK衝突)を起こしcoded拒否契約を迂回——単一ライターの並行問題でなく永続状態由来の決定的衝突
+- **`_insert_tree_rows`へ委譲**: import/mergeで既に採用済みの「fresh id再挿入+id_map経由report書換え」共有ライターへ変更——冗長な5系統INSERT loopを除去し、dedupe・chunk上限不変条件・report remapを継承。nb行自身のみ元id維持(`NOTEBOOK_ALREADY_EXISTS`プローブ契約は既存通り)
+- **`source_chunk_ids`もremap**: 報告JSONは`{S#: [chunk_ids]}`のchunk rowidも保持しており、全再挿入経路(import/merge含む)で死んだまたは無関係な行を指していた——`_remap_report_source_ids`に`chunk_map`を追加し`_insert_tree_rows`が構築する`chunk_id_map`で書換え
+- **`_restore_trashed_source`のchunkもfresh rowid化**: source本体は元id+プローブ契約(既存`SOURCE_ALREADY_EXISTS`)を維持、子chunkのみfresh id——rowid再利用での衝突を同じく閉塞
+- **境界(記録)**: source単体restore後、既存メッセージ報告内の旧chunk id参照は解決不可のまま(削除時点で既に死んでおり、生nbの他行はarchive外で書換対象外)
+- **行動ピン2件**: ①削除→別nb取込でrowid再利用後のrestore成功(旧コードではPK衝突)+counts一致+fresh id非衝突 ②報告の`source_id_map`/`source_chunk_ids`が両方ともlive行へ解決されることの直接検証
+- **既存テスト2件のlookup更新**: chunk行をarchived idでなく(source sha, seq)/(source_id, seq)で引く——「同じ論理chunk」を新idで引く形へ
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.685 — trash系restoreをBEGIN IMMEDIATE化(probe→INSERT間TOCTOU閉塞)
 
