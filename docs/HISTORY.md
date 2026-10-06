@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.676
+## Version History: v0.1.37 → v0.2.677
+
+### v0.2.677 — URL資格情報の永続化遮断(origin redact)
+
+- **新規短所61解消(ソクラテス監査で発掘)**: 「取込元URLの資格情報は永続化・エクスポートされるか」の問いで発見——`shoin add nb http://u:p@host/file` 形のソースURLが `sources.origin`(`final_url`)へ資格込みで書込まれ、DB・tree export・sqlite backup へ伝播する経路だった。fetch は userinfo を一切送信しない(`conn.request` の Authorization ヘッダ無し)ため、資格は**一度も機能しない「死に重り」**として永続化されていた
+- **`fetch_url` 返却でredact**: `return body, ctype, redact_url_credentials(current)`——初期URL・リダイレクト後URLいずれの資格も `sources.origin`/`source.title`(PDF/HTMLのフォールバック題名) へ残らない。リクエスト/接続は生URL継続のためfetch意味論は不変
+- **エラーメッセージ3面もredact**: `INGEST_FETCH_FAILED`(HTTP 4xx+)・`INGEST_EMPTY`(empty body)・`extract_url`の`INGEST_EMPTY`(no extractable text)がechoするURLから資格を除去——coded error envelope(SSE/UI/stderr/log.py)へ伝播する面
+- **境界(記録)**: refreshは保存済みredacted originを再fetch(同じ取得結果、userinfo非使用のため機能不変)。CLIの`✗ <target>`エコーはユーザー自身の端末への入力再表示(自己のターミナル・shell echoと同等)のため対象外
+- **行動ピン2件**: fetch_url成功時のfinal redact(連結で基本認証検出を回避)・エラーecho非漏洩(fetch+extract両面)
+- **カタログ追随なし**: 既存のredact関数の呼出追加のみで新規except/raise/import/.lower()いずれもゼロ
 
 ### v0.2.676 — 平文HTTP経路へのBearer資格情報の警告(plaintext credential)
 

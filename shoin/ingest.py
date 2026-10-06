@@ -19,7 +19,13 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 
-from .config import MAX_UPLOAD_BYTES, URL_MAX_REDIRECTS, URL_TIMEOUT_SEC, VERSION
+from .config import (
+    MAX_UPLOAD_BYTES,
+    URL_MAX_REDIRECTS,
+    URL_TIMEOUT_SEC,
+    VERSION,
+    redact_url_credentials,
+)
 
 _EXT_KIND = {
     ".txt": "txt",
@@ -658,14 +664,26 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
                 current = urllib.parse.urljoin(current, location)
                 continue
             if resp.status >= 400:
-                raise IngestError("INGEST_FETCH_FAILED", f"HTTP {resp.status} for {current}")
+                raise IngestError(
+                    "INGEST_FETCH_FAILED",
+                    f"HTTP {resp.status} for {redact_url_credentials(current)}",
+                )
             body = resp.read(MAX_UPLOAD_BYTES + 1)
             if not body:
-                raise IngestError("INGEST_EMPTY", f"server returned empty body for {current}")
+                raise IngestError(
+                    "INGEST_EMPTY",
+                    "server returned empty body for"
+                    f" {redact_url_credentials(current)}",
+                )
             _check_size(body)
             body = _decode_content_encoding(resp.getheader("Content-Encoding"), body)
             ctype = resp.getheader("Content-Type") or ""
-            return body, ctype, current
+            # v0.2.677 (product-review #61): the returned URL becomes the
+            # source's stored origin — persisted in the DB and propagated
+            # to exports/backups. Userinfo credentials are never used for
+            # the fetch itself (requests carry no Authorization), so they
+            # are dead weight that must never be persisted.
+            return body, ctype, redact_url_credentials(current)
         except (OSError, http.client.HTTPException) as exc:
             raise IngestError("INGEST_FETCH_FAILED", f"fetch failed: {exc}") from exc
         finally:
@@ -741,5 +759,8 @@ def extract_url(url: str) -> Extracted:
     # unchanged.  The same guard was applied to extract_file() in v0.2.50.
     text = text.replace("\x00", "").strip()
     if not text:
-        raise IngestError("INGEST_EMPTY", f"no extractable text at {url}")
+        raise IngestError(
+            "INGEST_EMPTY",
+            f"no extractable text at {redact_url_credentials(url)}",
+        )
     return Extracted("url", title, text, final_url, _digest(body), pages_failed)

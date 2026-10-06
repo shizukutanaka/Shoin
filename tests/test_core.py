@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.676")
+        self.assertEqual(VERSION, "0.2.677")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -3551,6 +3551,76 @@ class TestIngest(unittest.TestCase):
             "example.com",
             "default port 80 must not appear in the Host header",
         )
+
+    def test_fetch_url_strips_userinfo_from_final_url_and_errors(self) -> None:
+        """v0.2.677 (product-review #61): the URL fetch_url returns
+        becomes sources.origin — persisted in the DB and propagated to
+        exports/backups. Userinfo credentials are never sent on the wire
+        (requests carry no Authorization), so they must never persist.
+        Covers the success return and the error-message echo."""
+        import shoin.ingest as ing
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list[object]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        class Resp:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def getheader(self, name: str) -> str | None:
+                return "text/plain" if name == "Content-Type" else None
+
+            def read(self, n: int = -1) -> bytes:
+                return b"hello"
+
+        class FakeConn:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def request(self, *a: object, **k: object) -> None:
+                pass
+
+            def getresponse(self) -> Resp:
+                return Resp(self.status)
+
+            def close(self) -> None:
+                pass
+
+        uurl = "http://" + "user:pw@example.com/page"
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn(200)),
+        ):
+            _body, _ctype, final = ing.fetch_url(uurl)
+        self.assertEqual(final, "http://example.com/page")
+        self.assertNotIn("pw", final)
+        # error path — the echoed current URL must carry no userinfo.
+        with (
+            patch.object(ing.socket, "getaddrinfo", fake_getaddrinfo),
+            patch.object(ing, "_PinnedHTTPConnection", lambda *a, **k: FakeConn(500)),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.fetch_url(uurl)
+        self.assertEqual(cm.exception.code, "INGEST_FETCH_FAILED")
+        self.assertNotIn("pw", str(cm.exception))
+
+    def test_extract_url_empty_error_strips_userinfo(self) -> None:
+        """v0.2.677 (product-review #61): INGEST_EMPTY echoes the input
+        URL — an error surfaced to the UI/stderr/log must not replay a
+        credential the user embedded in it."""
+        import shoin.ingest as ing
+
+        url = "http://" + "u:pw@example.com/x"
+        with (
+            patch.object(
+                ing, "fetch_url",
+                return_value=(b"<html> </html>", "text/html", url),
+            ),
+            self.assertRaises(IngestError) as cm,
+        ):
+            ing.extract_url(url)
+        self.assertEqual(cm.exception.code, "INGEST_EMPTY")
+        self.assertNotIn("pw", str(cm.exception))
 
     def test_ssrf_rebinding_to_private_blocked(self) -> None:
         """A host resolving to a private address is rejected even at fetch time."""
