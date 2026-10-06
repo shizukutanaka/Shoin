@@ -1806,6 +1806,56 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
 
+    def test_src_patch_meta(self) -> None:
+        """v0.2.658: PATCH /api/sources/{id} with {"meta"} replaces the
+        descriptive metadata object (product-review #24) — echoed back,
+        surfaced on the notebook detail read, whole-object REPLACE."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "meta-nb"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "m.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["メタデータの説明文"])
+
+        # meta-only PATCH — no title/weight fields.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}",
+            {"meta": {"author": "Doe", "year": "2020"}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {"author": "Doe", "year": "2020"})
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(
+            detail["sources"][0]["meta"], {"author": "Doe", "year": "2020"}
+        )
+        # REPLACE semantics — keys absent from the second object are gone.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"meta": {"year": "2021"}}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {"year": "2021"})
+        # Empty object clears everything.
+        status, out = self._json("PATCH", f"/api/sources/{src.id}", {"meta": {}})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["meta"], {})
+        # Non-object meta is the coded 400, not a 500.
+        for bad in ("freeform", [1], 7, True):
+            status, err = self._json(
+                "PATCH", f"/api/sources/{src.id}", {"meta": bad}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # Oversized serialized object is the same coded 400 via the store.
+        status, err = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"meta": {"k": "x" * 5000}}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 class NonStreamingLLMTest(unittest.TestCase):
     """Server falls back to non-streaming chat() when LLM has no chat_stream method."""

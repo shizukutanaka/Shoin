@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.657")
+        self.assertEqual(VERSION, "0.2.658")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18217,7 +18217,7 @@ class TestResidualGuards(unittest.TestCase):
         for var, lo, hi in spans:
             ok = re.compile(
                 rf"self\._(?:require|required_int|optional_str|optional_id_list|"
-                rf"optional_int|optional_float)\(\s*{var}\b"
+                rf"optional_int|optional_float|optional_json_obj)\(\s*{var}\b"
             )
             for i in range(lo, hi):
                 line = lines[i]
@@ -19030,6 +19030,10 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.653: usage_metrics skips a hand-corrupted (non-numeric)
                 # metric row instead of failing the whole surface.
                 "(TypeError,ValueError)",
+                # v0.2.658: update_source_meta maps an unserializable meta
+                # object (json.dumps TypeError/ValueError) to the coded
+                # field-format error — same classify-then-wrap shape.
+                "(TypeError,ValueError)",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
                 "sqlite3.IntegrityError", "sqlite3.IntegrityError",
@@ -19184,8 +19188,9 @@ class TestResidualGuards(unittest.TestCase):
                 # +2: _cmd_search's question/length guards (v0.2.649)
                 # +1: _cmd_eval's missing-cases guard (v0.2.651)
                 # +2: _cmd_import's file-read / not-JSON guards (v0.2.655)
+                # +1: _cmd_source meta's malformed key=value pair (v0.2.658)
                 "StoreError", "StoreError", "StoreError",
-                "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -19216,8 +19221,9 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _required_int's missing-field guard (v0.2.656)
                 # +3: _optional_float type/range guards + _h_src_patch's
                 #     no-field-sentinel guard (v0.2.657)
+                # +1: _optional_json_obj's non-dict field guard (v0.2.658)
                 "StoreError", "StoreError", "StoreError",
-                "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
@@ -19225,11 +19231,19 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 68,  # +1: _utf8's coded surrogate rejection
+                # v0.2.658: _meta_text rejects non-object meta payloads — a
+                # programmer-error builtin, same class as the existing
+                # internal-validator ValueErrors (never reaches the request
+                # path: callers classify it coded inside their own guards).
+                "ValueError", "ValueError",
+            ] + ["StoreError"] * 72,  # +1: _utf8's coded surrogate rejection
                                       # +2: merge_notebooks self-merge /
                                       #     corrupt-tree guards (v0.2.656)
                                       # +3: update_source_weight type/range/
                                       #     missing-row guards (v0.2.657)
+                                      # +4: update_source_meta non-dict /
+                                      #     unserializable / oversize / missing-
+                                      #     row guards (v0.2.658)
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
                                       # +3: update_chunk_text empty/missing/deleted
@@ -21782,4 +21796,177 @@ class TestSourceWeight(unittest.TestCase):
         )
         self.assertEqual(
             main(["--db", db, "source", "weight", "999", "2"]), 1
+        )
+
+class TestSourceMeta(unittest.TestCase):
+    """v0.2.658: per-source descriptive metadata (product-review #24).
+
+    Weakness #24: title/origin/sha256 describe provenance, but nothing
+    carries the citation-descriptive fields (author, year) that BibTeX/RIS
+    exports need — every exported reference rendered anonymous and dated
+    by ingest day instead of publication. The `meta` JSON column holds the
+    freeform object; the store owns whole-object REPLACE semantics and the
+    serialized-byte bound; exports read `author`/`year` as the canonical
+    citation keys.
+    """
+
+    def test_meta_defaults_persists_and_validates(self) -> None:
+        store = make_store()
+        nb_id = seed(store)
+        srcs = store.sources_for_notebook(nb_id)
+        # Migration 12's '{}' default keeps every pre-existing row
+        # metadata-free — the column addition alone changes nothing visible.
+        self.assertEqual([s.meta for s in srcs], [{}, {}])
+        store.update_source_meta(srcs[0].id, {"author": "山田", "year": "2024"})
+        self.assertEqual(
+            store.get_source(srcs[0].id).meta, {"author": "山田", "year": "2024"}
+        )
+        self.assertEqual(store.get_source(srcs[1].id).meta, {})
+        # Whole-object REPLACE: a second write drops keys the first set.
+        store.update_source_meta(srcs[0].id, {"year": "2025"})
+        self.assertEqual(store.get_source(srcs[0].id).meta, {"year": "2025"})
+        # Non-dict, oversized, and missing-row inputs are all the coded path.
+        for bad in (["a"], "str", 7, None):
+            with self.assertRaises(StoreError) as cm:
+                store.update_source_meta(srcs[0].id, bad)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_meta(srcs[0].id, {"k": "x" * 5000})
+        self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_meta(999, {})
+        self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_meta_serialization_is_canonical(self) -> None:
+        # Logical equality must be byte equality — otherwise trash/export
+        # payloads churn on key order and duplicate detection breaks.
+        from shoin.store import _meta_dump
+
+        self.assertEqual(
+            _meta_dump({"b": 1, "a": 2}), _meta_dump({"a": 2, "b": 1})
+        )
+        self.assertEqual(_meta_dump({"a": "ä"}), '{"a":"ä"}')
+
+    def test_meta_survives_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        store.add_chunks(a.id, ["テキスト"])
+        store.update_source_meta(a.id, {"author": "著者", "year": "2023"})
+        # duplicate preserves meta.
+        dup = store.duplicate_notebook(nb.id, "m2")
+        self.assertEqual(
+            store.sources_for_notebook(dup.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # export -> import preserves meta.
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(
+            store.sources_for_notebook(imp.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # delete -> trash restore preserves meta (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(
+            store.sources_for_notebook(nb.id)[0].meta,
+            {"author": "著者", "year": "2023"},
+        )
+        # A pre-meta-column export (key absent) imports metadata-free.
+        for s in doc["sources"]:
+            del s["meta"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(store.sources_for_notebook(imp2.id)[0].meta, {})
+        # A non-object meta in a foreign document is a coded refusal.
+        doc["sources"][0]["meta"] = "freeform"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_meta_feeds_bibtex_and_ris(self) -> None:
+        from shoin.export import export_bibtex, export_ris
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "paper", "mem://a", "sa")
+        # No meta: exports emit no author line and year falls back to
+        # added_at's leading digits (pre-existing contract, unchanged).
+        bib = export_bibtex(store, nb.id)
+        self.assertNotIn("author =", bib)
+        ris = export_ris(store, nb.id)
+        self.assertNotIn("AU  -", ris)
+        # meta.author/meta.year are the citation keys reference managers
+        # read — meta.year must win over the ingest timestamp.
+        store.update_source_meta(a.id, {"author": "Doe, J and Roe, A", "year": "2019"})
+        bib = export_bibtex(store, nb.id)
+        self.assertIn("author = {Doe, J and Roe, A}", bib)
+        self.assertIn("year = {2019}", bib)
+        ris = export_ris(store, nb.id)
+        self.assertIn("AU  - Doe, J", ris)
+        self.assertIn("AU  - Roe, A", ris)
+        self.assertIn("PY  - 2019", ris)
+        # A garbage meta.year falls back to added_at, not a bogus PY/year.
+        store.update_source_meta(a.id, {"year": "n.d."})
+        bib2 = export_bibtex(store, nb.id)
+        self.assertNotIn("year = {n.d.}", bib2)
+
+    def test_meta_patch_touches_notebook(self) -> None:
+        # Meta feeds export output — content-bearing like rename, so the
+        # notebook's updated_at must move (unlike weight, which is a
+        # retrieval preference only).
+        store = make_store()
+        nb = store.create_notebook("m")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        before = store.get_notebook(nb.id).updated_at
+        store.update_source_meta(a.id, {"author": "x"})
+        self.assertNotEqual(store.get_notebook(nb.id).updated_at, before)
+
+    def test_cli_source_meta(self) -> None:
+        """`shoin source meta` — REQ-103 parity with PATCH meta."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+            sid = s.sources_for_notebook(nb_id)[0].id
+        # Merge-style write via key=value pairs.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "source", "meta", str(sid),
+                      "author=山田", "year=2024"]), 0
+            )
+        with Store(db) as s:
+            self.assertEqual(
+                s.get_source(sid).meta, {"author": "山田", "year": "2024"}
+            )
+        # Bare call prints the current object.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "source", "meta", str(sid)]), 0)
+        import json as _j
+        self.assertEqual(
+            _j.loads(out.getvalue()), {"author": "山田", "year": "2024"}
+        )
+        # --clear resets to the empty object.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(["--db", db, "source", "meta", str(sid), "--clear"]), 0
+            )
+        with Store(db) as s:
+            self.assertEqual(s.get_source(sid).meta, {})
+        # A malformed pair and a dead id are both the coded StoreError
+        # path — stderr err.prefix + exit 1, never a traceback.
+        self.assertEqual(
+            main(["--db", db, "source", "meta", str(sid), "noeq"]), 1
+        )
+        self.assertEqual(
+            main(["--db", db, "source", "meta", "999", "a=b"]), 1
         )

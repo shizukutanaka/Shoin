@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.657"
+VERSION = "0.2.658"
 
 
 DEFAULT_PORT = 7440
@@ -34,6 +34,11 @@ EMBED_MODEL_SETTING_KEY = "embed_model"  # settings key for the stored-vector bu
 # the source's chunks to the pool floor. Bounded so one source can dominate a
 # ranking but never overflow it; store/server/CLI share this same bound.
 SOURCE_WEIGHT_MAX = 8.0
+# REQ-002: per-source metadata (author/year/…) serialized JSON byte bound.
+# Meta is descriptive citation data a user writes via PATCH/CLI — unbounded
+# it would become a per-source blob column; 4KB covers a reference manager's
+# worth of fields with headroom while keeping detail responses small.
+SOURCE_META_MAX = 4096
 
 
 def config_file() -> Path:

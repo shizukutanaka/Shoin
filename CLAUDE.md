@@ -316,7 +316,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - `_h_ask_sse()`: manages streaming, catches BrokenPipeError/ConnectionResetError, saves partial responses
 
 **`cli.py`** (Command-Line Interface)
-- Subcommands: notebook (new/list/delete/rename/duplicate/merge — merge v0.2.656), add, ask, search (v0.2.649), studio, questions, export (`--format tree` for the portable notebook tree — v0.2.655), import (v0.2.655), serve, reindex, note (add/list/delete), source (delete/rename/refresh/refresh-all/weight — weight v0.2.657) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), chunk (edit — v0.2.647), trash (list/restore/purge — v0.2.654), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
+- Subcommands: notebook (new/list/delete/rename/duplicate/merge — merge v0.2.656), add, ask, search (v0.2.649), studio, questions, export (`--format tree` for the portable notebook tree — v0.2.655), import (v0.2.655), serve, reindex, note (add/list/delete), source (delete/rename/refresh/refresh-all/weight/meta — weight v0.2.657, meta v0.2.658) (v0.2.68), health (v0.2.127), stats (v0.2.634), backup (v0.2.636), chunk (edit — v0.2.647), trash (list/restore/purge — v0.2.654), messages (list/clear — `list` v0.2.73), eval (v0.2.226; baseline `--save`/`--diff` v0.2.226/334)
 - Maps to the same backends (Store, LLM, Q&A) as the web server
 - Internationalization: respects SHOIN_LANG for output
 
@@ -344,7 +344,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.657** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.658** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

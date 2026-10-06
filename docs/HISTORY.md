@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.657
+## Version History: v0.1.37 → v0.2.658
+
+### v0.2.658 — ソースメタデータ (meta)
+
+- **短所24解消**: title/kind/origin/sha256 しかなく著者・発行年等の引用記述を置く場所が無く、BibTeX/RIS 出力が匿名 n.d. 固定だった。`sources.meta TEXT NOT NULL DEFAULT '{}'` (migration 12 — '{}' 既定で既存ソースはメタ無しのまま) + `Store.update_source_meta` (whole-object REPLACE・直列化 byte上限 SOURCE_META_MAX=4096・coded guards) を `PATCH /api/sources/{id} {"meta"}` + `shoin source meta <id> [k=v…] [--clear]` の REQ-103 両面で公開
+- **canonical serialization**: `_meta_dump` (sort_keys+ensure_ascii=False+最小 separator) で論理等価=バイト等価 — キー順違いで trash/export ペイロードが揺れない。`_meta_text` は dict/TEXT 両形を受理し非オブジェクトを ValueError へ — import/merge/restore 各経路が同一正規化を通る
+- **export 反映**: meta.author→BibTeX `author=`/RIS `AU  -` (`A and B` 分割)、meta.year→`year=`/`PY  -` で added_at の取込日を上書き——取込日≠発行年は引用の基本的誤り。異形 meta.year は added_at フォールバックで誤値非放出
+- **touch 契約**: meta は export 内容を動かすコンテンツ系のため `touch_notebook` する (weight は検索設定で非コンテンツのため touch しない、の対称)
+- **行動ピン6件**: 既定/置換/coded 4種・canonical dump・全往復 (duplicate/import/trash) 保存+異形拒否・BibTeX/RIS author/year+フォールバック・touch 確認・CLI parity (merge/表示/clear/異形)
 
 ### v0.2.657 — ソース検索重み (weight)
 

@@ -16,13 +16,19 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
-from .config import MAX_NAME_LEN, MAX_TITLE_LEN, SOURCE_WEIGHT_MAX, data_dir
+from .config import (
+    MAX_NAME_LEN,
+    MAX_TITLE_LEN,
+    SOURCE_META_MAX,
+    SOURCE_WEIGHT_MAX,
+    data_dir,
+)
 
 _T = TypeVar("_T")
 
@@ -359,11 +365,57 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE sources ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;
         """,
     ),
+    (
+        12,
+        # Per-source metadata (v0.2.658, product-review #24): a JSON object
+        # column carrying citation-descriptive fields (author, year, …) that
+        # titles/origins cannot express. '{}'-defaulted so every pre-existing
+        # source reads as having empty metadata — the migration alone changes
+        # nothing visible. Same ALTER TABLE concurrency contract as the
+        # weight column above.
+        """
+        ALTER TABLE sources ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
 ]
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds")
+
+
+def _meta_dump(meta: dict[str, Any]) -> str:
+    """Canonical serialization for a source's meta object.
+
+    sort_keys + tight separators make logically-equal dicts byte-identical
+    in the column — a re-PATCH of the same fields cannot churn storage,
+    and round-trip tests compare strings, not dict ordering.
+    """
+    return json.dumps(
+        meta, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _meta_text(value: Any) -> str:
+    """Normalize a payload's `meta` field to canonical JSON text.
+
+    Accepts the two shapes a tree payload can legitimately carry: the raw
+    TEXT column (a JSON string, our own export/archive form) or a JSON
+    object (a foreign generator's natural spelling). Everything else is
+    garbage — raise ValueError so callers funnel it into their own coded
+    error (NOTEBOOK_IMPORT_INVALID at import, SYSTEM_INTERNAL_ERROR at
+    trash restore). Missing/None means the pre-column default '{}'.
+    """
+    if value is None:
+        return "{}"
+    if isinstance(value, dict):
+        return _meta_dump(value)
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("meta is not a JSON object")
+        return _meta_dump(parsed)
+    raise ValueError("meta is not a JSON object")
 
 
 def pack_vector(vec: list[float]) -> bytes:
@@ -424,6 +476,9 @@ class Source:
     sha256: str
     added_at: str
     weight: float = 1.0
+    # Freeform JSON object of descriptive metadata (author/year/…), parsed
+    # from the meta column on read — never a raw TEXT leak to callers.
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -746,6 +801,12 @@ class Store:
             for c in chunks:
                 if c["embedding"] is not None:
                     c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+            # Normalize meta inside the same corrupt-payload boundary — a
+            # garbage meta field is the same defect class as a broken
+            # embedding tag, and must surface SYSTEM_INTERNAL_ERROR, not
+            # a raw ValueError escaping mid-transaction.
+            for s in sources:
+                s["meta"] = _meta_text(s.get("meta"))
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "SYSTEM_INTERNAL_ERROR",
@@ -767,13 +828,15 @@ class Store:
             for s in sources:
                 self.conn.execute(
                     "INSERT INTO sources(id, notebook_id, kind, title, origin,"
-                    " sha256, added_at, weight) VALUES(?,?,?,?,?,?,?,?)",
+                    " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         s["id"], s["notebook_id"], s["kind"], s["title"],
                         s["origin"], s["sha256"], s["added_at"],
-                        # Archives written before migration 11 carry no weight
-                        # key — restore them neutral rather than refusing.
+                        # Archives written before migration 11/12 carry no
+                        # weight/meta key — restore them neutral rather
+                        # than refusing.
                         float(s.get("weight", 1.0)),
+                        s["meta"],
                     ),
                 )
             for c in chunks:
@@ -858,8 +921,11 @@ class Store:
                 for k in ("kind", "title", "origin", "sha256", "added_at"):
                     s[k]
                 # weight is optional in the document (pre-v0.2.657 exports
-                # lack it) but must be numeric when present.
+                # lack it) but must be numeric when present; meta is the
+                # same — absent or the canonical object/string only
+                # (pre-v0.2.658).
                 float(s.get("weight", 1.0))
+                _meta_text(s.get("meta"))
             for c in chunks:
                 if c["source_id"] not in src_ids:
                     raise StoreError(
@@ -933,14 +999,15 @@ class Store:
         for s in sources:
             cur = self.conn.execute(
                 "INSERT INTO sources"
-                "(notebook_id, kind, title, origin, sha256, added_at, weight)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "(notebook_id, kind, title, origin, sha256, added_at, weight,"
+                " meta) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     notebook_id, s["kind"], s["title"], s["origin"],
                     s["sha256"], s["added_at"],
                     # Same optional-key contract as trash_restore: exports
                     # predating the column import neutral.
                     float(s.get("weight", 1.0)),
+                    _meta_text(s.get("meta")),
                 ),
             )
             id_map[s["id"]] = int(cur.lastrowid or 0)
@@ -1068,10 +1135,11 @@ class Store:
             ).fetchall():
                 cur = self.conn.execute(
                     "INSERT INTO sources"
-                    "(notebook_id, kind, title, origin, sha256, added_at, weight)"
-                    " VALUES (?,?,?,?,?,?,?)",
+                    "(notebook_id, kind, title, origin, sha256, added_at, weight,"
+                    " meta) VALUES (?,?,?,?,?,?,?,?)",
                     (new_id, row["kind"], row["title"], row["origin"],
-                     row["sha256"], row["added_at"], float(row["weight"])),
+                     row["sha256"], row["added_at"], float(row["weight"]),
+                     row["meta"]),
                 )
                 id_map[int(row["id"])] = int(cur.lastrowid or 0)
             for old_src, new_src in id_map.items():
@@ -1256,6 +1324,7 @@ class Store:
                 r["sha256"],
                 r["added_at"],
                 float(r["weight"]),
+                json.loads(r["meta"]),
             )
             for r in rows
         ]
@@ -1273,6 +1342,7 @@ class Store:
             row["sha256"],
             row["added_at"],
             float(row["weight"]),
+            json.loads(row["meta"]),
         )
 
     def notebooks_for_sources(
@@ -1495,6 +1565,49 @@ class Store:
                 raise StoreError(
                     "SOURCE_NOT_FOUND", f"source {source_id} not found"
                 )
+
+    def update_source_meta(self, source_id: int, meta: dict[str, Any]) -> None:
+        """Replace a source's descriptive metadata object (v0.2.658, #24).
+
+        Whole-object REPLACE, not a per-key merge — idempotent PATCH
+        semantics; key-level merging lives at the CLI layer (it reads,
+        merges, and writes the whole object back). The column stores
+        canonical JSON (_meta_dump: sorted keys, tight separators) so
+        logically-equal objects serialize byte-identically and a re-PATCH
+        cannot churn storage. Bounds: must be a dict, must serialize to
+        JSON, serialized form ≤ SOURCE_META_MAX — descriptive citation
+        data, not a blob column. touch_notebook IS called: author/year
+        changes what exports emit, which is content-bearing the same way
+        a rename is. Single-statement UPDATE + rowcount covers both
+        never-existed and concurrently-deleted ids as SOURCE_NOT_FOUND.
+        """
+        if not isinstance(meta, dict):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"meta must be a JSON object, got {type(meta).__name__}",
+            )
+        try:
+            text = _meta_dump(meta)
+        except (TypeError, ValueError) as e:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                "meta must be JSON-serializable",
+            ) from e
+        if len(text.encode("utf-8")) > SOURCE_META_MAX:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"meta exceeds {SOURCE_META_MAX} bytes",
+            )
+        src = self.get_source(source_id)
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE sources SET meta=? WHERE id=?", (text, source_id)
+            )
+            if cur.rowcount == 0:
+                raise StoreError(
+                    "SOURCE_NOT_FOUND", f"source {source_id} not found"
+                )
+            self.touch_notebook(src.notebook_id)
 
     def add_chunks(
         self, source_id: int, texts: list[str], contexts: list[str] | None = None

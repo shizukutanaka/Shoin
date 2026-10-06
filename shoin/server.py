@@ -181,6 +181,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 "title": s.title,
                 "origin": s.origin,
                 "weight": s.weight,
+                "meta": s.meta,
                 # Refreshability is decided by what the origin can still be
                 # read from, not by kind: URL sources always qualify; a file
                 # source qualifies only while its recorded path still exists
@@ -456,6 +457,22 @@ class _Handler(BaseHTTPRequestHandler):
                 f"{key} must be a finite number in {lo}..{hi}",
             )
         return value
+
+    def _optional_json_obj(self, data: Json, key: str) -> dict[str, Any] | None:
+        """Optional JSON-object field: absent -> None; present -> the dict
+        itself or VALIDATION_FIELD_FORMAT_INVALID. Type-shape only —
+        serializability and the byte bound are the store writer's
+        contract (update_source_meta), so the same limit governs every
+        write path instead of drifting per surface."""
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a JSON object, got {type(raw).__name__}",
+            )
+        return raw
 
     # --- routing --------------------------------------------------------
 
@@ -888,15 +905,18 @@ class _Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         title = self._optional_str(data, "title") or None
         weight = self._optional_float(data, "weight", 0.0, SOURCE_WEIGHT_MAX)
-        if title is None and weight is None:
+        meta = self._optional_json_obj(data, "meta")
+        if title is None and weight is None and meta is None:
             raise StoreError(
                 "VALIDATION_REQUIRED_FIELD_MISSING",
-                "missing field: title or weight",
+                "missing field: title, weight, or meta",
             )
         with Store(self.db) as store:
             src = store.get_source(src_id)
             if weight is not None:
                 store.update_source_weight(src_id, weight)
+            if meta is not None:
+                store.update_source_meta(src_id, meta)
             if title is not None:
                 # rename_source, not store.update_source_title, so the embeddings
                 # that bake in the old title are refreshed too (v0.2.160); the
@@ -916,7 +936,7 @@ class _Handler(BaseHTTPRequestHandler):
         # same way a content refresh does (same fix as _h_src_refresh, v0.2.36):
         # evict stale question suggestions, since the cache key is source IDs only
         # and a rename doesn't change those, so it would never self-expire. A
-        # weight change never reaches the question-generation prompt — no evict.
+        # weight/meta change never reaches the generation prompt — no evict.
         if title is not None:
             with self.questions_cache_lock:
                 self.questions_cache.pop(src.notebook_id, None)
@@ -925,6 +945,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "id": src_id,
                 "title": echo_title,
                 "weight": weight if weight is not None else src.weight,
+                "meta": meta if meta is not None else src.meta,
             }
         )
 

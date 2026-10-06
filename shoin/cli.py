@@ -167,6 +167,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "skip {skipped} / 失敗 {failed})"
         ),
         "src.weighted": "重み設定完了: [{id}] weight={w} (0-8、検索スコアへ乗算)",
+        "src.meta_set": "メタデータ設定完了: [{id}] {meta}",
         "chunk.edited": "チャンク更新完了: [{id}] (埋め込みクリア — reindexで再構築)",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
@@ -270,6 +271,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "{unchanged} unchanged / {skipped} skipped / {failed} failed)"
         ),
         "src.weighted": "Weight set: [{id}] weight={w} (0-8, multiplies retrieval score)",
+        "src.meta_set": "Metadata set: [{id}] {meta}",
         "chunk.edited": "Chunk updated: [{id}] (embedding cleared — run reindex to rebuild)",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
@@ -379,6 +381,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     src_w.add_argument("source_id", type=int)
     src_w.add_argument("weight", type=float)
+    src_m = srcsub.add_parser(
+        "meta",
+        help="ソースメタデータ (author=… year=…; 引数なしで表示・--clearで消去)",
+    )
+    src_m.add_argument("source_id", type=int)
+    src_m.add_argument("pairs", nargs="*", metavar="key=value")
+    src_m.add_argument("--clear", action="store_true")
 
     chk = sub.add_parser("chunk", help="チャンク管理")
     chksub = chk.add_subparsers(dest="action", required=True)
@@ -1134,6 +1143,33 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
                 w=str(float(args.weight)),
             )
         )
+    elif action == "meta":
+        import json
+        # Key-level merge surface over the store's whole-object REPLACE:
+        # read the current object, merge `key=value` pairs, write back.
+        # `--clear` is the remove-class complement — key deletion is the
+        # empty-object special case of replace semantics, not a third verb.
+        src = store.get_source(int(args.source_id))
+        if not args.pairs and not args.clear:
+            print(json.dumps(src.meta, ensure_ascii=False, sort_keys=True))
+        else:
+            meta = {} if args.clear else dict(src.meta)
+            for pair in args.pairs:
+                key, sep, value = pair.partition("=")
+                if not sep or not key.strip():
+                    raise StoreError(
+                        "VALIDATION_FIELD_FORMAT_INVALID",
+                        f"meta pair must be key=value, got {pair!r}",
+                    )
+                meta[key.strip()] = value
+            store.update_source_meta(int(args.source_id), meta)
+            print(
+                _t(
+                    "src.meta_set",
+                    id=str(args.source_id),
+                    meta=json.dumps(meta, ensure_ascii=False, sort_keys=True),
+                )
+            )
     return 0
 
 
