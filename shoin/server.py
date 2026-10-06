@@ -8,6 +8,7 @@ else is plain JSON. No path-based static serving: only the embedded index.html.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from .config import (
     NB_NOTES_LIMIT,
     REQUEST_SOCKET_SEC,
     SEARCH_K_MAX,
+    SOURCE_WEIGHT_MAX,
     TOP_K,
     VERSION,
     db_path,
@@ -178,6 +180,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
                 "kind": s.kind,
                 "title": s.title,
                 "origin": s.origin,
+                "weight": s.weight,
                 # Refreshability is decided by what the origin can still be
                 # read from, not by kind: URL sources always qualify; a file
                 # source qualifies only while its recorded path still exists
@@ -428,6 +431,31 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}"
             )
         return self._optional_int(data, key, 1, 2**63 - 1, 0)
+
+    def _optional_float(
+        self, data: Json, key: str, lo: float, hi: float
+    ) -> float | None:
+        """Optional bounded-float field: absent -> None; present -> a finite
+        float in [lo, hi] or VALIDATION_FIELD_FORMAT_INVALID. The float
+        sibling of _optional_int: JSON has one number type so ints are
+        accepted, bools/non-numbers are rejected, and a non-finite or
+        out-of-range value is a coded 400 — never a raw comparison or a
+        silent clamp."""
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a number, got {type(raw).__name__}",
+            )
+        value = float(raw)
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} must be a finite number in {lo}..{hi}",
+            )
+        return value
 
     # --- routing --------------------------------------------------------
 
@@ -857,27 +885,48 @@ class _Handler(BaseHTTPRequestHandler):
                 tmp_path.unlink(missing_ok=True)
 
     def _h_src_patch(self, src_id: int) -> None:
-        title = self._require(self._read_json(), "title")
+        data = self._read_json()
+        title = self._optional_str(data, "title") or None
+        weight = self._optional_float(data, "weight", 0.0, SOURCE_WEIGHT_MAX)
+        if title is None and weight is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING",
+                "missing field: title or weight",
+            )
         with Store(self.db) as store:
             src = store.get_source(src_id)
-            # rename_source, not store.update_source_title, so the embeddings that
-            # bake in the old title are refreshed too (v0.2.160); the rename itself
-            # commits regardless of whether embedding succeeds.
-            rename_source(store, src_id, title, src.origin, self.llm)
-        # Use src_id and title from the request — no second get_source() to avoid
-        # a TOCTOU window where a concurrent delete would return HTTP 404 despite
-        # the update having already committed successfully. But update_source_title()
-        # itself silently truncates to MAX_TITLE_LEN before persisting (same class of
-        # bug v0.2.93 fixed in _h_src_upload) — apply the identical truncation here so
-        # the response matches what was actually written, without a second DB round trip.
-        title = title[:MAX_TITLE_LEN]
+            if weight is not None:
+                store.update_source_weight(src_id, weight)
+            if title is not None:
+                # rename_source, not store.update_source_title, so the embeddings
+                # that bake in the old title are refreshed too (v0.2.160); the
+                # rename itself commits regardless of whether embedding succeeds.
+                rename_source(store, src_id, title, src.origin, self.llm)
+        # Use src_id and title/weight from the request — no second get_source() to
+        # avoid a TOCTOU window where a concurrent delete would return HTTP 404
+        # despite the update having already committed successfully. But
+        # update_source_title() itself silently truncates to MAX_TITLE_LEN before
+        # persisting (same class of bug v0.2.93 fixed in _h_src_upload) — apply
+        # the identical truncation here so the response matches what was actually
+        # written, without a second DB round trip. A weight-only PATCH echoes the
+        # pre-read src.title — a racing rename in the same window resolves to
+        # whichever committed last, and the DB row (not this echo) is the truth.
+        echo_title = (title if title is not None else src.title)[:MAX_TITLE_LEN]
         # A renamed title changes the prompt build_context() sends to the LLM the
         # same way a content refresh does (same fix as _h_src_refresh, v0.2.36):
         # evict stale question suggestions, since the cache key is source IDs only
-        # and a rename doesn't change those, so it would never self-expire.
-        with self.questions_cache_lock:
-            self.questions_cache.pop(src.notebook_id, None)
-        self._json({"id": src_id, "title": title})
+        # and a rename doesn't change those, so it would never self-expire. A
+        # weight change never reaches the question-generation prompt — no evict.
+        if title is not None:
+            with self.questions_cache_lock:
+                self.questions_cache.pop(src.notebook_id, None)
+        self._json(
+            {
+                "id": src_id,
+                "title": echo_title,
+                "weight": weight if weight is not None else src.weight,
+            }
+        )
 
     def _h_src_delete(self, src_id: int) -> None:
         with Store(self.db) as store:

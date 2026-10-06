@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
-from .config import MAX_NAME_LEN, MAX_TITLE_LEN, data_dir
+from .config import MAX_NAME_LEN, MAX_TITLE_LEN, SOURCE_WEIGHT_MAX, data_dir
 
 _T = TypeVar("_T")
 
@@ -346,6 +346,19 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        11,
+        # Per-source retrieval weight (v0.2.657, product-review #19):
+        # retrieve()/retrieve_multi() multiply each fused hit's score by its
+        # source's weight, so an authoritative document can outrank a pasted
+        # scratch note. NOT NULL DEFAULT 1.0 keeps every pre-existing source
+        # neutral — the migration alone cannot shift a single ranking. ALTER
+        # TABLE has no IF NOT EXISTS; _migrate_once() absorbs the concurrent
+        # "duplicate column name" case (same contract as migration 7).
+        """
+        ALTER TABLE sources ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;
+        """,
+    ),
 ]
 
 
@@ -410,6 +423,7 @@ class Source:
     origin: str
     sha256: str
     added_at: str
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -753,10 +767,13 @@ class Store:
             for s in sources:
                 self.conn.execute(
                     "INSERT INTO sources(id, notebook_id, kind, title, origin,"
-                    " sha256, added_at) VALUES(?,?,?,?,?,?,?)",
+                    " sha256, added_at, weight) VALUES(?,?,?,?,?,?,?,?)",
                     (
                         s["id"], s["notebook_id"], s["kind"], s["title"],
                         s["origin"], s["sha256"], s["added_at"],
+                        # Archives written before migration 11 carry no weight
+                        # key — restore them neutral rather than refusing.
+                        float(s.get("weight", 1.0)),
                     ),
                 )
             for c in chunks:
@@ -840,6 +857,9 @@ class Store:
                 src_ids.add(s["id"])
                 for k in ("kind", "title", "origin", "sha256", "added_at"):
                     s[k]
+                # weight is optional in the document (pre-v0.2.657 exports
+                # lack it) but must be numeric when present.
+                float(s.get("weight", 1.0))
             for c in chunks:
                 if c["source_id"] not in src_ids:
                     raise StoreError(
@@ -913,11 +933,14 @@ class Store:
         for s in sources:
             cur = self.conn.execute(
                 "INSERT INTO sources"
-                "(notebook_id, kind, title, origin, sha256, added_at)"
-                " VALUES(?,?,?,?,?,?)",
+                "(notebook_id, kind, title, origin, sha256, added_at, weight)"
+                " VALUES(?,?,?,?,?,?,?)",
                 (
                     notebook_id, s["kind"], s["title"], s["origin"],
                     s["sha256"], s["added_at"],
+                    # Same optional-key contract as trash_restore: exports
+                    # predating the column import neutral.
+                    float(s.get("weight", 1.0)),
                 ),
             )
             id_map[s["id"]] = int(cur.lastrowid or 0)
@@ -1045,10 +1068,10 @@ class Store:
             ).fetchall():
                 cur = self.conn.execute(
                     "INSERT INTO sources"
-                    "(notebook_id, kind, title, origin, sha256, added_at)"
-                    " VALUES (?,?,?,?,?,?)",
+                    "(notebook_id, kind, title, origin, sha256, added_at, weight)"
+                    " VALUES (?,?,?,?,?,?,?)",
                     (new_id, row["kind"], row["title"], row["origin"],
-                     row["sha256"], row["added_at"]),
+                     row["sha256"], row["added_at"], float(row["weight"])),
                 )
                 id_map[int(row["id"])] = int(cur.lastrowid or 0)
             for old_src, new_src in id_map.items():
@@ -1232,6 +1255,7 @@ class Store:
                 r["origin"],
                 r["sha256"],
                 r["added_at"],
+                float(r["weight"]),
             )
             for r in rows
         ]
@@ -1248,6 +1272,7 @@ class Store:
             row["origin"],
             row["sha256"],
             row["added_at"],
+            float(row["weight"]),
         )
 
     def notebooks_for_sources(
@@ -1437,6 +1462,39 @@ class Store:
                 "SYSTEM_INTERNAL_ERROR",
                 f"unexpected constraint violation: {e}",
             ) from e
+
+    def update_source_weight(self, source_id: int, weight: float) -> None:
+        """Set a source's retrieval weight (v0.2.657, product-review #19).
+
+        The weight multiplies the fused normalized score of every hit the
+        source contributes — 1.0 neutral, >1 promotes, <1 demotes, 0 pins
+        its chunks to the pool floor. Bounded to [0, SOURCE_WEIGHT_MAX]:
+        one source may dominate a ranking but cannot overflow it, and a
+        non-finite value must never reach the score field. Single-statement
+        UPDATE + rowcount covers both the never-existed and the concurrently-
+        deleted id as SOURCE_NOT_FOUND. touch_notebook is deliberately NOT
+        called: weight is a retrieval preference, not content, so the
+        notebook list's updated_at ordering must not churn on it.
+        """
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"weight must be a number, got {type(weight).__name__}",
+            )
+        value = float(weight)
+        if not math.isfinite(value) or not 0.0 <= value <= SOURCE_WEIGHT_MAX:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"weight must be finite in 0..{SOURCE_WEIGHT_MAX}",
+            )
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE sources SET weight=? WHERE id=?", (value, source_id)
+            )
+            if cur.rowcount == 0:
+                raise StoreError(
+                    "SOURCE_NOT_FOUND", f"source {source_id} not found"
+                )
 
     def add_chunks(
         self, source_id: int, texts: list[str], contexts: list[str] | None = None

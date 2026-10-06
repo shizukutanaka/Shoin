@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.656")
+        self.assertEqual(VERSION, "0.2.657")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -15283,8 +15283,9 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
     "search.py:73", "search.py:952",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
-    # character class (v0.2.650 suggestion oracle).
-    "search.py:1747",
+    # character class (v0.2.650 suggestion oracle; v0.2.657 shifted it
+    # +35 for _apply_source_weights).
+    "search.py:1782",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -18215,7 +18216,8 @@ class TestResidualGuards(unittest.TestCase):
         offenders = []
         for var, lo, hi in spans:
             ok = re.compile(
-                rf"self\._(?:require|optional_str|optional_id_list|optional_int)\(\s*{var}\b"
+                rf"self\._(?:require|required_int|optional_str|optional_id_list|"
+                rf"optional_int|optional_float)\(\s*{var}\b"
             )
             for i in range(lo, hi):
                 line = lines[i]
@@ -19212,6 +19214,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError",
                 # +1: _h_global_search question-length guard (v0.2.649)
                 # +1: _required_int's missing-field guard (v0.2.656)
+                # +3: _optional_float type/range guards + _h_src_patch's
+                #     no-field-sentinel guard (v0.2.657)
+                "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
@@ -19220,9 +19225,11 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 65,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 68,  # +1: _utf8's coded surrogate rejection
                                       # +2: merge_notebooks self-merge /
                                       #     corrupt-tree guards (v0.2.656)
+                                      # +3: update_source_weight type/range/
+                                      #     missing-row guards (v0.2.657)
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
                                       # +3: update_chunk_text empty/missing/deleted
@@ -20695,8 +20702,9 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
             # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
             # constant character class — same static-constant category as
-            # the other sites (v0.2.650 suggestion oracle).
-            "search.py": [73, 1747, 952],
+            # the other sites (v0.2.650 suggestion oracle; +35 for
+            # _apply_source_weights in v0.2.657).
+            "search.py": [73, 1782, 952],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -21650,3 +21658,128 @@ class TestNbMerge(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         return os.path.join(d, "t.db")
+
+
+class TestSourceWeight(unittest.TestCase):
+    """v0.2.657: per-source retrieval weight (product-review #19)."""
+
+    def test_weight_defaults_persists_and_validates(self) -> None:
+        from shoin.config import SOURCE_WEIGHT_MAX
+
+        store = make_store()
+        nb_id = seed(store)
+        src = store.sources_for_notebook(nb_id)
+        # Migration 11's NOT NULL DEFAULT keeps every pre-existing row neutral.
+        self.assertEqual([s.weight for s in src], [1.0, 1.0])
+        store.update_source_weight(src[0].id, 3.5)
+        self.assertEqual(store.get_source(src[0].id).weight, 3.5)
+        self.assertEqual(store.get_source(src[1].id).weight, 1.0)
+        # Boundary values are accepted; the out-of-range, non-finite, and
+        # wrong-type inputs all map to the coded validator error.
+        store.update_source_weight(src[0].id, 0.0)
+        store.update_source_weight(src[0].id, SOURCE_WEIGHT_MAX)
+        for bad in (-0.1, SOURCE_WEIGHT_MAX + 0.1, float("nan"), float("inf"), "2", True):
+            with self.assertRaises(StoreError) as cm:
+                store.update_source_weight(src[0].id, bad)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_source_weight(999, 2.0)
+        self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_weight_shifts_retrieval_order(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("w")
+        # A dense and a sparse match: BM25 density ranks `strong` first when
+        # every source is neutral — the baseline the weight pass must move.
+        strong = store.add_source(nb.id, "txt", "strong", "mem://s", "ss")
+        weak = store.add_source(nb.id, "txt", "weak", "mem://w", "sw")
+        store.add_chunks(strong.id, ["固有語XYZ 固有語XYZ 固有語XYZ 固有語XYZ"])
+        store.add_chunks(weak.id, ["固有語XYZ"])
+        base = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(len(base), 2)
+        self.assertEqual(base[0].source_id, strong.id)
+        # Promotion: weight-8 lifts the weakly-matching source above the
+        # dense unweighted one (pre-normalization application — a weight
+        # must be able to rescue a low-ranked hit, not just sink high ones).
+        store.update_source_weight(weak.id, 8.0)
+        boosted = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(boosted[0].source_id, weak.id)
+        self.assertEqual(boosted[-1].source_id, strong.id)
+        # Demotion: weight-0 from the other direction, same ordering.
+        store.update_source_weight(weak.id, 1.0)
+        store.update_source_weight(strong.id, 0.0)
+        demoted = retrieve(store, nb.id, "固有語XYZ")
+        self.assertEqual(demoted[0].source_id, weak.id)
+        # Cross-notebook (None scope) and multi-query paths apply the same
+        # weight pass — a floor-weighted source must never leapfrog.
+        cross = retrieve(store, None, "固有語XYZ")
+        self.assertEqual(cross[0].source_id, weak.id)
+        multi = retrieve_multi(store, nb.id, ["固有語XYZ"])
+        self.assertEqual(multi[0].source_id, weak.id)
+
+    def test_weight_survives_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("w")
+        a = store.add_source(nb.id, "txt", "a", "mem://a", "sa")
+        store.add_chunks(a.id, ["テキスト"])
+        store.update_source_weight(a.id, 2.0)
+        # duplicate preserves the weight.
+        dup = store.duplicate_notebook(nb.id, "w2")
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(dup.id)], [2.0]
+        )
+        # export -> import preserves it (the tree document carries weight).
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(imp.id)], [2.0]
+        )
+        # delete -> trash restore preserves it (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(nb.id)], [2.0]
+        )
+        # A pre-weight-column export (key absent) imports neutral.
+        for s in doc["sources"]:
+            del s["weight"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(
+            [s.weight for s in store.sources_for_notebook(imp2.id)], [1.0]
+        )
+        # A non-numeric weight in a foreign document is a coded refusal.
+        doc["sources"][0]["weight"] = "heavy"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_cli_source_weight(self) -> None:
+        """`shoin source weight <id> <w>` — REQ-103 parity with PATCH."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+            sid = s.sources_for_notebook(nb_id)[0].id
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "source", "weight", str(sid), "2.5"]), 0
+            )
+        self.assertIn("weight=2.5", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(s.get_source(sid).weight, 2.5)
+        # Out-of-range argparse float (nan slips type=float) is the coded
+        # StoreError path — stderr err.prefix + exit 1, never a traceback.
+        self.assertEqual(
+            main(["--db", db, "source", "weight", str(sid), "nan"]), 1
+        )
+        self.assertEqual(
+            main(["--db", db, "source", "weight", "999", "2"]), 1
+        )

@@ -166,6 +166,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "一括再取込: {n}件 (更新 {refreshed} / 変更なし {unchanged} / "
             "skip {skipped} / 失敗 {failed})"
         ),
+        "src.weighted": "重み設定完了: [{id}] weight={w} (0-8、検索スコアへ乗算)",
         "chunk.edited": "チャンク更新完了: [{id}] (埋め込みクリア — reindexで再構築)",
         "health.version": "バージョン: {v}",
         "health.llm_ok": "LLM到達可能: {v}",
@@ -268,6 +269,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "refresh-all: {n} source(s) ({refreshed} refreshed / "
             "{unchanged} unchanged / {skipped} skipped / {failed} failed)"
         ),
+        "src.weighted": "Weight set: [{id}] weight={w} (0-8, multiplies retrieval score)",
         "chunk.edited": "Chunk updated: [{id}] (embedding cleared — run reindex to rebuild)",
         "health.version": "Version: {v}",
         "health.llm_ok": "LLM reachable: {v}",
@@ -372,6 +374,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "refresh-all", help="ノートブック内の全ソースを一括再取込 (cron向け)"
     )
     src_ra.add_argument("notebook_id", type=int)
+    src_w = srcsub.add_parser(
+        "weight", help="検索重みの設定 (1.0=標準・>1優遇・<1降格・0で下位固定)"
+    )
+    src_w.add_argument("source_id", type=int)
+    src_w.add_argument("weight", type=float)
 
     chk = sub.add_parser("chunk", help="チャンク管理")
     chksub = chk.add_subparsers(dest="action", required=True)
@@ -1113,6 +1120,18 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
                 unchanged=str(tally.get("unchanged", 0)),
                 skipped=str(tally.get("skipped", 0)),
                 failed=str(tally.get("failed", 0)),
+            )
+        )
+    elif action == "weight":
+        # update_source_weight raises the coded StoreError for range/type —
+        # argparse's type=float accepts nan/inf, so the store bound is the
+        # boundary (same single-validation contract as the API's validator).
+        store.update_source_weight(int(args.source_id), float(args.weight))
+        print(
+            _t(
+                "src.weighted",
+                id=str(args.source_id),
+                w=str(float(args.weight)),
             )
         )
     return 0

@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.656
+## Version History: v0.1.37 → v0.2.657
+
+### v0.2.657 — ソース検索重み (weight)
+
+- **短所19解消**: 全ソースが同権で扱われ「信頼できる一次資料を重く」する経路が無かった。`sources.weight REAL NOT NULL DEFAULT 1.0` (migration 11 — 既存行は中立のため migration 単体では順位が変わらない) + `Store.update_source_weight` (`PATCH /api/sources/{id}` 拡張 `{weight}`/`{title,weight}`・`shoin source weight <id> <w>` の REQ-103 両面)
+- **適用位置は正規化前**: `_apply_source_weights` が融合直後の raw RRF スコアへ乗算してから `_minmax` へ — 正規化後乗算ではプール床(常に0.0)の重いソースが 0×8=0 で永久に浮上しないため、優遇と降格の両方向を成立させるには weighted 順序を minmax が見る必要がある。`SOURCE_WEIGHT_MAX=8.0` で1ソースが支配し得ても溢れない境界 (w>1 優遇・w<1 降格・w=0 床固定)。`rerank`/`_tail_cut`/MMR は相対絶壁で動くため絶対 rescale 安全
+- **設計上の境界**: `rowcount==0` → `SOURCE_NOT_FOUND` が存在なし/並行削除を一括 (TOCTOU事前検査不要)・`touch_notebook` しない (検索設定はコンテンツ変更ではなく、updated_at 並びを撹拌しない)・並行削除中ヒットは `weights.get(id, 1.0)` で中立・全往復経路 (duplicate/export-import/trash-restore/merge) は `float(s.get("weight",1.0))` の optional-key 契約で weight列無しの古ペイロードも中立復元
+- **行動ピン4件**: 既定/範囲/coded検証・order往復 (優遇で低密度が高密度を逆転・降格で床・None横断・multi同経路)・全往復で weight 保存 + 異形重み拒否・CLI parity
 
 ### v0.2.656 — ノートブック統合 (merge)
 

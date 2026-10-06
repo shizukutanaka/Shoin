@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.656"
+VERSION = "0.2.657"
 
 
 DEFAULT_PORT = 7440
@@ -29,6 +29,11 @@ NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI hist
 NB_NOTES_LIMIT = 500  # notes embedded in GET /api/notebooks/{id} (UI notes pane)
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
 EMBED_MODEL_SETTING_KEY = "embed_model"  # settings key for the stored-vector builder model
+# REQ-004: per-source retrieval weight bound. The weight multiplies a source's
+# fused [0,1] retrieval score — 1.0 is neutral, >1 promotes, <1 demotes, 0 pins
+# the source's chunks to the pool floor. Bounded so one source can dominate a
+# ranking but never overflow it; store/server/CLI share this same bound.
+SOURCE_WEIGHT_MAX = 8.0
 
 
 def config_file() -> Path:

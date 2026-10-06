@@ -1599,6 +1599,39 @@ def _debug_print(
 # --- top-level ------------------------------------------------------------
 
 
+def _apply_source_weights(
+    store: Store, notebook_id: int | None, hits: list[Hit]
+) -> None:
+    """Multiply each fused hit's raw score by its source's weight (v0.2.657).
+
+    Called BEFORE _minmax — the weighted ordering must be the one min-max
+    normalization sees. Applied after normalization it could only demote
+    (x×w stays ≤1 for w≤1) and could never promote: the pool floor is always
+    stretched to exactly 0.0, so a barely-retrieved chunk of a weight-8
+    source would stay pinned at 0×8=0 forever. Pre-normalization, a weight-8
+    source's low-rank chunk outscores an unweighted top hit — promotion and
+    demotion both work, and the [0,1] blend calibration is preserved because
+    _minmax still runs last. One indexed lookup covers the whole notebook
+    (per-hit cost is a dict read); a hit whose source row was deleted
+    mid-request falls back to neutral 1.0 via .get() — a racing delete must
+    neither re-weight nor drop surviving hits. Same `(? IS NULL OR …)`
+    scoping idiom as the retrieval queries, so a cross-notebook (None) call
+    reads every notebook's weights in one pass.
+    """
+    weights = {
+        int(r["id"]): float(r["weight"])
+        for r in store.conn.execute(
+            "SELECT s.id, s.weight FROM sources s"
+            " WHERE (? IS NULL OR s.notebook_id = ?)",
+            (notebook_id, notebook_id),
+        ).fetchall()
+    }
+    if not weights:
+        return
+    for h in hits:
+        h.score *= weights.get(h.source_id, 1.0)
+
+
 def retrieve(
     store: Store,
     notebook_id: int | None,
@@ -1647,6 +1680,7 @@ def retrieve(
     # retrieval. rrf_fuse() emits raw rank-reciprocal values, so _minmax here
     # rescales them to [0,1] before the lexical blend.
     if fused:
+        _apply_source_weights(store, notebook_id, fused)
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed, strict=True):
             h.score = n
@@ -1724,6 +1758,7 @@ def retrieve_multi(
 
     fused = rrf_fuse_lists(lists)
     if fused:
+        _apply_source_weights(store, notebook_id, fused)
         normed = _minmax([h.score for h in fused])
         for h, n in zip(fused, normed, strict=True):
             h.score = n

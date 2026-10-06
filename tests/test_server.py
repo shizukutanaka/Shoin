@@ -1753,6 +1753,59 @@ class ServerTest(unittest.TestCase):
             "an unsupported-but-harmless language code must also fall back to ja",
         )
 
+    def test_src_patch_weight(self) -> None:
+        """v0.2.657: PATCH /api/sources/{id} with {"weight"} sets the
+        retrieval weight (product-review #19) — no title needed, and the
+        value surfaces on the notebook detail read."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "weight-nb"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "w.txt", "mem://w", "sha-w")
+            store.add_chunks(src.id, ["重みの説明文"])
+
+        # weight-only PATCH — no title field at all.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"weight": 3.0}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["id"], src.id)
+        self.assertEqual(out["weight"], 3.0)
+        self.assertEqual(out["title"], "w.txt")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["weight"], 3.0)
+
+        # Combined title+weight — both apply, weight echoes the request.
+        status, out = self._json(
+            "PATCH", f"/api/sources/{src.id}", {"title": "w2.txt", "weight": 2}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["title"], "w2.txt")
+        self.assertEqual(out["weight"], 2.0)
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["title"], "w2.txt")
+        self.assertEqual(detail["sources"][0]["weight"], 2.0)
+
+        # Neither field present is the coded missing-field 400.
+        status, err = self._json("PATCH", f"/api/sources/{src.id}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        # Non-numeric / out-of-range / non-finite are coded 400s.
+        for bad in ("heavy", 9.0, -0.5, True):
+            status, err = self._json(
+                "PATCH", f"/api/sources/{src.id}", {"weight": bad}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # Dead source id is the coded 404.
+        status, err = self._json("PATCH", "/api/sources/99999", {"weight": 2})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
+
 
 class NonStreamingLLMTest(unittest.TestCase):
     """Server falls back to non-streaming chat() when LLM has no chat_stream method."""

@@ -51,7 +51,7 @@ shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
 shoin eval 1 cases.json               # 検索精度を自分の文書で測定(recall/MRR)
-# その他: search / questions / messages / note / source (rename・refresh・refresh-all・delete) / chunk edit / reindex
+# その他: search / questions / messages / note / source (rename・refresh・refresh-all・weight・delete) / chunk edit / reindex
 #         stats(利用メトリクス表示。GET /api/metricsでも同一カウンタを返す) / trash(list|restore|purge 削除済みnbのundo) / backup
 #         export --format tree → shoin import で別マシン/別DBへnbを受け渡し (shoin-nb-tree-v1)
 ```
