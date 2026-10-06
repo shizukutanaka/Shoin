@@ -216,6 +216,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~74~~ | ~~**evalのcases/--diff baseline文書が無制限読込——巨大JSON文書でOOM**~~ → **解消済み(v0.2.690)** | 「上限の無い全量読込は残っていないか」の問いで発掘: `shoin eval`のcases文書と`--diff`ベースラインがread_text全量+無制限json.loads——681のimport閉塞と同じOOM欠陥クラスの残存経路。`MAX_IMPORT_BYTES`を「CLIが一度に読込むJSON文書の上限」へ一般化し両入口をstat+読取の2層で閉塞(拒否はVALIDATION_FIELD_FORMAT_INVALID・文書別ラベル) |
 | ~~75~~ | ~~**HTTP同時接続数に上限なし——接続フラッドでスレッド枯渇**~~ → **解消済み(v0.2.691)** | 「寿命が有界でも数が無制限の資源は残っていないか」の問いで発掘: `ThreadingHTTPServer`は接続毎に無制限スレッド生成——`REQUEST_SOCKET_SEC`は各接続の寿命のみ制限し接続「数」は無制限のまま、数千接続の保持でタイムアウト発動前にスレッド枯渇。`MAX_IN_FLIGHT_REQUESTS`(64)セマフォをaccept loopでacquireし過剩をカーネルbacklog滞留へ変換(finally解放・120s有界保持で不デッドロック) |
 | ~~76~~ | ~~**import文書がsource id重複を許容——id_map潰れでchunk/reportが別sourceへ無言誤帰属**~~ → **解消済み(v0.2.692)** | 「export→importで文書の整合性は検証されるか」の問いで発掘: 検証は `src_ids` をsetとして構築するため同idの2行を重複として検出せず、細工exportの同id source×2がid_map後勝ちでchunk+reportを最後のsourceへ誤帰属(先行行は0チャンク空殻)——検証ループ先頭のmembership検査で`NOTEBOOK_IMPORT_INVALID`拒否(入口のみ最小・TX未到達) |
+| ~~77~~ | ~~**import文書フィールドが書込経路の語彙/範囲/utf8検証を迂回——phantom行の永続化かraw sqlite error(500)**~~ → **解消済み(v0.2.693)** | 「import文書はwriterと同じ検証を受けるか」の問いで発掘: `_insert_tree_rows`のverbatim bindがSOURCE_KINDS/STUDIO_KINDS/role語彙・有限weight・_utf8を迂回——語彙外kind/roleが永続phantom行・Infinity格納・NaN/非str/サロゲートがraw error化。入口検証をwriter契約へ揃え同codedで拒否(_import_str新設) |
 
 ### 解決済み(記録)
 

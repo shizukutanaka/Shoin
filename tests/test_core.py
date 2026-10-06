@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.692")
+        self.assertEqual(VERSION, "0.2.693")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19987,7 +19987,7 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 82,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 87,  # +5: import field-guard parity (v0.2.693)
                                       # +1: import_notebook's duplicate
                                       #     source-id rejection (v0.2.692)
                                       # +2: _insert_tree_rows / duplicate_notebook
@@ -22852,6 +22852,33 @@ class TestNbExportImport(unittest.TestCase):
                 {**good, "sources": [
                     good["sources"][0], good["sources"][0],
                 ]},
+                # v0.2.693: document fields bypass the write-path
+                # guards — verbatim binds in _insert_tree_rows skip
+                # the kind/role vocabularies, the finite weight
+                # range, and utf8 encodability the writers enforce.
+                {**good, "sources": [
+                    {**good["sources"][0], "kind": "exe"}
+                ]},  # out-of-vocab source kind
+                {**good, "sources": [
+                    {**good["sources"][0], "weight": float("nan")}
+                ]},  # NaN weight (died raw on NOT NULL before)
+                {**good, "sources": [
+                    {**good["sources"][0], "weight": float("inf")}
+                ]},  # Infinity weight (stored before)
+                {**good, "sources": [
+                    {**good["sources"][0], "title": "t\ud800x"}
+                ]},  # lone surrogate (died raw on bind before)
+                {**good, "sources": [
+                    {**good["sources"][0], "title": {"x": 1}}
+                ]},  # unbindable non-str field
+                {**good, "studio_outputs": [
+                    {"kind": "evil", "body": "b",
+                     "citation_report": "{}", "created_at": "t"}
+                ]},  # out-of-vocab studio kind
+                {**good, "messages": [
+                    {"role": "system", "body": "b",
+                     "citation_report": "{}", "created_at": "t"}
+                ]},  # out-of-vocab message role
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):

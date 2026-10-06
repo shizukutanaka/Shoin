@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.692
+## Version History: v0.1.37 → v0.2.693
+
+### v0.2.693 — import文書フィールドを書込経路と同一契約で検証(語彙・範囲・utf8)
+
+- **新規短所77解消(ソクラテス問いで発掘)**: 「import文書のフィールドは書込経路と同じ語彙/範囲検証を受けるか」——`import_notebook`の文書検証はキー存在+若干の型検査のみで、`_insert_tree_rows`はフィールドを**verbatim bind**。writer経路(`add_source`/`add_studio_output`/`add_message`/`update_source_weight`)が強制する SOURCE_KINDS/STUDIO_KINDS/role語彙と有限weight範囲・`_utf8`符号化検査を全て迂回——細工exportで語彙外kind/roleがphantom行として永続化(どのcallerも上書き不能)、Infinity weightが格納、NaN weight/dict型フィールド/単独サロゲートがraw IntegrityError・InterfaceError・UnicodeEncodeError(=500)で生死——「異形文書はcoded拒否」契約の未カバー面
+- **入口検証でwriter契約を強制**: sources(kind∈SOURCE_KINDS・weight有限0..SOURCE_WEIGHT_MAX・title/origin/sha256/added_at)、chunks(text/context・seq/embedding_norm数値性)、notes/studio/messages(strフィールド+studio kind∈STUDIO_KINDS+role∈user/assistant)。新ヘルパー`_import_str`が非str→coded・サロゲートは`.encode("utf-8")`のValueError経由で同coded NOTEBOOK_IMPORT_INVALID
+- **行動ピン1件**: malformed-casesに7件追加——語彙外src/studio kind・語彙外role・NaN/Inf weight・サロゲート・非strフィールド(coded拒否+nb数不変)
+- **カタログ追随1件**: raise-inventory store.py +5(_import_str・kind×2・weight・role)
 
 ### v0.2.692 — import文書のsource id重複をcoded拒否(誤帰属の閉塞)
 

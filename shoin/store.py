@@ -449,6 +449,24 @@ def _meta_text(value: Any) -> str:
     raise ValueError("meta is not a JSON object")
 
 
+def _import_str(value: Any) -> None:
+    """Reject a document field that is not a storable UTF-8 string.
+
+    _insert_tree_rows binds document fields verbatim: a non-str reaches
+    sqlite as a raw InterfaceError (unbindable) or silently coerced
+    garbage, and a lone surrogate dies as UnicodeEncodeError — never the
+    coded document rejection. The StoreError carries
+    NOTEBOOK_IMPORT_INVALID straight through the caller's except;
+    .encode()'s UnicodeEncodeError is a ValueError, so the same generic
+    rejection follows from the surrounding try either way.
+    """
+    if not isinstance(value, str):
+        raise StoreError(
+            "NOTEBOOK_IMPORT_INVALID", "export field is not a string"
+        )
+    value.encode("utf-8")
+
+
 def _settings_of(row: sqlite3.Row) -> dict[str, Any]:
     """Parse a notebooks row's settings column for the Notebook dataclass.
 
@@ -1241,11 +1259,36 @@ class Store:
                 src_ids.add(s["id"])
                 for k in ("kind", "title", "origin", "sha256", "added_at"):
                     s[k]
+                # v0.2.693: document rows bypass every guard the write
+                # path enforces — _insert_tree_rows binds fields verbatim
+                # while add_source/update_source_weight/add_studio_output/
+                # add_message enforce the kind/role vocabularies and a
+                # finite 0..SOURCE_WEIGHT_MAX range, and _utf8 every bound
+                # string. Without the same checks here a crafted export
+                # persists an out-of-vocabulary kind or role (phantom rows
+                # no caller can overwrite) or an Infinity weight; a NaN
+                # weight, a dict field, or a lone surrogate instead died
+                # on a raw sqlite error — not the coded document
+                # rejection. _import_str enforces str-typed, UTF-8-
+                # encodable text fields; encode failures surface as
+                # ValueError → NOTEBOOK_IMPORT_INVALID below.
+                if s["kind"] not in SOURCE_KINDS:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export source kind is not a known kind",
+                    )
                 # weight is optional in the document (pre-v0.2.657 exports
                 # lack it) but must be numeric when present; meta is the
                 # same — absent or the canonical object/string only
                 # (pre-v0.2.658).
-                float(s.get("weight", 1.0))
+                w = float(s.get("weight", 1.0))
+                if not math.isfinite(w) or not 0.0 <= w <= SOURCE_WEIGHT_MAX:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export source weight is outside the finite range",
+                    )
+                for k in ("title", "origin", "sha256", "added_at"):
+                    _import_str(s[k])
                 _meta_text(s.get("meta"))
             for c in chunks:
                 if c["source_id"] not in src_ids:
@@ -1255,17 +1298,41 @@ class Store:
                     )
                 for k in ("seq", "text", "context", "embedding_norm"):
                     c[k]
+                for k in ("text", "context"):
+                    _import_str(c[k])
+                float(c["seq"])
+                # embedding_norm is NULL whenever the chunk carries no
+                # embedding — a legit export emits null, only a present
+                # value must be numeric.
+                if c["embedding_norm"] is not None:
+                    float(c["embedding_norm"])
                 if c["embedding"] is not None:
                     c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
             for n in notes:
                 for k in ("title", "body", "created_at"):
                     n[k]
+                for k in ("title", "body", "created_at"):
+                    _import_str(n[k])
             for o in studio_outputs:
                 for k in ("kind", "body", "citation_report", "created_at"):
                     o[k]
+                if o["kind"] not in STUDIO_KINDS:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export studio kind is not a known kind",
+                    )
+                for k in ("body", "citation_report", "created_at"):
+                    _import_str(o[k])
             for m in messages:
                 for k in ("role", "body", "citation_report", "created_at"):
                     m[k]
+                if m["role"] not in ("user", "assistant"):
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export message role is not a known role",
+                    )
+                for k in ("body", "citation_report", "created_at"):
+                    _import_str(m[k])
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "NOTEBOOK_IMPORT_INVALID",
