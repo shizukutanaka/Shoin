@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.687")
+        self.assertEqual(VERSION, "0.2.688")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19955,7 +19955,10 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _optional_json_obj's non-dict field guard (v0.2.658)
                 # +1: _h_nb_rename's empty-PATCH sentinel (name/settings
                 #     at least one required) (v0.2.659)
+                # +1: _optional_id_list's scope-length guard
+                #     (MAX_SCOPE_IDS) (v0.2.688)
                 "StoreError", "StoreError", "StoreError",
+                "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards

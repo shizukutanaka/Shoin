@@ -1020,6 +1020,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(
             err["error"]["code"], "VALIDATION_INTEGER_OVERFLOW"  # type: ignore[index]
         )
+        # v0.2.688: the scope list itself is bounded — without a length cap a
+        # ~10MB body could name millions of ids and the per-id get_source loop
+        # burned one SELECT each on the request thread.
+        from shoin.config import MAX_SCOPE_IDS
+
+        status, err = ask(
+            {"question": "楮は？", "source_ids": list(range(1, MAX_SCOPE_IDS + 2))}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"  # type: ignore[index]
+        )
         status, err = ask({"question": "楮は？", "source_ids": [99999]})
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]

@@ -28,6 +28,7 @@ from .config import (
     API_VERSION,
     EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
+    MAX_SCOPE_IDS,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
     NB_MESSAGES_LIMIT,
@@ -437,6 +438,11 @@ class _Handler(BaseHTTPRequestHandler):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"{key} must be a list, got {type(raw).__name__}",
+            )
+        if len(raw) > MAX_SCOPE_IDS:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} too long (max {MAX_SCOPE_IDS} items)",
             )
         out: list[int] = []
         for item in raw:

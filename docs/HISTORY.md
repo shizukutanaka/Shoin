@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.687
+## Version History: v0.1.37 → v0.2.688
+
+### v0.2.688 — source_idsスコープlistの件数上限化(MAX_SCOPE_IDS)
+
+- **新規短所72解消(ソクラテス問いで発掘)**: 「数で書ける全ての入力に上界はあるか」——`_optional_id_list`は要素型(正整数・非bool・i64範囲)のみ検査で**件数無制限**だった。`_read_json`の10MBボディ内で数百万idを送ると、ask/search両経路がSSEヘッダ前の検証でid毎に`get_source`をループ——要求スレッド上で無制限のSELECT燃焼(per-requestスレッドモデルで繰返し要求はスレッド枯渇へ蓄積)。検証loopを通過した場合も`json_each`が巨大配列を走査する二次面
+- **`MAX_SCOPE_IDS = 4096`**: 実nbのソース数を大きく超過しつつ、検証loop(4096 SELECT≒ms級)とjson_each走査を軽量に制限。超過は`VALIDATION_FIELD_FORMAT_INVALID`(400)——「malformed scope」として一貫した契約
+- **却下案(単一SQL存在検証)記録**: `WHERE id IN json_each`の一括検証化も検討したが、per-id404応答の既存契約とピン群を維持するため上限化の最小修正に留めた
+- **行動ピン1件**: MAX_SCOPE_IDS+1件のscope list→400 coded拒否(ask経路・searchは同一helperで自動カバー)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.687 — mergeを単一TX化(serialize→delete間の零落閉塞)
 

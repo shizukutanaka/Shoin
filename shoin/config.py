@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.687"
+VERSION = "0.2.688"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -38,6 +38,12 @@ MAX_IMPORT_BYTES = 1 << 30
 NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI history view)
 NB_NOTES_LIMIT = 500  # notes embedded in GET /api/notebooks/{id} (UI notes pane)
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
+# v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
+# no element cap, so a ~10MB ask/search body could name millions of ids and the
+# per-id get_source loop burned one SELECT each — an unbounded-CPU vector on a
+# request thread. 4096 far exceeds any real notebook's source count while
+# keeping the validation loop (and the json_each scan) trivially cheap.
+MAX_SCOPE_IDS = 4096
 EMBED_MODEL_SETTING_KEY = "embed_model"  # settings key for the stored-vector builder model
 # REQ-004: per-source retrieval weight bound. The weight multiplies a source's
 # fused [0,1] retrieval score — 1.0 is neutral, >1 promotes, <1 demotes, 0 pins
