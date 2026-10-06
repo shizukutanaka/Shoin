@@ -12,7 +12,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│           Web UI (single-file HTML)             │ User-facing
+│        Web UI (index.html + app.js + style.css)  │ User-facing
 ├─────────────────────────────────────────────────┤
 │  Web Server (HTTP/SSE)  + CLI (subcommands)    │ API & I/O
 ├─────────────────────────────────────────────────┤
@@ -302,7 +302,7 @@ The check is conservative: single bigrams like `好き` (common adjective suffix
 - Single-threaded HTTP handler per request (`ThreadingHTTPServer`)
 - Bound to 127.0.0.1 only; rejects non-local Hostnames (DNS rebinding defense)
 - Routes:
-  - GET `/` → static index.html
+  - GET `/` → static index.html (+ literal routes `/static/app.js`, `/static/style.css` — v0.2.666 split; no path-based traversal)
   - GET/POST/DELETE `/api/notebooks/*` → CRUD
   - POST `/api/notebooks/{id}/sources` → ingest (file upload or URL)
   - GET `/api/notebooks/{id}` → full notebook payload; chat history is embedded as its `"messages"` array (there is no dedicated GET route for messages alone — a prior version of this doc incorrectly claimed one existed, v0.2.75)
@@ -344,7 +344,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.665** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.666** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

@@ -11,7 +11,7 @@ breaks in a single vanilla-JS file, and how much of it needs a *browser* to see?
 Three classes cover most of it, and none of them need one:
 
 1. **JS syntax** — one typo silently breaks the entire UI, since the whole app is
-   a single <script> block. `node --check` catches it; the test SKIPs (never
+   a single JS file (app.js since v0.2.666). `node --check` catches it; the test SKIPs (never
    fails) when node is unavailable, so the suite stays dependency-free.
 2. **i18n completeness** — every data-i18n* key the HTML references must exist in
    BOTH locales, or a JA or EN user sees a blank/English-only control. This is a
@@ -38,18 +38,24 @@ from pathlib import Path
 
 from shoin.server import _Handler
 
-_UI = Path(__file__).resolve().parent.parent / "shoin" / "static" / "index.html"
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "shoin" / "static"
+_UI = _STATIC_DIR / "index.html"
 
 
 def _html() -> str:
     return _UI.read_text(encoding="utf-8")
 
 
-def _script_body(html: str) -> str:
-    """The contents of the single <script> block that is the whole application."""
-    m = re.search(r"<script>(.*)</script>", html, re.S)
-    assert m, "index.html must contain exactly one inline <script> block"
-    return m.group(1)
+def _script() -> str:
+    """The UI's JavaScript app — v0.2.666 split it out of index.html into
+    /static/app.js (same-origin route, no build step)."""
+    return (_STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+
+def _style() -> str:
+    """The UI's stylesheet — v0.2.666 split it out of index.html into
+    /static/style.css."""
+    return (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
 
 def _js_block(src: str, marker: str) -> str:
@@ -93,7 +99,7 @@ class TestUIContract(unittest.TestCase):
             self.skipTest("node not available; JS syntax check skipped")
         with tempfile.TemporaryDirectory() as d:
             js = Path(d) / "ui.mjs"
-            js.write_text(_script_body(_html()), encoding="utf-8")
+            js.write_text(_script(), encoding="utf-8")
             proc = subprocess.run(
                 [node, "--check", str(js)], capture_output=True, text=True, timeout=60
             )
@@ -102,7 +108,7 @@ class TestUIContract(unittest.TestCase):
     def test_every_i18n_key_exists_in_both_locales(self) -> None:
         """A key referenced by the HTML but missing from a locale renders blank."""
         html = _html()
-        script = _script_body(html)
+        script = _script()
         # Keys the markup asks for, via any data-i18n* attribute flavour.
         used = set(re.findall(r'data-i18n[a-z-]*="([^"]+)"', html))
         self.assertTrue(used, "expected data-i18n attributes in index.html")
@@ -125,7 +131,7 @@ class TestUIContract(unittest.TestCase):
         e.g. data-i18n-value added later — sits unlocalized forever: no key
         lookup ever runs on it. Pin the used kinds to the handled ones."""
         html = _html()
-        script = _script_body(html)
+        script = _script()
         used = set(re.findall(r'\b(data-i18n[a-z-]*)="', html))
         handled = set(
             re.findall(r'querySelectorAll\("\[(data-i18n[a-z-]*)\]"\)', script)
@@ -147,7 +153,7 @@ class TestUIContract(unittest.TestCase):
         """
         from shoin.studio import KINDS
 
-        script = _script_body(_html())
+        script = _script()
         for loc in ("ja", "en"):
             m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
             self.assertIsNotNone(m, f"I18N.{loc} block not found")
@@ -169,7 +175,7 @@ class TestUIContract(unittest.TestCase):
         locale-only key (or a dynamic `t()` key added to one side) drifts
         unnoticed.
         """
-        script = _script_body(_html())
+        script = _script()
         locales: dict[str, set[str]] = {}
         for loc in ("ja", "en"):
             m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
@@ -202,7 +208,7 @@ class TestUIContract(unittest.TestCase):
         nothing). Key-set symmetry (above) can't see this: both locales define
         the key; only the placeholder names inside the values diverge.
         """
-        script = _script_body(_html())
+        script = _script()
         tables: dict[str, dict[str, set[str]]] = {}
         for loc in ("ja", "en"):
             m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
@@ -230,7 +236,7 @@ class TestUIContract(unittest.TestCase):
         call site have drifted apart. Checks both directions per source line,
         against the union of ja+en placeholder sets.
         """
-        script = _script_body(_html())
+        script = _script()
         values: dict[str, set[str]] = {}
         for loc in ("ja", "en"):
             m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
@@ -271,7 +277,7 @@ class TestUIContract(unittest.TestCase):
         """
         from shoin.studio import KINDS
 
-        script = _script_body(_html())
+        script = _script()
         m = re.search(r"\bKINDS\s*=\s*\[([^\]]*)\]", script)
         self.assertIsNotNone(m, "const KINDS array not found in index.html")
         assert m is not None
@@ -288,7 +294,7 @@ class TestUIContract(unittest.TestCase):
         """
         from shoin.export import FORMATS
 
-        script = _script_body(_html())
+        script = _script()
         ui_fmts = set(re.findall(r'export\?format=([a-z]+)', script))
         self.assertTrue(ui_fmts, "expected export ?format= hrefs in index.html")
         self.assertEqual(ui_fmts, set(FORMATS))
@@ -301,7 +307,7 @@ class TestUIContract(unittest.TestCase):
         answers in the UI."""
         from shoin.citation import COVERAGE_LOW
 
-        script = _script_body(_html())
+        script = _script()
         m = re.search(r"\bCOVERAGE_LOW\s*=\s*([0-9.]+)", script)
         self.assertIsNotNone(m, "const COVERAGE_LOW not found in index.html")
         assert m is not None
@@ -318,7 +324,7 @@ class TestUIContract(unittest.TestCase):
         (not equality): producer-only keys like n_sources and quote_mismatch
         (folded into misattributed) legitimately have no UI reader.
         """
-        script = _script_body(_html())
+        script = _script()
         ui_keys = set(re.findall(r"\breport\.([a-z_]+)", script))
         self.assertTrue(ui_keys, "expected report.* reads in index.html")
         from shoin.citation import CitationReport
@@ -338,7 +344,7 @@ class TestUIContract(unittest.TestCase):
         thrown-response-object toast across the whole UI."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             fn = _js_block(src, "async function api")
         except ValueError:
@@ -385,7 +391,7 @@ const mkRes = (ok, status, body, bad) => ({
         (create/rename/notes/studio/reindex all go through jpost)."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         api_fn = _js_block(src, "async function api")
         m = re.search(r"const jpost = [^\n]*", src)
         if not m:
@@ -420,7 +426,7 @@ const fetch = async (path, opts) => {
         literal wiring the contract hangs on."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         # Wiring seams: the submit handler consults scopeSelection(), passes a
         # literal object (the request-body pin's readable contract), and the
         # zero-selection guard names the toast key.
@@ -480,7 +486,7 @@ console.log("ok");
         """A path or verb the UI fetches but the server never registers is a
         404/405 in waiting. Path-only matching would let api() (GET) slip onto
         a POST-only route — the server answers 405 at click time."""
-        script = _script_body(_html())
+        script = _script()
 
         # Call sites look like api("/api/…"), api(`/api/…${expr}/…`, {method:"X"}),
         # or jpost("/api/…") (always POST). Bare api() defaults to GET.
@@ -519,7 +525,7 @@ console.log("ok");
         Pin the route table's internal integrity and the metadata names
         the JS actually sends."""
         server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
-        script = _script_body(_html())
+        script = _script()
 
         # Route table: every name has a handler, every verb a do_* method.
         handlers = set(re.findall(r"def (_h_[a-z_]+)\(", server))
@@ -587,7 +593,7 @@ console.log("ok");
         selectable file that ingest then rejects), and `?format=` values
         ⊆ export `FORMATS` (a link that 400s at click time)."""
         html = _html()
-        script = _script_body(html)
+        script = _script()
         server = (_UI.parent.parent / "server.py").read_text(encoding="utf-8")
         ingest = (_UI.parent.parent / "ingest.py").read_text(encoding="utf-8")
         export_mod = (_UI.parent.parent / "export.py").read_text(encoding="utf-8")
@@ -651,7 +657,7 @@ console.log("ok");
         api(url, {…, body: JSON.stringify({…})}); a non-JSON body (the file
         upload's raw bytes) carries no fields. Resolving per call site:
         jpost→POST, api→GET unless {method:"X"}."""
-        script = _script_body(_html())
+        script = _script()
 
         def match_brace(src: str, i: int) -> int:
             """i points at '{'; return the index just past its match."""
@@ -812,7 +818,7 @@ console.log("ok");
         dict literals, list comprehensions, calls into shoin.server/shoin.store
         functions (return-shape merge); anything else is opaque — reads under
         it are unverifiable and never fail."""
-        script = _script_body(_html())
+        script = _script()
         n = len(script)
         IDENT = r"[A-Za-z_$][\w$]*"
 
@@ -1306,8 +1312,8 @@ console.log("ok");
         and inline on*= handlers all fail CSP-style review and ship
         noise or injection surface to users."""
         html = _html()
-        style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
-        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        style = _style()
+        script = _script()
         self.assertRegex(
             style,
             r":focus(-visible)?\s*\{[^}]*outline",
@@ -1325,7 +1331,8 @@ console.log("ok");
             "debug/eval constructs in <script>",
         )
         self.assertEqual(
-            re.findall(r'javascript:|\son\w+="', html),
+            re.findall(r"javascript:", html + "\n" + script)
+            + re.findall(r'\son\w+="', html),
             [],
             "javascript: URL or inline on*= handler present",
         )
@@ -1501,9 +1508,11 @@ console.log("ok");
         `"seal "+k`, so "constructed" means: appears as a word inside
         any quoted literal in the file."""
         html = _html()
-        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        script = _script()
+        style = _style()
+        corpus = html + "\n" + script
         defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", style))
-        self.assertTrue(defined, "no CSS classes found — <style> scan broken")
+        self.assertTrue(defined, "no CSS classes found — style.css scan broken")
 
         class_ctx: set[str] = set()
 
@@ -1513,17 +1522,17 @@ console.log("ok");
                     class_ctx.add(w)
 
         for m in re.finditer(
-            r'class\s*=\s*"([^"]*)"|class\s*=\s*\'([^\']*)\'', html
+            r'class\s*=\s*"([^"]*)"|class\s*=\s*\'([^\']*)\'', corpus
         ):
             absorb(m.group(1) or m.group(2) or "")
         for m in re.finditer(
-            r'classList\.(?:add|remove|toggle|contains)\("([^"]+)"\)', html
+            r'classList\.(?:add|remove|toggle|contains)\("([^"]+)"\)', corpus
         ):
             absorb(m.group(1))
-        for m in re.finditer(r"className\s*=\s*([^;]+);", html):
+        for m in re.finditer(r"className\s*=\s*([^;]+);", corpus):
             for lit in re.findall(r'"([^"]*)"', m.group(1)):
                 absorb(lit)
-        for m in re.finditer(r'el\("[a-z0-9]+",\s*((?:"[^"]*"|[^,])+)', html):
+        for m in re.finditer(r'el\("[a-z0-9]+",\s*((?:"[^"]*"|[^,])+)', corpus):
             argtext = re.sub(r'el\("[a-z0-9]+"', "", m.group(1))
             for lit in re.findall(r'"([^"]*)"', argtext):
                 absorb(lit)
@@ -1535,7 +1544,7 @@ console.log("ok");
         )
 
         words: set[str] = set()
-        for lit in re.findall(r'"([^"\n]*)"', html) + re.findall(r"'([^'\n]*)'", html):
+        for lit in re.findall(r'"([^"\n]*)"', corpus) + re.findall(r"'([^'\n]*)'", corpus):
             words.update(lit.split())
         self.assertEqual(
             sorted(defined - words),
@@ -1557,7 +1566,7 @@ console.log("ok");
           and CSP `connect-src 'self'` + `default-src 'none'` would break
           the reference anyway — one sneaks in only as a dead feature."""
         html = _html()
-        script = _script_body(html)
+        script = _script()
 
         ids = re.findall(r'\bid="([^"]+)"', html)
         dup = sorted({x for x in ids if ids.count(x) > 1})
@@ -1599,8 +1608,7 @@ console.log("ok");
           on `--washi` keeps them light-texted on a dark band.
         - Tinted literal surfaces (.badge.warn/.err/.dim, #banner) are not
           var-driven — each needs a literal override inside the block."""
-        html = _html()
-        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        style = _style()
         m = re.search(
             r"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{(.*?)\n\}",
             style, re.S,
@@ -1659,7 +1667,7 @@ console.log("ok");
         - Messages need page-break-inside:avoid so a Q/A isn't split
           across pages."""
         html = _html()
-        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        style = _style()
         m = re.search(r"@media\s+print\s*\{(.*)", style, re.S)
         self.assertIsNotNone(m, "no @media print block in <style>")
         assert m is not None
@@ -1708,7 +1716,7 @@ console.log("ok");
         - The viewer sheet's padding must shrink — 24px×2 of chrome at
           360px eats a tenth of the sheet."""
         html = _html()
-        style = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
+        style = _style()
         m = re.search(r"@media\s*\(max-width:\s*880px\)\s*\{(.*?)\n\}", style, re.S)
         self.assertIsNotNone(m, "no max-width:880px block in <style>")
         assert m is not None
@@ -1741,8 +1749,7 @@ console.log("ok");
         typing (guard on editable targets) so they can't steal keys from a
         form field. The hint tooltip must keep documenting them — an
         undiscoverable shortcut is dead code."""
-        html = _html()
-        script = "\n".join(re.findall(r"<script[^>]*>(.*?)</script>", html, re.S))
+        script = _script()
 
         self.assertIn('document.addEventListener("keydown"', script)
         self.assertIn('e.key==="/"', script)
@@ -1831,10 +1838,11 @@ console.log("ok");
         href="#id" — a stale one silently unwires the a11y tree. Pin every
         literal id reference to a real id."""
         html = _html()
+        script = _script()
         ids = set(re.findall(r'\bid="([^"]+)"', html))
-        refs = set(re.findall(r'\$\(\s*"#([A-Za-z0-9_-]+)"\s*\)', html))
+        refs = set(re.findall(r'\$\(\s*"#([A-Za-z0-9_-]+)"\s*\)', script))
         refs |= set(
-            re.findall(r'getElementById\(\s*["\']([A-Za-z0-9_-]+)["\']\s*\)', html)
+            re.findall(r'getElementById\(\s*["\']([A-Za-z0-9_-]+)["\']\s*\)', script)
         )
         for attr in (
             "for",
@@ -1865,7 +1873,7 @@ console.log("ok");
         node = shutil.which("node")
         if not node:
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         start = src.index("function renderFullSource")
         depth, end = 0, start
         for i in range(start, len(src)):
@@ -1911,7 +1919,7 @@ console.log("ok")
         hrefs set when a notebook is open, removed when cur goes null."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function renderNotebook")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
@@ -1957,7 +1965,7 @@ console.log("ok")
         falls back to en. Executes the real resolver + I18N + t() under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         i18n = _js_block(src, "const I18N = {")
         # The resolver block: `const _serverLang` .. `const t = ...` (applyI18n
         # follows t and is not part of the contract under test).
@@ -2001,7 +2009,7 @@ console.log("ok")
         chips; non-citation brackets stay text."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function renderWithSeals")
         harness = """\
 function el(tag, cls, text){ return {tag, cls, text, children:[],
@@ -2040,7 +2048,7 @@ console.log("ok")
         real number, not a missing/null coverage field."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function reportBadges")
         harness = """\
 function el(tag, cls, text){ return {tag, cls, text, children:[],
@@ -2091,7 +2099,7 @@ console.log("ok")
         the real renderStudio + reportBadges under node: every flag lands."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         harness = (
             """\
 function el(tag, cls, text){ return {tag, cls, text, children:[],
@@ -2134,7 +2142,7 @@ console.log("ok")
         head; single match and id-less reports keep the old fast paths."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         harness = (
             """\
 let _sealSeq = 0;
@@ -2175,7 +2183,7 @@ const excerpt = "前文。引用箇所のテキストはここにある。後続
         the badge tracks j.degraded in both directions."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         harness = (
             """\
 const degBadge = {hidden: true};
@@ -2214,7 +2222,7 @@ console.log("ok")
         asserts the toast carries the server message."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, 'else if (ev==="error")')
         except ValueError:
@@ -2247,7 +2255,7 @@ console.log("ok")
         fully redundant with the done frame's report (source_map /
         source_id_map). Guards against reintroducing a dead meta store; the
         frame itself is still consumed-and-advanced by the parser above."""
-        src = _script_body(_html())
+        src = _script()
         self.assertNotIn('ev==="meta"', src)
 
     def test_sse_payload_fields_match_the_envelope(self) -> None:
@@ -2284,7 +2292,7 @@ console.log("ok")
                 }
             emitted.setdefault(ev, []).append(keys)
 
-        src = _script_body(_html())
+        src = _script()
         for ev in ("delta", "done", "error"):
             sites = emitted.get(ev, [])
             self.assertTrue(sites, f"server never emits an '{ev}' frame")
@@ -2317,7 +2325,7 @@ console.log("ok")
         be racing the persist. Executes the real block under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, "if (!gotDone && !failed)")
         except ValueError:
@@ -2402,7 +2410,7 @@ console.log("ok")
         real function under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, "async function openNotebook")
         except ValueError:
@@ -2464,7 +2472,7 @@ main().catch(e => { console.error(e.message || e); process.exit(1) })
         function under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, "function renderChatHistory")
         except ValueError:
@@ -2516,7 +2524,7 @@ console.log("ok")
         silently hide user notes. Executes the real function under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, "function renderNotes")
         except ValueError:
@@ -2573,7 +2581,7 @@ console.log("ok")
         function under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             block = _js_block(src, "function renderStudio")
         except ValueError:
@@ -2632,7 +2640,7 @@ console.log("ok")
         question chips."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "async function health")
         harness = """\
 const reg = {};
@@ -2683,7 +2691,7 @@ console.log("ok")
         a stale (switched-away) notebook id are dropped rather than shown."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "async function refreshQuestions")
         harness = """\
 const reg = {};
@@ -2745,7 +2753,7 @@ console.log("ok")
         rebuilds) and the externalPendingRename stash (sibling-button clicks)."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function renderNotebook")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
@@ -2837,7 +2845,7 @@ console.log("ok")
         reload the notebook, and restore itself on error."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function renderNotebook")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
@@ -2934,7 +2942,7 @@ console.log("ok")
         off, where 0 embedded is the first-class mode."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function embedNote")
         harness = """\
 function t(k){ return k === "src.embed_short" ? "{n}/{total} embedded" : k }
@@ -2984,7 +2992,7 @@ console.log("ok")
         the rename."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function renderNotebook")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
@@ -3087,7 +3095,7 @@ console.log("ok")
         check — the remaining unpinned branch of showSource."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             show = _js_block(src, "async function showSource")
         except ValueError as e:
@@ -3183,7 +3191,7 @@ const closeViewer = () => {};
         SAME body element (a second placeholder must never appear)."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         show = _js_block(src, "async function showSource")
         harness = (
             """\
@@ -3262,7 +3270,7 @@ const closeViewer = () => {};
         second commit() (blur firing after Enter) is a no-op."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "function startSourceRename")
         harness = """\
 function mkEl(){ return {children:[], value:"", type:"", className:"", dataset:{},
@@ -3350,7 +3358,7 @@ console.log("ok")
         prompt() before any request fires."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "async function loadNotebooks")
         harness = """\
 const reg = {};
@@ -3458,7 +3466,7 @@ console.log("ok")
         the promise resolves AND the message reaches toast."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         fn = _js_block(src, "async function loadNotebooks")
         harness = """\
 let toasted = null;
@@ -3487,7 +3495,7 @@ const api = async () => { throw new Error("[500] down"); };
         both directions under node (throwing store vs. real passthrough) and
         lexical containment: `localStorage.` must appear only inside the two
         helper bodies — any new bare call site is the same boot-killer."""
-        src = _script_body(_html())
+        src = _script()
         helpers = []
         for name in ("_lsGet", "_lsSet"):
             m = re.search(rf"const {name}[^\n]*", src)
@@ -3540,7 +3548,7 @@ console.log("ok");
         at the consumer, so inside render* every collection always exists.
         Pin the boundary spreads lexically and `renderFullSource`'s
         tolerance under node."""
-        src = _script_body(_html())
+        src = _script()
         self.assertIn("notebooks = j.notebooks || [];", src)
         m = re.search(r"cur = \{[^}]*\.\.\.j[^}]*\};", src)
         self.assertIsNotNone(m, "cur boundary normalization missing")
@@ -3607,7 +3615,7 @@ console.log("ok");
         included). Runs all three real handlers under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         blocks = []
         for marker in ('$("#nbForm").onsubmit', '$("#fileInput").onchange', '$("#urlBtn").onclick'):
             try:
@@ -3700,7 +3708,7 @@ const nbBtn = {disabled: false};
         documentElement.lang. Runs the real applyI18n + onclick under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             apply_fn = _js_block(src, "function applyI18n()")
             onclick = _js_block(src, '$("#langBtn").onclick')
@@ -3772,7 +3780,7 @@ console.log("ok")
         Runs all five real handlers under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         blocks = {}
         for name, marker in (
             ("noteForm", '$("#noteForm").onsubmit'),
@@ -3905,7 +3913,7 @@ const noteEv = {preventDefault(){}, target: {querySelector: () => noteBtn}};
         """
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             show = _js_block(src, "async function showSource")
             trap = _js_block(src, '$("#viewer").addEventListener("keydown"')
@@ -4008,7 +4016,7 @@ const closeViewer = () => calls.closed++;
         body under node and asserts delta accumulation + done dispatch."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(_html())
+        src = _script()
         try:
             loop = _js_block(src, 'while ((i = buf.indexOf("\\n\\n")) >= 0)')
         except ValueError:
@@ -4073,7 +4081,7 @@ console.log("ok")
         node = shutil.which("node")
         if not node:
             self.skipTest("node not available; JS behavior check skipped")
-        src = _script_body(html)
+        src = _script()
         block = src[src.index("const selectTab") : src.index('$("#langBtn").onclick')]
         harness = """\
 const panes = {};

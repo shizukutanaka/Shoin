@@ -166,7 +166,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~24~~ | ~~**ソースのメタデータが薄い**~~ | **解消 (v0.2.658)**: `sources.meta`(自由JSON・≤4KB)を追加——`PATCH /api/sources/{id} {meta}` + `shoin source meta` で whole-object REPLACE。meta.author/meta.year が BibTeX/RIS の author/AU・year/PY を駆動(取込日≠発行年を修正)。全往復経路で保存 |
 | 25 | ~~**全文検索 API が無い**~~ → **解消済み** (v0.2.637: `POST /api/notebooks/{id}/search` が /ask 同一retrieve経路のhitsを生成・永続化なしで返す。`k`は_optional_intで1..50・`source_ids`同一契約・history非展開) |
 | 26 | ~~**detail応答のページネーション無し**~~ → **解消済み** (v0.2.646: `GET /api/notebooks/{id}/messages|notes?offset&limit` が cap を超えた全量を newest-first で走査——limit 1..500・total開示・coded検証。sources は cap 対象外のため対象外) |
-| 27 | **index.html の単一ファイル化** | ビルド不要と引き換えに、JS全実装が1ファイルへ凝集。差分レビュー・部分テストの粒度が粗い |
+| ~~27~~ | ~~index.html の単一ファイル化~~ | 解消済み v0.2.666: index.html+app.js+style.cssの3ファイル分割（ビルド不要・リテラルルート配信・CSP script-src self強化） |
 | 28 | ~~**ダークモード無し**~~ → **解消済み** (v0.2.638: `prefers-color-scheme` でパレット変数上書き。常時暗帯面は`--band`/`--band-ink`分離、tintリテラル面は個別上書き) |
 | 29 | ~~**キーボードショートカットがタブのみ**~~ → **解消済み** (v0.2.642: `/`で質問入力フォーカス・1/2/3でペイン選択。編集中/修飾キー/モーダル中は無効。chat.hintに記載) |
 | 30 | ~~**モバイル/レスポンシブ未監査**~~ → **解消済み** (v0.2.641: ≤880px契約を監査・ピン固定。flex input溢れに`min-width:0`、viewer余白8pxへ。レスポンシブ骨格は既存タブ切替) |

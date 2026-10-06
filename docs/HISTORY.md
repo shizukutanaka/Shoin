@@ -29,7 +29,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.665
+## Version History: v0.1.37 → v0.2.666
 
 ### v0.2.664 — FTS5索引の optimize セグメントマージ(索引肥大の構造抑止)
 
@@ -44,6 +44,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 - **UI側はbounded pollへ**: done欠落時の単発fetchはpersistと競合し前ターン行を凍結し得た——`cur.messages`基線(ask開始時の最終assistant本文)と照合し新規行の出現を最大10回×2sで待つ。`messages`要素にidが無い・NB_MESSAGES_LIMIT上限で行数が増えない両ケースを本文差で吸収
 - **行動ピン2件**: server側=delta死亡後も永続行が全パーツ結合と一致(list_messages実検証)、UI側=node実ブロック実行で1回fetch→retry後の新規行復元・前ターン一致時の非復元・done/error後の非fetchを固定
 - **設計上の境界**: `Last-Event-ID` プロトコル再開は非対象——POST+fetchストリームに標準のEventSource再接続は存在せず、server側完了+poll復元がローカル製品の正直な範囲
+
+### v0.2.666 — Web UIの3ファイル分割(index.html+app.js+style.css)
+
+- **短所27解消**: ビルド不要と引き換えに1373行の単一 index.html へJS全実装(~1055行)とCSS(~205行)が凝集し、差分レビュー・部分テストの粒度が粗かった。`<script>`→`shoin/static/app.js`、`<style>`→`shoin/static/style.css` へ抽出し、index.html は117行のマークアップのみに
+- **配信はリテラルルート**: `/static/app.js`・`/static/style.css` を `_h_static_app_js`/`_h_static_style_css`→共有 `_serve_packaged_asset` で配信——ルート表が2名をallowlist化しパス成分はファイルシステムへ一切届かない(`_h_theme_css` と同型、パストラバーサル経路ゼロ)。同梱欠落は空ボディの静寂ブランクUIではなく `STATIC_ASSET_NOT_FOUND` のcoded 404
+- **CSP強化**: `script-src 'unsafe-inline'` → `script-src 'self'`——インラインJSが存在しなくなったためinline許可を剥がし外部資産のみ許可。`style-src` は従来通り('unsafe-inline' 'self'、theme.css差込み口を維持)。`__SHOIN_LANG__` 置換はindex.html側に残るため `_h_ui` 不変
+- **package-data追随**: globを `static/*.html` から `*.css`/`*.js` 追加——package-dataピン(v0.2.293)がこの追随を強制した設計通りの動作
+- **テストヘルパ追随**: `_script_body(html)`/`_style` スキャンを `_script()`/`_style()`(app.js/style.css直接読取)へ置換し約50呼出しを機械追従、REQ corpus・TODO/FIXMEスキャン・querySelectorカタログ・CSS var pin は静的資産全ファイルへ拡張
+- **行動ピン2件**: 両資産の200+Content-Type+index.htmlのリンク+CSP script-src 'self'/no-unsafe-inline・同梱欠落時のSTATIC_ASSET_NOT_FOUND 404
 
 ### v0.2.663 — APIバージョニング(X-Shoin-API ヘッダ + 互換ポリシー明文化)
 

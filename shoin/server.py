@@ -2,7 +2,8 @@
 
 Single-user local app. Each request opens its own Store (SQLite/WAL), the LLM
 backend is shared and injectable for tests. `ask` streams over SSE; everything
-else is plain JSON. No path-based static serving: only the embedded index.html.
+else is plain JSON. Static serving is the three packaged UI files under
+literal routes only (index.html + app.js + style.css) — no path traversal.
 """
 
 from __future__ import annotations
@@ -503,6 +504,11 @@ class _Handler(BaseHTTPRequestHandler):
     _ROUTES: tuple[tuple[str, str, str], ...] = (
         ("GET", r"^/$", "ui"),
         ("GET", r"^/api/theme\.css$", "theme_css"),
+        # v0.2.666: the UI's script and stylesheet ship as packaged siblings
+        # of index.html — literal filenames on the route table, so no path
+        # component ever reaches the filesystem lookup.
+        ("GET", r"^/static/app\.js$", "static_app_js"),
+        ("GET", r"^/static/style\.css$", "static_style_css"),
         ("GET", r"^/api/health$", "health"),
         ("GET", r"^/api/metrics$", "metrics"),
         ("GET", r"^/api/trash$", "trash_list"),
@@ -648,13 +654,36 @@ class _Handler(BaseHTTPRequestHandler):
                 "Content-Length": str(len(body)),
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline' 'self';"
-                    " script-src 'unsafe-inline'; connect-src 'self'; img-src data:;"
+                    " script-src 'self'; connect-src 'self'; img-src data:;"
                     " frame-ancestors 'none'"
                 ),
                 "X-Frame-Options": "DENY",
             },
         )
         self.wfile.write(body)
+
+    def _serve_packaged_asset(self, name: str, content_type: str) -> None:
+        # Shipped sibling of index.html (v0.2.666). The route table allowlists
+        # the two literal names, so `name` is never user-controlled. A missing
+        # packaged asset is a build defect — a coded 404 beats an empty body,
+        # which would render as a silent blank UI with zero signal.
+        try:
+            body = (_STATIC.parent / name).read_bytes()
+        except OSError:
+            self._error(404, "STATIC_ASSET_NOT_FOUND", f"packaged asset missing: {name}")
+            return
+        self._headers(
+            200,
+            content_type,
+            {"Content-Length": str(len(body))},
+        )
+        self.wfile.write(body)
+
+    def _h_static_app_js(self) -> None:
+        self._serve_packaged_asset("app.js", "text/javascript; charset=utf-8")
+
+    def _h_static_style_css(self) -> None:
+        self._serve_packaged_asset("style.css", "text/css; charset=utf-8")
 
     def _h_theme_css(self) -> None:
         # User theme hook: the palette is already :root variables, so a file

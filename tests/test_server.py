@@ -1777,6 +1777,43 @@ class ServerTest(unittest.TestCase):
         assert style is not None
         self.assertIn("'self'", style.group(1))
 
+    def test_packaged_ui_assets_are_served_and_linked(self) -> None:
+        """v0.2.666 (product-review #27): index.html no longer inlines its
+        script/style — the app lives in two packaged siblings served by
+        literal same-origin routes. Both ends must stay wired: the files are
+        200 under /static/*, and the page links them so a build that drops
+        one renders a blank, not a 404 discovered only by clicking."""
+        status, headers, js = self._req("GET", "/static/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get("Content-Type", ""))
+        self.assertIn(b"const I18N", js)
+        status, headers, css = self._req("GET", "/static/style.css")
+        self.assertEqual(status, 200)
+        self.assertIn("text/css", headers.get("Content-Type", ""))
+        self.assertIn(b"--sumi", css)
+        status, headers, page = self._req("GET", "/")
+        self.assertIn(b'<script src="/static/app.js"></script>', page)
+        self.assertIn(b'<link rel="stylesheet" href="/static/style.css">', page)
+        # script-src moved to 'self' — external assets load, inline JS stays
+        # denied, and the CSP pin keeps the tightening explicit.
+        csp = headers.get("Content-Security-Policy", "")
+        scripts = re.search(r"script-src\s+([^;]+)", csp)
+        self.assertIsNotNone(scripts)
+        assert scripts is not None
+        self.assertIn("'self'", scripts.group(1))
+        self.assertNotIn("unsafe-inline", scripts.group(1))
+
+    def test_missing_packaged_asset_is_a_coded_404(self) -> None:
+        """A wheel that fails to ship app.js must not serve a silent empty
+        body — the UI would render blank with zero signal. The packaged-
+        asset sender degrades to a coded 404 instead."""
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "_STATIC", Path("/nonexistent-dir/x")):
+            status, body = self._json("GET", "/static/app.js")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "STATIC_ASSET_NOT_FOUND")
+
     def test_ui_lang_meta_reflects_shoin_lang(self) -> None:
         """README documents SHOIN_LANG as controlling "UI言語", but the Web UI
         is served as pure static bytes and previously ignored it entirely,

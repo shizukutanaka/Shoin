@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.665")
+        self.assertEqual(VERSION, "0.2.666")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -15433,6 +15433,9 @@ _ERROR_CODE_CATALOG = {
     "METHOD_NOT_ALLOWED",
     "ROUTE_NOT_FOUND",
     "SECURITY_CROSS_ORIGIN_BLOCKED",
+    # v0.2.666: a missing packaged static asset (app.js/style.css) is a
+    # coded 404 — an empty body would render as a silent blank UI.
+    "STATIC_ASSET_NOT_FOUND",
     "SECURITY_HOST_NOT_ALLOWED",
     "SYSTEM_INTERNAL_ERROR",
     "VALIDATION_FIELD_FORMAT_INVALID",
@@ -15996,7 +15999,10 @@ class TestResidualGuards(unittest.TestCase):
         corpus = "\n".join(
             f.read_text(encoding="utf-8")
             for f in list(root.glob("shoin/*.py")) + list(root.glob("tests/*.py"))
-        ) + (root / "shoin" / "static" / "index.html").read_text(encoding="utf-8")
+        ) + "\n".join(
+            f.read_text(encoding="utf-8")
+            for f in sorted((root / "shoin" / "static").iterdir())
+        )
         untraced = [r for r in reqs if r not in corpus]
         self.assertEqual(untraced, [], f"REQ ids with no code/test trace: {untraced}")
 
@@ -18278,12 +18284,13 @@ class TestResidualGuards(unittest.TestCase):
         canonical markers, word-boundary, comment or not — an inline "TODO:"
         in a docstring or a stray <!-- TODO --> in index.html is the same
         violation. Test fixtures live in tests/, so this file is naturally
-        exempt."""
+        exempt. Scan covers every shipped static asset type (v0.2.666: the
+        UI is now index.html + app.js + style.css)."""
         marker = re.compile(r"\b(?:TODO|FIXME)\b")
         root = Path(__file__).resolve().parent.parent / "shoin"
         offenders = []
         for f in sorted(root.rglob("*")):
-            if f.suffix not in (".py", ".html"):
+            if f.suffix not in (".py", ".html", ".js", ".css"):
                 continue
             for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                 if marker.search(line):
@@ -19131,6 +19138,10 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.643: _h_theme_css degrades a missing/unreadable theme
                 # file to an empty stylesheet — the cosmetic hook must never
                 # 5xx a page load.
+                "OSError",
+                # v0.2.666: _serve_packaged_asset maps a missing packaged
+                # app.js/style.css to STATIC_ASSET_NOT_FOUND — a silent
+                # empty body would render a blank UI with zero signal.
                 "OSError",
                 # v0.2.661: _h_health's staleness read is best-effort —
                 # health is the diagnostic surface and must still 200 when
@@ -20984,7 +20995,7 @@ class TestResidualGuards(unittest.TestCase):
         )
 
     def test_ui_selectors_are_cataloged(self) -> None:
-        """`querySelector`/`querySelectorAll` literals in index.html:
+        """`querySelector`/`querySelectorAll` literals in app.js:
         renaming a class/attribute without updating the selector makes
         it silently return null — the feature goes dead with no test
         or console signal. The full literal set is cataloged; a new
@@ -20994,7 +21005,7 @@ class TestResidualGuards(unittest.TestCase):
 
         html = (
             Path(__file__).resolve().parent.parent
-            / "shoin" / "static" / "index.html"
+            / "shoin" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         found: set[str] = set()
         for m in _re.finditer(
@@ -21027,19 +21038,19 @@ class TestResidualGuards(unittest.TestCase):
         )
 
     def test_css_var_refs_are_defined(self) -> None:
-        """Every `var(--x)` reference in index.html must resolve to a
+        """Every `var(--x)` reference in the UI must resolve to a
         `--x:` definition — an undefined custom property silently
         falls back to `initial`/inherit, degrading the style with no
         signal (the v0.2.523 `--ink` defect: the source-rename input
-        showed default text color instead of --sumi)."""
+        showed default text color instead of --sumi). Definitions live
+        in style.css (v0.2.666); refs can appear in either file."""
         import re as _re
 
-        html = (
-            Path(__file__).resolve().parent.parent
-            / "shoin" / "static" / "index.html"
-        ).read_text(encoding="utf-8")
-        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", html))
-        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", html))
+        static_dir = Path(__file__).resolve().parent.parent / "shoin" / "static"
+        style = (static_dir / "style.css").read_text(encoding="utf-8")
+        app = (static_dir / "app.js").read_text(encoding="utf-8")
+        defs = set(_re.findall(r"--([a-zA-Z-]+)\s*:", style))
+        refs = set(_re.findall(r"var\(--([a-zA-Z-]+)\)", style + "\n" + app))
         missing = sorted(refs - defs)
         self.assertGreater(len(defs), 5)
         self.assertGreater(len(refs), 5)
