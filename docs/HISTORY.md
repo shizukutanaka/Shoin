@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.677
+## Version History: v0.1.37 → v0.2.678
+
+### v0.2.678 — HTTPエラー本文への資格情報エコー除去(detail scrub)
+
+- **新規短所62解消(ソクラテス監査で発掘・v0.2.675の記録境界を閉塞)**: 「サーバー由来のエラー本文に秘密が映り込まないか」の問いで発掘——`SYSTEM_LLM_HTTP_ERROR` は応答本文300Bをdetailとして添付する。応答は**サーバー産**で、不誠実・不良なゲートウェイがリクエストの `Authorization: Bearer <key>` やURL資格を本文へエコーすると、秘密が SSE error frame・UI toast・stderr・log.py の全面へ伝播する経路だった。v0.2.675が「クライアント生成のURL echo」を塞いだが、サーバー産のechoは残存していた
+- **detail scrub**: `_post_once` で `llm_api_key()` と `url_userinfo(self.base_url)` の2秘密を `***` へ置換——このクライアントが送信した秘密のみを除去し、host/pathは診断のため温存。`url_userinfo`(config.py新設)はredactと`_split_authority`を共有(authority走査を単一化——find-sentinelカタログ不変)
+- **境界(記録)**: stream経路のHTTPErrorは本文を読まない(コード+`(stream)`のみ)——echo面を持たないため対象外。サーバーが秘密をエコーしない通常応答への影響ゼロ(置換はliteral一致のみ)
+- **行動ピン1件**: Bearerキー+userinfoを本文へエコーするHTTP 500 → メッセージから両秘密が除去・host温存・`***`マーカー
+- **カタログ追随なし**: authority抽出の共有化でfind-sentinel数不変(1)、except/raise/.lower()/importいずれもドリフトなし
 
 ### v0.2.677 — URL資格情報の永続化遮断(origin redact)
 

@@ -24,6 +24,7 @@ from .config import (
     llm_retries,
     llm_url,
     redact_url_credentials,
+    url_userinfo,
 )
 
 CHAT_TIMEOUT_SEC = 180
@@ -206,6 +207,15 @@ class LLMClient:
                 return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             detail = exc.read(300).decode("utf-8", errors="replace")
+            # v0.2.678 (product-review #62): the error body is server-produced —
+            # a misbehaving gateway can echo the request's headers or URL back
+            # inside it, reflecting the Bearer token or URL userinfo into every
+            # surface this message reaches (SSE error frame, UI toast, stderr,
+            # log). Scrub the secrets this client sent before they propagate;
+            # host and path stay visible for diagnosis.
+            for secret in (llm_api_key(), url_userinfo(self.base_url)):
+                if secret:
+                    detail = detail.replace(secret, "***")
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc

@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.677")
+        self.assertEqual(VERSION, "0.2.678")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9434,6 +9434,39 @@ class TestLLMClient(unittest.TestCase):
         # The read limit must have been set (not None, meaning uncapped read was not called)
         self.assertIsNotNone(fake_body.max_read, "read() must be called with a size limit")
         self.assertLessEqual(fake_body.max_read, 300)
+
+    def test_http_error_detail_scrubs_sent_secrets(self) -> None:
+        """v0.2.678 (product-review #62): an HTTP error body is server-produced
+        — a misbehaving gateway can echo request headers/URL back inside it,
+        reflecting the Bearer token or URL userinfo into every surface the
+        error reaches. The message must scrub the secrets this client sent
+        while keeping host/path visible for diagnosis."""
+        import io
+        import os
+        import urllib.error
+        from unittest.mock import patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        key = "k" + "1"
+        url = "http://" + "u:p@localhost:11434/v1"
+        body = io.BytesIO(
+            ("echo Authorization: Bearer " + key + " back at " + url).encode()
+        )
+        err = urllib.error.HTTPError(url, 500, "err", {}, body)
+        with (
+            patch.dict(os.environ, {"SHOIN_LLM_API_KEY": key}),
+            patch("urllib.request.urlopen", side_effect=err),
+        ):
+            client = LLMClient(base_url=url)
+            with self.assertRaises(LLMError) as cm:
+                client.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_HTTP_ERROR")
+        msg = str(cm.exception)
+        self.assertNotIn(key, msg, "Bearer token must not survive the error body")
+        self.assertNotIn("u:p", msg, "URL userinfo must not survive the error body")
+        self.assertIn("localhost", msg, "host stays visible for diagnosis")
+        self.assertIn("***", msg)
 
     def test_post_retries_transport_failures_then_succeeds(self) -> None:
         """v0.2.639: a refused connection or socket timeout is a transient

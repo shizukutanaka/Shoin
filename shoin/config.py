@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.677"
+VERSION = "0.2.678"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -149,6 +149,34 @@ def endpoint_is_external(url: str) -> bool:
     return not (ip.is_loopback or ip.is_unspecified)
 
 
+def _split_authority(url: str) -> tuple[str, str, str]:
+    """(prefix, authority, tail): prefix is 'scheme://' ('' when absent),
+    authority the host/userinfo span before the first '/', '?' or '#',
+    tail everything after it. Purely lexical — never raises on malformed
+    input, which is the whole point for the error paths that use it."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return "", "", url
+    end = len(rest)
+    for delim in "/?#":
+        i = rest.find(delim)
+        if 0 <= i < end:
+            end = i
+    return f"{scheme}://", rest[:end], rest[end:]
+
+
+def url_userinfo(url: str) -> str:
+    """The userinfo (user:pass) portion of a URL — '' when absent (v0.2.678).
+
+    Needed by callers that must know the exact credential substring a URL
+    embeds (e.g. to scrub it from a server echo), where the redacted form
+    is not enough."""
+    _prefix, authority, _tail = _split_authority(url)
+    if "@" not in authority:
+        return ""
+    return authority.rsplit("@", 1)[0]
+
+
 def redact_url_credentials(url: str) -> str:
     """Strip userinfo (user:pass@) from a URL for display (v0.2.675).
 
@@ -162,18 +190,10 @@ def redact_url_credentials(url: str) -> str:
     without '//' has no authority to carry userinfo — returned as-is
     (the '@' a bare path contains is not a credential).
     """
-    scheme, sep, rest = url.partition("://")
-    if not sep:
+    prefix, authority, tail = _split_authority(url)
+    if not prefix or "@" not in authority:
         return url
-    end = len(rest)
-    for delim in "/?#":
-        i = rest.find(delim)
-        if 0 <= i < end:
-            end = i
-    authority, tail = rest[:end], rest[end:]
-    if "@" not in authority:
-        return url
-    return f"{scheme}://{authority.rsplit('@', 1)[1]}{tail}"
+    return f"{prefix}{authority.rsplit('@', 1)[1]}{tail}"
 
 
 def llm_model() -> str:
