@@ -125,6 +125,9 @@ class ServerTest(unittest.TestCase):
         # v0.2.663 (product-review #40): the API contract version is
         # discoverable from the health surface too.
         self.assertEqual(data["api"], API_VERSION)
+        # v0.2.674 (product-review #58): a non-loopback LLM endpoint
+        # silently breaks the local-only promise — health must say so.
+        self.assertFalse(data["llm_external"])
         status, headers, page = self._req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("書院", page.decode())

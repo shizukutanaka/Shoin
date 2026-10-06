@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.673")
+        self.assertEqual(VERSION, "0.2.674")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8808,6 +8808,53 @@ class TestLLMClient(unittest.TestCase):
             next(gen)
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
 
+    def test_endpoint_is_external_truth_table(self) -> None:
+        """v0.2.674 (product-review #58): loopback literals, localhost
+        names and unspecified bind addresses are local; LAN hosts,
+        public IPs and DNS names are external — only the first group
+        keeps document text and questions on this machine."""
+        from shoin.config import endpoint_is_external
+
+        for url in (
+            "http://localhost:11434/v1",
+            "http://foo.localhost:8000",
+            "http://127.0.0.1:11434/v1",
+            "http://127.9.0.1/v1",
+            "http://[::1]:8080",
+            "http://0.0.0.0:8000",
+        ):
+            self.assertFalse(endpoint_is_external(url), url)
+        for url in (
+            "http://192.168.1.10:11434/v1",
+            "http://10.0.0.5:8080",
+            "https://api.openai.com/v1",
+            "http://example.com/v1",
+            "ftp://invalid-scheme",
+        ):
+            self.assertTrue(endpoint_is_external(url), url)
+        # Cannot reach anything: hostname-less or unparseable — not a leak.
+        for url in ("", "not a url", "relative/path", "http://[::1:11434/v1"):
+            self.assertFalse(endpoint_is_external(url), url)
+
+    def test_external_endpoint_warns_at_construction(self) -> None:
+        """v0.2.674 (product-review #58): a non-loopback base_url breaks
+        the local-only promise — LLMClient warns once at construction
+        (every real surface builds the client once per process) instead
+        of inside the per-request paths."""
+        import io
+
+        from shoin.llm import LLMClient
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            LLMClient(base_url="http://example.com/v1")
+        self.assertIn("not local", err.getvalue())
+        err.seek(0)
+        err.truncate(0)
+        with patch("sys.stderr", err):
+            LLMClient(base_url="http://127.0.0.1:11434/v1")
+        self.assertEqual(err.getvalue(), "")
+
     def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
         """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
         Request() itself raise ValueError via urlsplit — BEFORE urlopen runs.
@@ -12864,6 +12911,44 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("model-A", out.getvalue())
         self.assertIn("reindex", err.getvalue())
+
+    def test_cli_health_warns_on_external_endpoint(self) -> None:
+        """v0.2.674 (product-review #58): `shoin health` surfaces a
+        non-loopback SHOIN_LLM_URL on stderr — the local-only promise
+        breaks silently otherwise. CLI parity with /api/health's
+        llm_external field."""
+        import io
+        import os
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        out, err = io.StringIO(), io.StringIO()
+        env = {"SHOIN_LLM_URL": "http://192.168.1.10:11434/v1"}
+        with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+            "sys.stderr", err
+        ):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("ローカルではありません", err.getvalue())
+        # The default endpoint is loopback — no warning there.
+        out2, err2 = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out2), patch("sys.stderr", err2):
+            rc = main(["health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ローカルではありません", err2.getvalue())
 
     def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
         """`python -m shoin` must reach the same CLI as the `shoin` script.
@@ -19253,7 +19338,14 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.639: llm_retries()'s int() parse shares the
                 # invalid->default contract with port().
                 "(TypeError,ValueError)",
-                "OSError", "json.JSONDecodeError",
+                "OSError",
+                # v0.2.674: endpoint_is_external's two narrow probes —
+                # urlsplit ValueError (unclosed bracket) degrades to
+                # "local" verdict (cannot transmit = not a leak);
+                # ip_address ValueError means a DNS name, which by
+                # definition is not this machine → external.
+                "ValueError", "ValueError",
+                "json.JSONDecodeError",
             ],
             "evaluate.py": ["UnicodeEncodeError"],
             "export.py": ["(ValueError,json.JSONDecodeError)"],
@@ -19416,7 +19508,10 @@ class TestResidualGuards(unittest.TestCase):
         trivial_baseline = {
             # config.py +1: llm_retries()'s parse failure falls back to the
             # default 2, same contract as port()'s range fallback.
-            "config.py": 7, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
+            # config.py +2: endpoint_is_external's probes degrade to a
+            # verdict (v0.2.674) — unparseable URL → local (cannot
+            # transmit = not a leak); non-IP hostname → external.
+            "config.py": 9, "evaluate.py": 1, "export.py": 1, "ingest.py": 1,
             "llm.py": 2,
             # log.py +1: emit()'s stderr-write guard — logging must never
             # break the operation it reports (v0.2.652).
@@ -19753,7 +19848,9 @@ class TestResidualGuards(unittest.TestCase):
         )
         baseline = {
             # config.py +1: log_json_enabled env compare (v0.2.652)
-            "config.py": 2, "ingest.py": 4, "search.py": 4,
+            # config.py +1: endpoint_is_external's hostname compare —
+            # DNS names are ASCII-case-insensitive by spec (v0.2.674).
+            "config.py": 3, "ingest.py": 4, "search.py": 4,
             "server.py": 3, "store.py": 2,
         }
         actual: dict[str, int] = {}

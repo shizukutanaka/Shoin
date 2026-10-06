@@ -25,6 +25,7 @@ from .config import (
     db_path,
     embed_batch,
     embed_model,
+    endpoint_is_external,
     llm_model,
     llm_url,
     multi_query_enabled,
@@ -212,6 +213,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_batch_default": "{n} (既定)",
         "health.data_dir": "データベースファイル: {v}",
         "health.llm_url": "LLMエンドポイント: {v}",
+        "health.llm_external": (
+            "警告: LLMエンドポイントはローカルではありません"
+            "——チャンク本文と質問文がこのマシンを離れます"
+        ),
         "stats.name": "ノートブック: {v}",
         "stats.sources": "ソース: {n}",
         "stats.chunks": "チャンク: {n}",
@@ -339,6 +344,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.embed_batch_default": "{n} (default)",
         "health.data_dir": "Database file: {v}",
         "health.llm_url": "LLM endpoint: {v}",
+        "health.llm_external": (
+            "Warning: the LLM endpoint is not local"
+            " — chunk text and questions leave this machine"
+        ),
         "stats.name": "Notebook: {v}",
         "stats.sources": "Sources: {n}",
         "stats.chunks": "Chunks: {n}",
@@ -669,6 +678,12 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     avail = getattr(llm, "available", lambda: False)()
     print(_t("health.version", v=VERSION))
     print(_t("health.llm_url", v=_one_line(llm_url())))
+    # v0.2.674 (product-review #58): the product promise is that document
+    # text and questions never leave this machine — a non-loopback
+    # endpoint silently breaks it. stderr, same pattern as the
+    # embed-model-staleness hint below.
+    if endpoint_is_external(llm_url()):
+        print(_t("health.llm_external"), file=sys.stderr)
     print(_t("health.llm_ok", v=_t("health.yes") if avail else _t("health.no")))
     print(_t("health.model", v=_one_line(llm_model())))
     em = embed_model()

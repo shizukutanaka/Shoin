@@ -38,6 +38,8 @@ from .config import (
     TOP_K,
     VERSION,
     db_path,
+    endpoint_is_external,
+    llm_url,
     multi_query_enabled,
     theme_css_path,
     ui_lang,
@@ -756,6 +758,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "embed_model": embed_model,
                 "indexed_embed_model": indexed_embed_model,
                 "embed_model_changed": embed_stale,
+                # v0.2.674 (product-review #58): the product promise is that
+                # document text and questions never leave this machine — a
+                # non-loopback base_url silently breaks it. The client's own
+                # URL when it has one, else the configured default.
+                "llm_external": endpoint_is_external(
+                    getattr(self.llm, "base_url", "") or llm_url()
+                ),
                 # Surfaces the SHOIN_MULTI_QUERY opt-in state (v0.2.126) so a user
                 # debugging "why is retrieval slow / why isn't recall improving"
                 # doesn't have to know the env var exists — same diagnostic-first

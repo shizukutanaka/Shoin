@@ -81,7 +81,7 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 
 | 変数 | 既定値 | 説明 |
 |------|--------|------|
-| `SHOIN_LLM_URL` | `http://localhost:11434/v1` | OpenAI互換エンドポイント |
+| `SHOIN_LLM_URL` | `http://localhost:11434/v1` | OpenAI互換エンドポイント。非ローカル指定時は起動時/`shoin health`/`/api/health`(`llm_external`)に警告——文書は外部送信される |
 | `SHOIN_LLM_MODEL` | `qwen3:4b` | 生成モデル |
 | `SHOIN_LLM_API_KEY` | (無効) | 設定すると全LLMリクエストへ`Authorization: Bearer <key>`を付与。認証必須のゲートウェイ(vLLM+proxy・ホスト型OpenAI互換)向け。未設定時はヘッダ自体を送らない |
 | `SHOIN_EMBED_MODEL` | `nomic-embed-text` | 埋め込みモデル(空でBM25のみ) |

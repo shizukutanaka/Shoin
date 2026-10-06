@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.673"
+VERSION = "0.2.674"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -119,6 +121,32 @@ def db_path() -> Path:
 
 def llm_url() -> str:
     return _get("SHOIN_LLM_URL", "http://localhost:11434/v1")
+
+
+def endpoint_is_external(url: str) -> bool:
+    """True when an endpoint URL is NOT this machine (v0.2.674).
+
+    The product promise is that document text and questions never leave
+    the host — a non-loopback base_url silently breaks it (chunk text to
+    the embeddings route, context+questions to chat). Loopback literals,
+    `localhost` names and unspecified bind addresses count as local;
+    anything else — LAN hosts, public IPs, DNS names — is external. A
+    malformed URL reports False: it fails loudly at request time anyway
+    and "cannot send anywhere" is not a leak.
+    """
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a DNS name other than localhost — never this machine
+    return not (ip.is_loopback or ip.is_unspecified)
 
 
 def llm_model() -> str:

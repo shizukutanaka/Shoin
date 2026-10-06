@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.673
+## Version History: v0.1.37 → v0.2.674
+
+### v0.2.674 — 非ローカルLLMエンドポイントの可視化(llm_external)
+
+- **新規短所58解消(ソクラテス監査で発掘)**: 「『データは端末を離れない』という製品の約束は設定で静かに破られうるか」の問いで発見——`SHOIN_LLM_URL` が非ループバックを指すと、チャンク本文(embeddings)と質問+コンテキスト(chat)が外部へ送信されるにも関わらず、それを利用者が発見する経路がゼロだった。READMEの「all data stays local」約束が設定値に暗黙依存し、破断が不可視だった
+- **`endpoint_is_external(url)`**(config.py新設): hostnameが `localhost`/`.localhost` 終端・loopbackリテラル・unspecified bind(0.0.0.0/::)なら local——それ以外(LAN IP・公開IP・DNS名)は external。「このマシンでない=送信データが端末を離れる」判定であり、RFC1918 LANもexternal(RFC1918は"安全"でなく端末の外)。hostnameなし/unparseableはFalse(送信不能=漏洩でない・リクエスト時に既に loud fail)
+- **3面の可視化**: ①`LLMClient.__init__` が external 時にstderrへ一回警告(実サーフェスはプロセス当たり1クライアント構築のため構築時一点で全経路をカバー、リクエスト毎の重複警告なし) ②`GET /api/health` に `llm_external` フィールド(クライアントの実 base_url、fallbackで設定値) ③`shoin health` がstderrへ警告行(ja/en i18n)
+- **境界(記録)**: remote endpointは合法なユーザー選択(共有LAN上のLLM・ホステッド互換API)のため警告であって拒否ではない。スキーム非HTTPのURLでも非ローカル宛てはexternal判定(保守側)
+- **行動ピン4件**: 述語真偽表(loopback/unspecified/LAN/DNS/malformed)・LLMClient構築時警告の送信/非送信・`llm_external` healthフィールド・CLI stderr警告
+- **カタログ追随3件**: except-handler inventory config.py +2(狭域ValueErrorはverdict降格)・trivial-body floor config.py +2・`.lower()` inventory config.py +1(DNS名はASCII大文字小文字不感)——新規raise/コード・from-import baselineは非変更(module形式`import urllib.parse`)
 
 ### v0.2.673 — _decodeのバイナリガード + BOM無しUTF-16/32のNULパターン検出
 

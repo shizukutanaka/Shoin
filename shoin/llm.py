@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import http.client
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from .config import embed_model, llm_api_key, llm_model, llm_retries, llm_url
+from .config import (
+    embed_model,
+    endpoint_is_external,
+    llm_api_key,
+    llm_model,
+    llm_retries,
+    llm_url,
+)
 
 CHAT_TIMEOUT_SEC = 180
 
@@ -107,6 +115,18 @@ class LLMClient:
         embedding_model: str | None = None,
     ) -> None:
         self.base_url = (base_url or llm_url()).rstrip("/")
+        # v0.2.674 (product-review #58): the product promise is that
+        # document text and questions never leave this machine — a
+        # non-loopback endpoint silently breaks it. Warn once at client
+        # construction (every real surface builds the client once per
+        # process) instead of inside the per-request paths.
+        if endpoint_is_external(self.base_url):
+            print(
+                "Warning: LLM endpoint is not local"
+                f" ({self.base_url}) — chunk text and questions"
+                " leave this machine",
+                file=sys.stderr,
+            )
         self.model = model or llm_model()
         self.embedding_model = embedding_model if embedding_model is not None else embed_model()
         # finish_reason of the most recent chat/chat_stream call ("stop",
