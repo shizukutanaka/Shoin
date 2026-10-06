@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.666"
+VERSION = "0.2.667"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 

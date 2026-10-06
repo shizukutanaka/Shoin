@@ -1641,6 +1641,52 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
 
+    def test_trash_source_and_note_round_trip(self) -> None:
+        """v0.2.667: source/note deletes archive with their own kind — the
+        undo-log covers every destructive entity delete, not just nb."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "t"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "memo.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["猫は液体である。"])
+            src_id = src.id
+        status, body = self._json(
+            "POST", f"/api/notebooks/{nb_id}/notes",
+            {"title": "memo", "body": "本文"},
+        )
+        self.assertEqual(status, 201)
+        note_id = body["id"]
+        status, _ = self._json("DELETE", f"/api/sources/{src_id}")
+        self.assertEqual(status, 200)
+        status, _ = self._json("DELETE", f"/api/notes/{note_id}")
+        self.assertEqual(status, 200)
+        status, body = self._json("GET", "/api/trash")
+        items = {
+            t["kind"]: t
+            for t in body["trash"]
+            if t["notebook_id"] == nb_id
+        }
+        self.assertEqual(sorted(items), ["note", "source"])
+        status, body = self._json(
+            "POST", f"/api/trash/{items['source']['id']}/restore"
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["kind"], "source")
+        self.assertEqual(body["id"], src_id)
+        status, body = self._json(
+            "POST", f"/api/trash/{items['note']['id']}/restore"
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["kind"], "note")
+        status, body = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual([s["title"] for s in body["sources"]], ["memo.txt"])
+        self.assertEqual([n["title"] for n in body["notes"]], ["memo"])
+
     def test_nb_tree_export_and_import_round_trip(self) -> None:
         """GET .../export?format=tree emits the portable document; POST
         /api/notebooks/import re-inserts it under fresh ids (v0.2.655)."""

@@ -103,7 +103,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.merged": "統合完了: [{id}] {name} (nb{src} を吸収・ゴミ箱へアーカイブ)",
         "nb.imported": "インポート完了: [{id}] {name}",
         "trash.empty": "ゴミ箱は空です。",
-        "trash.item": "[{id}] {name}  (nb_id {nb_id}・削除 {ts})",
+        "trash.item": "[{id}] {kind} {name}  (nb_id {nb_id}・削除 {ts})",
         "trash.restored": "復元完了: [{id}] {name}",
         "trash.purged": "アーカイブを完全削除しました",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
@@ -216,7 +216,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.merged": "Merged: [{id}] {name} (absorbed nb{src}, archived to trash)",
         "nb.imported": "Imported: [{id}] {name}",
         "trash.empty": "Trash is empty.",
-        "trash.item": "[{id}] {name}  (nb_id {nb_id}, deleted {ts})",
+        "trash.item": "[{id}] {kind} {name}  (nb_id {nb_id}, deleted {ts})",
         "trash.restored": "Restored: [{id}] {name}",
         "trash.purged": "Trash archive purged.",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
@@ -960,14 +960,15 @@ def _cmd_trash(store: Store, args: argparse.Namespace) -> int:
                 _t(
                     "trash.item",
                     id=str(r["id"]),
+                    kind=r["kind"],
                     name=_one_line(r["name"]),
                     nb_id=str(r["notebook_id"]),
                     ts=r["deleted_at"],
                 )
             )
     elif action == "restore":
-        nb = store.trash_restore(int(args.trash_id))
-        print(_t("trash.restored", id=str(nb.id), name=_one_line(nb.name)))
+        res = store.trash_restore(int(args.trash_id))
+        print(_t("trash.restored", id=str(res["id"]), name=_one_line(res["name"])))
     elif action == "purge":
         store.trash_purge(int(args.trash_id))
         print(_t("trash.purged"))

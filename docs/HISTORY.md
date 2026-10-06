@@ -29,7 +29,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.666
+## Version History: v0.1.37 → v0.2.667
 
 ### v0.2.664 — FTS5索引の optimize セグメントマージ(索引肥大の構造抑止)
 
@@ -44,6 +44,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 - **UI側はbounded pollへ**: done欠落時の単発fetchはpersistと競合し前ターン行を凍結し得た——`cur.messages`基線(ask開始時の最終assistant本文)と照合し新規行の出現を最大10回×2sで待つ。`messages`要素にidが無い・NB_MESSAGES_LIMIT上限で行数が増えない両ケースを本文差で吸収
 - **行動ピン2件**: server側=delta死亡後も永続行が全パーツ結合と一致(list_messages実検証)、UI側=node実ブロック実行で1回fetch→retry後の新規行復元・前ターン一致時の非復元・done/error後の非fetchを固定
 - **設計上の境界**: `Last-Event-ID` プロトコル再開は非対象——POST+fetchストリームに標準のEventSource再接続は存在せず、server側完了+poll復元がローカル製品の正直な範囲
+
+### v0.2.667 — trash undo-logの全削除動詞カバー(source/note kind)
+
+- **新規短所51解消**(ソクラテス監査で発掘): 「削除動詞はすべてundo可能か」の問いで、v0.2.654の trash_items がノートブックのみをカバーし `delete_source`(チャンク+embeddingを含む・upload取込後はtmp origin消失で実質不可復旧)と `delete_note`(ユーザー記述テキスト)が**同一欠陥クラスの未カバー部分**として永久消失していた。trash_items へ `kind` 列(migration 14・既存行は'notebook'バックフィル)を追加し、両削除動詞が同TXでアーカイブ
+- **restoreはkind分岐**: `trash_restore` が payload の `kind` でディスパッチ——notebook=既存の元id一括再挿入・**source=元id**(chunk INSERTがFTS triggerを再発火・embedding verbatim・親nb消失は NOTEBOOK_NOT_FOUND・id占有は SOURCE_ALREADY_EXISTSでsilent mergeなし)・**note=新規id**(note idはdelete/list以外に参照ゼロのため再割当てが正当で衝突不能)。`GET /api/trash`・`shoin trash list` が kind を開示
+- **設計上の境界**: messages-clear は対象外——履歴消去は意図的cleanupであり、削除後のメッセージは id 系列が先頭から再採番されるため元id復元が事実上常に衝突し、新id復元は id 順序≠時系列を壊す。アーカイブ化しない選択を明示(再生成可能・プライバシー意図)
+- **行動ピン5件**: store往復(kind識別・byte同一chunk+FTS再索引+note復元)・親消失NOTEBOOK_NOT_FOUND+id占有SOURCE_ALREADY_EXISTS・note新id非衝突・未知kind→SYSTEM_INTERNAL_ERROR・API往復(kind開示+restored echo)。カタログ追随: raise-inventory +3(NOTEBOOK_NOT_FOUND×2/SOURCE_ALREADY_EXISTS)
 
 ### v0.2.666 — Web UIの3ファイル分割(index.html+app.js+style.css)
 

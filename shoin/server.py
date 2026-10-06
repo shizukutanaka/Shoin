@@ -754,8 +754,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_trash_restore(self, item_id: int) -> None:
         with Store(self.db) as store:
-            nb = store.trash_restore(item_id)
-        self._json({"id": nb.id, "name": nb.name}, 201)
+            restored = store.trash_restore(item_id)
+        self._json(restored, 201)
 
     def _h_trash_purge(self, item_id: int) -> None:
         with Store(self.db) as store:

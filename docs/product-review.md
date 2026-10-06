@@ -190,6 +190,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~48~~ | ~~**SSE再接続/再開なし**~~ → **解消済み(v0.2.665)** | delta書込のclient_gone後も生成を完了まで消費し**完全回答**を永続化——トークン消費はserialized lock内で確定済みのため中断は純損。done欠落時のUI回復は基線最終assistant本文との差分で新規行を検出するbounded poll(10×2s)へ拡張しpersist競合で前ターン行を凍結しない。Last-Event-ID再開はPOST+fetch形に標準EventSourceが無く非対象 |
 | 49 | ~~**スケジュール/定期タスク機構なし**~~ → **解消済み** (v0.2.648: `POST /api/notebooks/{id}/refresh-all`/`shoin source refresh-all` が全refreshableソースを一括処理——cronに登録すれば定期再取込が完結。per-source結果収集で死んだorigin一つで全体が止まらない) |
 | 50 | **ローカルLLM以外の選択肢前提** | 組込みモデル同梱やクラウドAPIキー対応は設計外。ユーザーが別途 OpenAI 互換サーバを用意する必要がある |
+| ~~51~~ | ~~**削除undoがノートブックのみ**~~ → **解消済み(v0.2.667)** | ソクラテス監査で発掘: v0.2.654のtrash_itemsはnbのみをカバーし、`delete_source`(upload取込後はtmp origin消失で実質不可復旧)と`delete_note`が永久消失だった。trash_itemsへ`kind`列(migration 14)を追加し両動詞が同TXでアーカイブ——restoreはkind分岐(source=元id+FTS再索引・NOTEBOOK_NOT_FOUND親消失/SOURCE_ALREADY_EXISTS占有、note=新規idで衝突不能)。messages-clearは意図的cleanup+id再採番衝突のため設計上対象外 |
 
 ### 解決済み(記録)
 

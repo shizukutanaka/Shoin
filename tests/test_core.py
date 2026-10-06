@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.666")
+        self.assertEqual(VERSION, "0.2.667")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19391,7 +19391,12 @@ class TestResidualGuards(unittest.TestCase):
                 # internal-validator ValueErrors (never reaches the request
                 # path: callers classify it coded inside their own guards).
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 76,  # +1: _utf8's coded surrogate rejection
+                # v0.2.667: trash_restore's malformed-payload guards —
+                # non-dict JSON and unknown `kind` funnel into the existing
+                # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
+                # corrupt boundary, never onto the request path.
+                "ValueError", "ValueError",
+            ] + ["StoreError"] * 79,  # +1: _utf8's coded surrogate rejection
                                       # +4: update_notebook_settings non-dict /
                                       #     unknown-key / out-of-bounds / missing-
                                       #     row guards (v0.2.659)
@@ -19407,6 +19412,9 @@ class TestResidualGuards(unittest.TestCase):
                                       # +3: update_chunk_text empty/missing/deleted
                                       # +4: trash raises (TRASH_NOT_FOUND x2,
                                       #     ALREADY_EXISTS, corrupt payload)
+                                      # +3: per-entity trash restores —
+                                      #     NOTEBOOK_NOT_FOUND x2 (gone parent)
+                                      #     + SOURCE_ALREADY_EXISTS (v0.2.667)
                                       # -1: delete_notebook's own NOT_FOUND
                                       #     raise now delegated to get_notebook
                                       # +4: import_notebook (name-not-str, dangling
@@ -21483,7 +21491,8 @@ class TestTrash(unittest.TestCase):
             self.assertEqual(items[0]["name"], "研究")
             self.assertEqual(items[0]["notebook_id"], nb_id)
             nb = s.trash_restore(items[0]["id"])
-            self.assertEqual(nb.id, nb_id)
+            self.assertEqual(nb["id"], nb_id)
+            self.assertEqual(nb["kind"], "notebook")
             self.assertEqual(s.counts(nb_id), before)
             row = s.conn.execute(
                 "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
@@ -21550,6 +21559,111 @@ class TestTrash(unittest.TestCase):
             tid = s.trash_list()[0]["id"]
             s.conn.execute(
                 "UPDATE trash_items SET payload=? WHERE id=?", ("not-json", tid)
+            )
+            s.conn.commit()
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            self.assertEqual(len(s.trash_list()), 1)
+
+    def test_source_and_note_delete_archive_and_restore(self) -> None:
+        """v0.2.667: source/note deletes archive to the same trash undo-log —
+        a deleted upload whose tmp origin is gone stays recoverable. Restore
+        keeps the source id (chunks re-fire FTS, embeddings verbatim) and
+        gives the note a fresh id (nothing references note ids)."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "cats.txt", "mem://cats", "sha-c")
+            s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+            chunk = s.conn.execute(
+                "SELECT id, embedding, embedding_norm FROM chunks WHERE source_id=?",
+                (src.id,),
+            ).fetchone()
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_source(src.id)
+            s.delete_note(nid)
+            items = s.trash_list()
+            self.assertEqual(sorted(t["kind"] for t in items), ["note", "source"])
+            by_kind = {t["kind"]: t for t in items}
+            res = s.trash_restore(by_kind["source"]["id"])
+            self.assertEqual(res["kind"], "source")
+            self.assertEqual(res["id"], src.id)
+            self.assertEqual(s.get_source(src.id).title, "cats.txt")
+            row = s.conn.execute(
+                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                (chunk["id"],),
+            ).fetchone()
+            self.assertEqual(row["embedding"], chunk["embedding"])
+            self.assertEqual(row["embedding_norm"], chunk["embedding_norm"])
+            # INSERT re-fired the FTS triggers — searchable immediately
+            hits = s.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks_fts"
+                " WHERE chunks_fts MATCH '猫は液'"
+            ).fetchone()["n"]
+            self.assertEqual(int(hits), 1)
+            res2 = s.trash_restore(by_kind["note"]["id"])
+            self.assertEqual(res2["kind"], "note")
+            notes = s.list_notes(nb.id)
+            self.assertEqual([n["title"] for n in notes], ["memo"])
+            self.assertEqual([n["body"] for n in notes], ["本文"])
+            self.assertEqual(s.trash_list(), [])
+
+    def test_source_restore_missing_parent_or_occupied_id_is_coded(self) -> None:
+        """v0.2.667: a source archive cannot restore into a vanished
+        notebook (NOTEBOOK_NOT_FOUND) nor over a re-occupied source id
+        (SOURCE_ALREADY_EXISTS) — never a silent merge; archive kept."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "a.txt", "mem://a", "sha-a")
+            s.add_chunks(src.id, ["テキスト"])
+            s.delete_source(src.id)
+            tid = s.trash_list()[0]["id"]
+            s.delete_notebook(nb.id)
+            # Parent gone — restore refuses NOTEBOOK_NOT_FOUND, archive kept
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(len(s.trash_list()), 2)
+            # Bring the parent back — the source id stays free (the nb
+            # archive was taken after the source delete), so refill it
+            # with a new source: the occupied id is the binding refusal.
+            nb_item = [t for t in s.trash_list() if t["kind"] == "notebook"][0]
+            s.trash_restore(nb_item["id"])
+            src2 = s.add_source(nb.id, "txt", "b.txt", "mem://b", "sha-b")
+            self.assertEqual(src2.id, src.id)
+            with self.assertRaises(StoreError) as cm:
+                s.trash_restore(tid)
+            self.assertEqual(cm.exception.code, "SOURCE_ALREADY_EXISTS")
+            self.assertEqual(len(s.trash_list()), 1)  # archive intact
+            s.trash_purge(tid)
+            self.assertEqual(s.trash_list(), [])
+
+    def test_note_restore_gets_fresh_id_never_conflicts(self) -> None:
+        """v0.2.667: note restore re-assigns the id — deleting note 5 and
+        adding a new note that reuses id 5 does not block the undo."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            nid = s.add_note(nb.id, "old", "b")
+            s.delete_note(nid)
+            nid2 = s.add_note(nb.id, "new", "b2")
+            self.assertEqual(nid2, nid)  # id reuse is the premise
+            tid = s.trash_list()[0]["id"]
+            res = s.trash_restore(tid)
+            self.assertEqual(res["kind"], "note")
+            self.assertNotEqual(res["id"], nid)
+            titles = sorted(n["title"] for n in s.list_notes(nb.id))
+            self.assertEqual(titles, ["new", "old"])
+
+    def test_trash_unknown_kind_is_coded(self) -> None:
+        """v0.2.667: a hand-edited/foreign payload kind must surface as
+        SYSTEM_INTERNAL_ERROR (corrupt boundary), never dispatch blindly."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            s.delete_notebook(nb.id)
+            tid = s.trash_list()[0]["id"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?",
+                ('{"kind":"mystery"}', tid),
             )
             s.conn.commit()
             with self.assertRaises(StoreError) as cm:

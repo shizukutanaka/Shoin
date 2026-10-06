@@ -121,6 +121,7 @@ class TrashItem(TypedDict):
     notebook_id: int
     name: str
     deleted_at: str
+    kind: str
 
 # --- schema migrations (append-only; never edit a shipped entry) ---
 
@@ -390,6 +391,19 @@ MIGRATIONS: list[tuple[int, str]] = [
         # migration alone changes no retrieval behavior.
         """
         ALTER TABLE notebooks ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
+    (
+        14,
+        # Trash kind column (v0.2.667): the undo-log generalizes from
+        # notebook-only archives to per-entity payloads — a source (with
+        # its chunks and embeddings) or a single note. Every pre-existing
+        # row is a notebook tree, so 'notebook' backfills truthfully;
+        # new archives write the payload's kind explicitly. trash_list()
+        # surfaces kind so the two archive classes read differently
+        # without ever parsing payloads.
+        """
+        ALTER TABLE trash_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'notebook';
         """,
     ),
 ]
@@ -823,15 +837,7 @@ class Store:
             payload["sources"].append(dict(r))
             src_ids.append(int(r["id"]))
         for sid in src_ids:
-            for r in self.conn.execute(
-                "SELECT * FROM chunks WHERE source_id=? ORDER BY seq", (sid,)
-            ):
-                row = dict(r)
-                if row["embedding"] is not None:
-                    row["embedding"] = {
-                        "$blob": base64.b64encode(row["embedding"]).decode("ascii")
-                    }
-                payload["chunks"].append(row)
+            payload["chunks"].extend(self._chunk_dicts(sid))
         payload["notes"] = [
             dict(r)
             for r in self.conn.execute(
@@ -860,6 +866,24 @@ class Store:
             self._notebook_tree_dict(notebook_id), ensure_ascii=False
         )
 
+    def _chunk_dicts(self, source_id: int) -> list[dict[str, Any]]:
+        """Raw chunk rows for one source with embedding BLOBs base64-tagged.
+
+        Shared by the notebook-tree serializer and the source-level trash
+        archive (v0.2.667) — the same verbatim-valid, zero-re-embed shape.
+        """
+        rows: list[dict[str, Any]] = []
+        for r in self.conn.execute(
+            "SELECT * FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
+        ):
+            row = dict(r)
+            if row["embedding"] is not None:
+                row["embedding"] = {
+                    "$blob": base64.b64encode(row["embedding"]).decode("ascii")
+                }
+            rows.append(row)
+        return rows
+
     def delete_notebook(self, notebook_id: int) -> None:
         # Undo-log trash (v0.2.654): archive-then-delete in ONE
         # transaction — the undo record can never be missing for a
@@ -877,7 +901,7 @@ class Store:
     def trash_list(self) -> list[TrashItem]:
         """Newest-first trash index — columns only, payload never parsed."""
         rows = self.conn.execute(
-            "SELECT id, notebook_id, name, deleted_at"
+            "SELECT id, notebook_id, name, deleted_at, kind"
             " FROM trash_items ORDER BY deleted_at DESC, id DESC"
         ).fetchall()
         return [
@@ -886,19 +910,26 @@ class Store:
                 notebook_id=int(r["notebook_id"]),
                 name=str(r["name"]),
                 deleted_at=str(r["deleted_at"]),
+                kind=str(r["kind"]),
             )
             for r in rows
         ]
 
-    def trash_restore(self, trash_id: int) -> Notebook:
-        """Re-insert a trashed tree with its original ids, in one TX.
+    def trash_restore(self, trash_id: int) -> dict[str, Any]:
+        """Re-insert a trashed entity in one TX, dispatching on payload kind.
 
-        Chunk INSERTs re-fire the FTS triggers, so a restored notebook
-        is searchable immediately with its (base64-decoded) vectors
-        intact. The one refusal is an occupied notebook id: INTEGER
-        PRIMARY KEY reuses max(id)+1, so after delete→create the old
-        id can legitimately be taken — ALREADY_EXISTS, never a
-        silent merge or id rewrite.
+        Notebook archives (v0.2.654) re-insert with their original ids —
+        chunk INSERTs re-fire the FTS triggers and base64 vectors land
+        verbatim, so a restored tree is searchable immediately at zero
+        re-embed cost. Source archives (v0.2.667) follow the same
+        contract inside their parent notebook, which must still exist
+        (NOTEBOOK_NOT_FOUND): an occupied source id refuses with
+        SOURCE_ALREADY_EXISTS, never a silent merge or id rewrite.
+        Note archives get a fresh id — nothing outside delete/list
+        references note ids, so re-assignment loses nothing and cannot
+        collide. INTEGER PRIMARY KEY reuses max(id)+1, so every
+        occupied-id refusal is a real conflict, not paranoia.
+        Returns {"kind", "id", "name"} — the restored entity's identity.
         """
         row = self.conn.execute(
             "SELECT payload FROM trash_items WHERE id=?", (trash_id,)
@@ -907,27 +938,62 @@ class Store:
             raise StoreError("TRASH_NOT_FOUND", f"trash item {trash_id} not found")
         try:
             payload = json.loads(row["payload"])
-            nb = payload["notebook"]
-            sources = payload["sources"]
-            chunks = payload["chunks"]
-            notes = payload["notes"]
-            studio_outputs = payload["studio_outputs"]
-            messages = payload["messages"]
-            for c in chunks:
-                if c["embedding"] is not None:
-                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
-            # Normalize meta inside the same corrupt-payload boundary — a
-            # garbage meta field is the same defect class as a broken
-            # embedding tag, and must surface SYSTEM_INTERNAL_ERROR, not
-            # a raw ValueError escaping mid-transaction.
-            for s in sources:
-                s["meta"] = _meta_text(s.get("meta"))
-            nb["settings"] = _meta_text(nb.get("settings"))
+            if not isinstance(payload, dict):
+                raise ValueError("trash payload is not an object")
+            kind = str(payload.get("kind", "notebook"))
+            if kind == "notebook":
+                nb = payload["notebook"]
+                sources = payload["sources"]
+                chunks = payload["chunks"]
+                notes = payload["notes"]
+                studio_outputs = payload["studio_outputs"]
+                messages = payload["messages"]
+                for c in chunks:
+                    if c["embedding"] is not None:
+                        c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+                # Normalize meta inside the same corrupt-payload boundary — a
+                # garbage meta field is the same defect class as a broken
+                # embedding tag, and must surface SYSTEM_INTERNAL_ERROR, not
+                # a raw ValueError escaping mid-transaction.
+                for s in sources:
+                    s["meta"] = _meta_text(s.get("meta"))
+                nb["settings"] = _meta_text(nb.get("settings"))
+            elif kind == "source":
+                src = payload["source"]
+                chunks = payload["chunks"]
+                for c in chunks:
+                    if c["embedding"] is not None:
+                        c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+                src["meta"] = _meta_text(src.get("meta"))
+                nb_id = int(src["notebook_id"])
+            elif kind == "note":
+                note = payload["note"]
+                nb_id = int(note["notebook_id"])
+            else:
+                raise ValueError(f"unknown trash kind {kind!r}")
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "SYSTEM_INTERNAL_ERROR",
                 f"trash item {trash_id} payload is corrupt",
             ) from exc
+        if kind == "notebook":
+            return self._restore_notebook_tree(
+                nb, sources, chunks, notes, studio_outputs, messages, trash_id
+            )
+        if kind == "source":
+            return self._restore_trashed_source(src, chunks, nb_id, trash_id)
+        return self._restore_trashed_note(note, nb_id, trash_id)
+
+    def _restore_notebook_tree(
+        self,
+        nb: dict[str, Any],
+        sources: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+        notes: list[dict[str, Any]],
+        studio_outputs: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        trash_id: int,
+    ) -> dict[str, Any]:
         if self.conn.execute(
             "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
         ).fetchone():
@@ -994,10 +1060,86 @@ class Store:
                 )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
             self._optimize_fts()
-        return Notebook(
-            nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
-            json.loads(nb["settings"]),
-        )
+        return {"kind": "notebook", "id": nb["id"], "name": nb["name"]}
+
+    def _restore_trashed_source(
+        self,
+        src: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        nb_id: int,
+        trash_id: int,
+    ) -> dict[str, Any]:
+        """Source archive restore (v0.2.667): original id inside its parent
+        notebook — chunk INSERTs re-fire the FTS triggers, so the source is
+        searchable again in the same commit that lands it."""
+        if self.conn.execute(
+            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
+        ).fetchone() is None:
+            raise StoreError(
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {nb_id} is gone — cannot restore source into it",
+            )
+        if self.conn.execute(
+            "SELECT 1 FROM sources WHERE id=?", (src["id"],)
+        ).fetchone():
+            raise StoreError(
+                "SOURCE_ALREADY_EXISTS",
+                f"source {src['id']} already exists — cannot restore over it",
+            )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO sources(id, notebook_id, kind, title, origin,"
+                " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    src["id"], nb_id, src["kind"], src["title"], src["origin"],
+                    src["sha256"], src["added_at"],
+                    # Archives written before migrations 11/12 carry no
+                    # weight/meta key — restore them neutral rather than
+                    # refusing (same contract as notebook-tree restore).
+                    float(src.get("weight", 1.0)),
+                    src["meta"],
+                ),
+            )
+            for c in chunks:
+                self.conn.execute(
+                    "INSERT INTO chunks(id, source_id, seq, text, context,"
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        c["id"], src["id"], c["seq"], c["text"],
+                        c["context"], c["embedding"], c["embedding_norm"],
+                    ),
+                )
+            self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
+            self.touch_notebook(nb_id)
+            self._optimize_fts()
+        return {"kind": "source", "id": int(src["id"]), "name": str(src["title"])}
+
+    def _restore_trashed_note(
+        self, note: dict[str, Any], nb_id: int, trash_id: int
+    ) -> dict[str, Any]:
+        """Note archive restore (v0.2.667): fresh id inside its parent
+        notebook — nothing outside delete/list references note ids, so
+        re-assignment loses nothing and the insert can never collide."""
+        if self.conn.execute(
+            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
+        ).fetchone() is None:
+            raise StoreError(
+                "NOTEBOOK_NOT_FOUND",
+                f"notebook {nb_id} is gone — cannot restore note into it",
+            )
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO notes(notebook_id, title, body, created_at)"
+                " VALUES(?,?,?,?)",
+                (nb_id, note["title"], note["body"], note["created_at"]),
+            )
+            self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
+            self.touch_notebook(nb_id)
+        return {
+            "kind": "note",
+            "id": int(cur.lastrowid or 0),
+            "name": str(note["title"]),
+        }
 
     def trash_purge(self, trash_id: int) -> None:
         """Permanently drop one trash archive — the undo record itself."""
@@ -1516,7 +1658,27 @@ class Store:
 
     def delete_source(self, source_id: int) -> None:
         src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+        # Undo-log trash (v0.2.667): same archive-then-delete TX as
+        # delete_notebook — a deleted upload whose tmp origin is long
+        # gone is unrecoverable without this record. Chunks ride in the
+        # payload (base64 embeddings) and re-fire FTS triggers on restore.
+        src_row = self.conn.execute(
+            "SELECT * FROM sources WHERE id=?", (source_id,)
+        ).fetchone()
+        payload = json.dumps(
+            {
+                "kind": "source",
+                "source": dict(src_row) if src_row is not None else {},
+                "chunks": self._chunk_dicts(source_id),
+            },
+            ensure_ascii=False,
+        )
         with self.conn:
+            self.conn.execute(
+                "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
+                " VALUES(?,?,?,?,'source')",
+                (src.notebook_id, src.title, _now(), payload),
+            )
             cur = self.conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
             if cur.rowcount == 0:
                 raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
@@ -2025,10 +2187,18 @@ class Store:
         )
 
     def delete_note(self, note_id: int) -> None:
-        row = self.conn.execute("SELECT notebook_id FROM notes WHERE id=?", (note_id,)).fetchone()
+        row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
             raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
+        # Undo-log trash (v0.2.667): a user-typed note is unrecoverable
+        # text — same archive-then-delete contract as notebook/source.
+        payload = json.dumps({"kind": "note", "note": dict(row)}, ensure_ascii=False)
         with self.conn:
+            self.conn.execute(
+                "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
+                " VALUES(?,?,?,?,'note')",
+                (int(row["notebook_id"]), str(row["title"]), _now(), payload),
+            )
             cur = self.conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
             if cur.rowcount == 0:
                 raise StoreError("NOTE_NOT_FOUND", f"note {note_id} was concurrently deleted")
