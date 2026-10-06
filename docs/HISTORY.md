@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.669
+## Version History: v0.1.37 → v0.2.670
+
+### v0.2.670 — DB物理整合性の診断経路(shoin check + GET /api/check)
+
+- **新規短所54解消(ソクラテス監査で発掘)**: 「破損したDBを診断する経路はあるか」の問いで発見——`shoin health`/`GET /api/health` は「設定・LLM到達性」を報告するが「**ファイル自体の健全性**」を診断する経路が一切なく、破損した .sqlite は全コマンドで raw `sqlite3.DatabaseError: file is not a database` のトレースバックになるだけだった(Store() オープンで即死・coded経路ゼロ)
+- **`Store.check()`**: `PRAGMA integrity_check(20)`(上限20行)のverdict + `PRAGMA foreign_key_check` の違反件数 + `schema_migrations` の適用済み/期待ヘッド版を返す。`ok` = integrity "ok" かつ fk違反0
+- **`shoin check`**: healthと同じく共有 `with Store(...)` の外で実行——**開けないファイルこそ診断対象**なので自分で Store を開く。unopenable(DatabaseError含む)は stderr のcoded行+rc1、健全rc0——cron/スクリプトからの破損検知が可能。corrupt_hint で backup/export からの復元を案内
+- **`GET /api/check`**: `with Store(self.db)` が例外(DatabaseError含む)で失敗した場合も `{ok:false, integrity:"unopenable", error}` を200で返す——「壊れたDBを診断する面」が500で潰れない設計(_h_health の best-effort open と同型)
+- **行動ピン3件**: store=ok形+frozen植付けFK違反でok反転・CLI=健全rc0+3行・corrupt→rc1+clean stderr(トレースバックなし)・API=健全200形+unopenable面
+- **カタログ追随1件**: except-inventory cli.py +1(`except (OSError, StoreError, sqlite3.DatabaseError)` in `_cmd_check`——DatabaseErrorはOperationalErrorを包含し'file is not a database'を捕捉)
 
 ### v0.2.669 — 削除済みバイトの物理回収(trash empty + vacuum)
 

@@ -529,6 +529,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("GET", r"^/static/app\.js$", "static_app_js"),
         ("GET", r"^/static/style\.css$", "static_style_css"),
         ("GET", r"^/api/health$", "health"),
+        ("GET", r"^/api/check$", "check"),
         ("GET", r"^/api/metrics$", "metrics"),
         ("GET", r"^/api/trash$", "trash_list"),
         ("POST", r"^/api/trash/(\d+)/restore$", "trash_restore"),
@@ -769,6 +770,19 @@ class _Handler(BaseHTTPRequestHandler):
         # observability pair: durable totals vs per-event lines.
         with Store(self.db) as store:
             self._json({"metrics": store.usage_metrics()})
+
+    def _h_check(self) -> None:
+        try:
+            with Store(self.db) as store:
+                self._json(store.check())
+        except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+            # A file that cannot open at all is itself the finding — report
+            # it as the diagnostic payload, not a generic 500 (the same
+            # best-effort contract _h_health keeps). DatabaseError covers
+            # OperationalError.
+            self._json(
+                {"ok": False, "integrity": "unopenable", "error": str(exc)}
+            )
 
     def _h_trash_list(self) -> None:
         with Store(self.db) as store:

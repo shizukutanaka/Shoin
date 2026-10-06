@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.669")
+        self.assertEqual(VERSION, "0.2.670")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19139,6 +19139,10 @@ class TestResidualGuards(unittest.TestCase):
                 # the broken thing being diagnosed (raw OSError for
                 # unopenable paths alongside OperationalError/StoreError).
                 "(OSError,StoreError,sqlite3.OperationalError)",
+                # v0.2.670: _cmd_check reports an unopenable DB as its own
+                # finding — DatabaseError (covers OperationalError) catches
+                # 'file is not a database' raised at Store()'s first PRAGMA.
+                "(OSError,StoreError,sqlite3.DatabaseError)",
             ],
             "config.py": [
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
@@ -19249,6 +19253,10 @@ class TestResidualGuards(unittest.TestCase):
                 # .pyz — to FileNotFoundError so the coded 404 boundary
                 # above it keeps one shape.
                 "(ImportError,OSError)",
+                # v0.2.670: _h_check answers {ok:false,'unopenable'} when
+                # the DB file itself cannot open — the diagnostic surface
+                # must not collapse to a generic 500 (mirrors _h_health).
+                "(OSError,StoreError,sqlite3.DatabaseError)",
             ],
             "store.py": [
                 # v0.2.654: trash_restore maps a corrupt/hand-edited
@@ -21696,6 +21704,40 @@ class TestTrash(unittest.TestCase):
                 res2 = s.vacuum()
                 self.assertLessEqual(res2["freed"], res["freed"])
 
+    def test_check_reports_physical_health(self) -> None:
+        """v0.2.670: check() is the physical-DB diagnostic — the
+        integrity verdict, FK-violation count, and applied-vs-expected
+        schema version. A planted FK violation flips ok to False."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "c.db")
+            with Store(db) as s:
+                seed(s)
+                res = s.check()
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["integrity"], "ok")
+                self.assertEqual(res["integrity_errors"], [])
+                self.assertEqual(res["fk_violations"], 0)
+                self.assertEqual(res["schema_version"], res["expected_version"])
+                # Plant an orphan chunk through a raw connection — every
+                # production path keeps PRAGMA foreign_keys=ON, so the only
+                # way a violation can exist is outside the product's writes.
+                raw = sqlite3.connect(db)
+                try:
+                    raw.execute("PRAGMA foreign_keys = OFF")
+                    raw.execute(
+                        "INSERT INTO chunks(source_id, seq, text, context)"
+                        " VALUES(?,?,?,?)",
+                        (99999, 0, "orphan", ""),
+                    )
+                    raw.commit()
+                finally:
+                    raw.close()
+                res2 = s.check()
+                self.assertFalse(res2["ok"])
+                self.assertGreaterEqual(res2["fk_violations"], 1)
+
     def test_restore_corrupt_payload_is_coded(self) -> None:
         """A hand-edited trash payload must surface as a coded error and
         leave the archive row — never a raw JSONDecodeError traceback."""
@@ -21873,6 +21915,38 @@ class TestTrash(unittest.TestCase):
         with redirect_stdout(out2):
             self.assertEqual(main(["--db", db, "vacuum"]), 0)
         self.assertIn("VACUUM完了", out2.getvalue())
+
+    def test_cli_check_reports_health_and_unopenable(self) -> None:
+        """v0.2.670: `shoin check` returns rc0 with integrity/FK/schema on
+        a healthy DB, and rc1 + a clean unopenable line on a corrupt file
+        — never a raw sqlite3 traceback."""
+        import io
+        import shutil
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin.cli import main
+        from shoin.store import MIGRATIONS
+
+        db = self._tmpdb()
+        with Store(db) as s:
+            seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--db", db, "check"]), 0)
+        body = out.getvalue()
+        self.assertIn("整合性: ok", body)
+        self.assertIn("外部キー違反: 0件", body)
+        head = MIGRATIONS[-1][0]
+        self.assertIn(f"スキーマ版: {head}/{head}", body)
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        bad = os.path.join(d, "bad.db")
+        Path(bad).write_bytes(b"not a sqlite file " * 100)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(main(["--db", bad, "check"]), 1)
+        self.assertIn("DBを開けません", err.getvalue())
 
 
 class TestNbExportImport(unittest.TestCase):

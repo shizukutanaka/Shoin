@@ -193,6 +193,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~51~~ | ~~**削除undoがノートブックのみ**~~ → **解消済み(v0.2.667)** | ソクラテス監査で発掘: v0.2.654のtrash_itemsはnbのみをカバーし、`delete_source`(upload取込後はtmp origin消失で実質不可復旧)と`delete_note`が永久消失だった。trash_itemsへ`kind`列(migration 14)を追加し両動詞が同TXでアーカイブ——restoreはkind分岐(source=元id+FTS再索引・NOTEBOOK_NOT_FOUND親消失/SOURCE_ALREADY_EXISTS占有、note=新規idで衝突不能)。messages-clearは意図的cleanup+id再採番衝突のため設計上対象外 |
 | ~~52~~ | ~~**serve起動が逆引きDNSで~30s停滞**~~ → **解消済み(v0.2.668)** | pyz e2e検証で発掘: stdlib `HTTPServer.server_bind`がbind時に`socket.getfqdn(host)`のPTR参照を実行し、リゾルバ低速/不在環境でlisten自体が遅延(実測35s・ソースツリー同一)。`_HTTPServer.server_bind`をoverrideし`TCPServer.server_bind`+リテラル`server_name`へ置換——ループバック専用に正規名不要(server_nameの消費者はstdlib HTMLエラーページのみで本ハンドラはJSONエンベロープ)。実測 35.0s→0.05s |
 | ~~53~~ | ~~**削除済みバイトの物理回収経路なし**~~ → **解消済み(v0.2.669)** | 「蓄積した全バイトは回収されるか」のソクラテス問いで発掘: ①ゴミ箱はpurgeが1件単位で一括emptyの経路が無かった ②SQLiteは削除済み領域をfreelistへ移すだけでDBファイルが物理的に縮小せず、purgeしても消費ディスクが戻らなかった。`trash_purge_all`(1TX全件削除)+`vacuum()`(wal_checkpoint後にVACUUM、before/after/freed報告)+`freelist_bytes()`で回収可能量を`stats`へ可視化。`DELETE /api/trash`+`shoin trash empty`、`POST /api/vacuum`+`shoin vacuum`のREQ-103パリティ |
+| ~~54~~ | ~~**破損DBの診断経路なし**~~ → **解消済み(v0.2.670)** | 「破損したDBを診断する経路はあるか」のソクラテス問いで発掘: healthは設定/LLM到達性の面で、「ファイル自体の健全性」の経路がゼロ——corrupt .sqlite はStore()オープンで `sqlite3.DatabaseError: file is not a database` 即死しcoded経路が無かった。`Store.check()`(integrity_check+foreign_key_check+schema版)を新設し `shoin check`(健全rc0/破損・unopenable rc1——cron検知可)+`GET /api/check`(unopenableを200診断値として返す、500潰れなし)の両面へ |
 
 ### 解決済み(記録)
 

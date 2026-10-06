@@ -2433,6 +2433,34 @@ class Store:
         after = self.db_bytes()
         return {"before": before, "after": after, "freed": before - after}
 
+    def check(self) -> dict[str, Any]:
+        """Physical-DB diagnostic (v0.2.670): the integrity_check verdict,
+        the foreign_key_check violation count, and the applied schema
+        version against the expected head.
+
+        A file that cannot even be opened never reaches this method —
+        callers surface that as "unopenable" themselves. Corruption found
+        mid-check propagates as sqlite3.DatabaseError from the PRAGMA,
+        which IS the diagnostic the caller reports, so it is deliberately
+        not swallowed here.
+        """
+        rows = self.conn.execute("PRAGMA integrity_check(20)").fetchall()
+        errors = [str(r[0]) for r in rows]
+        integ_ok = errors == ["ok"]
+        fk_rows = self.conn.execute("PRAGMA foreign_key_check").fetchall()
+        row = self.conn.execute(
+            "SELECT MAX(version) AS v FROM schema_migrations"
+        ).fetchone()
+        expected = MIGRATIONS[-1][0] if MIGRATIONS else 0
+        return {
+            "ok": integ_ok and not fk_rows,
+            "integrity": "ok" if integ_ok else "corrupt",
+            "integrity_errors": [] if integ_ok else errors,
+            "fk_violations": len(fk_rows),
+            "schema_version": int(row["v"] or 0),
+            "expected_version": expected,
+        }
+
     def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
         """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
         rows = self.conn.execute(

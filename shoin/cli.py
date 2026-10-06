@@ -108,6 +108,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "trash.purged": "アーカイブを完全削除しました",
         "trash.emptied": "ゴミ箱を空にしました: {n}件",
         "vacuum.done": "VACUUM完了: {before} → {after} ({freed} 回収)",
+        "check.integrity": "整合性: {v}",
+        "check.fk": "外部キー違反: {n}件",
+        "check.schema": "スキーマ版: {n}",
+        "check.unopenable": "DBを開けません: {msg}",
+        "check.corrupt_hint": (
+            "⚠ 破損の可能性——`shoin backup` やエクスポートからの"
+            "復元を検討してください"
+        ),
         "stats.freelist": "回収可能な空き領域: {n}",
         "nb.empty": "書院がありません。`shoin notebook new <名前>` で作成。",
         "msg.cleared": "チャット履歴をクリアしました",
@@ -224,6 +232,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "trash.purged": "Trash archive purged.",
         "trash.emptied": "Trash emptied: {n} archive(s).",
         "vacuum.done": "Vacuum done: {before} → {after} ({freed} reclaimed).",
+        "check.integrity": "Integrity: {v}",
+        "check.fk": "Foreign-key violations: {n}",
+        "check.schema": "Schema version: {n}",
+        "check.unopenable": "Cannot open database: {msg}",
+        "check.corrupt_hint": (
+            "⚠ possible corruption — consider restoring from"
+            " `shoin backup` or an export."
+        ),
         "stats.freelist": "Reclaimable free space: {n}",
         "nb.empty": "No notebooks. Create one with `shoin notebook new <name>`.",
         "msg.cleared": "Chat history cleared",
@@ -501,6 +517,9 @@ def _build_parser() -> argparse.ArgumentParser:
     trsub.add_parser("empty", help="ゴミ箱を空にする(全アーカイブ完全削除・復元不可)")
 
     sub.add_parser("vacuum", help="DBをVACUUMして削除済み領域をOSへ返却")
+    sub.add_parser(
+        "check", help="DB物理整合性を診断 (integrity/FK違反/スキーマ版、破損時rc=1)"
+    )
     return p
 
 
@@ -988,6 +1007,37 @@ def _cmd_trash(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(db: str | None) -> int:
+    """Diagnose the physical DB — the counterpart of `health` (config/LLM
+    reachability): this command answers "is the file itself sound".
+    Runs outside main()'s shared `with Store(...)` block for the same
+    reason `health`/`serve` do — a file that cannot even open is exactly
+    the finding this command exists to report (v0.2.670).
+    """
+    try:
+        with Store(db or db_path()) as store:
+            res = store.check()
+    except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+        # DatabaseError covers OperationalError and catches 'file is not a
+        # database' — a Store() on a corrupt file raises it at the first
+        # PRAGMA, before check() could run.
+        print(_t("check.unopenable", msg=str(exc)), file=sys.stderr)
+        return 1
+    print(_t("check.integrity", v=str(res["integrity"])))
+    for line in res["integrity_errors"]:
+        print(f"  {line}")
+    print(_t("check.fk", n=str(res["fk_violations"])))
+    print(
+        _t(
+            "check.schema",
+            n=f"{res['schema_version']}/{res['expected_version']}",
+        )
+    )
+    if not res["ok"]:
+        print(_t("check.corrupt_hint"), file=sys.stderr)
+    return 0 if res["ok"] else 1
+
+
 def _cmd_vacuum(store: Store, args: argparse.Namespace) -> int:
     res = store.vacuum()
     print(
@@ -1315,6 +1365,10 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
         except Exception as exc:  # noqa: BLE001 - see comment above
             print(_t("err.prefix", code="SYSTEM_INTERNAL_ERROR", msg=str(exc)), file=sys.stderr)
             return 1
+    if str(args.command) == "check":
+        # Same Store()-free position as health: a corrupt file raises inside
+        # Store() itself, so the diagnostic must open its own connection.
+        return _cmd_check(_db_arg(args))
     try:
         with Store(_db_arg(args) or db_path()) as store:
             command = str(args.command)

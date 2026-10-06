@@ -1657,6 +1657,37 @@ class ServerTest(unittest.TestCase):
         self.assertLessEqual(body["after"], body["before"])
         self.assertEqual(body["freed"], body["before"] - body["after"])
 
+    def test_check_endpoint_reports_health_and_unopenable(self) -> None:
+        """v0.2.670: GET /api/check returns the physical-DB diagnostic;
+        a file that cannot even open reports ok:false + 'unopenable'
+        instead of a generic 500."""
+        status, body = self._json("GET", "/api/check")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["integrity"], "ok")
+        self.assertEqual(body["fk_violations"], 0)
+        self.assertEqual(body["schema_version"], body["expected_version"])
+
+        import threading as _th
+
+        bad = str(Path(self.tmp.name) / "bad.db")
+        Path(bad).write_bytes(b"not a sqlite file " * 100)
+        srv2 = make_server(port=0, db=bad, llm=FakeLLM())
+        th = _th.Thread(target=srv2.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv2.server_address[1]}/api/check"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv2.shutdown()
+            srv2.server_close()
+            th.join(timeout=5)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["integrity"], "unopenable")
+
     def test_trash_source_and_note_round_trip(self) -> None:
         """v0.2.667: source/note deletes archive with their own kind — the
         undo-log covers every destructive entity delete, not just nb."""
