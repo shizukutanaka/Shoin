@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.680
+## Version History: v0.1.37 → v0.2.681
+
+### v0.2.681 — `shoin import` の文書サイズ上限(MAX_IMPORT_BYTES)
+
+- **新規短所65解消(ソクラテス監査で発掘)**: 「上限の無い入力経路は残っていないか」の問いで発掘——`POST /api/notebooks/import` は `_read_json` が `MAX_UPLOAD_BYTES`(10MB)で制御済みだが、CLI `shoin import <file>`・`import -`(stdin) は `read_text`+`json.loads` で**文書を無制限に全量読込**。細工・誤生成の巨大export(数百MB〜GB)でプロセスがパース途中OOM死する経路だった——パース失敗前にメモリ自体を要求するので coded エラーにも到達しない
+- **`MAX_IMPORT_BYTES = 1 << 30`(1GiB)**: 最大正規export(50kチャンク×本文+base64 embedding≈数百MB)に十分な余裕を残しつつ、敵性文書が強制し得るresident setを制限。file経路は stat() で事前拒否(extract_fileと同パターン)+成長ファイル用に読取自体も上限再検査、stdinはstat不可のためbounded read(MAX+1)のみ
+- **拒否はcoded**: `NOTEBOOK_IMPORT_INVALID`で文書が巨大なことを明示——部分的なインポートは発生しない(json.loads前の拒否のためTX未到達)
+- **副次修正**: stdin経路が locale decode → 厳密 utf-8 へ(file経路と同一のデコード契約——非UTF-8ロケールでの暗黙mojibake解消)
+- **境界(記録)**: API側10MB上限は据置き——UIから>10MBのexportを再importするにはCLI経路(設計上の分業)。evalのcases/--diffファイルはユーザー自作の診断入力で同一クラスに非ず(記録済み境界)
+- **行動ピン1件**: MAX_IMPORT_BYTESをpatchで縮小し、file stat-gate・stdin流の両拒否(coded+nb数不変)を検証
+- **カタログ追随1件**: raise-inventory cli.py +3(oversize拒否3サイト)
 
 ### v0.2.680 — 非正規ファイルの永久ブロック経路を閉塞(is_file gate)
 

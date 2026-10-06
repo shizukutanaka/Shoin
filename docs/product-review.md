@@ -204,6 +204,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~62~~ | ~~**HTTPエラー本文が秘密をエコーし得る**~~ → **解消済み(v0.2.678)** | 「サーバー由来のエラー本文に秘密が映り込まないか」の問いで発掘(v0.2.675の記録境界を閉塞): `SYSTEM_LLM_HTTP_ERROR`は応答本文300Bをdetail添付——不良なゲートウェイがBearerキーやURL資格をエコーすると秘密がSSE/UI/stderr/log全面へ伝播。`_post_once`で`llm_api_key()`+`url_userinfo(base_url)`を`***`置換(送信した秘密のみ、host/path温存)。stream経路は本文非読で対象外 |
 | ~~63~~ | ~~**同一sha merge/importがraw IntegrityErrorで死ぬ**~~ → **解消済み(v0.2.679)** | 「同一内容のソースを含む2ノートブックのmergeはどうなるか」の問いで発掘: `UNIQUE(notebook_id,sha256)`に裸INSERT——共有sha mergeや文書内dup shaが500化(部分挿入はTX巻戻し)。`_insert_tree_rows`でsha dedupe: 同一sha=同一text=同一決定的chunkのため既存sourceへid_map折返し・chunk INSERT skip・citation_report remap経由で引用解決・cap計算は実挿入数 |
 | ~~64~~ | ~~**非正規ファイルが永久ブロックでハングする**~~ → **解消済み(v0.2.680)** | 「ローカルファイルらしきものは全て安全に読めるか」の問いで発掘: `extract_file`は拡張子とst_sizeのみ検査——FIFO/デバイス/ソケットはst_size 0でsize gateを素通りし`read_bytes()`がwriter未到着で永久ブロック(ローカルreadにtimeout不可)。serveでは要求スレッド消費・CLIはハング。`is_file()`で読取前に`INGEST_FETCH_FAILED`拒否——symlinkはfollowして抽出(後者を陽性対照でピン) |
+| ~~65~~ | ~~**CLI import が文書を無制限読込**~~ → **解消済み(v0.2.681)** | 「上限の無い入力経路は残っていないか」の問いで発掘: API側importは`_read_json`の10MB制御済みだが `shoin import <file>`/`-`(stdin) はread_text+`json.loads`で全量読込——巨大exportでOOM死(coded未到達)。`MAX_IMPORT_BYTES`(1GiB)でstat事前拒否+読取上限+stdin bounded readの3層化。stdinデコードもlocale→厳密utf-8へ(副次修正) |
 
 ### 解決済み(記録)
 

@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.680")
+        self.assertEqual(VERSION, "0.2.681")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19912,6 +19912,10 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _cmd_source meta's malformed key=value pair (v0.2.658)
                 # +2: _cmd_notebook settings' pair-shape / int-value guards
                 #     (v0.2.659)
+                # +3: _cmd_import's oversize gates — file stat-gate, grew-
+                #     during-read, and stdin stream; the coded instance is
+                #     built once and re-raised by reference (v0.2.681)
+                "oversize(ref)", "oversize(ref)", "oversize(ref)",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -22640,6 +22644,46 @@ class TestNbExportImport(unittest.TestCase):
         self.assertIn("インポート完了", out2.getvalue())
         with Store(db) as s:
             self.assertEqual(len(s.list_notebooks()), 2)
+
+    def test_cli_import_rejects_oversize_document(self) -> None:
+        """v0.2.681: the CLI import path must bound the document.
+
+        The file/stdin used to be read in full with no cap — a hostile or
+        accidental giant export OOM-killed the process mid-parse. Patch
+        MAX_IMPORT_BYTES down so a tiny file exercises every gate: the
+        stat()-size pre-check, the grew-during-read recheck, and the stdin
+        stream (which has no stat at all).
+        """
+        import io
+        import sys
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        doc = b'{"format": "shoin-nb-tree-v1", "notebook": {}, "sources": []}'
+        f = os.path.join(tempfile.mkdtemp(), "big.json")
+        Path(f).write_bytes(doc)
+        err = io.StringIO()
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 8),
+            redirect_stderr(err),
+        ):
+            # stat() sees the oversize file before any read
+            self.assertEqual(main(["--db", db, "import", f]), 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err.getvalue())
+            # the stdin stream has no stat — the bounded read is the gate
+            err = io.StringIO()
+            fake_stdin = io.TextIOWrapper(io.BytesIO(doc), encoding="utf-8")
+            with (
+                patch.object(sys, "stdin", fake_stdin),
+                redirect_stderr(err),
+            ):
+                self.assertEqual(main(["--db", db, "import", "-"]), 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err.getvalue())
+        # nothing was imported in either rejected run
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 0)
 
     def _tmpdb_cli(self) -> str:
         import shutil

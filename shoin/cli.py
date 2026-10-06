@@ -16,6 +16,7 @@ from pathlib import Path
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
     EMBED_MODEL_SETTING_KEY,
+    MAX_IMPORT_BYTES,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     TOP_K,
@@ -785,12 +786,28 @@ def _cmd_import(store: Store, args: argparse.Namespace) -> int:
     export|import pipes work."""
     import json
 
+    oversize = StoreError(
+        "NOTEBOOK_IMPORT_INVALID",
+        f"export document exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+    )
     try:
+        # v0.2.681: bound the document BEFORE json.loads — the file/stdin used
+        # to be read in full with no cap, so a hostile or accidental giant
+        # export OOM-killed the process mid-parse. Stat the file first like
+        # extract_file does, then bound the read itself for a file that grew
+        # (or a stdin stream, which has no stat).
         if str(args.file) == "-":
-            raw_text = sys.stdin.read()
+            raw_bytes = sys.stdin.buffer.read(MAX_IMPORT_BYTES + 1)
+            if len(raw_bytes) > MAX_IMPORT_BYTES:
+                raise oversize
         else:
-            raw_text = Path(str(args.file)).expanduser().read_text(encoding="utf-8")
-        raw = json.loads(raw_text)
+            p = Path(str(args.file)).expanduser()
+            if p.stat().st_size > MAX_IMPORT_BYTES:
+                raise oversize
+            raw_bytes = p.read_bytes()
+            if len(raw_bytes) > MAX_IMPORT_BYTES:
+                raise oversize
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except OSError as exc:
         raise StoreError(
             "SYSTEM_IO_ERROR", f"cannot read export file: {exc}"
