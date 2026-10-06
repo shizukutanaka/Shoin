@@ -2649,6 +2649,54 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
+    def test_delta_write_death_still_persists_the_complete_answer(self) -> None:
+        """v0.2.665 (product-review #48): once a delta write dies, the handler
+        keeps consuming the LLM stream to completion — the token spend is
+        already sunk inside generation_lock — and the persisted assistant row
+        holds the FULL answer. The UI's done-miss poll and any reload must not
+        find only the prefix that fit before the cut."""
+        import io
+        from unittest.mock import patch
+
+        import shoin.server as srv_mod
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "delta-full"})
+        nb_id = nb["id"]
+        req = urllib.request.Request(
+            self._url(f"/api/notebooks/{nb_id}/upload"),
+            data=("楮は和紙の原料である。" * 30).encode(),
+            method="POST",
+            headers={"X-Filename": "kaji.txt"},
+        )
+        with urllib.request.urlopen(req):
+            pass
+
+        def delta_boom(event, payload):
+            if event == "delta":
+                raise ConnectionError("gone")
+
+        err = io.StringIO()
+        with (
+            patch.object(srv_mod._Handler, "_sse", side_effect=delta_boom),
+            patch("sys.stderr", err),
+        ):
+            status, raw = self._sse(
+                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, "")
+        self.assertNotIn("Traceback", err.getvalue())
+        with Store(str(Path(self.tmp.name) / "ps.db")) as s:
+            rows = [
+                m for m in s.list_messages(nb_id) if m["role"] == "assistant"
+            ]
+        self.assertEqual(len(rows), 1)
+        # Every streamed part survived — a mid-loop abort would have left the
+        # empty or single-token prefix instead.
+        self.assertEqual(rows[0]["body"], "".join(self.llm.reply_parts))
+
     def test_send_error_survives_a_dead_connection(self) -> None:
         """send_error on a socket that died mid-response must swallow the write
         failure — protocol-level errors are already terminal; raising again

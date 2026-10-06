@@ -1087,6 +1087,11 @@ $("#askForm").onsubmit = async e=>{
   bd.append(el("span","spin", t("busy")));
   $("#askBtn").disabled = true;
   let acc = "", gotDone = false, failed = false;
+  // Baseline for the drop-recovery poll below: the last persisted assistant
+  // body BEFORE this ask lands — captured while `cur` still holds this
+  // notebook's detail (v0.2.665).
+  const _asst0 = (cur && cur.messages || []).filter(m=>m.role==="assistant");
+  const _baseAsstBody = _asst0.length ? _asst0[_asst0.length-1].body : null;
   try{
     const ids = scopedIds(scope.sel, scope.live);
     const r = await jpost(`/api/notebooks/${nbId}/ask`, ids ? {question:q, source_ids:ids} : {question:q});
@@ -1132,21 +1137,29 @@ $("#askForm").onsubmit = async e=>{
     }
     if (!gotDone && !failed){
       // Stream ended without a done frame (a proxy or network cut): the server
-      // persists the full assistant message + report anyway, so re-render the
-      // stored answer instead of leaving a seal-less partial text behind.
-      try{
-        const d = await (await api(`/api/notebooks/${nbId}`)).json();
-        const last = (d.messages||[]).filter(m=>m.role==="assistant").pop();
-        if (last){
-          acc = last.body || "";
-          bd.replaceChildren();
-          renderWithSeals(bd, acc, last.report || null);
-          const c = el("div","cites"); reportBadges(c, last.report || {});
-          if (c.children.length) bd.parentElement.append(c);
-          $("#degBadge").hidden = !(last.report && last.report.degraded);
-        }
-        else { toast(t("chat.stream_dropped")); }
-      }catch(_e){ toast(t("chat.stream_dropped")); }
+      // keeps generating after a client drop and persists the COMPLETE answer
+      // once finished (v0.2.665), so poll briefly for a NEW last assistant
+      // row — a single immediate fetch can race the persist and freeze on the
+      // previous turn's message.
+      let restored = false;
+      for (let tries=0; tries<10 && !restored; tries++){
+        if (tries) await new Promise(r=>setTimeout(r,2000));
+        try{
+          const d = await (await api(`/api/notebooks/${nbId}`)).json();
+          const asst = (d.messages||[]).filter(m=>m.role==="assistant");
+          const last = asst[asst.length-1];
+          if (last && last.body !== _baseAsstBody){
+            acc = last.body || "";
+            bd.replaceChildren();
+            renderWithSeals(bd, acc, last.report || null);
+            const c = el("div","cites"); reportBadges(c, last.report || {});
+            if (c.children.length) bd.parentElement.append(c);
+            $("#degBadge").hidden = !(last.report && last.report.degraded);
+            restored = true;
+          }
+        }catch(_e){ /* keep polling — a transient fetch failure retries like the first */ }
+      }
+      if (!restored){ if (!acc) bd.replaceChildren(); toast(t("chat.stream_dropped")); }
     }
   }catch(err){ bd.textContent=""; toast(err.message); }
   finally{

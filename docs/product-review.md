@@ -187,7 +187,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 45 | ~~**観測性が SHOIN_DEBUG のみ**~~ → **解消済み** (v0.2.652: `SHOIN_LOG_JSON=1`でJSON Linesイベントログ——`source_indexed`/`ask_completed`がID・件数・ms・degradedをstderr emit。`_PRIVATE_FIELDS`フィルタで本文流出不可。trace層は設計上不要として残) |
 | 46 | **Windows 未検証** | 開発・検証は macOS/Linux 前提。`shell=False` 設計とパス処理は概ね移植可能だが実機検証履歴が無い |
 | 47 | **Python 3.11 フロア** | requires-python >=3.11 で更に古い distro 標準 Python では動かない(意図的だが利用層を狭める) |
-| 48 | **SSE再接続/再開なし** | ストリーム断は「done欠落→永続回答復元」で救済するのみ。`Last-Event-ID` 再開やclient-side resumeは無い |
+| ~~48~~ | ~~**SSE再接続/再開なし**~~ → **解消済み(v0.2.665)** | delta書込のclient_gone後も生成を完了まで消費し**完全回答**を永続化——トークン消費はserialized lock内で確定済みのため中断は純損。done欠落時のUI回復は基線最終assistant本文との差分で新規行を検出するbounded poll(10×2s)へ拡張しpersist競合で前ターン行を凍結しない。Last-Event-ID再開はPOST+fetch形に標準EventSourceが無く非対象 |
 | 49 | ~~**スケジュール/定期タスク機構なし**~~ → **解消済み** (v0.2.648: `POST /api/notebooks/{id}/refresh-all`/`shoin source refresh-all` が全refreshableソースを一括処理——cronに登録すれば定期再取込が完結。per-source結果収集で死んだorigin一つで全体が止まらない) |
 | 50 | **ローカルLLM以外の選択肢前提** | 組込みモデル同梱やクラウドAPIキー対応は設計外。ユーザーが別途 OpenAI 互換サーバを用意する必要がある |
 

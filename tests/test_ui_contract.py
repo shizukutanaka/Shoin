@@ -2311,8 +2311,10 @@ console.log("ok")
         message + report, but the live bubble used to keep the seal-less
         partial text — diverging silently from what a reload renders. The
         recovery path re-fetches the notebook and re-renders the stored
-        message through the same renderWithSeals/reportBadges chain. Executes
-        the real block under node."""
+        message through the same renderWithSeals/reportBadges chain; v0.2.665
+        turned the single refetch into a bounded poll because the server now
+        finishes the interrupted generation first — the first fetch can still
+        be racing the persist. Executes the real block under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script_body(_html())
@@ -2325,6 +2327,7 @@ console.log("ok")
 const calls = {render: [], badges: [], toasts: [], appended: [], api: 0};
 const degBadge = {hidden: true};
 const $ = s => s === "#degBadge" ? degBadge : {};
+const setTimeout = (cb, ms) => cb();   // v0.2.665: make poll retries instant
 function t(k){ return k }
 function el(t2, c, txt){ return {tag:t2, cls:c, text:txt, children:[],
   append(x){ this.children.push(x) }} }
@@ -2335,6 +2338,7 @@ function reportBadges(c, report){ calls.badges.push(report);
   if (report.degraded) c.append({cls: "badge dim"}) }
 function toast(m){ calls.toasts.push(m) }
 const nbId = 7;
+let _baseAsstBody = null;
 let apiImpl = async () => ({json: async () => ({messages: [
   {role: "user", body: "q", report: null},
   {role: "assistant", body: "full answer [S1]", report: {degraded: true}}]})});
@@ -2357,6 +2361,19 @@ calls.api = 0;
 acc = await run(true, false);
 if (acc !== "partial text" || calls.api !== 0)
   { console.error("refetched after a normal done frame"); process.exit(1) }
+// v0.2.665: the first recovery fetch can still show the PREVIOUS turn while
+// the server finishes the interrupted generation — the poll must keep
+// trying until the NEW assistant row lands instead of freezing on stale.
+calls.api = 0; calls.render.length = 0;
+_baseAsstBody = "prior turn";
+let n = 0;
+apiImpl = async () => { n++; return {json: async () => ({messages: [
+  {role: "assistant", body: n < 2 ? "prior turn" : "full answer [S1]",
+   report: {degraded: true}}]})} };
+acc = await run(false, false);
+if (acc !== "full answer [S1]" || calls.api !== 2)
+  { console.error("poll missed the new row: " + acc + " api=" + calls.api); process.exit(1) }
+calls.api = 0;
 acc = await run(false, true);
 if (calls.api !== 0)
   { console.error("refetched after an error frame"); process.exit(1) }

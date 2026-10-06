@@ -1459,7 +1459,20 @@ class _Handler(BaseHTTPRequestHandler):
                 with self.generation_lock:
                     for token in self._stream_chat(build_messages(question, context, history)):
                         parts.append(token)
-                        self._sse("delta", {"text": token})
+                        if client_gone:
+                            continue
+                        try:
+                            self._sse("delta", {"text": token})
+                        except ConnectionError:
+                            # Client dropped mid-answer — keep consuming the
+                            # generator to completion anyway: the token spend
+                            # is already sunk inside the serialized lock, and
+                            # the persist below then writes the COMPLETE
+                            # answer, so the client's done-miss recovery and
+                            # any page reload see the full answer rather than
+                            # the prefix that happened to fit before the cut
+                            # (v0.2.665).
+                            client_gone = True
                     # Read last_finish_reason while still holding the lock — the
                     # shared llm resets it at the start of every chat/stream call,
                     # so reading after release races with the next queued request.

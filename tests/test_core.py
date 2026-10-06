@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.664")
+        self.assertEqual(VERSION, "0.2.665")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19111,6 +19111,11 @@ class TestResidualGuards(unittest.TestCase):
                 "(ValueError,json.JSONDecodeError)",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
+                "ConnectionError",
+                # v0.2.665: per-delta write guard inside the generation loop —
+                # a dead client must not abort the paid-for stream; the
+                # handler finishes generating so the persisted row is the
+                # COMPLETE answer (resume via re-fetch, product-review #48).
                 "ConnectionError",
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",

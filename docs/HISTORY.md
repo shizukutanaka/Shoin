@@ -29,7 +29,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.664
+## Version History: v0.1.37 → v0.2.665
 
 ### v0.2.664 — FTS5索引の optimize セグメントマージ(索引肥大の構造抑止)
 
@@ -37,6 +37,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 - callee-transacted 契約(`_rewrite_chunk_context_titles` と同型): ヘルパ自身は with を持たず呼出し側TXに従う——索引書込みとマージがアトミックにコミット/ロールバックされ、半マージ状態の中間コミット経路が存在しない
 - 設計上の境界: trigram 3gram 全展開の固有サイズ(文書の数倍)は残存——本対応は「可避免なセグメントオーバーヘッド」の抑止であり、索引圧縮やトークナイザ変更は非対象(トークナイザ変更は既存DBの全再索引を要する破壊的変更)
 - 行動ピン2件: 全6書込経路で 'optimize' 文の実送出を trace callback で検証+マージ後も検索が応答・カタログ追随2件(bare-write allowlist +1、callee 呼出しサイト regex +1)
+
+### v0.2.665 — SSE切断後も生成を完了し完全回答を永続化(ストリーム断の回答切詰め解消)
+
+- **短所48解消**: ask SSEストリームの切断は「delta書込失敗→生成ループ脱出→**部分**回答のみ永続化」で、残りの回答が永続的に失われていた。generation_lock内で delta `ConnectionError` を捕捉し `client_gone` を立てて**残りトークンを消費継続**——トークン消費は既にserialized lock内で確定済みのため、切断で計算を捨てるのは純損。persistは完了後1回のみ行われ完全回答+レポートを書く(fire-and-forget意味論)
+- **UI側はbounded pollへ**: done欠落時の単発fetchはpersistと競合し前ターン行を凍結し得た——`cur.messages`基線(ask開始時の最終assistant本文)と照合し新規行の出現を最大10回×2sで待つ。`messages`要素にidが無い・NB_MESSAGES_LIMIT上限で行数が増えない両ケースを本文差で吸収
+- **行動ピン2件**: server側=delta死亡後も永続行が全パーツ結合と一致(list_messages実検証)、UI側=node実ブロック実行で1回fetch→retry後の新規行復元・前ターン一致時の非復元・done/error後の非fetchを固定
+- **設計上の境界**: `Last-Event-ID` プロトコル再開は非対象——POST+fetchストリームに標準のEventSource再接続は存在せず、server側完了+poll復元がローカル製品の正直な範囲
 
 ### v0.2.663 — APIバージョニング(X-Shoin-API ヘッダ + 互換ポリシー明文化)
 
