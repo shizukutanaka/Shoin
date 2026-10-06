@@ -162,7 +162,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 20 | **ノートブック単位設定が無い** | TOP_K・トークン予算・言語等はプロセスグローバル。プロジェクトごとに変えられない |
 | 21 | ~~**削除は即物理削除**~~ → **解消済み** (v0.2.654: nb削除が全子表を`trash_items`へJSON undo-log化——同一TXのため巻戻し不能なコミットは構造上存在しない。`GET /api/trash`+restore/purge・`shoin trash`。id衝突はALREADY_EXISTSで拒否=暗黙merge無し) |
 | 22 | ~~**DB全体のバックアップ/エクスポート経路なし**~~ → **解消済み** (v0.2.636: `shoin backup <dest>` が SQLite online backup API でライブ一貫スナップショットを作成。dest=0600・`~`展開・自己上書き拒否・coded失敗経路) |
-| 23 | **ノートブック統合・複製が無い** | 複製のみ解消 (v0.2.645: `POST /api/notebooks/{id}/duplicate`/`shoin notebook duplicate`——全子表を一TX複写・embedding verbatim有効・FTS再索引)。mergeは設計上の別件として残 |
+| ~~23~~ | ~~ノートブック統合・複製が無い~~ | **解消 v0.2.656** — 複製 (v0.2.645) に続きmerge側も着地: `Store.merge_notebooks` が元nbの全子表を新規idで取込先へ再挿入 (chunk.source_id・citation_report.source_id_map を id_map で再写像・importと `_insert_tree_rows` 共有) した上で `delete_notebook` 経由で元nbをゴミ箱へアーカイブ=復元可能。`POST /api/notebooks/{id}/merge {"source_id"}` + `shoin notebook merge <target> <src>` のCLI/Web両面 |
 | 24 | **ソースのメタデータが薄い** | title/kind/origin/sha256 のみ。著者・発行日・タグ等の分類用メタ無し |
 | 25 | ~~**全文検索 API が無い**~~ → **解消済み** (v0.2.637: `POST /api/notebooks/{id}/search` が /ask 同一retrieve経路のhitsを生成・永続化なしで返す。`k`は_optional_intで1..50・`source_ids`同一契約・history非展開) |
 | 26 | ~~**detail応答のページネーション無し**~~ → **解消済み** (v0.2.646: `GET /api/notebooks/{id}/messages|notes?offset&limit` が cap を超えた全量を newest-first で走査——limit 1..500・total開示・coded検証。sources は cap 対象外のため対象外) |

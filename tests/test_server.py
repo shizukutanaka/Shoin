@@ -1619,6 +1619,59 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_nb_merge_endpoint(self) -> None:
+        """POST /api/notebooks/{id}/merge (v0.2.656): folds the source
+        notebook's tree in under fresh ids and archives the emptied
+        source to trash — echoes the surviving target."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "T"})
+        self.assertEqual(status, 201)
+        t = body["id"]
+        status, body = self._json("POST", "/api/notebooks", {"name": "S"})
+        self.assertEqual(status, 201)
+        src = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            ss = store.add_source(src, "txt", "sdoc", "mem://s", "sha-s")
+            store.add_chunks(ss.id, ["ソース側本文です。"])
+        status, body = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": src}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"id": t, "name": "T"})
+        status, det = self._json("GET", f"/api/notebooks/{t}")
+        self.assertEqual(status, 200)
+        self.assertEqual([s["title"] for s in det["sources"]], ["sdoc"])
+        # the emptied source is gone (archived under trash, not lost)
+        status, err = self._json("GET", f"/api/notebooks/{src}")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, trash = self._json("GET", "/api/trash")
+        self.assertEqual(status, 200)
+        items = [t for t in trash["trash"] if t["notebook_id"] == src]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "S")
+        # validator boundary: absent / wrong type / dead / self
+        status, err = self._json("POST", f"/api/notebooks/{t}/merge", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": "x"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": 999}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        status, err = self._json(
+            "POST", f"/api/notebooks/{t}/merge", {"source_id": t}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
     def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
         """GET /api/theme.css (v0.2.643): the user-theme hook serves
         SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.

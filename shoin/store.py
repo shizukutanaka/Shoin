@@ -878,53 +878,9 @@ class Store:
                     (name, ts, ts),
                 )
                 new_id = int(cur.lastrowid or 0)
-                id_map: dict[Any, int] = {}
-                for s in sources:
-                    cur = self.conn.execute(
-                        "INSERT INTO sources"
-                        "(notebook_id, kind, title, origin, sha256, added_at)"
-                        " VALUES(?,?,?,?,?,?)",
-                        (
-                            new_id, s["kind"], s["title"], s["origin"],
-                            s["sha256"], s["added_at"],
-                        ),
-                    )
-                    id_map[s["id"]] = int(cur.lastrowid or 0)
-                for c in chunks:
-                    self.conn.execute(
-                        "INSERT INTO chunks(source_id, seq, text, context,"
-                        " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
-                        (
-                            id_map[c["source_id"]], c["seq"], c["text"],
-                            c["context"], c["embedding"], c["embedding_norm"],
-                        ),
-                    )
-                for n in notes:
-                    self.conn.execute(
-                        "INSERT INTO notes(notebook_id, title, body, created_at)"
-                        " VALUES(?,?,?,?)",
-                        (new_id, n["title"], n["body"], n["created_at"]),
-                    )
-                for o in studio_outputs:
-                    self.conn.execute(
-                        "INSERT INTO studio_outputs(notebook_id, kind, body,"
-                        " citation_report, created_at) VALUES(?,?,?,?,?)",
-                        (
-                            new_id, o["kind"], o["body"],
-                            _remap_report_source_ids(o["citation_report"], id_map),
-                            o["created_at"],
-                        ),
-                    )
-                for m in messages:
-                    self.conn.execute(
-                        "INSERT INTO messages(notebook_id, role, body,"
-                        " citation_report, created_at) VALUES(?,?,?,?,?)",
-                        (
-                            new_id, m["role"], m["body"],
-                            _remap_report_source_ids(m["citation_report"], id_map),
-                            m["created_at"],
-                        ),
-                    )
+                self._insert_tree_rows(
+                    new_id, sources, chunks, notes, studio_outputs, messages
+                )
         except sqlite3.InterfaceError as exc:
             # Unbindable value types (dict where TEXT belongs) are a
             # malformed payload, not a DB failure — classify honestly.
@@ -932,6 +888,121 @@ class Store:
                 "NOTEBOOK_IMPORT_INVALID", "export rows failed type checks"
             ) from exc
         return Notebook(new_id, name, ts, ts)
+
+    def _insert_tree_rows(
+        self,
+        notebook_id: int,
+        sources: list[Any],
+        chunks: list[Any],
+        notes: list[Any],
+        studio_outputs: list[Any],
+        messages: list[Any],
+    ) -> None:
+        """Re-insert a serialized notebook tree under FRESH ids.
+
+        Callee-transacted: the caller owns `with self.conn:` (same
+        contract as touch_notebook). Shared by import_notebook, which
+        inserts the new notebook row first, and merge_notebooks, which
+        targets an existing one. Source ids are re-keyed through
+        id_map; citation_report source_id_map is rewritten through the
+        same map so reports never point at dead or wrong sources.
+        Chunk INSERTs re-fire the FTS triggers, so merged/imported
+        content is searchable the moment the transaction commits.
+        """
+        id_map: dict[Any, int] = {}
+        for s in sources:
+            cur = self.conn.execute(
+                "INSERT INTO sources"
+                "(notebook_id, kind, title, origin, sha256, added_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (
+                    notebook_id, s["kind"], s["title"], s["origin"],
+                    s["sha256"], s["added_at"],
+                ),
+            )
+            id_map[s["id"]] = int(cur.lastrowid or 0)
+        for c in chunks:
+            self.conn.execute(
+                "INSERT INTO chunks(source_id, seq, text, context,"
+                " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                (
+                    id_map[c["source_id"]], c["seq"], c["text"],
+                    c["context"], c["embedding"], c["embedding_norm"],
+                ),
+            )
+        for n in notes:
+            self.conn.execute(
+                "INSERT INTO notes(notebook_id, title, body, created_at)"
+                " VALUES(?,?,?,?)",
+                (notebook_id, n["title"], n["body"], n["created_at"]),
+            )
+        for o in studio_outputs:
+            self.conn.execute(
+                "INSERT INTO studio_outputs(notebook_id, kind, body,"
+                " citation_report, created_at) VALUES(?,?,?,?,?)",
+                (
+                    notebook_id, o["kind"], o["body"],
+                    _remap_report_source_ids(o["citation_report"], id_map),
+                    o["created_at"],
+                ),
+            )
+        for m in messages:
+            self.conn.execute(
+                "INSERT INTO messages(notebook_id, role, body,"
+                " citation_report, created_at) VALUES(?,?,?,?,?)",
+                (
+                    notebook_id, m["role"], m["body"],
+                    _remap_report_source_ids(m["citation_report"], id_map),
+                    m["created_at"],
+                ),
+            )
+
+    def merge_notebooks(self, target_id: int, source_id: int) -> Notebook:
+        """Fold one notebook into another (v0.2.656).
+
+        The source notebook's sources, chunks, notes, studio outputs
+        and messages are re-inserted into the target under fresh ids —
+        the same re-keying as duplicate/import (chunk source_ids and
+        citation_report source_id_maps remapped, embeddings carried
+        verbatim, FTS re-indexed on INSERT). The source notebook is
+        then deleted through delete_notebook, which archives the whole
+        tree to trash in the same transaction: a merge is recoverable
+        via `trash restore`.
+
+        Ordering is copy-then-delete, two transactions: a crash
+        mid-merge can duplicate content (target gains the rows, source
+        still lives and can be retried or trashed by hand), never
+        lose it.
+        """
+        self.get_notebook(target_id)
+        self.get_notebook(source_id)
+        if target_id == source_id:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                "cannot merge a notebook into itself",
+            )
+        doc = self._notebook_tree_dict(source_id)
+        try:
+            for c in doc["chunks"]:
+                if c["embedding"] is not None:
+                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+            with self.conn:
+                self._insert_tree_rows(
+                    target_id,
+                    doc["sources"],
+                    doc["chunks"],
+                    doc["notes"],
+                    doc["studio_outputs"],
+                    doc["messages"],
+                )
+                self.touch_notebook(target_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoreError(
+                "SYSTEM_INTERNAL_ERROR",
+                f"notebook {source_id} tree could not be serialized",
+            ) from exc
+        self.delete_notebook(source_id)
+        return self.get_notebook(target_id)
 
     def touch_notebook(self, notebook_id: int) -> None:
         """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""

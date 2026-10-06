@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.655 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.656 時点に同期)
 
 ## プロダクト定義
 
@@ -37,7 +37,7 @@
 
 | ID | 要件 | 受け入れ基準 |
 |----|------|-------------|
-| REQ-001 | Notebook CRUD | 作成/一覧/改名/削除/複製。削除はソース・ノート・出力をcascadeし同TXでundo-log(trash_items)へ全行アーカイブ——`GET /api/trash`/`POST /api/trash/{id}/restore`(id衝突はALREADY_EXISTS・巻戻しなし)/`DELETE /api/trash/{id}`、`shoin trash list|restore|purge`(v0.2.654)。複製は`POST /api/notebooks/{id}/duplicate`/`shoin notebook duplicate`で全子表を一TX複写——embedding BLOBは同一モデル由来のためverbatim有効、FTS triggerが再索引(v0.2.645)。受け渡しは`GET /api/notebooks/{id}/export?format=tree`/`shoin export <id> --format tree`のundo-log同一envelope(`shoin-nb-tree-v1`)と`POST /api/notebooks/import`/`shoin import <file>`(新規idで全行再挿入、chunk source_idとcitation_report.source_id_mapをid_mapで再写像、異形文書は`NOTEBOOK_IMPORT_INVALID`)で双方向(v0.2.655) |
+| REQ-001 | Notebook CRUD | 作成/一覧/改名/削除/複製。削除はソース・ノート・出力をcascadeし同TXでundo-log(trash_items)へ全行アーカイブ——`GET /api/trash`/`POST /api/trash/{id}/restore`(id衝突はALREADY_EXISTS・巻戻しなし)/`DELETE /api/trash/{id}`、`shoin trash list|restore|purge`(v0.2.654)。複製は`POST /api/notebooks/{id}/duplicate`/`shoin notebook duplicate`で全子表を一TX複写——embedding BLOBは同一モデル由来のためverbatim有効、FTS triggerが再索引(v0.2.645)。受け渡しは`GET /api/notebooks/{id}/export?format=tree`/`shoin export <id> --format tree`のundo-log同一envelope(`shoin-nb-tree-v1`)と`POST /api/notebooks/import`/`shoin import <file>`(新規idで全行再挿入、chunk source_idとcitation_report.source_id_mapをid_mapで再写像、異形文書は`NOTEBOOK_IMPORT_INVALID`)で双方向(v0.2.655)。統合は`POST /api/notebooks/{id}/merge {source_id}`/`shoin notebook merge <target> <src>`——元nb全子表を取込先へ新規id再挿入(`_insert_tree_rows`をimportと共有)しdelete_notebook経由で元nbをtrash_itemsへアーカイブ=巻戻し可能、self/deadはcoded拒否(v0.2.656) |
 | REQ-002 | ソース取込: PDF/MD/TXT/HTML/URL | 各形式でテキスト抽出成功。10MB上限。失敗時はエラーIDつき明示 |
 | REQ-003 | チャンク分割 + インデックス | 見出し境界優先、512トークン目安/オーバーラップ64。各チャンクに節文脈(タイトル>見出し)を併記(v0.2.123)。SQLite FTS5へ登録。抽出誤りは `PATCH /api/chunks/{id}`/`shoin chunk edit` で個別修正可——embeddingクリア(旧本文のベクトルは誤取得の元、reindexで再構築)・chunks_au triggerがFTSを同TX再索引(v0.2.647) |
 | REQ-004 | ハイブリッド検索 | BM25(FTS5) + ベクトル(埋め込みAPI委譲)をRRF融合(v0.2.56、下記「検索パイプライン」参照)。クエリは幅/字体バリアントに展開し半角カナ・全角英数を相互一致(v0.2.144)。埋め込み未設定時はBM25のみで劣化動作。`POST /api/notebooks/{id}/search`で同パイプラインのhitsのみを回答生成なしで返す検索専用経路あり(v0.2.637)。`notebook_id=None`が全nb横断のスコープ形——`(? IS NULL OR s.notebook_id=?)`で単一SQL形状のまま真空化し、`POST /api/search`+`shoin search`でnb_id/nb名/src題のprovenance付きhitsを返す(v0.2.649)。ゼロ件時はcorpus最近接語を`suggestions`で返す(v0.2.650) |

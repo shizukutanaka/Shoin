@@ -29,7 +29,31 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.655
+## Version History: v0.1.37 → v0.2.656
+
+### v0.2.656 — ノートブック統合 (merge)
+
+短所23のmerge側を解消: 複製 (v0.2.645) はできても2つのノートブックを
+1つへ畳み込む経路が無かった。`Store.merge_notebooks(target, source)`
+が元nbの全子表 (sources/chunks/notes/studio_outputs/messages) を
+`_notebook_tree_dict` でシリアライズし、取込先へ**新規id**で再挿入
+——importと同一の `_insert_tree_rows` に共通化 (chunk.source_idと
+citation_report.source_id_mapをid_mapで再写像、embedding BLOBは
+base64復号してverbatim、FTS triggerがINSERTで再索引=merge直後から
+検索可能)。その後 `delete_notebook` 経由で元nbを削除=同TXで
+trash_itemsへ全量アーカイブ——mergeは `trash restore` で巻戻せる。
+設計上の境界:
+- コピーTXが削除TXより先にコミット: 途中クラッシュは二重コピー
+  (取込先に行があり元nbも生存=再試行可能) になり得ても、データ消失
+  の経路は構造上存在しない
+- 自己mergeは `VALIDATION_FIELD_FORMAT_INVALID`、片方が死nbは
+  `NOTEBOOK_NOT_FOUND`——どちらも書込み前に拒否
+- mergeは名を変えない: 取込先のname/timestampsは touch のみ更新
+面は `POST /api/notebooks/{id}/merge {"source_id":N}` (200で取込先を
+エコー) + `shoin notebook merge <target> <src>` のREQ-103パリティ。
+`_required_int` (必須正int版の_require) を validator 層へ追加。
+行動ピン: TestNbMerge 3件 (全子表往復+FTS+report再写像+trash確認・
+self/dead拒否・CLI往復) + server往復+validator境界4種。
 
 ### v0.2.655 — ノートブック export/import (shoin-nb-tree-v1)
 

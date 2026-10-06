@@ -419,6 +419,16 @@ class _Handler(BaseHTTPRequestHandler):
             )
         return raw
 
+    def _required_int(self, data: Json, key: str) -> int:
+        """Required positive-int field — the numeric sibling of _require:
+        absent -> VALIDATION_REQUIRED_FIELD_MISSING; present -> the same
+        positive/bounded validation _optional_int applies."""
+        if data.get(key) is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING", f"missing field: {key}"
+            )
+        return self._optional_int(data, key, 1, 2**63 - 1, 0)
+
     # --- routing --------------------------------------------------------
 
     _ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -435,6 +445,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
         ("POST", r"^/api/notebooks/(\d+)/duplicate$", "nb_duplicate"),
+        ("POST", r"^/api/notebooks/(\d+)/merge$", "nb_merge"),
         ("POST", r"^/api/notebooks/import$", "nb_import"),
         ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
         ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
@@ -681,6 +692,14 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             nb = store.duplicate_notebook(nb_id, name)
             self._json({"id": nb.id, "name": nb.name}, 201)
+
+    def _h_nb_merge(self, nb_id: int) -> None:
+        # {"source_id": N} — folds nb N's tree into this one, then archives
+        # and deletes N via the trash undo-log (merge is recoverable).
+        source_id = self._required_int(self._read_json(), "source_id")
+        with Store(self.db) as store:
+            nb = store.merge_notebooks(nb_id, source_id)
+            self._json({"id": nb.id, "name": nb.name})
 
     def _q_int(self, key: str, lo: int, hi: int, default: int) -> int:
         """Query-string bounded int: absent -> default; non-numeric or

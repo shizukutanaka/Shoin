@@ -98,6 +98,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
         "nb.duplicated": "複製完了: [{id}] {name}",
+        "nb.merged": "統合完了: [{id}] {name} (nb{src} を吸収・ゴミ箱へアーカイブ)",
         "nb.imported": "インポート完了: [{id}] {name}",
         "trash.empty": "ゴミ箱は空です。",
         "trash.item": "[{id}] {name}  (nb_id {nb_id}・削除 {ts})",
@@ -199,6 +200,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
         "nb.duplicated": "Duplicated: [{id}] {name}",
+        "nb.merged": "Merged: [{id}] {name} (absorbed nb{src}, archived to trash)",
         "nb.imported": "Imported: [{id}] {name}",
         "trash.empty": "Trash is empty.",
         "trash.item": "[{id}] {name}  (nb_id {nb_id}, deleted {ts})",
@@ -326,6 +328,11 @@ def _build_parser() -> argparse.ArgumentParser:
     nb_dup = nbsub.add_parser("duplicate", help="複製(ソース・チャンク・ノート等を全コピー)")
     nb_dup.add_argument("notebook_id", type=int)
     nb_dup.add_argument("name", nargs="?", default=None)
+    nb_mg = nbsub.add_parser(
+        "merge", help="統合(別nbの中身を取込み、元nbはゴミ箱へアーカイブ)"
+    )
+    nb_mg.add_argument("notebook_id", type=int)
+    nb_mg.add_argument("source_id", type=int)
 
     msgs = sub.add_parser("messages", help="チャット履歴管理")
     msgssub = msgs.add_subparsers(dest="action", required=True)
@@ -834,6 +841,16 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
     elif action == "duplicate":
         nb = store.duplicate_notebook(int(args.notebook_id), args.name)
         print(_t("nb.duplicated", id=str(nb.id), name=_one_line(nb.name)))
+    elif action == "merge":
+        nb = store.merge_notebooks(int(args.notebook_id), int(args.source_id))
+        print(
+            _t(
+                "nb.merged",
+                id=str(nb.id),
+                name=_one_line(nb.name),
+                src=str(args.source_id),
+            )
+        )
     return 0
 
 

@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.655")
+        self.assertEqual(VERSION, "0.2.656")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -16761,6 +16761,9 @@ class TestResidualGuards(unittest.TestCase):
             "rename_notebook": 1,
             "trash_purge": 1,  # single-statement writer like rename_notebook
             "set_setting": 1,
+            # v0.2.656: 5 bare INSERT executes, all inside the CALLER's
+            # `with self.conn:` — the import/merge shared insert half.
+            "_insert_tree_rows": 5,
         }
         root = Path(__file__).resolve().parent.parent / "shoin"
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
@@ -16824,7 +16827,8 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_callee_transaction_contract_call_sites_covered(self) -> None:
         """Callee-transacted helpers (`touch_notebook`,
-        `_rewrite_chunk_context_titles`, `_set_embedding_pair`) contain
+        `_rewrite_chunk_context_titles`, `_set_embedding_pair`,
+        `_insert_tree_rows`) contain
         bare write-executes by design — their docstrings make the CALLER
         own the transaction. The C250 pin checks the callees' statements
         against the allowlist, but cannot see whether every call site
@@ -16839,7 +16843,8 @@ class TestResidualGuards(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent / "shoin"
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
         call = re.compile(
-            r"self\.(touch_notebook|_rewrite_chunk_context_titles|_set_embedding_pair)\s*\("
+            r"self\.(touch_notebook|_rewrite_chunk_context_titles|"
+            r"_set_embedding_pair|_insert_tree_rows)\s*\("
         )
         method = ""
         in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
@@ -19006,6 +19011,10 @@ class TestResidualGuards(unittest.TestCase):
                 # document (missing keys, non-dict rows, bad b64) to
                 # NOTEBOOK_IMPORT_INVALID — same classify-then-wrap.
                 "(KeyError,TypeError,ValueError)",
+                # v0.2.656: merge_notebooks' own tree serialization /
+                # insert path — internal rows, classified SYSTEM_*. Same
+                # corrupt-row signature shape as restore/import.
+                "(KeyError,TypeError,ValueError)",
                 # v0.2.655: unbindable value types inside a foreign
                 # document are malformed input, not a DB failure.
                 "sqlite3.InterfaceError",
@@ -19202,7 +19211,8 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
                 # +1: _h_global_search question-length guard (v0.2.649)
-                "StoreError",
+                # +1: _required_int's missing-field guard (v0.2.656)
+                "StoreError", "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
@@ -19210,7 +19220,9 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 63,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 65,  # +1: _utf8's coded surrogate rejection
+                                      # +2: merge_notebooks self-merge /
+                                      #     corrupt-tree guards (v0.2.656)
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
                                       # +3: update_chunk_text empty/missing/deleted
@@ -21533,6 +21545,104 @@ class TestNbExportImport(unittest.TestCase):
         self.assertIn("インポート完了", out2.getvalue())
         with Store(db) as s:
             self.assertEqual(len(s.list_notebooks()), 2)
+
+    def _tmpdb_cli(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
+
+
+class TestNbMerge(unittest.TestCase):
+    """merge_notebooks (v0.2.656): folds one notebook's tree into another
+    under fresh ids — the merge half of ledger #23 duplicate_notebook
+    left open. The emptied source is archived to trash by
+    delete_notebook in the same delete TX, so a merge is recoverable;
+    copy commits before the delete begins, so a crash can duplicate
+    content but never lose it."""
+
+    def test_merge_folds_children_and_trashes_source(self) -> None:
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            t_src = s.add_source(target.id, "txt", "t-doc", "mem://t", "sha-t")
+            s.add_chunks(t_src.id, ["対象側の本文のみ存在。"])
+            src_nb = seed(s)
+            src_ids = [int(x.id) for x in s.sources_for_notebook(src_nb)]
+            report = json.dumps({"source_id_map": {"S1": src_ids[0]}})
+            s.add_message(src_nb, "assistant", "答え [S1]", report)
+            s.add_note(src_nb, "memo", "本文メモ")
+            s.add_studio_output(src_nb, "briefing", "概要", report)
+
+            merged = s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(merged.id, target.id)
+            titles = sorted(
+                x.title for x in s.sources_for_notebook(target.id)
+            )
+            self.assertEqual(titles, ["doc-en", "doc-ja", "t-doc"])
+            # FTS re-indexed on INSERT — merged content searchable at once.
+            self.assertTrue(bm25_search(s, target.id, "猫は液", 5))
+            # ... and the target's own content survived alongside it.
+            self.assertTrue(bm25_search(s, target.id, "対象側", 5))
+            # source_id_map now names the merged rows' FRESH ids.
+            fresh = {
+                x.title: int(x.id) for x in s.sources_for_notebook(target.id)
+            }
+            row = s.list_messages(target.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": fresh["doc-ja"]})
+            self.assertEqual(len(s.list_notes(target.id)), 1)
+            self.assertTrue(s.latest_studio_outputs(target.id))
+            # Source nb is gone — and archived, not lost.
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(src_nb)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            trash = s.trash_list()
+            self.assertEqual(len(trash), 1)
+            self.assertEqual(trash[0]["notebook_id"], src_nb)
+
+    def test_merge_rejects_self_and_missing(self) -> None:
+        with make_store() as s:
+            a = s.create_notebook("A")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(a.id, a.id)
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+            b = s.create_notebook("B")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(999, b.id)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(b.id, 999)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            # A failed merge writes nothing: both notebooks still live,
+            # nothing was archived.
+            self.assertEqual(len(s.list_notebooks()), 2)
+            self.assertEqual(s.trash_list(), [])
+
+    def test_cli_notebook_merge(self) -> None:
+        """`shoin notebook merge <target> <source>` — REQ-103 parity with
+        POST /api/notebooks/{id}/merge."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            t = s.create_notebook("A")
+            src = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(
+                    ["--db", db, "notebook", "merge", str(t.id), str(src)]
+                ),
+                0,
+            )
+        self.assertIn("統合完了", out.getvalue())
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 1)
+            self.assertEqual(len(s.trash_list()), 1)
 
     def _tmpdb_cli(self) -> str:
         import shutil
