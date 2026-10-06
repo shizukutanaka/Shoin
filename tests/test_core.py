@@ -30,6 +30,8 @@ from shoin.ingest import (
 from shoin.llm import LLMError
 from shoin.pipeline import _embed_chunks, _embed_input, rename_source
 from shoin.search import (
+    _SYNONYM_GROUPS,
+    _SYNONYMS,
     Hit,
     _char_bigrams,
     _fallback_needles,
@@ -108,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.661")
+        self.assertEqual(VERSION, "0.2.662")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2176,6 +2178,8 @@ class TestChunk(unittest.TestCase):
         self.assertIn("\u0969\u096A\u096B", va)
         # Mixed/Lo terms never explode into per-script products.
         self.assertNotIn("٣", term_variants("a3"))
+        # 四 is not a decimal digit and has no synonym-table row (v0.2.662),
+        # so it still emits just itself.
         self.assertEqual(term_variants("四"), ["四"])
 
     def test_script_digit_query_retrieves_across_rows(self) -> None:
@@ -4462,7 +4466,9 @@ class TestSearch(unittest.TestCase):
         self.assertIn("学校", term_variants("學校"))
         self.assertIn("廣島縣", term_variants("広島県"))
         self.assertIn("広島県", term_variants("廣島県"))
-        self.assertEqual(term_variants("言語"), ["言語"])
+        # 言語 has no spelling variant; its only extra is the v0.2.662
+        # synonym-table member 'language'.
+        self.assertEqual(term_variants("言語"), ["言語", "language"])
 
     def test_fts_query_quoting(self) -> None:
         # Each ASCII term now also contributes its fullwidth spelling (v0.2.144):
@@ -14541,8 +14547,11 @@ class TestWidthVariants(unittest.TestCase):
         # v0.2.528: the NFD variant bridges canonically-decomposed text
         # (macOS NFD filenames; a dakuten spelled base+゙) — 'データ' is
         # テ + combining voiced mark, a legitimate extra recall channel.
+        # v0.2.662 appended 'data' — the curated synonym table bridges
+        # データ↔data at the meaning level, a channel the spelling
+        # variants could not produce.
         self.assertEqual(
-            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた"]
+            term_variants("ﾃﾞｰﾀ"), ["ﾃﾞｰﾀ", "データ", "データ", "でーた", "data"]
         )
         self.assertEqual(term_variants("GPU"), ["GPU", "ＧＰＵ"])
         self.assertEqual(term_variants("ＧＰＵ"), ["ＧＰＵ", "GPU"])
@@ -14568,6 +14577,62 @@ class TestWidthVariants(unittest.TestCase):
         finally:
             st.close()
 
+    def test_synonym_variants_bridge_meaning_level_words(self) -> None:
+        """v0.2.662 (product-review #14): the curated synonym table emits
+        every other group member as an OR'd needle for a term equal to one
+        member, so BM25 bridges meaning-level pairs (値段↔価格, エラー↔error)
+        that share no spelling — the exact gap that previously required the
+        vector leg.  Lookup keys cover the NFKC form, its casefold, the
+        katakana spelling, and the English stems."""
+        self.assertIn("価格", term_variants("値段"))
+        self.assertIn("値段", term_variants("価格"))
+        self.assertIn("price", term_variants("価格"))
+        self.assertIn("エラー", term_variants("error"))
+        self.assertIn("error", term_variants("エラー"))
+        # Halfwidth query -> NFKC key; hiragana query -> katakana key.
+        self.assertIn("error", term_variants("ｴﾗｰ"))
+        self.assertIn("error", term_variants("えらー"))
+        # Inflected EN -> stem key ('errors' -> 'error' -> エラー).
+        self.assertIn("エラー", term_variants("errors"))
+        # A term outside the table gains nothing.
+        self.assertEqual(term_variants("squash"), ["squash", "ｓｑｕａｓｈ"])
+        # The table is a clique list: symmetric membership, no self-pairs.
+        for group in _SYNONYM_GROUPS:
+            self.assertGreaterEqual(len(group), 2)
+            for member in group:
+                others = _SYNONYMS[member]
+                self.assertNotIn(member, others)
+                self.assertEqual(sorted(others),
+                                 sorted(m for m in group if m != member))
+
+    def test_synonym_retrieval_both_directions(self) -> None:
+        """e2e: a query on one member retrieves docs that wrote another."""
+        st, nb_id, _ = self._seeded_store()
+        s_ja_price = st.add_source(nb_id, "md", "ja_p", "ja_p.md", "jp")
+        st.add_chunks(s_ja_price.id, ["この製品の価格は三万円です。"],
+                      contexts=["ja_p"])
+        s_en_err = st.add_source(nb_id, "md", "en_e", "en_e.md", "ee")
+        st.add_chunks(s_en_err.id, ["error handling patterns in the client"],
+                      contexts=["en_e"])
+        s_ja_err = st.add_source(nb_id, "md", "ja_e", "ja_e.md", "je")
+        st.add_chunks(s_ja_err.id, ["エラー発生時の復旧手順をまとめた。"],
+                      contexts=["ja_e"])
+        try:
+            # JA->JA: no shared characters — substring/width cannot bridge.
+            got = {h.source_id for h in bm25_search(st, nb_id, "値段", 9)}
+            self.assertEqual(got, {s_ja_price.id})
+            # EN->JA loanword + EN->EN, both directions of one query.
+            for q in ("error", "errors"):
+                got = {h.source_id
+                       for h in bm25_search(st, nb_id, q, 9)}
+                self.assertEqual(got, {s_en_err.id, s_ja_err.id}, q)
+            # An out-of-table query stays exactly as selective as before.
+            got = {h.source_id
+                   for h in bm25_search(st, nb_id, "squash", 9)}
+            self.assertEqual(got, set())
+        finally:
+            st.close()
+
     def test_term_variants_numeric_spellings(self) -> None:
         """v0.2.213: a digit term should also retrieve its shorthand spellings."""
         v = term_variants("32000")
@@ -14575,8 +14640,9 @@ class TestWidthVariants(unittest.TestCase):
             self.assertIn(want, v)
         # Non-digit and non-numeric terms emit no numeric spellings.
         self.assertEqual(term_variants("python"), ["python", "ｐｙｔｈｏｎ"])
-        # "言語" has no variant of any kind (v0.2.227: kyujitai would add one).
-        self.assertEqual(term_variants("言語"), ["言語"])
+        # "言語" has no *spelling* variant — but v0.2.662's curated synonym
+        # table bridges the meaning-level pair 言語↔language.
+        self.assertEqual(term_variants("言語"), ["言語", "language"])
 
     def test_numeric_retrieval_both_directions(self) -> None:
         """Digit query finds shorthand sources; shorthand query finds digit sources."""
@@ -15321,11 +15387,13 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:73", "search.py:952",
+    "search.py:73",
+    # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105).
+    "search.py:1105",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
-    # character class (v0.2.650 suggestion oracle; v0.2.657 shifted it
-    # +35 for _apply_source_weights).
-    "search.py:1782",
+    # character class (v0.2.650 suggestion oracle; shifted to 1935 by
+    # the v0.2.662 synonym-table block).
+    "search.py:1935",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -18191,8 +18259,10 @@ class TestResidualGuards(unittest.TestCase):
             ):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
+        # v0.2.662: the synonym-table block shifted the MATCH site
+        # +153 lines (702 -> 855).
         self.assertEqual(
-            sites, ["search.py:702"],
+            sites, ["search.py:855"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -20784,9 +20854,9 @@ class TestResidualGuards(unittest.TestCase):
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
             # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
             # constant character class — same static-constant category as
-            # the other sites (v0.2.650 suggestion oracle; +35 for
-            # _apply_source_weights in v0.2.657).
-            "search.py": [73, 1782, 952],
+            # the other sites (v0.2.650 suggestion oracle). Both search.py
+            # sites shifted +153 by the v0.2.662 synonym-table block.
+            "search.py": [73, 1935, 1105],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -20833,8 +20903,9 @@ class TestResidualGuards(unittest.TestCase):
                             escaped_interps.append(
                                 f"{path.name}:{node.lineno}"
                             )
+        # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105).
         self.assertEqual(
-            escaped_interps, ["search.py:952"],
+            escaped_interps, ["search.py:1105"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.661
+## Version History: v0.1.37 → v0.2.662
+
+### v0.2.662 — 同義語拡張(キュレーション同義語テーブルで意味レベルの語彙橋渡し)
+
+- **短所14解消**: `term_variants` は字形変換のみ(幅・字体・旧字体・幹)で、意味的同義語は BM25 では拾えず vector leg 頼みだった——embed 未設定では「車↔自動車」級どころか文字を共有しない `価格↔値段`・`エラー↔error` が一切通じなかった
+- **実装**: `_SYNONYM_GROUPS`(189グループのキュレーション表: カタカナ外来語↔英語、非外来語 JA↔EN、EN 省略形↔正式形)から `_build_synonyms` が member→他member の clique 辞書を生成。`_synonym_variants(norm)` を `term_variants` の最終段へ追加——FTS針・LIKE針・suggestions の corpus 照合が全て同一経路で拡張される
+- **ルックアップ4経路**: NFKC形・casefold(“ERROR”→error 行)・カタカナ形(“えらー”→エラー行)・`_stem_variants` の語幹(“errors”→error→エラー)——語幹経路で活用形も橋渡し。発射は member verbatim のみ(再帰的拡張なし=有界)
+- **高精度キュレーション**: 誤ペアは死針でなく生ノイズを注入するため、疑義のある組は不採用。同一文書が存在しない環境では各 synonym は OR 追加の死針として1パターンのコストのみ
+- **全語針化(3gram衝突回避)**: 同義語は「表記違い」でなく別の語——CJK項の全variantを3gram分解する既存経路に流すと `database` の gram `ata` が文脈 `kata` に、LIKE 側では `パスワード` のbigram `ード` が `コード` に誤爆する。fts_query/_fallback_needles が synonym member を識別して whole-term 針化(quoted phrase / %word% 完全一致)
+- **union 構築**: `_build_synonyms` は複数グループ出現の member を union で結合(単純代入だと後勝ちで先の対が消失する実害をピンで検出)——重複 member は merged グループへ統合して解消
+- **境界**: open-world 同義語(WordNet級の大規模語彙網・LLM生成)は外部依存を伴うため対象外——決定論的な高精度ペアの橋渡しまで。表は明示的にキュレーション可能な定数として文書化
+- **行動ピン2件**: `term_variants` 双方向+ルックアップ4経路+clique 整合(対称・self 除外・全member)・bm25_search 往復(値段→価格doc・error/errors→EN+JA両doc・表外語は無変化)
+- **カタログ追随5件**: MATCH site 702→855・interpolated-regex catalog/baseline 952→1105・1782→1935・既存 exact-list ピン2件(データ・言語)は正当性コメント付きで新契約へ更新(`_SYNONYMS` は factory-call 生成で mutable-pin 非対象=許可リスト変更不要)
 
 ### v0.2.661 — 埋込みモデル変更の可視化(クエリ時ヒント + health 面)
 
@@ -37,7 +49,7 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 - **クエリ時ヒント**: `_check_embed_model_ok` が不一致時に stderr へ修復ヒント(`old→new` モデル名+`shoin reindex <nb>`、i18n)を1行出力——CLI ask/search・サーバ ask/SSE の全クエリ時経路が単一点でカバーされる
 - **health 面 (REQ-103 両面)**: `GET /api/health` に `indexed_embed_model`(索引済みモデル)+`embed_model_changed` ブールを追加。`shoin health` は索引済みモデル行を出力し、不一致時に同一ヒントを stderr へ
 - **静かな述語**: `_embed_model_stale(store, current_model)` を分離——`_check_embed_model_ok` は stderr 副作用を持つため health ポーリング(数秒毎のUIランプ)が呼べない。同一述語を副作用無しで読める
-- **health の耐性契約**: `_h_health`/`_cmd_health` の Store 読みは best-effort (`except (StoreError, sqlite3.OperationalError)`) —— DB が壊れていること自体が診断対象であり、診断面が一緒に死んではならない。空フィールドは「不明」を意味する
+- **health の耐性契約**: `_h_health`/`_cmd_health` の Store 読みは best-effort (`except (OSError, StoreError, sqlite3.OperationalError)`——sqlite3.connect は開けないパスで生 OSError を伝播) —— DB が壊れていること自体が診断対象であり、診断面が一緒に死んではならない。空フィールドは「不明」を意味する
 - **設計上の境界**: 自動再 index は索引全再計算を暗黙起動する重い mutation のため採らず——「静かに死ぬ」→「可視+一発コマンドで直せる」の境界で解消
 - **行動ピン7件**: stderr ヒント(old/new/reindex 含有)・静かな述語(stale/match/empty/disabled 4分岐+stderr 無出力)・health API フィールド(既定/mismatch/broken-DB 耐性)・CLI health 行+hint・test_workflow の既定フィールド
 - **カタログ追随**: except +2(cli health・_h_health の防御)・trivial-body +2・import catalog qa.py `sys`・server.py `sqlite3`+`_embed_model_stale`+`EMBED_MODEL_SETTING_KEY`・cli.py `EMBED_MODEL_SETTING_KEY`

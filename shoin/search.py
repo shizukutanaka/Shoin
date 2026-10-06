@@ -370,6 +370,147 @@ _DIGIT_ROWS: tuple[tuple[str, ...], ...] = (
 _STEM_INVARIANT = frozenset({"news"})
 
 
+# Meaning-level synonyms the BM25 leg cannot otherwise reach (v0.2.662,
+# product-review #14).  term_variants bridges spelling (width, script,
+# kyujitai, inflection); this table bridges *words* — a source that says
+# 自動車 is invisible to a 車 query only in the degenerate substring sense,
+# but 価格↔値段 and エラー↔error share no characters at all, so without a
+# vocabulary bridge such pairs retrieve only through the vector leg, which
+# is absent whenever embeddings are off.  The table is deliberately small
+# and curated to high-precision pairs: every member of a group is OR'd as
+# an extra needle for a query term equal to any other member, so a wrong
+# pair would inject live noise rather than a dead pattern — when a pairing
+# is debatable it is left out.  English members are lowercase canonical
+# forms; the inflection/stem bridges in term_variants cover their
+# inflected spellings, and the lookup below also stems the query side.
+_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
+    # Katakana loanwords ↔ their English words (bilingual corpora).
+    ("エラー", "error"), ("サーバ", "サーバー", "server"),
+    ("データ", "data"), ("モデル", "model"), ("ネットワーク", "network"),
+    ("セキュリティ", "security"), ("パスワード", "password"),
+    ("ユーザー", "user"), ("ファイル", "file"), ("システム", "system"),
+    ("テスト", "test"), ("ライブラリ", "library"),
+    ("データベース", "database"), ("キャッシュ", "cache"),
+    ("メモリ", "memory"), ("バックアップ", "backup"),
+    ("トークン", "token"), ("プロンプト", "prompt"),
+    ("ベクトル", "vector"), ("ログ", "log"), ("スキーマ", "schema"),
+    ("バージョン", "version"), ("タグ", "tag"), ("キー", "key"),
+    ("ビルド", "build"), ("リリース", "release"), ("レビュー", "review"),
+    ("マージ", "merge"), ("ブランチ", "branch"), ("コミット", "commit"),
+    ("デプロイ", "deploy"), ("コンテナ", "container"),
+    ("インスタンス", "instance"), ("プロセス", "process"),
+    ("スレッド", "thread"), ("キュー", "queue"), ("バッファ", "buffer"),
+    ("エンコーディング", "encoding"), ("フィールド", "field"),
+    ("ハンドラ", "handler"), ("パーサ", "parser"), ("エクスポート", "export"),
+    ("インポート", "import"),
+    # Japanese terms ↔ English words (non-loanword pairs).
+    ("検索", "search"), ("索引", "index"), ("質問", "question"),
+    ("回答", "answer"), ("引用", "citation"), ("要約", "summary"),
+    ("翻訳", "translation"), ("推論", "inference"),
+    ("埋め込み", "embedding"), ("評価", "evaluation"),
+    ("性能", "performance"),
+    ("暗号", "encryption"), ("署名", "signature"),
+    ("証明書", "certificate"), ("脆弱性", "vulnerability"),
+    ("脅威", "threat"), ("監査", "audit"),
+    ("障害", "outage", "incident"), ("復旧", "recovery"),
+    ("圧縮", "compression"), ("更新", "update"), ("変換", "conversion"),
+    ("重複", "duplicate"), ("同期", "synchronization"),
+    ("並列", "parallel"), ("遅延", "latency"), ("要求", "request"),
+    ("応答", "response"), ("入力", "input"), ("出力", "output"),
+    ("実行", "execution"), ("権限", "permission"),
+    ("設定", "config", "configuration", "settings"), ("管理", "management"),
+    ("開発", "development"), ("設計", "design"),
+    ("実装", "implementation"), ("仕様", "specification"),
+    ("要件", "requirement"), ("方法", "method"), ("手順", "procedure"),
+    ("方針", "policy"), ("品質", "quality"), ("保守", "maintenance"),
+    ("改善", "improvement"), ("最適化", "optimization"),
+    ("効率", "efficiency"), ("予算", "budget"), ("契約", "contract"),
+    ("顧客", "customer"), ("市場", "market"), ("機能", "feature"),
+    ("保存", "save"), ("送信", "send"), ("受信", "receive"),
+    ("登録", "registration"), ("警告", "warning"),
+    ("通知", "notification"), ("承認", "approval"),
+    ("必須", "required"), ("任意", "optional"), ("初期", "initial"),
+    ("最大", "maximum"), ("最小", "minimum"), ("平均", "average"),
+    ("合計", "total"), ("画面", "screen"), ("印刷", "print"),
+    ("起動", "startup"), ("停止", "shutdown"), ("共有", "shared"),
+    ("論文", "paper"), ("書籍", "book"),
+    ("記事", "article"), ("画像", "image"), ("音声", "audio"),
+    ("動画", "video"), ("地図", "map"), ("住所", "address"),
+    ("時刻", "time"), ("場所", "location"), ("会社", "company"),
+    ("仕事", "work"), ("言語", "language"), ("数値", "numeric"),
+    ("文字列", "string"), ("配列", "array"), ("辞書", "dictionary"),
+    ("関数", "function"), ("変数", "variable"),
+    ("定数", "constant"), ("例外", "exception"), ("接続", "connection"),
+    ("再試行", "retry"), ("永続", "persistent"), ("明示", "explicit"),
+    ("暗黙", "implicit"), ("内部", "internal"), ("外部", "external"),
+    ("公開", "public"), ("秘密", "secret"), ("正常", "normal"),
+    ("異常", "abnormal"), ("成功", "success"),
+    ("失敗", "failure", "fail"), ("完了", "completion"),
+    ("中断", "abort"), ("再開", "resume"), ("詳細", "detail"),
+    ("概要", "overview"), ("目的", "purpose"), ("対象", "target"),
+    ("範囲", "range"), ("条件", "condition"), ("結果", "result"),
+    ("原因", "cause"), ("理由", "reason"), ("変更", "change"),
+    ("追加", "addition"), ("削除", "deletion"), ("作成", "create"),
+    ("生成", "generation"), ("取得", "fetch"), ("利用", "usage"),
+    ("提供", "provision"), ("確認", "check"), ("拒否", "deny"),
+    ("許可", "permit"), ("禁止", "prohibit"),
+    ("既定", "デフォルト", "default"), ("価格", "値段", "price"),
+    ("費用", "コスト", "cost"), ("製品", "商品", "product"),
+    ("資料", "doc", "ドキュメント", "document"), ("会議", "ミーティング", "meeting"),
+    ("認証", "auth", "authentication"), ("運用", "ops", "operations"),
+    ("引数", "arg", "argument"),
+    # English abbreviations whose expansion is not a substring match.
+    ("repo", "repository"), ("param", "parameter"),
+    ("env", "environment"), ("info", "information"),
+    ("stats", "statistics"), ("admin", "administrator"),
+    ("bug", "defect"), ("dir", "directory"),
+)
+
+
+def _build_synonyms() -> dict[str, tuple[str, ...]]:
+    """term -> other members of its meaning group (v0.2.662).
+
+    A member listed in two groups unions both co-member sets rather than
+    the later group silently replacing the earlier mapping.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for group in _SYNONYM_GROUPS:
+        for member in group:
+            others = list(out.get(member, ()))
+            for co in group:
+                if co != member and co not in others:
+                    others.append(co)
+            out[member] = tuple(others)
+    return out
+
+
+_SYNONYMS = _build_synonyms()
+
+
+def _synonym_variants(norm: str) -> list[str]:
+    """Meaning-level spellings of *norm* from the curated synonym table.
+
+    *norm* is the query term's NFKC form (term_variants already computed it).
+    Lookup keys: the NFKC form itself, its casefold (so 'ERROR' reaches the
+    lowercase English members), its katakana spelling (hiragana query ->
+    loanword row), and the English stems _stem_variants emits (so 'errors'
+    reaches 'error' -> エラー).  Members are emitted verbatim — they are not
+    re-expanded, so a synonym's own width/stem spellings do not join in:
+    the FTS trigram folds case anyway, and the LIKE fallback shares the
+    same case-fold limit every other variant does.  Each synonym is an
+    OR'd extra needle — a dead spelling costs one pattern, a wrong pairing
+    is excluded from the table rather than tolerated.
+    """
+    keys = [norm, norm.casefold(), _to_katakana(norm)]
+    keys.extend(_stem_variants(norm))
+    out: list[str] = []
+    for key in keys:
+        for member in _SYNONYMS.get(key, ()):
+            if member != norm and member not in out:
+                out.append(member)
+    return out
+
+
 def _stem_variants(term: str) -> list[str]:
     """Singular/base spellings of an English ASCII term (v0.2.536).
 
@@ -546,6 +687,7 @@ def term_variants(term: str) -> list[str]:
     if ascii_folded != norm and ascii_folded.isascii():
         candidates.append(ascii_folded)
     candidates.extend(_stem_variants(norm))
+    candidates.extend(_synonym_variants(norm))
     out: list[str] = []
     for v in candidates:
         if v and v not in out:
@@ -583,6 +725,11 @@ def fts_query(query: str) -> str:
         # trigrams while its own raw form stays one quoted word.  FTS5 matches a
         # quoted string of 3+ characters through the trigram index either way.
         cjk_term = is_cjk(raw_term[0])
+        # Synonym members are whole different words, not spellings of the
+        # term — exploding one into trigrams would OR each gram as an
+        # independent needle ('kata' in a context hits the 'ata' gram of
+        # 'database'), so they emit whole only, like an ASCII term.
+        synonyms = set(_synonym_variants(unicodedata.normalize("NFKC", raw_term)))
         for variant in term_variants(raw_term):
             term = _fts_escape(variant)
             # Shorter-than-trigram variants contribute nothing here (the gram
@@ -590,7 +737,7 @@ def fts_query(query: str) -> str:
             # knows this and keeps the LIKE fallback alive for them.
             if len(term) < 3:
                 continue
-            if cjk_term:
+            if cjk_term and variant not in synonyms:
                 grams: list[str] = [term[i : i + 3] for i in range(len(term) - 2)]
             else:
                 grams = [term]
@@ -647,8 +794,14 @@ def _fallback_needles(query: str) -> list[str]:
             continue
         if not keep_stopwords and raw_term.lower() in _ASCII_STOPWORDS:
             continue
+        synonyms = set(_synonym_variants(unicodedata.normalize("NFKC", raw_term)))
         for term in term_variants(raw_term):
-            if is_cjk(term[0]):
+            if term in synonyms:
+                # Whole-word needles only: a synonym's bigrams would substring-
+                # collide with unrelated words ('コード' contains 'ード', one
+                # bigram of 'パスワード').
+                needles.append(term)
+            elif is_cjk(term[0]):
                 if len(term) >= 2:
                     needles.extend(term[i : i + 2] for i in range(len(term) - 1))
                 else:

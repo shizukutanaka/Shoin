@@ -153,7 +153,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 11 | **OCR 非対応** | スキャンPDFはテキストレイヤが無いと空チャンク化(pages_failed は露出するが内容は取れない) |
 | 12 | **画像・表の構造抽出が無い** | HTML img/表は alt テキスト程度まで。図表の意味は検索対象にならない |
 | 13 | ~~**CLI ask は非ストリーミング**~~ → **解消済み** (v0.2.635) | `ask()` が `on_delta` コールバックを受理し、chat_stream 搭載バックエンドでは逐字トークンを stdout へ即時転送(連結結果が永続回答と同一のため stdout バイト同一)。chat_stream 非搭載の最小 ChatBackend は従来の一括 chat() 経路へ自動退避 |
-| 14 | **同義語・語彙拡張が浅い** | term_variants は字形変換のみ。「車↔自動車」「PC↔パソコン」のような意味的同義語は BM25 では拾えず vector leg 頼み |
+| ~~14~~ | ~~同義語・語彙拡張が浅い~~ → **解消済み(v0.2.662)** | term_variants に curated 同義語表(_SYNONYM_GROUPS: 189グループ・カタカナ外来語↔英語・JA↔EN・EN省略形)を追加。norm/casefold/カタカナ/stem の4経路でルックアップし、文字を共有しない 価格↔値段・エラー↔error 級を BM25 leg で橋渡し。open-world(大規模語彙網/LLM生成)は外部依存のため境界外 |
 | ~~15~~ | ~~**英語ステミング無し**~~ → **解消済み** (台帳誤記 — `_stem_variants` v0.2.536 で規則活用は橋渡し済: documents→document・running→run・quickly→quick・closed family のみ。ran→run の不規則形は残存) |
 | 16 | ~~**ベクトル埋込みのバッチ化なし**~~ → **解消済み** (台帳誤記 — `_embed_chunks` は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ `llm.embed(batch)` で既実装。v0.2.648 実測確認) |
 | ~~17~~ | ~~**埋込みモデル変更時の自動再索引なし**~~ → **解消済み** (v0.2.661: 不一致がクエリ時stderrヒント+`/api/health`の`indexed_embed_model`/`embed_model_changed`+`shoin health`で可視化・一発修復経路明示。自動再indexは索引全再計算の暗黙mutationのため採らず——静かに死ぬ状態を「可視+actionable」化する境界) |
