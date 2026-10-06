@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.683
+## Version History: v0.1.37 → v0.2.684
+
+### v0.2.684 — refreshQuestionsの_llmOnガード除去(オフライン推奨質問の無到達を解消)
+
+- **Devin Review finding修正(#358のbug #3)**: UI `refreshQuestions`が`!window._llmOn`で早期returnしていたため、LLM不通用に実装されたサーバー側`_title_questions`フォールバック(v0.2.660)がUIでは**完全に無到達**だった——オフラインでソースを持つノートブックを開いても推奨質問chipsは常にゼロ(フォールバックが存在する意義そのものが潰れていた)
+- **ガードから`_llmOn`節を除去**: 質問の有無を端点側が判定する設計へ委譲——`GET /api/notebooks/{id}/questions`はLLM到達時は生成質問・不通時はタイトル由来骨格質問を返し、UIは表示のみ担う。`_llmOn`自体は健康バナー表示用として維持(1022-1041のlamp/banner面)
+- **境界(記録)**: オフライン時の端点呼出は`llm.chat`失敗→フォールバック経路でbounded(retry/backoff済み·接続refused系は高速失敗)。「LLMが死んでいる間は質問問欄を畳む」というUX選択肢もあったが、骨格質問を表示する方が「このノートブックで何が聞けるか」を常に示せるため採用
+- **行動ピン更新**: `test_refreshQuestions_chips_guards_and_race`のllm off分岐を「fetchせずchipsゼロ」→「fetch+chips描画」へ反転——フォールバック到達を直接実証
+- **カタログ追随ゼロ**: JS変更のみ(raise/except/lower/find/importsドリフトなし)
 
 ### v0.2.683 — trash系deleteをBEGIN IMMEDIATE化(serialize→DELETE間TOCTOU閉塞)
 

@@ -729,7 +729,11 @@ $("#clearChat").onclick = async ()=>{
 };
 async function refreshQuestions(){
   $("#qs").replaceChildren();
-  if (!cur || !cur.sources?.length || !window._llmOn) return;
+  // v0.2.684: no _llmOn gate — the endpoint itself returns the
+  // _title_questions fallback when the model is unreachable (v0.2.660),
+  // so skipping the request offline meant suggestions could never
+  // appear without a live LLM.
+  if (!cur || !cur.sources?.length) return;
   const nbId = cur.id;  // capture before await to detect notebook switches
   try{
     const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();

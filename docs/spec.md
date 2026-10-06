@@ -1,4 +1,4 @@
-# Shoin 仕様書 v0.1.0 (実装 v0.2.683 時点に同期)
+# Shoin 仕様書 v0.1.0 (実装 v0.2.684 時点に同期)
 
 ## プロダクト定義
 
@@ -51,7 +51,7 @@
 | ID | 要件 | 受け入れ基準 |
 |----|------|-------------|
 | REQ-101 | Studio出力5種 | briefing / study_guide / faq / timeline / mindmap(Markdown階層)。全出力に引用+引用検証適用 |
-| REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可)。LLM不通時はソースタイトル由来の決定論フォールバック質問(`「<題>」とは何ですか`/`What is "<title>"?`、i18n)を最大n件返し、到達不能を「質問ゼロ」と混同しない(v0.2.660) |
+| REQ-102 | 推奨質問 | ソース取込後に自動生成(既定4件、調整可)。LLM不通時はソースタイトル由来の決定論フォールバック質問(`「<題>」とは何ですか`/`What is "<title>"?`、i18n)を最大n件返し、到達不能を「質問ゼロ」と混同しない(v0.2.660)。UIの`refreshQuestions`は`_llmOn`をガードしない——オフライン早期returnがフォールバックを無到達化していたため、端点側フォールバックに委譲(v0.2.684) |
 | REQ-103 | 手動ノート | Notebookへメモ保存。Studio出力のノート化(各出力カードから1クリック保存、v0.2.412)。削除はundo-logへ`kind='note'`でアーカイブし `trash restore` で新規id復元(note idはdelete/list以外に参照ゼロのため衝突不能・v0.2.667) |
 | REQ-104 | エクスポート | Notebook全体をMarkdown、引用文献をBibTeX/RIS |
 | REQ-105 | CLI | serve/notebook/add/ask/studio/questions/eval/export/messages/reindex/note/source/chunk/health/stats/backup/vacuum/check。UI不要の全自動操作。`shoin check`/`GET /api/check` は PRAGMA integrity_check+foreign_key_check+schema_migrations でDB物理診断を返し、健全rc0/破損・開封不可rc1——health(設定/LLM到達性)とは別面で「ファイル自体の健全性」を報告、unopenableも診断値として返す(v0.2.670)。論理層としてチャンク総数/ベクトル未付与件数も報告し、埋込みモデル設定時に欠落があればreindex案内——取込時toastでしか見えなかったベクトル脚の部分死を永続可視化(v0.2.671)。`shoin vacuum`/`POST /api/vacuum` は wal_checkpoint(TRUNCATE)+VACUUM で削除済みページをOSへ返却しdb_bytesのbefore/after/freedを報告——SQLiteは削除済み領域をfreelistへ移すだけで物理縮小しないため、freelist_bytes()で回収可能量を`shoin stats`へ露出(v0.2.669)。`python -m shoin`も同一エントリ`cli.main()`へ委譲——ソースツリーからの直接実行が可能(v0.2.459)。配布の最小経路として `scripts/build_pyz.py` がstdlib `zipapp` の単一ファイル `shoin.pyz` を生成——`python3 shoin.pyz <sub>` で全機能が動作(Python 3.11+前提、ネイティブバイナリではない)。zip内静的資産は `pkgutil.get_data` 経由で読取(`__file__`相対Pathはzipメンバで失敗するため、v0.2.668)。利用メトリクス(カウント+ms合計のみ・本文非含有)は`Store.bump_metrics`がsettings表へatomic加算し`GET /api/metrics`/`shoin stats`末尾の利用ブロックへ露出——index.ok/fail/ms/embed_skipとask.count/nohit/degraded/fail/msの8キー、再起動横断(v0.2.653) |

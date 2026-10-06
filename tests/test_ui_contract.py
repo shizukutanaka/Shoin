@@ -2687,8 +2687,11 @@ console.log("ok")
     def test_refreshQuestions_chips_guards_and_race(self) -> None:
         """v0.2.265: pin refreshQuestions' three contract surfaces under node —
         chips render as buttons that fill #askInput on click, the guard skips
-        fetching entirely when there is no notebook/sources/LLM, and chips for
-        a stale (switched-away) notebook id are dropped rather than shown."""
+        fetching entirely when there is no notebook/sources, and chips for
+        a stale (switched-away) notebook id are dropped rather than shown.
+        v0.2.684: the LLM-off case now fetches on purpose — the endpoint's
+        own _title_questions fallback (v0.2.660) answers when the model is
+        unreachable, so suggestions must not be gated on _llmOn."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -2722,14 +2725,20 @@ chip.onclick();
 if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
   { console.error("chip click did not fill+focus input"); process.exit(1) }
 
-// Guards: no sources / llm off / no notebook -> cleared, no fetch.
-cur = { id: 1, sources: [] };
-await refreshQuestions();
+// LLM off -> still fetches (endpoint-side _title_questions fallback).
 window._llmOn = false; cur = { id: 1, sources: [{id: 5}] };
+await refreshQuestions();
+if (calls.length !== 2 || reg["#qs"].children.length !== 2)
+  { console.error("offline fallback path did not fetch/render: calls="
+      + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+
+// Guards: no sources / no notebook -> cleared, no fetch.
+reg["#qs"].children = [];
+cur = { id: 1, sources: [] };
 await refreshQuestions();
 cur = null;
 await refreshQuestions();
-if (calls.length !== 1 || reg["#qs"].children.length !== 0)
+if (calls.length !== 2 || reg["#qs"].children.length !== 0)
   { console.error("guards fetched or kept chips: calls=" + calls.length
       + " chips=" + reg["#qs"].children.length); process.exit(1) }
 
