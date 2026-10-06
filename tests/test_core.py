@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.663")
+        self.assertEqual(VERSION, "0.2.664")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -16873,6 +16873,9 @@ class TestResidualGuards(unittest.TestCase):
             # v0.2.656: 5 bare INSERT executes, all inside the CALLER's
             # `with self.conn:` — the import/merge shared insert half.
             "_insert_tree_rows": 5,
+            # v0.2.664: 1 bare 'optimize' INSERT — callee-transacted like
+            # _rewrite_chunk_context_titles (callers own the with).
+            "_optimize_fts": 1,
         }
         root = Path(__file__).resolve().parent.parent / "shoin"
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
@@ -16937,7 +16940,7 @@ class TestResidualGuards(unittest.TestCase):
     def test_callee_transaction_contract_call_sites_covered(self) -> None:
         """Callee-transacted helpers (`touch_notebook`,
         `_rewrite_chunk_context_titles`, `_set_embedding_pair`,
-        `_insert_tree_rows`) contain
+        `_insert_tree_rows`, `_optimize_fts`) contain
         bare write-executes by design — their docstrings make the CALLER
         own the transaction. The C250 pin checks the callees' statements
         against the allowlist, but cannot see whether every call site
@@ -16953,7 +16956,7 @@ class TestResidualGuards(unittest.TestCase):
         lines = (root / "store.py").read_text(encoding="utf-8").splitlines()
         call = re.compile(
             r"self\.(touch_notebook|_rewrite_chunk_context_titles|"
-            r"_set_embedding_pair|_insert_tree_rows)\s*\("
+            r"_set_embedding_pair|_insert_tree_rows|_optimize_fts)\s*\("
         )
         method = ""
         in_sig = False  # multi-line signatures close at `) -> T:` (indent 4)
@@ -17021,6 +17024,7 @@ class TestResidualGuards(unittest.TestCase):
         )
         self.assertTrue(sites.get("_rewrite_chunk_context_titles"), "non-vacuous")
         self.assertTrue(sites.get("_set_embedding_pair"), "non-vacuous")
+        self.assertTrue(sites.get("_optimize_fts"), "non-vacuous")  # v0.2.664
 
     def test_no_nested_with_conn_call_sites(self) -> None:
         """sqlite3's context manager commits on __exit__ — a `with self.conn:`
@@ -21666,6 +21670,48 @@ class TestNbExportImport(unittest.TestCase):
                     self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
             # nothing leaked in: only the seeded notebook exists
             self.assertEqual(len(s.list_notebooks()), 1)
+
+    def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
+        """v0.2.664: every chunk-write transaction ends with the FTS5
+        'optimize' merge — each INSERT otherwise leaves an unmerged
+        index segment automerge only chips at incrementally. The trace
+        callback records issued SQL, so the pin checks the wire."""
+        calls: list[str] = []
+        with make_store() as s:
+            s.conn.set_trace_callback(calls.append)
+            try:
+                nb = s.create_notebook("n")
+                src = s.add_source(nb.id, "txt", "t", "o", "h")
+                s.add_chunks(src.id, ["alpha beta gamma"])          # 1
+                s.replace_chunks_for_source(src.id, ["delta eps"])  # 2
+                s.duplicate_notebook(nb.id)                         # 3
+                doc = s.export_notebook(nb.id)
+                s.import_notebook(doc)                              # 4
+                nb2 = s.create_notebook("n2")
+                src2 = s.add_source(nb2.id, "txt", "t2", "o2", "h2")
+                s.add_chunks(src2.id, ["eta theta iota"])           # 5
+                # trash_restore: archive then re-insert under old ids
+                # (before merge — merge deletes the source notebook)
+                s.delete_notebook(nb.id)
+                trash_id = int(s.conn.execute(
+                    "SELECT id FROM trash_items ORDER BY id DESC LIMIT 1"
+                ).fetchone()["id"])
+                s.trash_restore(trash_id)                           # 6
+                s.merge_notebooks(nb2.id, nb.id)                    # 7
+            finally:
+                s.conn.set_trace_callback(None)
+        n_opt = sum(1 for q in calls if "VALUES('optimize')" in q)
+        self.assertGreaterEqual(
+            n_opt, 7,
+            "add_chunks/replace/duplicate/import/merge/restore must each "
+            f"end their TX with the optimize merge — saw {n_opt}",
+        )
+        # ...and the index still answers after the merges
+        with make_store() as s2:
+            nb3 = s2.create_notebook("n3")
+            src3 = s2.add_source(nb3.id, "txt", "t3", "o3", "h3")
+            s2.add_chunks(src3.id, ["検索できること"])
+            self.assertTrue(bm25_search(s2, nb3.id, "検索", 5))
 
     def test_duplicate_remapped_source_id_map(self) -> None:
         """Regression pin for the drift this version fixed: a verbatim copy

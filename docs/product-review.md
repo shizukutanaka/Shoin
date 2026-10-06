@@ -180,7 +180,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 38 | ~~**検索構文のUI露出なし**~~ → **解消済み** (実測確認: `chat.hint`ツールチップ「ヒント: -語 で除外検索」がja/en両言語で実装済み。台帳のみ遅れ) |
 | ~~39~~ | ~~ノートブックの共有/受け渡し機構なし~~ | **解消 v0.2.655** — `export --format tree`/`GET .../export?format=tree` が undo-log 同一 envelope(`shoin-nb-tree-v1`)を返し `shoin import`/`POST /api/notebooks/import` が新規idで全行再挿入(chunk source_id・citation_report.source_id_map を id_map 再写像・embedding verbatim・異形文書は `NOTEBOOK_IMPORT_INVALID`) |
 | ~~40~~ | ~~API のバージョニング無し~~ → **解消済み(v0.2.663)** | 全応答(JSON/SSE/静的/エラー)に `X-Shoin-API` ヘッダを送出し `GET /api/health` の `api` フィールドでも発見可能に。パスprefixでなくヘッダ駆動——既存クライアント・ルート表・UI契約ピンを無変更に保つ最小侵襲形。互換ポリシーを spec.md へ明文化(additive=非破壊・変更/削除でbump) |
-| 41 | **FTS5 trigram の索引サイズ** | trigram 索引は3gram全展開で文書サイズに対し大きめ。超大容量ではDBサイズが膨らむ(50,000チャンク上限内では実害小) |
+| ~~41~~ | ~~**FTS5 trigram の索引サイズ**~~ → **解消済み** (v0.2.664: 全チャンク書込TX終端で 'optimize' セグメントマージ実行——未マージセグメント蓄積による可避免肥大を構造防止。trigram 3gram展開の固有コストは残存・設計上の境界) |
 | ~~42~~ | ~~スペルミス/クエリ訂正なし~~ | **解消 v0.2.650** — ゼロ件時`POST /api/search`・nb_search・`shoin search`へ`suggestions`フィールド追加 (corpus最近接表層形上限3) |
 | ~~43~~ | ~~**推奨質問が LLM 依存**~~ | **解消 (v0.2.660)**: LLM 不通時に `_title_questions` がソースタイトル由来の骨格質問(eval --gen と同型・i18n済)を最大n件返す——到達不能が「質問ゼロ」と混同されない。URL酷似/61字超/fold重複タイトルは skip、LLM 応答済みで質問形0行は従来通り[](到達したが何も選ばなかった≠到達不能) |
 | 44 | ~~**eval cases の生成支援なし**~~ → **解消済み** (v0.2.651: `shoin eval <nb> --gen` がチャンクを持つソース1件=1ケースの雛形を生成——`sources`は実際のidを運び質問文は手直し前提) |

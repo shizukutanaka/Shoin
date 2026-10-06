@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.663
+## Version History: v0.1.37 → v0.2.664
+
+### v0.2.664 — FTS5索引の optimize セグメントマージ(索引肥大の構造抑止)
+
+- **短所41解消**: FTS5 trigram 索引は INSERT 毎に未マージセグメントを残し、automerge は漸進的にしか削らないため、索引が文書量以上へ肥大し続ける構造があった——全チャンク書込TX(`add_chunks`/`replace_chunks_for_source`/`duplicate_notebook`/`import_notebook`/`merge_notebooks`/`trash_restore`)の終端で `Store._optimize_fts` が `'optimize'` 特殊INSERTを**同一TX内**に実行し、新規索引行が未マージのまま永続化する経路を構造的に閉塞
+- callee-transacted 契約(`_rewrite_chunk_context_titles` と同型): ヘルパ自身は with を持たず呼出し側TXに従う——索引書込みとマージがアトミックにコミット/ロールバックされ、半マージ状態の中間コミット経路が存在しない
+- 設計上の境界: trigram 3gram 全展開の固有サイズ(文書の数倍)は残存——本対応は「可避免なセグメントオーバーヘッド」の抑止であり、索引圧縮やトークナイザ変更は非対象(トークナイザ変更は既存DBの全再索引を要する破壊的変更)
+- 行動ピン2件: 全6書込経路で 'optimize' 文の実送出を trace callback で検証+マージ後も検索が応答・カタログ追随2件(bare-write allowlist +1、callee 呼出しサイト regex +1)
 
 ### v0.2.663 — APIバージョニング(X-Shoin-API ヘッダ + 互換ポリシー明文化)
 

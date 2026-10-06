@@ -993,6 +993,7 @@ class Store:
                     ),
                 )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
+            self._optimize_fts()
         return Notebook(
             nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
             json.loads(nb["settings"]),
@@ -1091,6 +1092,7 @@ class Store:
                 self._insert_tree_rows(
                     new_id, sources, chunks, notes, studio_outputs, messages
                 )
+                self._optimize_fts()
         except sqlite3.InterfaceError as exc:
             # Unbindable value types (dict where TEXT belongs) are a
             # malformed payload, not a DB failure — classify honestly.
@@ -1171,6 +1173,22 @@ class Store:
                 ),
             )
 
+    def _optimize_fts(self) -> None:
+        """Merge every FTS5 b-tree segment into one ('optimize' insert).
+
+        Callee-transacted: the caller owns `with self.conn:` (same
+        contract as touch_notebook). Each chunk INSERT creates a new
+        unmerged index segment; automerge only chips at the pile
+        incrementally, so after bulk writes the trigram index carries
+        avoidable segment overhead on top of its inherent per-gram
+        cost. Every chunk-write path calls this once at the end of its
+        transaction: the merge runs on whatever rows the caller just
+        indexed, inside the same commit boundary (v0.2.664).
+        """
+        self.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')"
+        )
+
     def merge_notebooks(self, target_id: int, source_id: int) -> Notebook:
         """Fold one notebook into another (v0.2.656).
 
@@ -1210,6 +1228,7 @@ class Store:
                     doc["messages"],
                 )
                 self.touch_notebook(target_id)
+                self._optimize_fts()
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "SYSTEM_INTERNAL_ERROR",
@@ -1308,6 +1327,7 @@ class Store:
                         row["created_at"],
                     ),
                 )
+            self._optimize_fts()
         return Notebook(new_id, name, ts, ts, src.settings)
 
     # --- sources / chunks ---
@@ -1583,6 +1603,7 @@ class Store:
                             f"source {source_id} was concurrently deleted",
                         )
                 self.touch_notebook(src.notebook_id)
+                self._optimize_fts()
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
@@ -1763,6 +1784,7 @@ class Store:
                     )
                     ids.append(int(cur.lastrowid or 0))
                 self.touch_notebook(src.notebook_id)
+                self._optimize_fts()
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) — this is the genuine
