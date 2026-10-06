@@ -435,6 +435,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("PATCH", r"^/api/notebooks/(\d+)$", "nb_rename"),
         ("DELETE", r"^/api/notebooks/(\d+)$", "nb_delete"),
         ("POST", r"^/api/notebooks/(\d+)/duplicate$", "nb_duplicate"),
+        ("POST", r"^/api/notebooks/import$", "nb_import"),
         ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
         ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
@@ -668,6 +669,11 @@ class _Handler(BaseHTTPRequestHandler):
         with Store(self.db) as store:
             store.clear_messages(nb_id)
         self._json({"cleared": nb_id})
+
+    def _h_nb_import(self) -> None:
+        with Store(self.db) as store:
+            nb = store.import_notebook(self._read_json())
+            self._json({"id": nb.id, "name": nb.name}, status=201)
 
     def _h_nb_duplicate(self, nb_id: int) -> None:
         # Optional {"name": "..."} — absent/empty body forks as "<name> (copy)".
@@ -978,6 +984,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_export(self, nb_id: int) -> None:
         fmt = (self._query.get("format") or ["md"])[0]
+        if fmt == "tree":
+            # Machine-transfer document (v0.2.655): the trash undo-log's
+            # envelope — pairs with POST /api/notebooks/import. Kept OUT
+            # of export.FORMATS: that tuple is pinned in lockstep with
+            # the mime/ext tables and the UI's download links, none of
+            # which apply to a JSON tree (it is a response body, not an
+            # attachment users pick from the export menu).
+            with Store(self.db) as store:
+                self._json(store.export_notebook(nb_id))
+            return
         if fmt not in FORMATS:
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"format must be one of {FORMATS}")
         with Store(self.db) as store:

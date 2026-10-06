@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.654")
+        self.assertEqual(VERSION, "0.2.655")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -15293,6 +15293,9 @@ _ERROR_CODE_CATALOG = {
     # v0.2.654: trash restore refuses to merge over an occupied id.
     "NOTEBOOK_ALREADY_EXISTS",
     "NOTEBOOK_EMPTY",
+    # v0.2.655: a malformed/foreign export document is a 400-class input
+    # defect (import), never a raw KeyError/TypeError traceback.
+    "NOTEBOOK_IMPORT_INVALID",
     "NOTEBOOK_NOT_FOUND",
     "NOTE_NOT_FOUND",
     "SOURCE_ALREADY_EXISTS",
@@ -18882,13 +18885,19 @@ class TestResidualGuards(unittest.TestCase):
                 "(IngestError,LLMError,StoreError)",
                 "(UnicodeDecodeError,json.JSONDecodeError)",
                 "(UnicodeDecodeError,json.JSONDecodeError)",
+                # +1: _cmd_import maps a non-UTF-8/non-JSON export file to
+                # NOTEBOOK_IMPORT_INVALID — same coded contract (v0.2.655).
+                "(UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 # v0.2.627: process-boundary catch-all in main() — a custom
                 # ChatBackend raising a non-LLMError escaped every handler as
                 # a raw traceback; same coded SYSTEM_INTERNAL_ERROR mapping
                 # _dispatch applies to strays (CLI/API parity).
                 "Exception",
-                "OSError", "OSError", "OSError", "OSError",
+                # +1: _cmd_import's file read shares the coded OSError ->
+                # SYSTEM_IO_ERROR contract with _cmd_eval's cases file
+                # (v0.2.655).
+                "OSError", "OSError", "OSError", "OSError", "OSError",
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
                 # crash print() on strict-UTF-8 stdout — boundary catch in
@@ -18993,6 +19002,17 @@ class TestResidualGuards(unittest.TestCase):
                 # archive payload to a coded error instead of leaking
                 # a raw JSONDecodeError/b64 KeyError.
                 "(KeyError,TypeError,ValueError)",
+                # v0.2.655: import_notebook maps a malformed export
+                # document (missing keys, non-dict rows, bad b64) to
+                # NOTEBOOK_IMPORT_INVALID — same classify-then-wrap.
+                "(KeyError,TypeError,ValueError)",
+                # v0.2.655: unbindable value types inside a foreign
+                # document are malformed input, not a DB failure.
+                "sqlite3.InterfaceError",
+                # v0.2.655: _remap_report_source_ids passes a corrupt or
+                # non-dict citation_report through verbatim — the same
+                # corrupt-report convention restore already keeps.
+                "(AttributeError,TypeError,ValueError)",
                 # v0.2.653: bump_metrics is best-effort — a counter write
                 # must never break the operation it counts.
                 "(OSError,sqlite3.Error)",
@@ -19031,8 +19051,9 @@ class TestResidualGuards(unittest.TestCase):
             "log.py": 1,
             "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
-            # corrupt-row skip (v0.2.653).
-            "store.py": 2,
+            # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
+            # corrupt-report verbatim passthrough (v0.2.655).
+            "store.py": 3,
             "studio.py": 1,
         }
         actual: dict[str, list[str]] = {}
@@ -19151,7 +19172,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 # +2: _cmd_search's question/length guards (v0.2.649)
                 # +1: _cmd_eval's missing-cases guard (v0.2.651)
+                # +2: _cmd_import's file-read / not-JSON guards (v0.2.655)
                 "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -19187,7 +19210,7 @@ class TestResidualGuards(unittest.TestCase):
             "store.py": [
                 "AssertionError", "last_exc(ref)",
                 "RE-RAISE", "RE-RAISE", "RE-RAISE",
-            ] + ["StoreError"] * 59,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 63,  # +1: _utf8's coded surrogate rejection
                                       # +1: backup_to's live-path guard
                                       # +2: duplicate_notebook empty/too-long name
                                       # +3: update_chunk_text empty/missing/deleted
@@ -19195,6 +19218,9 @@ class TestResidualGuards(unittest.TestCase):
                                       #     ALREADY_EXISTS, corrupt payload)
                                       # -1: delete_notebook's own NOT_FOUND
                                       #     raise now delegated to get_notebook
+                                      # +4: import_notebook (name-not-str, dangling
+                                      #     chunk source_id, malformed payload,
+                                      #     unbindable rows) (v0.2.655)
             "studio.py": [
                 "LLMError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
@@ -21366,3 +21392,151 @@ class TestTrash(unittest.TestCase):
         self.assertIn("復元完了", out3.getvalue())
         with Store(db) as s:
             self.assertEqual(s.get_notebook(nb_id).name, "研究")
+
+
+class TestNbExportImport(unittest.TestCase):
+    """Portable export/import (v0.2.655): `export --format tree` emits the
+    trash undo-log envelope verbatim; `import` re-inserts the tree under
+    fresh ids (file ids mean nothing in the target DB), decodes embedding
+    BLOBs back verbatim, and rewrites citation_report source_id_map through
+    the new ids — the same remap duplicate_notebook now shares (its former
+    verbatim copy left dead pointers)."""
+
+    def _tree_doc(self, store: Store, nb_id: int) -> dict[str, object]:
+        doc = store.export_notebook(nb_id)
+        # A document that cannot survive json.dumps is not an export.
+        return json.loads(json.dumps(doc, ensure_ascii=False))
+
+    def _seed_with_report(self, store: Store) -> tuple[int, list[int]]:
+        nb_id = seed(store)
+        src_ids = [int(s.id) for s in store.sources_for_notebook(nb_id)]
+        # S3 -> 999 is already a dead pointer in the source notebook:
+        # import must drop it rather than carry a dangling id.
+        report = json.dumps(
+            {"source_id_map": {"S1": src_ids[0], "S2": src_ids[1], "S3": 999}}
+        )
+        store.add_message(nb_id, "assistant", "答え [S1]", report)
+        store.add_studio_output(nb_id, "briefing", "概要", report)
+        store.add_note(nb_id, "memo", "本文メモ")
+        store.set_embedding(store.chunks_for_source(src_ids[0])[0].id, [0.1, 0.2])
+        return nb_id, src_ids
+
+    def test_export_document_shape(self) -> None:
+        with make_store() as s:
+            nb_id, _ = self._seed_with_report(s)
+            doc = self._tree_doc(s, nb_id)
+            self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+            self.assertEqual(
+                set(doc),
+                {"format", "notebook", "sources", "chunks", "notes",
+                 "studio_outputs", "messages"},
+            )
+            self.assertEqual(doc["notebook"]["name"], "研究")
+            self.assertEqual(len(doc["sources"]), 2)
+            # blob-encoded for JSON transport
+            with_blobs = [c for c in doc["chunks"] if c["embedding"] is not None]
+            self.assertEqual(len(with_blobs), 1)
+            self.assertIsInstance(with_blobs[0]["embedding"]["$blob"], str)
+
+    def test_import_round_trip_under_fresh_ids(self) -> None:
+        with make_store() as s:
+            nb_id, src_ids = self._seed_with_report(s)
+            doc = self._tree_doc(s, nb_id)
+            imp = s.import_notebook(doc)
+            self.assertNotEqual(imp.id, nb_id)
+            self.assertEqual(s.counts(imp.id), s.counts(nb_id))
+            imp_src_ids = sorted(
+                int(x.id) for x in s.sources_for_notebook(imp.id)
+            )
+            self.assertEqual(len(imp_src_ids), 2)
+            self.assertNotIn(imp_src_ids[0], src_ids)
+            # chunks re-fired the FTS triggers — searchable immediately
+            self.assertTrue(bm25_search(s, imp.id, "猫は液", 5))
+            # embedding BLOB decoded back verbatim (get_chunk unpacks it;
+            # float32 storage — compare at float32 precision)
+            imp_chunk = s.chunks_for_source(imp_src_ids[0])[0]
+            self.assertEqual(len(imp_chunk.embedding or []), 2)
+            self.assertAlmostEqual((imp_chunk.embedding or [0])[0], 0.1, places=6)
+            self.assertAlmostEqual((imp_chunk.embedding or [0])[1], 0.2, places=6)
+            # citation_report source_id_map rewritten through the new ids
+            row = s.list_messages(imp.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": imp_src_ids[0], "S2": imp_src_ids[1]})
+            row_o = s.latest_studio_outputs(imp.id)[0]
+            sim_o = json.loads(row_o["citation_report"])["source_id_map"]
+            self.assertEqual(sim_o, {"S1": imp_src_ids[0], "S2": imp_src_ids[1]})
+            self.assertEqual(len(s.list_notes(imp.id)), 1)
+
+    def test_import_rejects_malformed_documents(self) -> None:
+        with make_store() as s:
+            nb_id, src_ids = self._seed_with_report(s)
+            good = self._tree_doc(s, nb_id)
+            cases: list[object] = [
+                "not-a-dict",
+                {"notebook": {"name": "x"}},  # missing sections
+                {**good, "notebook": {"name": 7}},  # non-str name
+                {**good, "chunks": [
+                    {**good["chunks"][0], "source_id": 424242}
+                ]},  # dangling source ref
+                {**good, "chunks": [
+                    {**good["chunks"][0], "embedding": {"nope": 1}}
+                ]},  # no $blob key
+                {**good, "chunks": [
+                    {**good["chunks"][0],
+                     "embedding": {"$blob": "%%%not-b64"}}
+                ]},  # undecodable blob
+            ]
+            for bad in cases:
+                with self.subTest(bad=repr(bad)[:60]):
+                    with self.assertRaises(StoreError) as cm:
+                        s.import_notebook(bad)
+                    self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+            # nothing leaked in: only the seeded notebook exists
+            self.assertEqual(len(s.list_notebooks()), 1)
+
+    def test_duplicate_remapped_source_id_map(self) -> None:
+        """Regression pin for the drift this version fixed: a verbatim copy
+        of citation_report would point S# at the ORIGINAL source ids."""
+        with make_store() as s:
+            nb_id, _ = self._seed_with_report(s)
+            dup = s.duplicate_notebook(nb_id)
+            dup_src_ids = sorted(
+                int(x.id) for x in s.sources_for_notebook(dup.id)
+            )
+            row = s.list_messages(dup.id)[0]
+            sim = json.loads(row["citation_report"])["source_id_map"]
+            self.assertEqual(sim, {"S1": dup_src_ids[0], "S2": dup_src_ids[1]})
+
+    def test_cli_export_tree_import_round_trip(self) -> None:
+        """`shoin export <nb> --format tree` | `shoin import <file>` —
+        REQ-103 parity with GET .../export?format=tree + POST /import."""
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            nb_id = seed(s)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "export", str(nb_id), "--format", "tree"]), 0
+            )
+        doc = json.loads(out.getvalue())
+        self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+        f = os.path.join(tempfile.mkdtemp(), "nb.json")
+        Path(f).write_text(json.dumps(doc), encoding="utf-8")
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(main(["--db", db, "import", f]), 0)
+        self.assertIn("インポート完了", out2.getvalue())
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 2)
+
+    def _tmpdb_cli(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")

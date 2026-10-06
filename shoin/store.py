@@ -364,6 +364,35 @@ def unpack_vector(blob: bytes) -> list[float]:
     return list(a)
 
 
+def _remap_report_source_ids(
+    report_json: str | None, id_map: dict[Any, int]
+) -> str | None:
+    """Rewrite a citation_report's source_id_map through an id remap.
+
+    Reports carry real source ids ({"S1": 4}) — a verbatim copy across
+    duplicate/import leaves dead or wrong pointers once the tree is
+    re-inserted under fresh ids. S# keys and every other field pass
+    through; an entry whose source did not come along is dropped rather
+    than left pointing at a dead row. A non-JSON or non-dict report
+    passes through verbatim (corrupt-report convention).
+    """
+    if report_json is None:
+        return None
+    try:
+        report = json.loads(report_json)
+        sim = report.get("source_id_map")
+        if isinstance(sim, dict):
+            mapped: dict[str, int] = {}
+            for k, v in sim.items():
+                # bool is an int subclass — never a source id.
+                if isinstance(v, int) and not isinstance(v, bool) and v in id_map:
+                    mapped[str(k)] = id_map[v]
+            report["source_id_map"] = mapped
+        return json.dumps(report, ensure_ascii=False)
+    except (ValueError, TypeError, AttributeError):
+        return report_json
+
+
 @dataclass(frozen=True)
 class Notebook:
     id: int
@@ -577,16 +606,19 @@ class Store:
         if cur.rowcount == 0:
             raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
-    def _notebook_tree_payload(self, notebook_id: int) -> str:
-        """Serialize the whole notebook tree for the trash archive.
+    def _notebook_tree_dict(self, notebook_id: int) -> dict[str, Any]:
+        """Serialize the whole notebook tree for trash archive / export.
 
         Column fidelity over the ORM projections: raw rows keep every
         field (context, embedding_norm, citation_report) so a restore
-        re-inserts byte-identical children. Embedding BLOBs are
-        base64-tagged — verbatim-valid on restore, zero re-embed cost.
+        or import re-inserts byte-identical children. Embedding BLOBs
+        are base64-tagged — verbatim-valid on restore, zero re-embed
+        cost. "format" stamps the document kind: a trash payload IS an
+        export document, so import/trash-restore share one envelope.
         """
         nb = self.get_notebook(notebook_id)
         payload: dict[str, Any] = {
+            "format": "shoin-nb-tree-v1",
             "notebook": {
                 "id": nb.id,
                 "name": nb.name,
@@ -637,7 +669,12 @@ class Store:
                 (notebook_id,),
             )
         ]
-        return json.dumps(payload, ensure_ascii=False)
+        return payload
+
+    def _notebook_tree_payload(self, notebook_id: int) -> str:
+        return json.dumps(
+            self._notebook_tree_dict(notebook_id), ensure_ascii=False
+        )
 
     def delete_notebook(self, notebook_id: int) -> None:
         # Undo-log trash (v0.2.654): archive-then-delete in ONE
@@ -768,6 +805,134 @@ class Store:
         if cur.rowcount == 0:
             raise StoreError("TRASH_NOT_FOUND", f"trash item {trash_id} not found")
 
+    def export_notebook(self, notebook_id: int) -> dict[str, Any]:
+        """Portable notebook-tree document (v0.2.655) — the same envelope
+        as the trash undo-log: a deleted notebook's archive is already a
+        valid import document, and vice versa."""
+        return self._notebook_tree_dict(notebook_id)
+
+    def import_notebook(self, payload: dict[str, Any]) -> Notebook:
+        """Insert an export document as a NEW notebook (v0.2.655).
+
+        Fresh ids everywhere — the file's ids mean nothing in the target
+        DB, so sources/chunks/notes/outputs/messages are re-inserted and
+        re-keyed like duplicate_notebook. citation_report source ids are
+        remapped through the new source ids (_remap_report_source_ids);
+        entries whose source did not come along are dropped. Embedding
+        BLOBs decode back verbatim — same model, zero re-embed cost —
+        and chunk INSERTs re-fire the FTS triggers, so the notebook is
+        searchable the moment import returns.
+        """
+        try:
+            nb = payload["notebook"]
+            name = nb["name"]
+            if not isinstance(name, str):
+                raise StoreError(
+                    "NOTEBOOK_IMPORT_INVALID", "export name is not a string"
+                )
+            sources = payload["sources"]
+            chunks = payload["chunks"]
+            notes = payload["notes"]
+            studio_outputs = payload["studio_outputs"]
+            messages = payload["messages"]
+            src_ids: set[Any] = set()
+            for s in sources:
+                src_ids.add(s["id"])
+                for k in ("kind", "title", "origin", "sha256", "added_at"):
+                    s[k]
+            for c in chunks:
+                if c["source_id"] not in src_ids:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "chunk references a source not in the export",
+                    )
+                for k in ("seq", "text", "context", "embedding_norm"):
+                    c[k]
+                if c["embedding"] is not None:
+                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+            for n in notes:
+                for k in ("title", "body", "created_at"):
+                    n[k]
+            for o in studio_outputs:
+                for k in ("kind", "body", "citation_report", "created_at"):
+                    o[k]
+            for m in messages:
+                for k in ("role", "body", "citation_report", "created_at"):
+                    m[k]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoreError(
+                "NOTEBOOK_IMPORT_INVALID",
+                "payload is not a valid notebook export",
+            ) from exc
+        # Import semantics are lenient where create is strict: a file from
+        # a newer version may carry a name past our current cap — truncate
+        # rather than refuse the whole notebook.
+        name = name.strip()[:MAX_NAME_LEN] or "imported"
+        _utf8(name, "name")
+        ts = _now()
+        try:
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO notebooks(name, created_at, updated_at)"
+                    " VALUES(?,?,?)",
+                    (name, ts, ts),
+                )
+                new_id = int(cur.lastrowid or 0)
+                id_map: dict[Any, int] = {}
+                for s in sources:
+                    cur = self.conn.execute(
+                        "INSERT INTO sources"
+                        "(notebook_id, kind, title, origin, sha256, added_at)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (
+                            new_id, s["kind"], s["title"], s["origin"],
+                            s["sha256"], s["added_at"],
+                        ),
+                    )
+                    id_map[s["id"]] = int(cur.lastrowid or 0)
+                for c in chunks:
+                    self.conn.execute(
+                        "INSERT INTO chunks(source_id, seq, text, context,"
+                        " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                        (
+                            id_map[c["source_id"]], c["seq"], c["text"],
+                            c["context"], c["embedding"], c["embedding_norm"],
+                        ),
+                    )
+                for n in notes:
+                    self.conn.execute(
+                        "INSERT INTO notes(notebook_id, title, body, created_at)"
+                        " VALUES(?,?,?,?)",
+                        (new_id, n["title"], n["body"], n["created_at"]),
+                    )
+                for o in studio_outputs:
+                    self.conn.execute(
+                        "INSERT INTO studio_outputs(notebook_id, kind, body,"
+                        " citation_report, created_at) VALUES(?,?,?,?,?)",
+                        (
+                            new_id, o["kind"], o["body"],
+                            _remap_report_source_ids(o["citation_report"], id_map),
+                            o["created_at"],
+                        ),
+                    )
+                for m in messages:
+                    self.conn.execute(
+                        "INSERT INTO messages(notebook_id, role, body,"
+                        " citation_report, created_at) VALUES(?,?,?,?,?)",
+                        (
+                            new_id, m["role"], m["body"],
+                            _remap_report_source_ids(m["citation_report"], id_map),
+                            m["created_at"],
+                        ),
+                    )
+        except sqlite3.InterfaceError as exc:
+            # Unbindable value types (dict where TEXT belongs) are a
+            # malformed payload, not a DB failure — classify honestly.
+            raise StoreError(
+                "NOTEBOOK_IMPORT_INVALID", "export rows failed type checks"
+            ) from exc
+        return Notebook(new_id, name, ts, ts)
+
     def touch_notebook(self, notebook_id: int) -> None:
         """Stamp the notebook's updated_at. Does NOT commit — callers must commit."""
         self.conn.execute("UPDATE notebooks SET updated_at=? WHERE id=?", (_now(), notebook_id))
@@ -828,19 +993,34 @@ class Store:
                 " SELECT ?, title, body, created_at FROM notes WHERE notebook_id=?",
                 (new_id, notebook_id),
             )
-            self.conn.execute(
-                "INSERT INTO studio_outputs(notebook_id, kind, body,"
-                " citation_report, created_at)"
-                " SELECT ?, kind, body, citation_report, created_at"
-                " FROM studio_outputs WHERE notebook_id=?",
-                (new_id, notebook_id),
-            )
-            self.conn.execute(
-                "INSERT INTO messages(notebook_id, role, body, citation_report,"
-                " created_at) SELECT ?, role, body, citation_report, created_at"
-                " FROM messages WHERE notebook_id=?",
-                (new_id, notebook_id),
-            )
+            for row in self.conn.execute(
+                "SELECT kind, body, citation_report, created_at"
+                " FROM studio_outputs WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            ).fetchall():
+                self.conn.execute(
+                    "INSERT INTO studio_outputs(notebook_id, kind, body,"
+                    " citation_report, created_at) VALUES(?,?,?,?,?)",
+                    (
+                        new_id, row["kind"], row["body"],
+                        _remap_report_source_ids(row["citation_report"], id_map),
+                        row["created_at"],
+                    ),
+                )
+            for row in self.conn.execute(
+                "SELECT role, body, citation_report, created_at"
+                " FROM messages WHERE notebook_id=? ORDER BY id",
+                (notebook_id,),
+            ).fetchall():
+                self.conn.execute(
+                    "INSERT INTO messages(notebook_id, role, body,"
+                    " citation_report, created_at) VALUES(?,?,?,?,?)",
+                    (
+                        new_id, row["role"], row["body"],
+                        _remap_report_source_ids(row["citation_report"], id_map),
+                        row["created_at"],
+                    ),
+                )
         return Notebook(new_id, name, ts, ts)
 
     # --- sources / chunks ---

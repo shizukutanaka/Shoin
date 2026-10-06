@@ -1576,6 +1576,49 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "TRASH_NOT_FOUND")
 
+    def test_nb_tree_export_and_import_round_trip(self) -> None:
+        """GET .../export?format=tree emits the portable document; POST
+        /api/notebooks/import re-inserts it under fresh ids (v0.2.655)."""
+        status, body = self._json("POST", "/api/notebooks", {"name": "portable"})
+        self.assertEqual(status, 201)
+        nb_id = body["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "cats.txt", "mem://cats", "sha-c")
+            store.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
+        status, doc = self._json(
+            "GET", f"/api/notebooks/{nb_id}/export?format=tree"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(doc["format"], "shoin-nb-tree-v1")
+        self.assertEqual(doc["notebook"]["name"], "portable")
+        self.assertEqual(len(doc["sources"]), 1)
+        status, body = self._json("POST", "/api/notebooks/import", doc)
+        self.assertEqual(status, 201)
+        self.assertNotEqual(body["id"], nb_id)
+        self.assertEqual(body["name"], "portable")
+        status, det = self._json("GET", f"/api/notebooks/{body['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(det["sources"]), 1)
+        # malformed payloads -> 400 coded, never a traceback
+        status, err = self._json(
+            "POST", "/api/notebooks/import", {"notebook": {}}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_IMPORT_INVALID")
+        # non-dict body -> the envelope guard rejects before the store
+        status, err = self._json("POST", "/api/notebooks/import", ["x"])
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        # a dead notebook exports as a coded 404 in the tree format too
+        status, err = self._json(
+            "GET", "/api/notebooks/99999/export?format=tree"
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
     def test_theme_css_serves_user_file_and_degrades_to_empty(self) -> None:
         """GET /api/theme.css (v0.2.643): the user-theme hook serves
         SHOIN_THEME_CSS / ~/.config/shoin/theme.css verbatim as text/css.

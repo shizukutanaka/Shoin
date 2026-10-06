@@ -29,7 +29,33 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.654
+## Version History: v0.1.37 → v0.2.655
+
+### v0.2.655 — ノートブック export/import (shoin-nb-tree-v1)
+
+短所39を解消: exportは人間向けレポート(md/bibtex/ris)のみで、別マシンや
+別DBへ運ぶ機械可読の受け渡し経路が無かった。
+`GET /api/notebooks/{id}/export?format=tree` / `shoin export <id> --format
+tree` が v0.2.654 undo-logと同一envelope(`{"format":"shoin-nb-tree-v1",
+notebook, sources, chunks, notes, studio_outputs, messages}`)を返し、
+`POST /api/notebooks/import` / `shoin import <file>`(`-`はstdin)がツリー
+全体を**新規id**で再挿入する——ファイル内idは宛先DBでは無意味なので
+duplicate_notebookと同じ再キー化(id_mapでchunk.source_idを貼替え、
+embedding BLOBはbase64復号してverbatim=再埋込ゼロ、FTS triggerが
+INSERTで再索引=import直後から検索可能)。
+設計上の境界:
+- `citation_report.source_id_map` も id_map で新idへ書換え(未収載ソース
+  は脱落)——従来duplicateがverbatim複写で残していた死蔵ポインタを
+  共有ヘルパ `_remap_report_source_ids` で修正し回帰ピンを立てた
+- 名前は寛容化: strip+MAX_NAME_LEN切詰・空は"imported"補完(importは
+  createではない——名で全体を拒否しない)
+- 異形文書は1try内で全必須キー走査をTX開始前に完了: 必須欠損・非str
+  name・dangling source_id・b64不能・unbindable型(InterfaceError)を全
+  て`NOTEBOOK_IMPORT_INVALID`(400)へcoded化——部分import経路なし
+- `FORMATS`には加えない: (md,bibtex,ris)はmime/ext表+UIリンクとlockstep
+  ピン済のため`?format=tree`は_h_export先頭で分岐しJSON本文として返す
+行動ピン: TestNbExportImport 5件(形状・往復fresh-id+FTS+report再写像・
+異形6種拒否・duplicate回帰・CLI往復)+server往復+400/404境界。
 
 ### v0.2.654 — ゴミ箱 / undo-log (trash_items + GET /api/trash)
 

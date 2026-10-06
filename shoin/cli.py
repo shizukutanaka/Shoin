@@ -98,6 +98,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
         "nb.duplicated": "複製完了: [{id}] {name}",
+        "nb.imported": "インポート完了: [{id}] {name}",
         "trash.empty": "ゴミ箱は空です。",
         "trash.item": "[{id}] {name}  (nb_id {nb_id}・削除 {ts})",
         "trash.restored": "復元完了: [{id}] {name}",
@@ -198,6 +199,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
         "nb.duplicated": "Duplicated: [{id}] {name}",
+        "nb.imported": "Imported: [{id}] {name}",
         "trash.empty": "Trash is empty.",
         "trash.item": "[{id}] {name}  (nb_id {nb_id}, deleted {ts})",
         "trash.restored": "Restored: [{id}] {name}",
@@ -412,7 +414,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ex = sub.add_parser("export", help="エクスポート")
     ex.add_argument("notebook_id", type=int)
-    ex.add_argument("--format", choices=FORMATS, default="md")
+    # "tree" (v0.2.655): the machine-transfer document — a JSON notebook
+    # tree, not a human-readable export format, so it stays out of
+    # export.FORMATS and its mime/ext/lockstep pins.
+    ex.add_argument("--format", choices=(*FORMATS, "tree"), default="md")
+
+    imp = sub.add_parser(
+        "import", help="インポート(export --format tree のJSONからnbを復元)"
+    )
+    imp.add_argument("file", help="export JSONファイル ('-' でstdin)")
 
     sv = sub.add_parser("serve", help="Web UI起動 (127.0.0.1のみ)")
     sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
@@ -636,6 +646,33 @@ def _cmd_backup(store: Store, args: argparse.Namespace) -> int:
     dest = Path(args.dest).expanduser()
     store.backup_to(dest)
     print(_t("backup.done", path=str(dest)))
+    return 0
+
+
+def _cmd_import(store: Store, args: argparse.Namespace) -> int:
+    """`shoin import <file>` (v0.2.655) — rebuild a notebook from an
+    `export --format tree` document under fresh ids. "-" reads stdin so
+    export|import pipes work."""
+    import json
+
+    try:
+        if str(args.file) == "-":
+            raw_text = sys.stdin.read()
+        else:
+            raw_text = Path(str(args.file)).expanduser().read_text(encoding="utf-8")
+        raw = json.loads(raw_text)
+    except OSError as exc:
+        raise StoreError(
+            "SYSTEM_IO_ERROR", f"cannot read export file: {exc}"
+        ) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Same classification as _cmd_eval's cases file: a non-UTF-8 or
+        # non-JSON file is a 400-class input defect, never a traceback.
+        raise StoreError(
+            "NOTEBOOK_IMPORT_INVALID", f"export file is not valid JSON: {exc}"
+        ) from exc
+    nb = store.import_notebook(raw)
+    print(_t("nb.imported", id=str(nb.id), name=_one_line(nb.name)))
     return 0
 
 
@@ -1134,8 +1171,21 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
             if command == "trash":
                 return _cmd_trash(store, args)
             if command == "export":
-                print(export(store, int(args.notebook_id), str(args.format)), end="")
+                if str(args.format) == "tree":
+                    import json
+
+                    print(
+                        json.dumps(
+                            store.export_notebook(int(args.notebook_id)),
+                            ensure_ascii=False,
+                            indent=1,
+                        )
+                    )
+                else:
+                    print(export(store, int(args.notebook_id), str(args.format)), end="")
                 return 0
+            if command == "import":
+                return _cmd_import(store, args)
     except (StoreError, IngestError, LLMError) as exc:
         print(_t("err.prefix", code=exc.code, msg=str(exc)), file=sys.stderr)
         return 1
