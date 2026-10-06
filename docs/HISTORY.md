@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.671
+## Version History: v0.1.37 → v0.2.672
+
+### v0.2.672 — チャンク数上限を全書込経路へ拡張(import/merge/duplicate)
+
+- **新規短所56解消(ソクラテス監査で発掘)**: 「上限と称する制約は全書込経路で同じ強度か」の問いで発見——`MAX_CHUNKS_PER_NOTEBOOK`(5万・STRIDE DoS制御)は `index_source`/`refresh_source`(pipeline.py)でのみ検査され、`import_notebook`/`merge_notebooks`/`duplicate_notebook` の3経路は一切無検査だった。大容量ツリー文書のimportや満杯nb同士のmergeで上限を素通りし、以後そのnbのベクトル脚(全チャンク全走査)が無制限コーパスで動く
+- **不変条件として一本化**: 上限は取込速度制限ではなくnb不変条件——`_insert_tree_rows`(import/mergeの共有ライター)先頭で `existing + incoming > MAX → INGEST_NOTEBOOK_FULL`(既存コード名を流用、coded 400)。`duplicate_notebook` は INSERT..SELECT の別経路のため同TX内に自前ガード(正常nbは 0+同数 で不変のため上限済nbのみ拒否)
+- **拒否はTX内で完結**: mergeは copy-TX内raiseでロールバック(対象nb不変・delete脚不実行)、importは新規nb行ごとロールバック(半importなし)
+- **行動ピン1件**: merge超過→coded拒否+両nb不変、merge境界(3+2=5)→通過、import超過→拒否+nb数不変、duplicate合法(at-cap)→通過/上限済→拒否
+- **カタログ追随1件**: raise-inventory store.py +2(INGEST_NOTEBOOK_FULL)
 
 ### v0.2.671 — check()の論理整合性層(チャンク総数+埋込み欠落件数)
 

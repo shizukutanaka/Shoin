@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.671")
+        self.assertEqual(VERSION, "0.2.672")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -10781,6 +10781,68 @@ class TestChunkLimit(unittest.TestCase):
                     result = refresh_source(s, res0.source.id)  # must not raise
                 self.assertEqual(result.n_chunks, 1)
 
+    def test_tree_write_paths_enforce_chunk_cap(self) -> None:
+        """The cap is a per-notebook invariant (the vector leg scans every
+        chunk), not an ingest-rate limit — yet until v0.2.672 only the
+        ingest writers enforced it. import_notebook and merge_notebooks
+        (via _insert_tree_rows) and duplicate_notebook (INSERT..SELECT)
+        all bypassed it, so a large export document or a merge into a
+        near-full target silently produced an over-cap notebook."""
+        from unittest.mock import patch
+
+        def _nb_with_chunks(s: Store, name: str, n: int) -> int:
+            nb_id = s.create_notebook(name).id
+            src = s.add_source(nb_id, "txt", name, f"mem://{name}", f"sha-{name}")
+            s.add_chunks(src.id, [f"{name} chunk {i}" for i in range(n)])
+            return nb_id
+
+        with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 5):
+            with make_store() as s:
+                # merge: 3 existing + 3 incoming = 6 > 5 → coded refusal,
+                # target untouched AND the source notebook not deleted
+                # (merge's copy-then-delete must not run its delete leg).
+                target = _nb_with_chunks(s, "target", 3)
+                source = _nb_with_chunks(s, "source", 3)
+                with self.assertRaises(StoreError) as cm:
+                    s.merge_notebooks(target, source)
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(s.counts(target)["chunks"], 3)
+                self.assertEqual(s.counts(source)["chunks"], 3)
+
+                # merge boundary: 3 + 2 = 5 == cap → allowed.
+                small = _nb_with_chunks(s, "small", 2)
+                s.merge_notebooks(target, small)  # must not raise
+                self.assertEqual(s.counts(target)["chunks"], 5)
+
+                # import: a document whose tree alone exceeds the cap →
+                # refused BEFORE the notebook row commits (no half-import).
+                # (add_chunks is the low-level writer and holds no cap, so
+                # an over-cap document is buildable directly — the same way
+                # a foreign export file arrives.)
+                big = _nb_with_chunks(s, "big", 6)
+                doc = s.export_notebook(big)
+                nb_count = len(s.list_notebooks())
+                with self.assertRaises(StoreError) as cm2:
+                    s.import_notebook(doc)
+                self.assertEqual(cm2.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(len(s.list_notebooks()), nb_count)
+
+                # duplicate: the target notebook is exactly at the cap, not
+                # over — duplication is legal and must still work...
+                dup = s.duplicate_notebook(target)
+                self.assertEqual(s.counts(dup.id)["chunks"], 5)
+
+        # ...but duplicating an ALREADY over-limit notebook (created under
+        # a looser cap — the only way one exists) replicates the broken
+        # invariant → refused.
+        with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 100):
+            with make_store() as s:
+                fat = _nb_with_chunks(s, "fat", 10)
+                with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 5):
+                    with self.assertRaises(StoreError) as cm3:
+                        s.duplicate_notebook(fat)
+                    self.assertEqual(cm3.exception.code, "INGEST_NOTEBOOK_FULL")
+
 
 class TestExport(unittest.TestCase):
     def test_md_line_collapses_lf(self) -> None:
@@ -19511,7 +19573,9 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 79,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 81,  # +1: _utf8's coded surrogate rejection
+                                      # +2: _insert_tree_rows / duplicate_notebook
+                                      #     chunk-cap guards (v0.2.672)
                                       # +4: update_notebook_settings non-dict /
                                       #     unknown-key / out-of-bounds / missing-
                                       #     row guards (v0.2.659)

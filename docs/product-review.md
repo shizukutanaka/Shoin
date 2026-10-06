@@ -195,6 +195,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~53~~ | ~~**削除済みバイトの物理回収経路なし**~~ → **解消済み(v0.2.669)** | 「蓄積した全バイトは回収されるか」のソクラテス問いで発掘: ①ゴミ箱はpurgeが1件単位で一括emptyの経路が無かった ②SQLiteは削除済み領域をfreelistへ移すだけでDBファイルが物理的に縮小せず、purgeしても消費ディスクが戻らなかった。`trash_purge_all`(1TX全件削除)+`vacuum()`(wal_checkpoint後にVACUUM、before/after/freed報告)+`freelist_bytes()`で回収可能量を`stats`へ可視化。`DELETE /api/trash`+`shoin trash empty`、`POST /api/vacuum`+`shoin vacuum`のREQ-103パリティ |
 | ~~54~~ | ~~**破損DBの診断経路なし**~~ → **解消済み(v0.2.670)** | 「破損したDBを診断する経路はあるか」のソクラテス問いで発掘: healthは設定/LLM到達性の面で、「ファイル自体の健全性」の経路がゼロ——corrupt .sqlite はStore()オープンで `sqlite3.DatabaseError: file is not a database` 即死しcoded経路が無かった。`Store.check()`(integrity_check+foreign_key_check+schema版)を新設し `shoin check`(健全rc0/破損・unopenable rc1——cron検知可)+`GET /api/check`(unopenableを200診断値として返す、500潰れなし)の両面へ |
 | ~~55~~ | ~~**埋込み欠落が取込toast一度きりで永続不可視**~~ → **解消済み(v0.2.671)** | 「物理健全でも論理欠損は診断できるか」の問いで発掘: 取込時 "N/M embedded" toastのみが欠落を報告し、以後ベクトル脚部分死を発見する経路がゼロ。check()へ `chunks`/`unembedded` 論理層を追加(全面CLI+API)・embed設定時のみreindex修復ヒント。FTS索引desync検出は外部コンテンツ表で原理的不能(rowid走査がcontent表を透過参照)のため非採用——証拠なき防御コードを入れない |
+| ~~56~~ | ~~**チャンク数上限がingest経路のみで強制**~~ → **解消済み(v0.2.672)** | 「上限と称する制約は全書込経路で同じ強度か」の問いで発掘: `MAX_CHUNKS_PER_NOTEBOOK`はindex/refresh(pipeline)のみ検査で、import/merge/duplicateの3経路は無検査——大容量export文書や満杯mergeで上限を素通りしベクトル脚が無制限コーパスで全走査。`_insert_tree_rows`(import/merge共有)先頭+`duplicate_notebook`の同TXガードへ `existing+incoming > MAX → INGEST_NOTEBOOK_FULL` で一本化 |
 
 ### 解決済み(記録)
 

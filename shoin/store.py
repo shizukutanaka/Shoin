@@ -23,6 +23,7 @@ from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
 from .config import (
+    MAX_CHUNKS_PER_NOTEBOOK,
     MAX_NAME_LEN,
     MAX_TITLE_LEN,
     NB_SETTING_KEYS,
@@ -1270,6 +1271,20 @@ class Store:
         Chunk INSERTs re-fire the FTS triggers, so merged/imported
         content is searchable the moment the transaction commits.
         """
+        # v0.2.672: the per-notebook chunk cap is a product invariant, not
+        # an ingest-rate limit — the vector leg scans every chunk in a
+        # notebook, so an over-cap corpus slows EVERY query on it. Until
+        # now only the ingest writers (index_source/refresh_source, in
+        # pipeline.py) enforced it; import and merge bypassed it entirely.
+        # Guarding the shared tree writer covers both at one point.
+        existing = self.counts(notebook_id)["chunks"]
+        incoming = len(chunks)
+        if existing + incoming > MAX_CHUNKS_PER_NOTEBOOK:
+            raise StoreError(
+                "INGEST_NOTEBOOK_FULL",
+                f"notebook chunk limit exceeded: {existing} existing"
+                f" + {incoming} incoming > {MAX_CHUNKS_PER_NOTEBOOK}",
+            )
         id_map: dict[Any, int] = {}
         for s in sources:
             cur = self.conn.execute(
@@ -1415,6 +1430,19 @@ class Store:
         _utf8(name, "name")
         ts = _now()
         with self.conn:
+            # v0.2.672: this fork copies the tree via INSERT..SELECT, not
+            # _insert_tree_rows, so it needs its own cap check — a normal
+            # notebook cannot breach it (0 + same count), but duplicating
+            # an already over-limit notebook would replicate the broken
+            # invariant. Inside the transaction like the sibling guard.
+            if self.counts(notebook_id)["chunks"] > MAX_CHUNKS_PER_NOTEBOOK:
+                raise StoreError(
+                    "INGEST_NOTEBOOK_FULL",
+                    f"notebook chunk limit exceeded: "
+                    f"{self.counts(notebook_id)['chunks']} chunks"
+                    f" > {MAX_CHUNKS_PER_NOTEBOOK}"
+                    " — cannot duplicate an over-limit notebook",
+                )
             cur = self.conn.execute(
                 "INSERT INTO notebooks(name, created_at, updated_at, settings)"
                 " VALUES(?,?,?,?)",
