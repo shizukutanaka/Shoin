@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.675
+## Version History: v0.1.37 → v0.2.676
+
+### v0.2.676 — 平文HTTP経路へのBearer資格情報の警告(plaintext credential)
+
+- **新規短所60解消(ソクラテス監査で発掘)**: 「秘密の送信経路は暗号化されているか」の問いで発見——`http://` scheme・外部エンドポイント・APIキーの3要素はそれぞれ合法な構成だが、**組合せると Bearer トークンが平文でワイヤを流れ**、経路上の全観測者(LAN/proxy/中間者)に読み得る構成になっていた。v0.2.674のexternal警告は「データが端末を離れる」面のみをカバーし、資格自体の平文転送は別の欠陥だった
+- **構築時警告追加**: `LLMClient.__init__` で `key設定済み かつ scheme=="http" かつ endpoint_is_external` の3条件が揃った時のみstderrへ警告——「use an https:// endpoint」の修復案内付き。loopback http(マシンを出ない・暗号化不要)とhttps(TLSで保護済)は免除
+- **境界(記録)**: 警告であって拒否ではない——信頼済みLAN上のLLMやローカルproxy越し構成は合法なユーザー選択のため。スキーム判定はRFC 3986 §3.1でcase-insensitive(`.lower()`)
+- **行動ピン1件**: 3条件合成で警告送出・https免除・loopback http免除・キー未設定免除の真偽表
+- **カタログ追随1件**: `.lower()` inventory llm.py +1(URIスキームはASCII大小文字不感——RFC 3986 §3.1)
 
 ### v0.2.675 — エンドポイントURL資格情報の表示面からの除去(redact_url_credentials)
 

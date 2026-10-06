@@ -145,6 +145,24 @@ class LLMClient:
         self._headers = {"Content-Type": "application/json"}
         if key:
             self._headers["Authorization"] = f"Bearer {key}"
+        # v0.2.676 (product-review #60): each property alone looks fine —
+        # http:// is a legal scheme, an external endpoint is a legal
+        # choice (LAN LLM, hosted gateway), an API key is a legal
+        # credential — but composed they put the Bearer token on the
+        # wire in cleartext where any on-path observer can read it.
+        # Loopback http is exempt: plaintext there never leaves the
+        # machine.
+        if (
+            key
+            and self.base_url[:7].lower() == "http://"
+            and endpoint_is_external(self.base_url)
+        ):
+            print(
+                "Warning: LLM API key travels unencrypted"
+                f" ({redact_url_credentials(self.base_url)})"
+                " — use an https:// endpoint",
+                file=sys.stderr,
+            )
 
     # --- transport ---
 

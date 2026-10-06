@@ -199,6 +199,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~57~~ | ~~**バイナリがモジバケとして索引される**~~ → **解消済み(v0.2.673)** | 「バイナリファイルはテキストとして索引されてしまうか」の問いで発掘: `_decode`のutf-8-sig→cp932→`errors="replace"`連鎖は**全バイト列を必ず文字列化**するため、.txt/.md名のバイナリが`\ufffd`まみれのゴミチャンクとして索引されBM25/ベクトル脚を汚染(実測50-100%置換)。デコード結果の置換+制御文字密度>20%で`INGEST_BINARY`拒否(file/URL/HTML一点)＋BOM無しUTF-16/32のNUL位置パターン検出で広codec救出(交互NULのロッシー経路を解消)。NUL-only/純置換フォールバックは誠実な再分類で契約追随 |
 | ~~58~~ | ~~**「データは端末を離れない」約束が設定で静かに破れうる**~~ → **解消済み(v0.2.674)** | 同問いで発掘: `SHOIN_LLM_URL`が非ループバックを指すと、チャンク本文(embeddings)と質問+コンテキスト(chat)が外部送信されるのに発見経路がゼロ。`endpoint_is_external`(localhost/.localhost/loopback/unspecifiedのみlocal——LAN IP・DNS名はexternal)を新設し、LLMClient構築時のstderr一回警告・`GET /api/health`の`llm_external`・`shoin health`のstderr警告(ja/en)で3面可視化。remote endpointは合法な選択のため拒否ではなく警告 |
 | ~~59~~ | ~~**URL userinfo資格情報が表示経路へ逐字漏洩**~~ → **解消済み(v0.2.675)** | 「機密はエラー/診断経路に漏れないか」の問いで発掘: `http://user:pass@host`形のエンドポイントURLが、LLMClient構築時警告(674で追加した自身の表面)・`SYSTEM_SERVICE_UNAVAILABLE`メッセージ(chat/stream両面——SSE/UI/stderr/ログへ伝播)・`shoin health`行へ資格込みで逐字表示。`redact_url_credentials`(authority内の`@`のみ除去——host/port/path/query保持・query内`@`は非資格で温存・malformedでも無raise)を新設し表示のみに適用(リクエストは生URL継続) |
+| ~~60~~ | ~~**平文HTTP経路へBearer資格情報が流出**~~ → **解消済み(v0.2.676)** | 「秘密の送信経路は暗号化されているか」の問いで発掘: `http://`+外部エンドポイント+APIキーの組合せで Bearer トークンが平文でワイヤを流れる構成——各要素は合法だが合成で漏洩。`LLMClient.__init__`で3条件揃合時のみstderr警告(https://とloopback httpは免除——TLS保護済/マシンを出ない)。拒否でなく警告(信頼済みLAN構成は合法選択) |
 
 ### 解決済み(記録)
 

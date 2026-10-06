@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.675")
+        self.assertEqual(VERSION, "0.2.676")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -8914,6 +8914,40 @@ class TestLLMClient(unittest.TestCase):
         # the real URL still drives the request itself (redact is
         # display-only — requests keep their credentials)
         self.assertEqual(client.base_url, url.rstrip("/"))
+
+    def test_plaintext_credential_warning(self) -> None:
+        """v0.2.676 (product-review #60): http:// + external endpoint +
+        API key composes into a Bearer token on the wire in cleartext —
+        each property legal alone, leaky together. Warn at construction;
+        loopback http and https exempt."""
+        import io
+        import os
+
+        from shoin.llm import LLMClient
+
+        ext = "http://llm.example.com:9000/v1"
+        with patch.dict(os.environ, {"SHOIN_LLM_API_KEY": "k" + "1"}):
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url=ext)
+            self.assertIn("unencrypted", err.getvalue())
+            # https:// encrypts the wire — no plaintext warning.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url="https://llm.example.com/v1")
+            self.assertNotIn("unencrypted", err.getvalue())
+            # loopback http never leaves the machine — exempt.
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url="http://127.0.0.1:11434/v1")
+            self.assertNotIn("unencrypted", err.getvalue())
+        # no key configured → nothing on the wire to protect.
+        env2 = {"SHOIN_LLM_API_KEY": ""}
+        with patch.dict(os.environ, env2):
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                LLMClient(base_url=ext)
+            self.assertNotIn("unencrypted", err.getvalue())
 
     def test_malformed_base_url_raises_llmerror_on_every_path(self) -> None:
         """An unclosed IPv6 bracket in base_url ("http://[::1:11434/v1") makes
@@ -19946,6 +19980,10 @@ class TestResidualGuards(unittest.TestCase):
             # config.py +1: endpoint_is_external's hostname compare —
             # DNS names are ASCII-case-insensitive by spec (v0.2.674).
             "config.py": 3, "ingest.py": 4, "search.py": 4,
+            # llm.py +1: cleartext-credential warning's scheme compare —
+            # URI schemes are ASCII-case-insensitive by RFC 3986 §3.1
+            # (v0.2.676).
+            "llm.py": 1,
             "server.py": 3, "store.py": 2,
         }
         actual: dict[str, int] = {}
