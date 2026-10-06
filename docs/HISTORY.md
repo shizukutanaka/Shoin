@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.682
+## Version History: v0.1.37 → v0.2.683
+
+### v0.2.683 — trash系deleteをBEGIN IMMEDIATE化(serialize→DELETE間TOCTOU閉塞)
+
+- **Devin Review finding修正(#358のbug #2)**: `delete_notebook`/`delete_source`/`delete_note`はアーカイブpayloadを`with self.conn:`**外**のauto-commit SELECTで読み取り、INSERT..DELETE間だけTX化していた——deferred beginのためpayload読取はwrite lock無しで走り、serializeとDELETEの隙間に別writerがコミットした行(add_source/add_chunks/add_note/add_message/update系)は**アーカイブ無しでcascade削除**され不可逆消失(undo-log契約の破断)
+- **全3経路を`with`ブロック先頭の`BEGIN IMMEDIATE`へ**: payload読取自体がwrite lock下で走り、WAL単一writer制約で外部コミットはTX期間中busy_timeout待ち——payloadが削除対象と必ず同一スナップショットを映す
+- **境界(記録)**: delete開始後に届いた書込はロック解放後に実行されるが、その時点では対象行は既に削除済み——FK ONで未親行はrefuse(従来と同じ拒否経路)
+- **行動ピン1件**: 3経路それぞれのserialize時点でin_transactionかつ外部writer(50ms busy_timeout)のINSERTがblocked——deferred beginでは即コミット成功するためfixの実在を直接実証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(BEGIN IMMEDIATEはSQLリテラル)
 
 ### v0.2.682 — dedupeは同一コーパス限り(編集済みchunkの消失を閉塞)
 

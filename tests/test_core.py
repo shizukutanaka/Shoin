@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.682")
+        self.assertEqual(VERSION, "0.2.683")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22116,6 +22116,58 @@ class TestTrash(unittest.TestCase):
                 1,
             )
             self.assertEqual(s.trash_list(), [])  # archive consumed
+
+    def test_deletes_serialize_under_write_lock(self) -> None:
+        """v0.2.683 (Devin Review #358 finding #2): the archive payload used to
+        be serialized BEFORE the write lock was taken — a row committed by
+        another writer in the serialize→DELETE gap was removed without ever
+        entering the archive (TOCTOU). Each trash delete now opens with
+        BEGIN IMMEDIATE inside `with self.conn:`, so the payload read itself
+        runs under the write lock. Pin: at each delete's serialization seam
+        the connection is in_transaction AND the lock is real — a foreign
+        writer with a tiny busy_timeout fails instead of interleaving."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            nb_id = seed(s)
+            src_id = int(
+                s.conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+            )
+            note_id = s.add_note(nb_id, "m", "本文")
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_get_source = s.get_source
+            s.get_source = lambda i: (probe(), orig_get_source(i))[1]
+            s.delete_source(src_id)
+
+            orig_touch = s.touch_notebook
+            s.touch_notebook = lambda i: (probe(), orig_touch(i))
+            s.delete_note(note_id)
+
+            orig_tree = s._notebook_tree_payload
+            s._notebook_tree_payload = lambda i: (probe(), orig_tree(i))[1]
+            s.delete_notebook(nb_id)
+
+        self.assertEqual(seen, [True, True] * 3)
 
     def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
         """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take

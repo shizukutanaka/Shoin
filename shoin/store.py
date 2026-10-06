@@ -890,9 +890,15 @@ class Store:
         # Undo-log trash (v0.2.654): archive-then-delete in ONE
         # transaction — the undo record can never be missing for a
         # committed delete, and live read paths need no filter changes.
-        nb = self.get_notebook(notebook_id)
-        payload = self._notebook_tree_payload(notebook_id)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): take the write lock BEFORE the
+            # payload read. With the default deferred begin, the
+            # auto-commit payload SELECTs ran under no lock — a row
+            # committed by another writer in the gap between serialize
+            # and DELETE was removed without ever being archived.
+            self.conn.execute("BEGIN IMMEDIATE")
+            nb = self.get_notebook(notebook_id)
+            payload = self._notebook_tree_payload(notebook_id)
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload)"
                 " VALUES(?,?,?,?)",
@@ -1771,23 +1777,27 @@ class Store:
         }
 
     def delete_source(self, source_id: int) -> None:
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         # Undo-log trash (v0.2.667): same archive-then-delete TX as
         # delete_notebook — a deleted upload whose tmp origin is long
         # gone is unrecoverable without this record. Chunks ride in the
         # payload (base64 embeddings) and re-fire FTS triggers on restore.
-        src_row = self.conn.execute(
-            "SELECT * FROM sources WHERE id=?", (source_id,)
-        ).fetchone()
-        payload = json.dumps(
-            {
-                "kind": "source",
-                "source": dict(src_row) if src_row is not None else {},
-                "chunks": self._chunk_dicts(source_id),
-            },
-            ensure_ascii=False,
-        )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): same TOCTOU as delete_notebook —
+            # the payload read must run under the write lock or a
+            # concurrent refresh/commit is deleted unarchived.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+            src_row = self.conn.execute(
+                "SELECT * FROM sources WHERE id=?", (source_id,)
+            ).fetchone()
+            payload = json.dumps(
+                {
+                    "kind": "source",
+                    "source": dict(src_row) if src_row is not None else {},
+                    "chunks": self._chunk_dicts(source_id),
+                },
+                ensure_ascii=False,
+            )
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
                 " VALUES(?,?,?,?,'source')",
@@ -2301,13 +2311,17 @@ class Store:
         )
 
     def delete_note(self, note_id: int) -> None:
-        row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
-        if row is None:
-            raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
         # Undo-log trash (v0.2.667): a user-typed note is unrecoverable
         # text — same archive-then-delete contract as notebook/source.
-        payload = json.dumps({"kind": "note", "note": dict(row)}, ensure_ascii=False)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): the row SELECT must run under
+            # the write lock — an update committed between read and
+            # delete used to be archived stale and removed fresh.
+            self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
+            if row is None:
+                raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
+            payload = json.dumps({"kind": "note", "note": dict(row)}, ensure_ascii=False)
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
                 " VALUES(?,?,?,?,'note')",
