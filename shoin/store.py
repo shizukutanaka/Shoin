@@ -1456,14 +1456,16 @@ class Store:
         the same re-keying as duplicate/import (chunk source_ids and
         citation_report source_id_maps remapped, embeddings carried
         verbatim, FTS re-indexed on INSERT). The source notebook is
-        then deleted through delete_notebook, which archives the whole
-        tree to trash in the same transaction: a merge is recoverable
-        via `trash restore`.
+        then archived to trash and deleted in the same transaction:
+        a merge is recoverable via `trash restore`.
 
-        Ordering is copy-then-delete, two transactions: a crash
-        mid-merge can duplicate content (target gains the rows, source
-        still lives and can be retried or trashed by hand), never
-        lose it.
+        One transaction (v0.2.687): serialize, copy, archive and delete
+        all run under a single BEGIN IMMEDIATE write lock. The earlier
+        two-transaction shape serialized the source under auto-commit
+        and deleted afterwards — a row committed by another writer in
+        between was archived into trash but never copied into the
+        target. A crash anywhere now rolls the whole merge back:
+        nothing is duplicated, nothing is dropped.
         """
         self.get_notebook(target_id)
         self.get_notebook(source_id)
@@ -1472,12 +1474,20 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 "cannot merge a notebook into itself",
             )
-        doc = self._notebook_tree_dict(source_id)
-        try:
-            for c in doc["chunks"]:
-                if c["embedding"] is not None:
-                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
-            with self.conn:
+        with self.conn:
+            # Re-probe + serialize under the write lock: an existence
+            # result older than the lock is stale, and serialize-then-
+            # delete must not observe a tree that changed mid-way.
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.get_notebook(target_id)
+            try:
+                doc = self._notebook_tree_dict(source_id)
+                payload = json.dumps(doc, ensure_ascii=False)
+                for c in doc["chunks"]:
+                    if c["embedding"] is not None:
+                        c["embedding"] = base64.b64decode(
+                            c["embedding"]["$blob"]
+                        )
                 self._insert_tree_rows(
                     target_id,
                     doc["sources"],
@@ -1486,14 +1496,28 @@ class Store:
                     doc["studio_outputs"],
                     doc["messages"],
                 )
+                # The archive is the same serialized tree — under the
+                # lock it is exactly what the delete removes.
+                self.conn.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(?,?,?,?)",
+                    (
+                        source_id,
+                        doc["notebook"]["name"],
+                        _now(),
+                        payload,
+                    ),
+                )
+                self.conn.execute(
+                    "DELETE FROM notebooks WHERE id=?", (source_id,)
+                )
                 self.touch_notebook(target_id)
                 self._optimize_fts()
-        except (KeyError, TypeError, ValueError) as exc:
-            raise StoreError(
-                "SYSTEM_INTERNAL_ERROR",
-                f"notebook {source_id} tree could not be serialized",
-            ) from exc
-        self.delete_notebook(source_id)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StoreError(
+                    "SYSTEM_INTERNAL_ERROR",
+                    f"notebook {source_id} tree could not be serialized",
+                ) from exc
         return self.get_notebook(target_id)
 
     def touch_notebook(self, notebook_id: int) -> None:

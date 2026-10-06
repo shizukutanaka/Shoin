@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.686")
+        self.assertEqual(VERSION, "0.2.687")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22906,10 +22906,17 @@ class TestNbExportImport(unittest.TestCase):
 class TestNbMerge(unittest.TestCase):
     """merge_notebooks (v0.2.656): folds one notebook's tree into another
     under fresh ids — the merge half of ledger #23 duplicate_notebook
-    left open. The emptied source is archived to trash by
-    delete_notebook in the same delete TX, so a merge is recoverable;
-    copy commits before the delete begins, so a crash can duplicate
-    content but never lose it."""
+    left open. v0.2.687 makes it one transaction: serialize, copy,
+    archive and delete all run under a single BEGIN IMMEDIATE — a crash
+    rolls everything back and no foreign commit can slip a row into the
+    archive that the copy never saw."""
+
+    def _tmpdb(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
 
     def test_merge_folds_children_and_trashes_source(self) -> None:
         with make_store() as s:
@@ -23128,6 +23135,74 @@ class TestNbMerge(unittest.TestCase):
             # A failed merge writes nothing: both notebooks still live,
             # nothing was archived.
             self.assertEqual(len(s.list_notebooks()), 2)
+
+    def test_merge_runs_under_one_write_lock(self) -> None:
+        """v0.2.687: serialize→copy→archive→delete inside one BEGIN
+        IMMEDIATE — pin in_transaction at the serialize and optimize
+        seams plus a blocked foreign writer (tiny busy_timeout), the
+        same probe style as the delete/restore lock pins."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            target = s.create_notebook("取込先")
+            src_nb = seed(s)
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_tree = s._notebook_tree_dict
+            s._notebook_tree_dict = lambda i: (probe(), orig_tree(i))[1]
+            orig_opt = s._optimize_fts
+            s._optimize_fts = lambda: (probe(), orig_opt())
+
+            merged = s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(merged.id, target.id)
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(src_nb)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(len(s.trash_list()), 1)
+
+        self.assertEqual(seen, [True, True] * 2)
+
+    def test_merge_copy_failure_rolls_back_everything(self) -> None:
+        """v0.2.687: a copy-side failure aborts the single TX — source
+        notebook stays live and unarchived, target unchanged. The old
+        two-TX shape committed the copy separately, so this is also the
+        crash-atomicity pin."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            t_src = s.add_source(target.id, "txt", "t", "mem://t", "sha-t")
+            s.add_chunks(t_src.id, ["対象側本文"])
+            src_nb = seed(s)
+            before = s.counts(target.id)
+
+            def boom(*_a: object, **_k: object) -> None:
+                raise ValueError("bad tree")
+
+            s._insert_tree_rows = boom
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            s.get_notebook(src_nb)  # still live
+            self.assertEqual(s.trash_list(), [])
+            self.assertEqual(s.counts(target.id), before)
             self.assertEqual(s.trash_list(), [])
 
     def test_cli_notebook_merge(self) -> None:

@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.686
+## Version History: v0.1.37 → v0.2.687
+
+### v0.2.687 — mergeを単一TX化(serialize→delete間の零落閉塞)
+
+- **新規短所71解消(ソクラテス問いで発掘)**: 「683/685で塞いだcheck-then-actギャップは書込系の残経路にも無いか」——`merge_notebooks`はsource nbをauto-commitでserialize(`_notebook_tree_dict`)し、copy TXコミット後に`delete_notebook`を2段実行していた。serialize〜delete間に外部writerがsource nbへコミットすると、その行はdelete側のarchiveに入るがcopyには含まれず、mergeの「全内容がtargetへ」契約から零落(手動trash restoreでのみ回復可能・lostでなくmisplacedだが不変条件違反)
+- **単一BEGIN IMMEDIATE化**: serialize→copy→archive→deleteを1TXへ——「コミット間のduplicate許容」より強い原子性(crash時も全rollbackでduplication/loss共にゼロ)。archive payloadは同一serialize結果を流用(ロック下で「消したもの」と「コピーしたもの」が同一であることを保証)
+- **archiveはdelete_notebookと同形**: `INSERT INTO trash_items(notebook_id, name, deleted_at, payload)`を直接実行(ネストしたwith不可のためinline)——`trash_restore`/`trash_list`の挙動は不変、巻戻しでmerge前のsource nbが復元される既存契約を維持
+- **re-probe**: ロック獲得後にtargetの存在を再確認——ロック獲得前のprobe結果は陳腐化し得る(683と同じ防御形)
+- **行動ピン2件**: ①serialize/optimize両シームでin_transaction=True+外部writer 50ms busy_timeout blocked ②copy失敗で全rollback( source nb生存・trash 0件・target不変——crash原子性ピン )
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.686 — nbツリーrestoreの子行をfresh rowid化(rowid再利用によるPK衝突閉塞)
 
