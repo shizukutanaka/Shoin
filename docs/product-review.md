@@ -154,7 +154,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 12 | **画像・表の構造抽出が無い** | HTML img/表は alt テキスト程度まで。図表の意味は検索対象にならない |
 | 13 | ~~**CLI ask は非ストリーミング**~~ → **解消済み** (v0.2.635) | `ask()` が `on_delta` コールバックを受理し、chat_stream 搭載バックエンドでは逐字トークンを stdout へ即時転送(連結結果が永続回答と同一のため stdout バイト同一)。chat_stream 非搭載の最小 ChatBackend は従来の一括 chat() 経路へ自動退避 |
 | 14 | **同義語・語彙拡張が浅い** | term_variants は字形変換のみ。「車↔自動車」「PC↔パソコン」のような意味的同義語は BM25 では拾えず vector leg 頼み |
-| 15 | **英語ステミング無し** | run/running/ran のような活用は trgram/LIKE では別語扱い。EN コーパスの再現率を下げる |
+| ~~15~~ | ~~**英語ステミング無し**~~ → **解消済み** (台帳誤記 — `_stem_variants` v0.2.536 で規則活用は橋渡し済: documents→document・running→run・quickly→quick・closed family のみ。ran→run の不規則形は残存) |
 | 16 | ~~**ベクトル埋込みのバッチ化なし**~~ → **解消済み** (台帳誤記 — `_embed_chunks` は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ `llm.embed(batch)` で既実装。v0.2.648 実測確認) |
 | 17 | **埋込みモデル変更時の自動再索引なし** | `_check_embed_model_ok` は不一致検出→vector leg無効化まで。再indexは `reindex` の手動実行が要る |
 | 18 | ~~ファイルソースの refresh 非対応~~ → **解消済み** (v0.2.633) | ファイル源は記録 origin パスを再読込。消失済みは `INGEST_FETCH_FAILED`、detail の `refreshable` で UI の↻表示を制御 |
@@ -182,7 +182,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 40 | **API のバージョニング無し** | `/api/...` にはバージョン prefix が無く、後方互換ポリシーが暗黙 |
 | 41 | **FTS5 trigram の索引サイズ** | trigram 索引は3gram全展開で文書サイズに対し大きめ。超大容量ではDBサイズが膨らむ(50,000チャンク上限内では実害小) |
 | ~~42~~ | ~~スペルミス/クエリ訂正なし~~ | **解消 v0.2.650** — ゼロ件時`POST /api/search`・nb_search・`shoin search`へ`suggestions`フィールド追加 (corpus最近接表層形上限3) |
-| 43 | **推奨質問が LLM 依存** | questions の品質は接続先モデルの力量に依存。モデル不在時は空配列で機能しない |
+| ~~43~~ | ~~**推奨質問が LLM 依存**~~ | **解消 (v0.2.660)**: LLM 不通時に `_title_questions` がソースタイトル由来の骨格質問(eval --gen と同型・i18n済)を最大n件返す——到達不能が「質問ゼロ」と混同されない。URL酷似/61字超/fold重複タイトルは skip、LLM 応答済みで質問形0行は従来通り[](到達したが何も選ばなかった≠到達不能) |
 | 44 | ~~**eval cases の生成支援なし**~~ → **解消済み** (v0.2.651: `shoin eval <nb> --gen` がチャンクを持つソース1件=1ケースの雛形を生成——`sources`は実際のidを運び質問文は手直し前提) |
 | 45 | ~~**観測性が SHOIN_DEBUG のみ**~~ → **解消済み** (v0.2.652: `SHOIN_LOG_JSON=1`でJSON Linesイベントログ——`source_indexed`/`ask_completed`がID・件数・ms・degradedをstderr emit。`_PRIVATE_FIELDS`フィルタで本文流出不可。trace層は設計上不要として残) |
 | 46 | **Windows 未検証** | 開発・検証は macOS/Linux 前提。`shell=False` 設計とパス処理は概ね移植可能だが実機検証履歴が無い |

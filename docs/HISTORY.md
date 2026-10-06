@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.659
+## Version History: v0.1.37 → v0.2.660
+
+### v0.2.660 — 推奨質問の決定論フォールバック
+
+- **短所43解消**: `suggest_questions` は `llm.chat` の LLMError で空配列を返し、モデル不在のノートブックが「尋ねるものが無い」と誤読された。LLM 不通時に `_title_questions` がソースタイトル由来の骨格質問(eval --gen と同型: `「<題>」とは何ですか` / `What is "<title>"?`、i18n済 `{title}` パリティ)を最大 n 件返す——到達不能を「質問ゼロ」と混同しない
+- **設計上の境界**: LLM が応答したが質問形の行を出さなかった場合は従来通り [] ——「到達したが何も選ばなかった」は正直な結果で「到達不能」とは別契約。URL酷似・61文字超・fold 重複のタイトルは引用せずスキップ。タイトル辞書は `sources_for_notebook` を一括取得した id→title マップで、取得と消失の間にソースが消えても map 非存在で黙って捌く(except 不使用・新規 except ゼロ)
+- **台帳誤記 #15**: 英語ステミングは `_stem_variants` (v0.2.536) で規則活用を既に橋渡し(documents→document・running→run・quickly→quick) —— product-review #15 を解消済みへ修正。ran→run の不規則形のみ残存として明示
+- **行動ピン4件**: LLM不通→タイトル質問列・URL/長大/重複タイトル skip・n 上限・全タイトル不適→[](旧契約ピンを新契約へ更新)
+- **カタログ追随**: i18n `question_fallback` ja/en `{title}` パリティ(_t kwarg ピン通過)
 
 ### v0.2.659 — ノートブック単位設定 (settings)
 

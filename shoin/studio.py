@@ -90,6 +90,13 @@ _STRINGS: dict[str, dict[str, str]] = {
             "one per line, no decoration."
         ),
     },
+    # v0.2.660 (product-review #43): deterministic suggestion shape when the
+    # LLM is unreachable — same "tell me about the title" skeleton eval
+    # --gen emits, so an unreachable model never collapses the surface to [].
+    "question_fallback": {
+        "ja": "「{title}」とは何ですか",
+        "en": "What is \"{title}\"?",
+    },
 }
 
 # _LIST_PREFIX_RE moved to qa.py (v0.2.125): rewrite_queries() parses the same
@@ -249,7 +256,10 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
             ]
         )
     except LLMError:
-        return []
+        # Model unreachable must not read as "this notebook has nothing
+        # worth asking" — fall back to title-derived skeleton questions
+        # (v0.2.660, product-review #43).
+        return _title_questions(store, notebook_id, hits, n)
     # Question detection is shared with citation.py's uncited_sentences() via
     # looks_like_question() — see that function's docstring for why this used to
     # be two independently-drifting copies of the same heuristic.
@@ -275,3 +285,50 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
             seen.add(key)
             questions.append(q)
     return questions[:n]
+
+
+# Titles longer than this are skipped rather than wrapped — a filename dump
+# or near-pathological title would produce a suggestion the /ask surface
+# itself reads as noise (and 60 + the template wrap stays far under
+# MAX_QUESTION_LEN).
+_FALLBACK_TITLE_MAX = 60
+
+
+def _title_questions(
+    store: Store, notebook_id: int, hits: list[Hit], n: int
+) -> list[str]:
+    """Deterministic question seeds derived from source titles (v0.2.660).
+
+    suggest_questions() calls this only when llm.chat raised LLMError — a
+    model that answered but produced no question-shaped lines still returns
+    [], because "reachable and chose nothing" is honest where "unreachable"
+    is not. Title questions are answerable by construction (their source is
+    in the notebook) but deliberately shallow — they name a source, not a
+    theme inside it, mirroring the eval --gen skeleton. URL-lookalike,
+    oversized, and duplicate-folded titles are skipped; a hit whose source
+    disappeared between the two reads is simply absent from the map.
+    """
+    titles = {s.id: s.title for s in store.sources_for_notebook(notebook_id)}
+    out: list[str] = []
+    seen: set[str] = set()
+    done: set[int] = set()
+    for h in hits:
+        if h.source_id in done or h.source_id not in titles:
+            continue
+        done.add(h.source_id)
+        title = unicodedata.normalize("NFKC", titles[h.source_id]).strip()
+        if (
+            not (2 <= len(title) <= _FALLBACK_TITLE_MAX)
+            or "://" in title
+            or title.startswith("www.")
+        ):
+            continue
+        key = _match_fold(title)
+        if key in seen:
+            continue
+        seen.add(key)
+        # _t call sites must supply their placeholders inline (i18n pin).
+        out.append(_t("question_fallback").format(title=title))
+        if len(out) >= n:
+            break
+    return out

@@ -283,9 +283,40 @@ class StudioTest(unittest.TestCase):
         empty = self.store.create_notebook("空")
         self.assertEqual(suggest_questions(self.store, FakeLLM(), empty.id), [])
 
-    def test_suggest_questions_llm_unavailable_returns_empty(self) -> None:
-        """DoD: suggest_questions degrades gracefully when LLM is down (graceful degradation)."""
-        self.assertEqual(suggest_questions(self.store, FakeLLM(chat_error=True), self.nb), [])
+    def test_suggest_questions_llm_unavailable_falls_back_to_titles(self) -> None:
+        """v0.2.660 (product-review #43): an unreachable model must not
+        collapse the suggestion surface to [] — the notebook's own source
+        titles yield deterministic skeleton questions (the eval --gen
+        shape), answerable by construction."""
+        qs = suggest_questions(self.store, FakeLLM(chat_error=True), self.nb)
+        self.assertEqual(qs, ["「資料1」とは何ですか", "「資料2」とは何ですか"])
+
+    def test_suggest_questions_fallback_skips_unusable_titles(self) -> None:
+        """URL-lookalike, oversized, and fold-duplicate titles are skipped
+        rather than quoted verbatim; every title unusable still yields []."""
+        nb = self.store.create_notebook("n")
+        url = self.store.add_source(nb.id, "txt", "https://example.com/x", "/u", "h1")
+        long_ = self.store.add_source(nb.id, "txt", "長" * 61, "/l", "h2")
+        good = self.store.add_source(nb.id, "txt", "鍵となる資料", "/g", "h3")
+        dup = self.store.add_source(nb.id, "txt", "鍵となる資料", "/g2", "h4")
+        for src in (url, long_, good, dup):
+            self.store.add_chunks(src.id, ["本文テキスト。"])
+        qs = suggest_questions(self.store, FakeLLM(chat_error=True), nb.id)
+        self.assertEqual(qs, ["「鍵となる資料」とは何ですか"])
+
+    def test_suggest_questions_fallback_empty_when_no_clean_titles(self) -> None:
+        nb = self.store.create_notebook("n")
+        src = self.store.add_source(nb.id, "txt", "https://example.com", "/u", "h1")
+        self.store.add_chunks(src.id, ["本文テキスト。"])
+        self.assertEqual(
+            suggest_questions(self.store, FakeLLM(chat_error=True), nb.id), []
+        )
+
+    def test_suggest_questions_fallback_respects_n(self) -> None:
+        qs = suggest_questions(
+            self.store, FakeLLM(chat_error=True), self.nb, n=1
+        )
+        self.assertEqual(qs, ["「資料1」とは何ですか"])
 
     def test_suggest_questions_bare_question_mark_rejected(self) -> None:
         """A lone '?' (1 char) must not be accepted as a question — minimum length is 2."""

@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.659")
+        self.assertEqual(VERSION, "0.2.660")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19074,7 +19074,9 @@ class TestResidualGuards(unittest.TestCase):
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).
             "store.py": 3,
-            "studio.py": 1,
+            # studio.py -1→0: suggest_questions' LLMError handler no longer
+            # returns a literal [] — it calls _title_questions (real fallback
+            # work, v0.2.660), so it leaves the silent-default class entirely.
         }
         actual: dict[str, list[str]] = {}
         trivial: dict[str, int] = {}
