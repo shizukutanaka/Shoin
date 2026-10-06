@@ -27,6 +27,7 @@ from .citation import make_report
 from .config import (
     API_VERSION,
     EMBED_MODEL_SETTING_KEY,
+    MAX_IN_FLIGHT_REQUESTS,
     MAX_QUESTION_LEN,
     MAX_SCOPE_IDS,
     MAX_TITLE_LEN,
@@ -1691,6 +1692,29 @@ class _HTTPServer(ThreadingHTTPServer):
     # dead-at-exit thread strictly correct (the same choice python -m
     # http.server makes).
     daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._in_flight = threading.BoundedSemaphore(MAX_IN_FLIGHT_REQUESTS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # v0.2.691 (product-review #75): cap in-flight connections — each
+        # accepted connection used to spawn a thread with no ceiling, so a
+        # connection flood exhausted threads before REQUEST_SOCKET_SEC ever
+        # freed one. Acquiring here (in the accept loop) parks excess clients
+        # in the kernel listen backlog instead of spawning unbounded
+        # threads; the slot is returned by process_request_thread's finally.
+        # If Thread.start() itself fails, stdlib's own except handles the
+        # request internally — the semaphore is precisely what keeps that
+        # failure unreachable, so the (unreachable) slot leak needs no code.
+        self._in_flight.acquire()
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._in_flight.release()
 
     def server_bind(self) -> None:
         # stdlib HTTPServer.server_bind calls socket.getfqdn(host) — a PTR

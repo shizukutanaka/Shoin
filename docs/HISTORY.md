@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.690
+## Version History: v0.1.37 → v0.2.691
+
+### v0.2.691 — HTTP同時接続数をセマフォで上限化(MAX_IN_FLIGHT_REQUESTS)
+
+- **新規短所75解消(ソクラテス問いで発掘)**: 「寿命が有界でも数が無制限の資源は残っていないか」——`ThreadingHTTPServer`は接続ごとにスレッドを**無制限生成**する。`REQUEST_SOCKET_SEC`(120s)は各接続の寿命を制限するが接続「数」は無制限のまま、ローカルの暴走/敵性プロセスが数千接続を保持するとスレッド枯渇(約8MB/スレッドのスタック→メモリ枯渇またはcan't start new thread)——タイムアウトが効く前に全要求が失敗する回復不能経路
+- **`MAX_IN_FLIGHT_REQUESTS = 64`**: `process_request`でBoundedSemaphoreをaccept loop内acquire——過剩接続はカーネルlisten backlogへ滞留(無制限スレッドではなく有界待機)。スロットは`process_request_thread`のfinallyで確実解放、各保持はREQUEST_SOCKET_SECで有界のためプールは原理的にデッドロック不能
+- **行動ピン1件**: cap=1で第1接続(partial request占有)中に第2接続の完全要求が1秒で応答なし(ゲート滞留)→第1切断後にスロット解放・第2要求が200応答——滞留と解放の両面を実ソケットで検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(追加は既存stdlibメソッドのオーバーライドのみ)
 
 ### v0.2.690 — evalのcases/--diff baseline文書をMAX_IMPORT_BYTESで上限化
 

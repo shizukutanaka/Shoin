@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.690"
+VERSION = "0.2.691"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -27,9 +27,18 @@ URL_MAX_REDIRECTS = 3
 # client that opens a socket and sends nothing (or a partial body) holds its
 # request thread forever — unbounded local connection leaks exhaust threads.
 REQUEST_SOCKET_SEC = 120
+# v0.2.691: bound on in-flight HTTP connections. ThreadingHTTPServer spawns
+# one handler thread per accepted connection with no ceiling — the socket
+# timeout caps each connection's LIFETIME but nothing caps the COUNT, so a
+# local process holding thousands of connections exhausts threads/memory
+# long before any timeout frees them. 64 slots turn excess connections into
+# kernel-backlog queueing (a bounded wait) instead of unbounded threads;
+# every slot's hold is still capped by REQUEST_SOCKET_SEC, so the pool
+# cannot deadlock — a stalled slot always frees within the timeout.
+MAX_IN_FLIGHT_REQUESTS = 64
 MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
 # v0.2.681: bound on a JSON document the CLI slurps into memory at once —
-# the `shoin import` file/stdin and (v0.2.690) the `shoin eval` cases file.
+# the `shoin import` file/stdin and (v0.2.691) the `shoin eval` cases file.
 # Both used to be read in full uncapped, so a hostile or accidental giant
 # document OOM-killed the process mid-parse. 1 GiB leaves headroom over
 # the largest legit export (~50k chunks × text + base64 embedding ≈ a few

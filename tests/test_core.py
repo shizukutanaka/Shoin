@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.690")
+        self.assertEqual(VERSION, "0.2.691")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -20720,7 +20720,12 @@ class TestResidualGuards(unittest.TestCase):
             # fields) — monotonic durations, not clock reads.
             "pipeline.py": ["time.monotonic", "time.monotonic"],
             "qa.py": ["threading.Lock", "time.monotonic", "time.monotonic"],
-            "server.py": ["threading.Lock", "threading.Lock"],
+            # v0.2.691: the in-flight request cap — a bounded semaphore is
+            # the concurrency primitive, not a new thread source.
+            "server.py": [
+                "threading.BoundedSemaphore",
+                "threading.Lock", "threading.Lock",
+            ],
         }
         actual: dict[str, list[str]] = {}
         sites: list[str] = []

@@ -1393,6 +1393,62 @@ class ServerTest(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
         self.assertTrue(srv.daemon_threads)
 
+    def test_inflight_semaphore_bounds_handler_threads(self) -> None:
+        """v0.2.691 (product-review #75): ThreadingHTTPServer spawned one
+        thread per connection with no ceiling — the socket timeout caps each
+        connection's LIFETIME but nothing capped the COUNT, so a connection
+        flood exhausted threads before a timeout ever freed one. The
+        MAX_IN_FLIGHT_REQUESTS semaphore parks excess connections in the
+        kernel backlog and returns the slot when the handler exits."""
+        import socket
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "MAX_IN_FLIGHT_REQUESTS", 1):
+            srv = srv_mod.make_server(
+                port=0, db=str(Path(self.tmp.name) / "s-cap.db"), llm=FakeLLM()
+            )
+        th = _th.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+        th.start()
+        held = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+        waiter = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+        try:
+            # Partial request line parks this connection's handler in
+            # rfile.read() — it owns the only slot for the rest of the test.
+            held.sendall(b"GET /api/health HT")
+            deadline = time.monotonic() + 5
+            while srv._in_flight.acquire(blocking=False):
+                srv._in_flight.release()
+                if time.monotonic() > deadline:
+                    self.fail("held connection never took the slot")
+                time.sleep(0.02)
+            # The second connection is accepted but parked at the gate: its
+            # complete request gets no response while the slot is taken.
+            waiter.settimeout(1.0)
+            waiter.sendall(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            with self.assertRaises(TimeoutError):
+                waiter.recv(1)
+            # Dropping the held connection frees the slot; the parked request
+            # is now served from the bytes already in its send buffer.
+            held.close()
+            waiter.settimeout(5.0)
+            head = b""
+            while b"\r\n" not in head:
+                chunk = waiter.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            self.assertIn(b" 200 ", head.split(b"\r\n", 1)[0] + b" ")
+        finally:
+            held.close()
+            waiter.close()
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+
     def test_json_body_deep_nesting_returns_400(self) -> None:
         """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
         and raises RecursionError — a malformed input that must still map to
