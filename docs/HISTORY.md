@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.660
+## Version History: v0.1.37 → v0.2.661
+
+### v0.2.661 — 埋込みモデル変更の可視化(クエリ時ヒント + health 面)
+
+- **短所17解消**: 埋込みモデル変更後、`_check_embed_model_ok` が不一致を検出して vector leg を止めても、**クエリ時は完全に静か**だった——index 時の `_embed_chunks` Warning はクエリ専任のセッション/Web ユーザーへ届かず、ask/search が理由不明で BM25-only へ退落していた
+- **クエリ時ヒント**: `_check_embed_model_ok` が不一致時に stderr へ修復ヒント(`old→new` モデル名+`shoin reindex <nb>`、i18n)を1行出力——CLI ask/search・サーバ ask/SSE の全クエリ時経路が単一点でカバーされる
+- **health 面 (REQ-103 両面)**: `GET /api/health` に `indexed_embed_model`(索引済みモデル)+`embed_model_changed` ブールを追加。`shoin health` は索引済みモデル行を出力し、不一致時に同一ヒントを stderr へ
+- **静かな述語**: `_embed_model_stale(store, current_model)` を分離——`_check_embed_model_ok` は stderr 副作用を持つため health ポーリング(数秒毎のUIランプ)が呼べない。同一述語を副作用無しで読める
+- **health の耐性契約**: `_h_health`/`_cmd_health` の Store 読みは best-effort (`except (StoreError, sqlite3.OperationalError)`) —— DB が壊れていること自体が診断対象であり、診断面が一緒に死んではならない。空フィールドは「不明」を意味する
+- **設計上の境界**: 自動再 index は索引全再計算を暗黙起動する重い mutation のため採らず——「静かに死ぬ」→「可視+一発コマンドで直せる」の境界で解消
+- **行動ピン7件**: stderr ヒント(old/new/reindex 含有)・静かな述語(stale/match/empty/disabled 4分岐+stderr 無出力)・health API フィールド(既定/mismatch/broken-DB 耐性)・CLI health 行+hint・test_workflow の既定フィールド
+- **カタログ追随**: except +2(cli health・_h_health の防御)・trivial-body +2・import catalog qa.py `sys`・server.py `sqlite3`+`_embed_model_stale`+`EMBED_MODEL_SETTING_KEY`・cli.py `EMBED_MODEL_SETTING_KEY`
 
 ### v0.2.660 — 推奨質問の決定論フォールバック
 

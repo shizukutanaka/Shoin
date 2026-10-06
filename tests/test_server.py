@@ -117,6 +117,10 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(data["llm"])
         self.assertIn("multi_query", data)
         self.assertFalse(data["multi_query"])  # default OFF
+        # v0.2.661 (product-review #17): staleness surface — FakeLLM has
+        # embedding_model="" so nothing can be stale here.
+        self.assertEqual(data["indexed_embed_model"], "")
+        self.assertFalse(data["embed_model_changed"])
         status, headers, page = self._req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("書院", page.decode())
@@ -247,6 +251,63 @@ class ServerTest(unittest.TestCase):
         # delete notebook
         status, _ = self._json("DELETE", f"/api/notebooks/{nb_id}")
         self.assertEqual(status, 200)
+
+    def test_health_reports_embed_model_staleness(self) -> None:
+        """v0.2.661 (product-review #17): /api/health names the model that
+        built the stored vectors and flags the mismatch — the stderr hint
+        emitted at query time never reaches a Web-UI user."""
+        import threading as _th
+
+        import shoin.server as srv_mod
+        from shoin.store import Store
+
+        class EmbedLLM(FakeLLM):
+            embedding_model = "model-B"
+
+        db = str(Path(self.tmp.name) / "s-embed.db")
+        with Store(db) as s:
+            s.set_setting("embed_model", "model-A")
+        srv = srv_mod.make_server(port=0, db=db, llm=EmbedLLM())
+        th = _th.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/api/health"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+        self.assertEqual(data["embed_model"], "model-B")
+        self.assertEqual(data["indexed_embed_model"], "model-A")
+        self.assertTrue(data["embed_model_changed"])
+
+    def test_health_survives_unopenable_db(self) -> None:
+        """v0.2.661: health is the diagnostic surface — a data dir that
+        cannot even be opened must not take the health check down with it.
+        Blank staleness fields then correctly read as "unknown"."""
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        srv = srv_mod.make_server(port=0, db=self.tmp.name, llm=FakeLLM())
+        th = _th.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/api/health"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["indexed_embed_model"], "")
+        self.assertFalse(data["embed_model_changed"])
 
     def test_upload_response_title_matches_persisted_truncated_title(self) -> None:
         """_h_src_upload()'s response must report the TRUNCATED title actually

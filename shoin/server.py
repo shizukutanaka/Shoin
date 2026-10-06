@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ from typing import Any
 
 from .citation import make_report
 from .config import (
+    EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
@@ -54,6 +56,7 @@ from .qa import (
     ChatBackend,
     _check_embed_model_ok,
     _degraded_text,
+    _embed_model_stale,
     _query_vector,
     build_context,
     build_messages,
@@ -669,6 +672,23 @@ class _Handler(BaseHTTPRequestHandler):
         avail = getattr(self.llm, "available", lambda: False)()
         model = getattr(self.llm, "model", "")
         embed_model = getattr(self.llm, "embedding_model", "")
+        # Surface the stored-vector builder model and the staleness flag so
+        # a model swap is diagnosable without reading server stderr
+        # (v0.2.661, product-review #17). Health must keep answering even
+        # when the DB itself is the broken thing being diagnosed, so the
+        # read is best-effort: blank fields then still say "unknown".
+        indexed_embed_model = ""
+        embed_stale = False
+        try:
+            with Store(self.db) as store:
+                indexed_embed_model = (
+                    store.get_setting(EMBED_MODEL_SETTING_KEY) or ""
+                ).strip()
+                embed_stale = _embed_model_stale(store, embed_model)
+        except (OSError, StoreError, sqlite3.OperationalError):
+            # sqlite3.connect propagates raw OSErrors for unopenable paths
+            # (directory, permission) alongside its own OperationalError.
+            pass
         self._json(
             {
                 "status": "ok",
@@ -676,6 +696,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "llm": avail,
                 "model": model,
                 "embed_model": embed_model,
+                "indexed_embed_model": indexed_embed_model,
+                "embed_model_changed": embed_stale,
                 # Surfaces the SHOIN_MULTI_QUERY opt-in state (v0.2.126) so a user
                 # debugging "why is retrieval slow / why isn't recall improving"
                 # doesn't have to know the env var exists — same diagnostic-first

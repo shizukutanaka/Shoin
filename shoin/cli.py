@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
+    EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     TOP_K,
@@ -177,6 +178,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.model": "生成モデル: {v}",
         "health.embed_model": "埋め込みモデル: {v}",
         "health.embed_model_off": "(無効 — BM25のみ)",
+        # v0.2.661 (product-review #17): the stored-vector builder model plus
+        # the repair hint — matches the /api/health indexed_embed_model and
+        # embed_model_changed fields.
+        "health.indexed_embed_model": "索引済み埋め込みモデル: {v}",
+        "health.embed_changed_hint": (
+            "Warning: モデル変更を検出 — ベクトル検索停止中。"
+            "`shoin reindex <nb>` で再構築"
+        ),
         "health.multi_query": "マルチクエリ検索(SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "埋め込みバッチサイズ(SHOIN_EMBED_BATCH): {v}",
         "health.chunking": (
@@ -282,6 +291,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.model": "Chat model: {v}",
         "health.embed_model": "Embed model: {v}",
         "health.embed_model_off": "(disabled — BM25 only)",
+        "health.indexed_embed_model": "Indexed embed model: {v}",
+        "health.embed_changed_hint": (
+            "Warning: model change detected — vector search paused. "
+            "Run `shoin reindex <nb>` to rebuild."
+        ),
         "health.multi_query": "Multi-query retrieval (SHOIN_MULTI_QUERY): {v}",
         "health.embed_batch": "Embed batch size (SHOIN_EMBED_BATCH): {v}",
         "health.chunking": (
@@ -619,6 +633,26 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     print(_t("health.model", v=_one_line(llm_model())))
     em = embed_model()
     print(_t("health.embed_model", v=em if em.strip() else _t("health.embed_model_off")))
+    # v0.2.661 (product-review #17): name the model that built the stored
+    # vectors; when it diverges from the configured one, vector search is
+    # silently disabled — print the same repair hint ask/search emit.
+    # Best-effort like _h_health: `shoin health` must keep answering even
+    # when the data dir itself is the broken thing being diagnosed.
+    indexed = ""
+    try:
+        with Store(db or db_path()) as store:
+            indexed = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
+    except (OSError, StoreError, sqlite3.OperationalError):
+        # sqlite3.connect propagates raw OSErrors for unopenable paths.
+        pass
+    print(
+        _t(
+            "health.indexed_embed_model",
+            v=indexed if indexed else _t("health.embed_model_off"),
+        )
+    )
+    if indexed and em.strip() and indexed != em.strip():
+        print(_t("health.embed_changed_hint"), file=sys.stderr)
     mq = _t("health.yes") if multi_query_enabled() else _t("health.no")
     print(_t("health.multi_query", v=mq))
     batch = embed_batch()

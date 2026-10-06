@@ -156,7 +156,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 14 | **同義語・語彙拡張が浅い** | term_variants は字形変換のみ。「車↔自動車」「PC↔パソコン」のような意味的同義語は BM25 では拾えず vector leg 頼み |
 | ~~15~~ | ~~**英語ステミング無し**~~ → **解消済み** (台帳誤記 — `_stem_variants` v0.2.536 で規則活用は橋渡し済: documents→document・running→run・quickly→quick・closed family のみ。ran→run の不規則形は残存) |
 | 16 | ~~**ベクトル埋込みのバッチ化なし**~~ → **解消済み** (台帳誤記 — `_embed_chunks` は `EMBED_BATCH=16`/`SHOIN_EMBED_BATCH` のバッチループ `llm.embed(batch)` で既実装。v0.2.648 実測確認) |
-| 17 | **埋込みモデル変更時の自動再索引なし** | `_check_embed_model_ok` は不一致検出→vector leg無効化まで。再indexは `reindex` の手動実行が要る |
+| ~~17~~ | ~~**埋込みモデル変更時の自動再索引なし**~~ → **解消済み** (v0.2.661: 不一致がクエリ時stderrヒント+`/api/health`の`indexed_embed_model`/`embed_model_changed`+`shoin health`で可視化・一発修復経路明示。自動再indexは索引全再計算の暗黙mutationのため採らず——静かに死ぬ状態を「可視+actionable」化する境界) |
 | 18 | ~~ファイルソースの refresh 非対応~~ → **解消済み** (v0.2.633) | ファイル源は記録 origin パスを再読込。消失済みは `INGEST_FETCH_FAILED`、detail の `refreshable` で UI の↻表示を制御 |
 | ~~19~~ | ~~**ソース優先度付けが無い**~~ | **解消 (v0.2.657)**: `sources.weight`(0..8・既定1.0)を融合rawスコアへ正規化前に乗算 (正規化後では床0.0が浮上不能)。w>1優遇・w<1降格・0床固定、`PATCH /api/sources/{id} {weight}` + `shoin source weight` の両面。全往復経路(export/import/trash/merge/duplicate)で保存 |
 | ~~20~~ | ~~**ノートブック単位設定が無い**~~ | **解消 (v0.2.659)**: `notebooks.settings`(ホワイトリスト: top_k・source_text_tokens)を migration 13 で追加——k未指定の retrieve 全経路が settings.top_k を解決し、ask/SSE の build_context が settings.source_text_tokens を予算化。`PATCH /api/notebooks/{id} {settings}` + `shoin notebook settings` の両面、全往復経路で保存 |

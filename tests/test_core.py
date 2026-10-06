@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.660")
+        self.assertEqual(VERSION, "0.2.661")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -12719,6 +12719,46 @@ class TestCLI(unittest.TestCase):
         self.assertIn(VERSION, text)
         self.assertIn("はい", text)  # LLM reachable: yes (default ja locale)
 
+    def test_cli_health_surfaces_embed_model_staleness(self) -> None:
+        """v0.2.661 (product-review #17): `shoin health` names the indexed
+        model and emits the reindex hint on stderr when it diverges from the
+        configured one — CLI parity with /api/health's new fields."""
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        class FakeAvailLLM:
+            embedding_model = ""
+
+            def available(self) -> bool:
+                return True
+
+            def chat(self, messages, temperature=0.2):
+                raise NotImplementedError
+
+            def embed_one(self, text):
+                raise NotImplementedError
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "h.db")
+            with Store(db) as s:
+                s.set_setting("embed_model", "model-A")
+            out, err = io.StringIO(), io.StringIO()
+            # The CLI compares the stored builder model against the configured
+            # one (embed_model()/SHOIN_EMBED_MODEL), not the llm attribute.
+            env = {"SHOIN_EMBED_MODEL": "model-B"}
+            with patch.dict(os.environ, env), patch("sys.stdout", out), patch(
+                "sys.stderr", err
+            ):
+                rc = main(["--db", db, "health"], llm=FakeAvailLLM())
+        self.assertEqual(rc, 0)
+        self.assertIn("model-A", out.getvalue())
+        self.assertIn("reindex", err.getvalue())
+
     def test_python_dash_m_invocation_delegates_to_cli(self) -> None:
         """`python -m shoin` must reach the same CLI as the `shoin` script.
 
@@ -18917,6 +18957,11 @@ class TestResidualGuards(unittest.TestCase):
                 # classify-then-wrap contract as the pair-shape guard.
                 "ValueError", "ValueError", "ValueError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
+                # v0.2.661: _cmd_health's indexed-model read is best-effort
+                # — health must keep answering when the data dir itself is
+                # the broken thing being diagnosed (raw OSError for
+                # unopenable paths alongside OperationalError/StoreError).
+                "(OSError,StoreError,sqlite3.OperationalError)",
             ],
             "config.py": [
                 "(TypeError,ValueError)", "(TypeError,ValueError)",
@@ -19008,6 +19053,10 @@ class TestResidualGuards(unittest.TestCase):
                 # file to an empty stylesheet — the cosmetic hook must never
                 # 5xx a page load.
                 "OSError",
+                # v0.2.661: _h_health's staleness read is best-effort —
+                # health is the diagnostic surface and must still 200 when
+                # the DB it reports on is unopenable/broken.
+                "(OSError,StoreError,sqlite3.OperationalError)",
             ],
             "store.py": [
                 # v0.2.654: trash_restore maps a corrupt/hand-edited
@@ -19069,7 +19118,10 @@ class TestResidualGuards(unittest.TestCase):
             # log.py +1: emit()'s stderr-write guard — logging must never
             # break the operation it reports (v0.2.652).
             "log.py": 1,
-            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 11,
+            # cli.py +1: _cmd_health's best-effort staleness read (v0.2.661).
+            "cli.py": 1,
+            # server.py +1: _h_health's best-effort staleness read (v0.2.661).
+            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 12,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import threading
 import time
 import unicodedata
@@ -93,6 +94,19 @@ _STRINGS: dict[str, dict[str, str]] = {
     "degraded_prefix": {
         "ja": "LLMエンドポイントに接続できないため、回答生成を省略。関連箇所のみ提示:\n",
         "en": "LLM endpoint unreachable; skipping answer generation. Showing relevant excerpts:\n",
+    },
+    # v0.2.661 (product-review #17): query-time hint naming the disabled leg
+    # and its one-command repair — the index-time Warning pipeline prints
+    # never reaches a query-only session.
+    "embed_model_changed": {
+        "ja": (
+            "Warning: 埋め込みモデルが {old} から {new} に変更されました — "
+            "ベクトル検索停止中。`shoin reindex <nb>` で再構築"
+        ),
+        "en": (
+            "Warning: embedding model changed from {old} to {new} — vector "
+            "search paused. Run `shoin reindex <nb>` to rebuild."
+        ),
     },
     "system_prompt": {
         "ja": (
@@ -552,17 +566,37 @@ def expand_query(question: str, history: list[Message]) -> str:
     return f"{prev[: MAX_QUESTION_LEN - len(question) - 1]} {question}"
 
 
+def _embed_model_stale(store: Store, current_model: str) -> bool:
+    """True when the DB's stored vectors were built by a different model.
+
+    The quiet half of _check_embed_model_ok()'s predicate — health surfaces
+    poll, so they must read the flag without the stderr hint (v0.2.661).
+    """
+    current = current_model.strip()
+    if not current:
+        return False
+    stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
+    return bool(stored) and stored != current
+
+
 def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     """Return False when the DB contains embeddings from a different model.
 
     Mixing embeddings from two models makes cosine scores meaningless, so
-    vector search is disabled until the notebook is re-indexed.
+    vector search is disabled until the notebook is re-indexed. Since
+    v0.2.661 the mismatch also prints a stderr hint naming the repair
+    (`shoin reindex`) — before that, the leg simply went silent at query
+    time and ask/search degraded with no visible cause (product-review #17).
     """
     current = (llm.embedding_model or "").strip()
-    if not current:
-        return True  # embedding disabled: nothing to mismatch
+    if not _embed_model_stale(store, current):
+        return True
     stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
-    return not stored or stored == current
+    print(
+        _t("embed_model_changed").format(old=stored, new=current),
+        file=sys.stderr,
+    )
+    return False
 
 
 # Embedding the question is the single most repeated LLM call in the app: every
