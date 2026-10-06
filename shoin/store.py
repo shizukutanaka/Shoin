@@ -1002,14 +1002,19 @@ class Store:
         messages: list[dict[str, Any]],
         trash_id: int,
     ) -> dict[str, Any]:
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
-        ).fetchone():
-            raise StoreError(
-                "NOTEBOOK_ALREADY_EXISTS",
-                f"notebook {nb['id']} already exists — cannot restore over it",
-            )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): the ALREADY_EXISTS probe must run
+            # under the write lock — an auto-commit read left a gap where a
+            # concurrent create turned the coded refusal into a raw
+            # IntegrityError on INSERT (same TOCTOU class as v0.2.683).
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.conn.execute(
+                "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
+            ).fetchone():
+                raise StoreError(
+                    "NOTEBOOK_ALREADY_EXISTS",
+                    f"notebook {nb['id']} already exists — cannot restore over it",
+                )
             self.conn.execute(
                 "INSERT INTO notebooks(id, name, created_at, updated_at, settings)"
                 " VALUES(?,?,?,?,?)",
@@ -1080,21 +1085,25 @@ class Store:
         """Source archive restore (v0.2.667): original id inside its parent
         notebook — chunk INSERTs re-fire the FTS triggers, so the source is
         searchable again in the same commit that lands it."""
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-        ).fetchone() is None:
-            raise StoreError(
-                "NOTEBOOK_NOT_FOUND",
-                f"notebook {nb_id} is gone — cannot restore source into it",
-            )
-        if self.conn.execute(
-            "SELECT 1 FROM sources WHERE id=?", (src["id"],)
-        ).fetchone():
-            raise StoreError(
-                "SOURCE_ALREADY_EXISTS",
-                f"source {src['id']} already exists — cannot restore over it",
-            )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): both probes run under the write
+            # lock — a concurrent delete/create in the gap used to surface
+            # as a raw FK/PK IntegrityError instead of the coded refusal.
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.conn.execute(
+                "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone() is None:
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND",
+                    f"notebook {nb_id} is gone — cannot restore source into it",
+                )
+            if self.conn.execute(
+                "SELECT 1 FROM sources WHERE id=?", (src["id"],)
+            ).fetchone():
+                raise StoreError(
+                    "SOURCE_ALREADY_EXISTS",
+                    f"source {src['id']} already exists — cannot restore over it",
+                )
             self.conn.execute(
                 "INSERT INTO sources(id, notebook_id, kind, title, origin,"
                 " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1128,14 +1137,18 @@ class Store:
         """Note archive restore (v0.2.667): fresh id inside its parent
         notebook — nothing outside delete/list references note ids, so
         re-assignment loses nothing and the insert can never collide."""
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-        ).fetchone() is None:
-            raise StoreError(
-                "NOTEBOOK_NOT_FOUND",
-                f"notebook {nb_id} is gone — cannot restore note into it",
-            )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): the parent probe runs under the
+            # write lock — a concurrent delete_notebook in the gap used to
+            # turn the coded NOTEBOOK_NOT_FOUND into a raw FK violation.
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.conn.execute(
+                "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone() is None:
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND",
+                    f"notebook {nb_id} is gone — cannot restore note into it",
+                )
             cur = self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
                 " VALUES(?,?,?,?)",

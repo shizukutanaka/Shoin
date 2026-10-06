@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.684
+## Version History: v0.1.37 → v0.2.685
+
+### v0.2.685 — trash系restoreをBEGIN IMMEDIATE化(probe→INSERT間TOCTOU閉塞)
+
+- **新規短所69解消(対称ソクラテス問いで発掘)**: 「v0.2.683で塞いだcheck-then-actギャップはrestore側にも残っていないか」——`_restore_notebook_tree`/`_restore_trashed_source`/`_restore_trashed_note`の存在確認probe(`ALREADY_EXISTS`/`NOTEBOOK_NOT_FOUND`/`SOURCE_ALREADY_EXISTS`)が`with self.conn:`**外**のauto-commit読取だった。probeとINSERTの隙間に別writerがコミットすると:coded拒否の代わりに①nb idを取られたケースはINSERTがPK衝突でraw `IntegrityError`(500系) ②親nb消失はFK違反——「undo-logの復活経路がcoded契約を迂回する」穴
+- **全3経路を`BEGIN IMMEDIATE`開始へ**(683と同一パターン): probe自体がwrite lock下で走り、WAL単一writer制約で外部コミットはTX期間中busy_timeout待ち——probe結果がINSERT時点まで有効。`with`内raiseのためTXロールバックでアーカイブ行は保持(既存「conflict→coded拒否+archive kept」テストで追随確認)
+- **境界(記録)**: restoreを選んだ時点で存在していた親/空きidに対してのみ判定——restore中に届いたcreateはロック解放後にコミットされるが、その時点では行は既にinsert済み(双方が「先に取った方が勝つ」で一貫)
+- **行動ピン1件**: 3種restore(nb/source/note)それぞれのin-TXシームでin_transactionかつ外部writer(50ms busy_timeout)のINSERTがblocked——probe→INSERT間がlock下であることの直接実証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.684 — refreshQuestionsの_llmOnガード除去(オフライン推奨質問の無到達を解消)
 

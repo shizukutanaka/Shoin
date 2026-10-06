@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.683")
+        self.assertEqual(VERSION, "0.2.685")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22168,6 +22168,58 @@ class TestTrash(unittest.TestCase):
             s.delete_notebook(nb_id)
 
         self.assertEqual(seen, [True, True] * 3)
+
+    def test_restores_probe_under_write_lock(self) -> None:
+        """v0.2.685: the restore side had the same TOCTOU class as the
+        deletes — the ALREADY_EXISTS / NOT_FOUND probes ran as auto-commit
+        reads before `with self.conn:`, so a concurrent create/delete in
+        the gap surfaced as a raw IntegrityError (or FK violation) instead
+        of the coded refusal. Each restore path now opens BEGIN IMMEDIATE;
+        pin in_transaction at an in-TX seam for all three kinds plus a
+        blocked foreign writer (tiny busy_timeout)."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            nb_id = seed(s)
+            src_id = int(
+                s.conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+            )
+            s.delete_source(src_id)
+            note_id = s.add_note(nb_id, "m", "本文")
+            s.delete_note(note_id)
+            s.delete_notebook(nb_id)
+            items = {t["kind"]: t["id"] for t in s.trash_list()}
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_opt = s._optimize_fts
+            s._optimize_fts = lambda: (probe(), orig_opt())
+            orig_touch = s.touch_notebook
+            s.touch_notebook = lambda i: (probe(), orig_touch(i))
+
+            s.trash_restore(items["notebook"])  # probes via _optimize_fts
+            s.trash_restore(items["source"])    # probes via touch + optimize
+            s.trash_restore(items["note"])      # probes via touch_notebook
+
+        self.assertEqual(seen, [True, True] * 4)
 
     def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
         """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take
