@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.662
+## Version History: v0.1.37 → v0.2.663
+
+### v0.2.663 — APIバージョニング(X-Shoin-API ヘッダ + 互換ポリシー明文化)
+
+- **短所40解消**: `/api/...` にバージョン表現が一切なく、後方互換ポリシーが暗黙だった——将来の破壊的変更をクライアントが検出する術が無かった
+- **ヘッダ駆動を採択**: `_headers` が全応答(JSON・SSE・静的・エラーエンベロープ)へ `X-Shoin-API: 1` を送出し、`GET /api/health` の `api` フィールドでも発見可能に。`X-Content-Type-Options`/`Cache-Control` と同一の送出点で全応答クラスをカバー
+- **パス prefix を不採用**: `/api/v1/...` 化は全ルート・UI fetch・ルート表契約ピンを同時更新する大ぶりな侵襲で、クライアント二重化の複雑性に対して局所CLI/Web2面の製品では実益薄——ヘッダ宣言+文書化ポリシーが正当な最小契約
+- **互換ポリシー明文化(spec.md)**: フィールド**追加**は非破壊(クライアントは未知フィールドを無視する契約)・既存フィールドの型変更/削除/意味変更は `API_VERSION` を increment
+- **行動ピン3件**: `test_workflow` health `api` フィールド・`test_baseline_security_headers` 3面(HTML/JSON/404)の `X-Shoin-API` ヘッダ・import インベントリ(API_VERSION)追従
+- **カタログ追随1件**: test_server.py の shoin import に `API_VERSION` 追加(noqa: E402 ブロック)
 
 ### v0.2.662 — 同義語拡張(キュレーション同義語テーブルで意味レベルの語彙橋渡し)
 

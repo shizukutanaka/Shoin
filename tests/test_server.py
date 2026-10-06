@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from shoin.config import API_VERSION  # noqa: E402
 from shoin.server import _THEME_CSS_LIMIT, make_server  # noqa: E402
 
 
@@ -121,6 +122,9 @@ class ServerTest(unittest.TestCase):
         # embedding_model="" so nothing can be stale here.
         self.assertEqual(data["indexed_embed_model"], "")
         self.assertFalse(data["embed_model_changed"])
+        # v0.2.663 (product-review #40): the API contract version is
+        # discoverable from the health surface too.
+        self.assertEqual(data["api"], API_VERSION)
         status, headers, page = self._req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("書院", page.decode())
@@ -2311,6 +2315,9 @@ class CacheControlTest(unittest.TestCase):
                 ("Cache-Control", "no-store"),
                 ("X-Content-Type-Options", "nosniff"),
                 ("Referrer-Policy", "no-referrer"),
+                # v0.2.663 (product-review #40): every response class names
+                # the API contract version it speaks.
+                ("X-Shoin-API", API_VERSION),
             ):
                 self.assertEqual(
                     want,

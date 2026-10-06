@@ -22,6 +22,7 @@ from typing import Any
 
 from .citation import make_report
 from .config import (
+    API_VERSION,
     EMBED_MODEL_SETTING_KEY,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
@@ -253,6 +254,10 @@ class _Handler(BaseHTTPRequestHandler):
         # build serving it (stale JS vs new API), and API responses are
         # live notebook state. Was SSE-only; hoisted to cover every response.
         self.send_header("Cache-Control", "no-store")
+        # Every response class (JSON, SSE, static, errors) declares the API
+        # contract it speaks — clients can detect a breaking-change boundary
+        # without parsing bodies (v0.2.663).
+        self.send_header("X-Shoin-API", API_VERSION)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -693,6 +698,7 @@ class _Handler(BaseHTTPRequestHandler):
             {
                 "status": "ok",
                 "version": VERSION,
+                "api": API_VERSION,
                 "llm": avail,
                 "model": model,
                 "embed_model": embed_model,
