@@ -116,6 +116,22 @@ def _read_packaged_asset(name: str) -> bytes:
 # v0.2.643: bound the user-theme response — a cosmetic hook must not be a
 # DoS backdoor by pointing SHOIN_THEME_CSS at a giant file.
 _THEME_CSS_LIMIT = 256 * 1024
+_IMPORTED_ORIGIN_PREFIX = "imported:"
+
+
+def _neutralize_import_origins(doc: Json) -> Json:
+    """File-path origins in an HTTP-supplied export must not become
+    refreshable: refresh re-reads file origins from disk, so the HTTP API
+    would read arbitrary server-side files (the confused deputy _h_src_add
+    refuses). Non-URL origins are kept, prefixed, for display only."""
+    sources = doc.get("sources")
+    if isinstance(sources, list):
+        for s in sources:
+            origin = s.get("origin") if isinstance(s, dict) else None
+            if isinstance(origin, str) and not origin.startswith(("http://", "https://")):
+                s["origin"] = _IMPORTED_ORIGIN_PREFIX + origin
+    return doc
+
 
 _EXPORT_MIME = {
     "md": "text/markdown; charset=utf-8",
@@ -876,7 +892,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_import(self) -> None:
         with Store(self.db) as store:
-            nb = store.import_notebook(self._read_json())
+            nb = store.import_notebook(_neutralize_import_origins(self._read_json()))
             self._json({"id": nb.id, "name": nb.name}, status=201)
 
     def _h_nb_duplicate(self, nb_id: int) -> None:

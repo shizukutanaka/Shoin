@@ -1765,6 +1765,26 @@ class ServerTest(unittest.TestCase):
         status, det = self._json("GET", f"/api/notebooks/{body['id']}")
         self.assertEqual(status, 200)
         self.assertEqual(len(det["sources"]), 1)
+        # a file-path origin in an HTTP import must not be re-readable via
+        # refresh (confused deputy: the HTTP API never reads server files)
+        secret = Path(self.tmp.name) / "server-secret.txt"
+        secret.write_text("server-side secret body text", encoding="utf-8")
+        doc["sources"][0]["origin"] = str(secret)
+        status, body = self._json("POST", "/api/notebooks/import", doc)
+        self.assertEqual(status, 201)
+        status, det = self._json("GET", f"/api/notebooks/{body['id']}")
+        self.assertEqual(status, 200)
+        self.assertFalse(det["sources"][0]["refreshable"])
+        self.assertTrue(det["sources"][0]["origin"].startswith("imported:"))
+        status, _ = self._json(
+            "POST", f"/api/sources/{det['sources'][0]['id']}/refresh"
+        )
+        self.assertNotEqual(status, 200)
+        status, body = self._json(
+            "POST", f"/api/notebooks/{body['id']}/refresh-all"
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("refreshed", [r.get("status") for r in body["results"]])
         # malformed payloads -> 400 coded, never a traceback
         status, err = self._json(
             "POST", "/api/notebooks/import", {"notebook": {}}
