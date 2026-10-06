@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-VERSION = "0.2.658"
+VERSION = "0.2.659"
 
 
 DEFAULT_PORT = 7440
@@ -39,6 +39,16 @@ SOURCE_WEIGHT_MAX = 8.0
 # it would become a per-source blob column; 4KB covers a reference manager's
 # worth of fields with headroom while keeping detail responses small.
 SOURCE_META_MAX = 4096
+
+# REQ-004: per-notebook retrieval overrides (v0.2.659, product-review #20).
+# notebooks.settings is a freeform JSON object, but only these keys act;
+# bounds mirror the global defaults they override (qa.py's
+# MIN_PER_SOURCE_TOKENS=64 floor and CONTEXT_TOKENS=2400 total budget, and
+# SEARCH_K_MAX above). The settings writer whitelists keys so a typo'd key
+# is a coded 400, not a silently inert setting.
+NB_SETTING_KEYS = ("top_k", "source_text_tokens")
+NB_SOURCE_TEXT_TOKENS_MIN = 64
+NB_SOURCE_TEXT_TOKENS_MAX = 2400
 
 
 def config_file() -> Path:

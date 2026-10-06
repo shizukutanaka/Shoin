@@ -25,6 +25,10 @@ from .chunk import _MAX_CONTEXT_CHARS
 from .config import (
     MAX_NAME_LEN,
     MAX_TITLE_LEN,
+    NB_SETTING_KEYS,
+    NB_SOURCE_TEXT_TOKENS_MAX,
+    NB_SOURCE_TEXT_TOKENS_MIN,
+    SEARCH_K_MAX,
     SOURCE_META_MAX,
     SOURCE_WEIGHT_MAX,
     data_dir,
@@ -377,6 +381,17 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE sources ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';
         """,
     ),
+    (
+        13,
+        # Per-notebook settings (v0.2.659, product-review #20): a JSON
+        # object column for retrieval overrides (top_k,
+        # source_text_tokens) that were previously process-global
+        # constants only. '{}' means "use the global defaults" — the
+        # migration alone changes no retrieval behavior.
+        """
+        ALTER TABLE notebooks ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
 ]
 
 
@@ -416,6 +431,22 @@ def _meta_text(value: Any) -> str:
             raise ValueError("meta is not a JSON object")
         return _meta_dump(parsed)
     raise ValueError("meta is not a JSON object")
+
+
+def _settings_of(row: sqlite3.Row) -> dict[str, Any]:
+    """Parse a notebooks row's settings column for the Notebook dataclass.
+
+    A MIGRATIONS-truncated test fixture — or a row read against a file
+    mid-upgrade — can carry no settings column at all: the honest read is
+    the same '{}' the column's DEFAULT produces once migration 13 lands.
+    A non-object stored value also degrades to {} rather than faulting
+    the read path (update_notebook_settings is the only writer, and it
+    cannot emit one).
+    """
+    if "settings" not in row.keys():
+        return {}
+    parsed = json.loads(row["settings"])
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def pack_vector(vec: list[float]) -> bytes:
@@ -464,6 +495,10 @@ class Notebook:
     name: str
     created_at: str
     updated_at: str
+    # Per-notebook retrieval overrides (v0.2.659), parsed from the
+    # settings column on read. Only NB_SETTING_KEYS act; {} = global
+    # defaults.
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -649,13 +684,28 @@ class Store:
         row = self.conn.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
         if row is None:
             raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
-        return Notebook(row["id"], row["name"], row["created_at"], row["updated_at"])
+        return Notebook(
+            row["id"],
+            row["name"],
+            row["created_at"],
+            row["updated_at"],
+            _settings_of(row),
+        )
 
     def list_notebooks(self) -> list[Notebook]:
         rows = self.conn.execute(
             "SELECT * FROM notebooks ORDER BY updated_at DESC, id DESC"
         ).fetchall()
-        return [Notebook(r["id"], r["name"], r["created_at"], r["updated_at"]) for r in rows]
+        return [
+            Notebook(
+                r["id"],
+                r["name"],
+                r["created_at"],
+                r["updated_at"],
+                _settings_of(r),
+            )
+            for r in rows
+        ]
 
     def rename_notebook(self, notebook_id: int, name: str) -> None:
         name = name.strip()
@@ -675,6 +725,70 @@ class Store:
         if cur.rowcount == 0:
             raise StoreError("NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found")
 
+    def notebook_settings(self, notebook_id: int) -> dict[str, Any]:
+        """Read-side accessor for per-notebook retrieval overrides
+        (v0.2.659). Read-only — returns {} for a missing notebook so the
+        retrieval path never turns a settings lookup into a 404 of its
+        own (a dead notebook already returns no hits)."""
+        row = self.conn.execute(
+            "SELECT settings FROM notebooks WHERE id=?", (notebook_id,)
+        ).fetchone()
+        if row is None:
+            return {}
+        parsed = json.loads(row["settings"])
+        return parsed if isinstance(parsed, dict) else {}
+
+    def update_notebook_settings(
+        self, notebook_id: int, settings: dict[str, Any]
+    ) -> None:
+        """Replace a notebook's retrieval-override object (v0.2.659, #20).
+
+        Whole-object REPLACE like update_source_meta — PATCH/CLI merge
+        client-side. Unlike source meta this is NOT freeform: only
+        NB_SETTING_KEYS act, so an unknown key would be a silently inert
+        setting — rejected instead. Bounds mirror the global constants
+        each key overrides (config.py). Calls touch_notebook: settings
+        change generated output (retrieval depth / prompt budget), the
+        same content-bearing class as rename.
+        """
+        if not isinstance(settings, dict):
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"settings must be a JSON object, got {type(settings).__name__}",
+            )
+        unknown = sorted(k for k in settings if k not in NB_SETTING_KEYS)
+        if unknown:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"unknown settings keys: {', '.join(unknown)} "
+                f"(allowed: {', '.join(NB_SETTING_KEYS)})",
+            )
+        bounds = {
+            "top_k": (1, SEARCH_K_MAX),
+            "source_text_tokens": (
+                NB_SOURCE_TEXT_TOKENS_MIN,
+                NB_SOURCE_TEXT_TOKENS_MAX,
+            ),
+        }
+        for key, value in settings.items():
+            lo, hi = bounds[key]
+            if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
+                raise StoreError(
+                    "VALIDATION_FIELD_FORMAT_INVALID",
+                    f"settings.{key} must be an integer in {lo}..{hi}",
+                )
+        text = _meta_dump(settings)
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE notebooks SET settings=? WHERE id=?",
+                (text, notebook_id),
+            )
+            if cur.rowcount == 0:
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND", f"notebook {notebook_id} not found"
+                )
+            self.touch_notebook(notebook_id)
+
     def _notebook_tree_dict(self, notebook_id: int) -> dict[str, Any]:
         """Serialize the whole notebook tree for trash archive / export.
 
@@ -693,6 +807,7 @@ class Store:
                 "name": nb.name,
                 "created_at": nb.created_at,
                 "updated_at": nb.updated_at,
+                "settings": nb.settings,
             },
             "sources": [],
             "chunks": [],
@@ -807,6 +922,7 @@ class Store:
             # a raw ValueError escaping mid-transaction.
             for s in sources:
                 s["meta"] = _meta_text(s.get("meta"))
+            nb["settings"] = _meta_text(nb.get("settings"))
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "SYSTEM_INTERNAL_ERROR",
@@ -821,9 +937,10 @@ class Store:
             )
         with self.conn:
             self.conn.execute(
-                "INSERT INTO notebooks(id, name, created_at, updated_at)"
-                " VALUES(?,?,?,?)",
-                (nb["id"], nb["name"], nb["created_at"], nb["updated_at"]),
+                "INSERT INTO notebooks(id, name, created_at, updated_at, settings)"
+                " VALUES(?,?,?,?,?)",
+                (nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
+                 nb["settings"]),
             )
             for s in sources:
                 self.conn.execute(
@@ -876,7 +993,10 @@ class Store:
                     ),
                 )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
-        return Notebook(nb["id"], nb["name"], nb["created_at"], nb["updated_at"])
+        return Notebook(
+            nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
+            json.loads(nb["settings"]),
+        )
 
     def trash_purge(self, trash_id: int) -> None:
         """Permanently drop one trash archive — the undo record itself."""
@@ -915,6 +1035,10 @@ class Store:
             notes = payload["notes"]
             studio_outputs = payload["studio_outputs"]
             messages = payload["messages"]
+            # settings is optional in the document (pre-v0.2.659 exports
+            # lack it) — absent normalizes to '{}', anything non-object is
+            # malformed like a non-object meta.
+            nb_settings_text = _meta_text(nb.get("settings"))
             src_ids: set[Any] = set()
             for s in sources:
                 src_ids.add(s["id"])
@@ -959,9 +1083,9 @@ class Store:
         try:
             with self.conn:
                 cur = self.conn.execute(
-                    "INSERT INTO notebooks(name, created_at, updated_at)"
-                    " VALUES(?,?,?)",
-                    (name, ts, ts),
+                    "INSERT INTO notebooks(name, created_at, updated_at, settings)"
+                    " VALUES(?,?,?,?)",
+                    (name, ts, ts, nb_settings_text),
                 )
                 new_id = int(cur.lastrowid or 0)
                 self._insert_tree_rows(
@@ -973,7 +1097,7 @@ class Store:
             raise StoreError(
                 "NOTEBOOK_IMPORT_INVALID", "export rows failed type checks"
             ) from exc
-        return Notebook(new_id, name, ts, ts)
+        return Notebook(new_id, name, ts, ts, json.loads(nb_settings_text))
 
     def _insert_tree_rows(
         self,
@@ -1124,8 +1248,9 @@ class Store:
         ts = _now()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO notebooks(name, created_at, updated_at) VALUES (?,?,?)",
-                (name, ts, ts),
+                "INSERT INTO notebooks(name, created_at, updated_at, settings)"
+                " VALUES(?,?,?,?)",
+                (name, ts, ts, _meta_dump(src.settings)),
             )
             new_id = int(cur.lastrowid or 0)
             id_map: dict[int, int] = {}
@@ -1183,7 +1308,7 @@ class Store:
                         row["created_at"],
                     ),
                 )
-        return Notebook(new_id, name, ts, ts)
+        return Notebook(new_id, name, ts, ts, src.settings)
 
     # --- sources / chunks ---
 

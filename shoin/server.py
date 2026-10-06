@@ -48,6 +48,9 @@ from .pipeline import (
     source_is_refreshable,
 )
 from .qa import (
+    SOURCE_TEXT_TOKENS as _QA_SOURCE_TEXT_TOKENS,
+)
+from .qa import (
     ChatBackend,
     _check_embed_model_ok,
     _degraded_text,
@@ -173,6 +176,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     return {
         "id": nb.id,
         "name": nb.name,
+        "settings": nb.settings,
         "counts": store.counts(nb_id),
         "sources": [
             {
@@ -408,9 +412,21 @@ class _Handler(BaseHTTPRequestHandler):
         of _optional_str/_optional_id_list — a JSON list/dict/bool or an
         out-of-range value must be a coded 400, not a raw comparison or a
         silently unbounded read."""
+        value = self._optional_int_or_none(data, key, lo, hi)
+        if value is None:
+            return default
+        return value
+
+    def _optional_int_or_none(
+        self, data: Json, key: str, lo: int, hi: int
+    ) -> int | None:
+        """k-resolution sibling of _optional_int (v0.2.659): absent -> None,
+        so the caller can hand the decision to the notebook's own settings
+        (nb_search's k — an explicit field still gets the same bounds
+        validation)."""
         raw = data.get(key)
         if raw is None:
-            return default
+            return None
         if not isinstance(raw, int) or isinstance(raw, bool):
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
@@ -704,15 +720,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(_notebook_json(store, nb_id))
 
     def _h_nb_rename(self, nb_id: int) -> None:
-        name = self._require(self._read_json(), "name")
-        # Echo the normalized name, not the raw request value — store strips
-        # whitespace before persisting, so echoing `name` would report a name
-        # the row never had (same response-vs-stored class as v0.2.93's
-        # _h_src_patch truncation).
-        name = name.strip()
+        # PATCH accepts {name} and/or {settings} (v0.2.659) — either field
+        # alone is valid; an empty object is the coded missing-field 400.
+        data = self._read_json()
+        name = self._optional_str(data, "name") or None
+        settings = self._optional_json_obj(data, "settings")
+        if name is None and settings is None:
+            raise StoreError(
+                "VALIDATION_REQUIRED_FIELD_MISSING",
+                "missing field: name or settings",
+            )
         with Store(self.db) as store:
-            store.rename_notebook(nb_id, name)
-        self._json({"id": nb_id, "name": name})
+            nb = store.get_notebook(nb_id)
+            if name is not None:
+                # Echo the normalized name, not the raw request value — store
+                # strips whitespace before persisting, so echoing `name` would
+                # report a name the row never had (same response-vs-stored
+                # class as v0.2.93's _h_src_patch truncation).
+                name = name.strip()
+                store.rename_notebook(nb_id, name)
+            if settings is not None:
+                store.update_notebook_settings(nb_id, settings)
+                nb = store.get_notebook(nb_id)
+        self._json(
+            {
+                "id": nb_id,
+                "name": name if name is not None else nb.name,
+                "settings": nb.settings,
+            }
+        )
 
     def _h_nb_delete(self, nb_id: int) -> None:
         with Store(self.db) as store:
@@ -1150,7 +1186,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"question too long (max {MAX_QUESTION_LEN} characters)",
             )
-        k = self._optional_int(body, "k", lo=1, hi=SEARCH_K_MAX, default=TOP_K)
+        # _or_none hands k-resolution to retrieve_for_question: a
+        # notebook-level settings.top_k wins over TOP_K when the request
+        # body carries no explicit k (v0.2.659).
+        k = self._optional_int_or_none(body, "k", lo=1, hi=SEARCH_K_MAX)
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404, same contract as /ask
@@ -1321,7 +1360,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                context = build_context(store, hits)
+                # Per-notebook retrieval budget override (v0.2.659) — the
+                # same knob qa.ask() applies on its own build_context call.
+                nb_budget = int(
+                    store.notebook_settings(nb_id).get(
+                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=nb_budget)
             except Exception as exc:
                 # Headers already committed; must not let this propagate to _dispatch
                 # (it would write a new HTTP status line into the SSE body stream).

@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.658
+## Version History: v0.1.37 → v0.2.659
+
+### v0.2.659 — ノートブック単位設定 (settings)
+
+- **短所20解消**: TOP_K(検索深さ)と SOURCE_TEXT_TOKENS(プロンプト内ソース本文予算)がプロセスグローバル固定で、研究用nbと速報用nbを分けられなかった。`notebooks.settings TEXT NOT NULL DEFAULT '{}'` (migration 13 — '{}' は「グローバル既定のまま」で migration 単体では検索動作が変わらない) + `Store.update_notebook_settings` (ホワイトリスト `NB_SETTING_KEYS=(top_k, source_text_tokens)`・int型検査・範囲検査を全て coded VALIDATION_FIELD_FORMAT_INVALID・行不在は NOTEBOOK_NOT_FOUND・whole-object REPLACE) を `PATCH /api/notebooks/{id} {"settings"}` (name との併用可) + `shoin notebook settings <id> [k=v…] [--clear]` の CLI/Web両面で公開
+- **解決は単一点**: `retrieve_for_question(k=None)` が `store.notebook_settings(nb_id).top_k` を解決——ask/nb_search/SSE-ask の全呼出しが明示kなしで設定を継承し、`POST /api/search`(nb_id=None)はオーナー不在でTOP_K固定。`source_text_tokens` は `ask()` と SSE ask の build_context 呼出しの2面にのみ適用——Studio は STUDIO_BUDGET_TOKENS(全ソース俯瞰)の別契約のまま。eval の `-k` 既定は TOP_K で固定しベースライン比較可能性を保全
+- **ホワイトリスト設計**: 不明キーは「無効のまま黙って動く設定」となるため typo を coded 400 で拒否——sources.meta(引用記述の自由JSON)とは反対の契約。範囲はグローバル定数ミラー: top_k 1..SEARCH_K_MAX(50)、source_text_tokens 64..2400(qaの floor/総予算と一致)
+- **touch 契約**: 設定は生成出力を変える(retrieval depth・prompt budget)ため `touch_notebook` する——weight(スコア係数のみ)との対称判断
+- **行動ピン7件**: 既定/REPLACE/whitelist+境界 coded・全往復(export/import/trash/duplicate)保存+旧ペイロード中立・top_k が retrieval に効く方向+明示k優先+横断はTOP_K・source_text_tokens が ask プロンプトを縮める・touch・CLI parity・API PATCH(name/settings併用+4種 coded+404)
 
 ### v0.2.658 — ソースメタデータ (meta)
 

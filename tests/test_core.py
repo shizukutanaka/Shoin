@@ -108,7 +108,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.658")
+        self.assertEqual(VERSION, "0.2.659")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18217,7 +18217,9 @@ class TestResidualGuards(unittest.TestCase):
         for var, lo, hi in spans:
             ok = re.compile(
                 rf"self\._(?:require|required_int|optional_str|optional_id_list|"
-                rf"optional_int|optional_float|optional_json_obj)\(\s*{var}\b"
+                # v0.2.659: _optional_int_or_none (nb settings k-resolution)
+                # added to the alternation.
+                rf"optional_int|optional_int_or_none|optional_float|optional_json_obj)\(\s*{var}\b"
             )
             for i in range(lo, hi):
                 line = lines[i]
@@ -18910,7 +18912,10 @@ class TestResidualGuards(unittest.TestCase):
                 # crash print() on strict-UTF-8 stdout — boundary catch in
                 # main() like OverflowError, coded err.prefix not a traceback.
                 "UnicodeEncodeError",
-                "ValueError", "ValueError",
+                # v0.2.659: _cmd_notebook settings maps a non-integer value
+                # in key=value to VALIDATION_FIELD_FORMAT_INVALID — same
+                # classify-then-wrap contract as the pair-shape guard.
+                "ValueError", "ValueError", "ValueError",
                 "sqlite3.OperationalError", "sqlite3.OperationalError",
             ],
             "config.py": [
@@ -19189,8 +19194,11 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _cmd_eval's missing-cases guard (v0.2.651)
                 # +2: _cmd_import's file-read / not-JSON guards (v0.2.655)
                 # +1: _cmd_source meta's malformed key=value pair (v0.2.658)
+                # +2: _cmd_notebook settings' pair-shape / int-value guards
+                #     (v0.2.659)
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
+                "StoreError", "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -19222,8 +19230,11 @@ class TestResidualGuards(unittest.TestCase):
                 # +3: _optional_float type/range guards + _h_src_patch's
                 #     no-field-sentinel guard (v0.2.657)
                 # +1: _optional_json_obj's non-dict field guard (v0.2.658)
+                # +1: _h_nb_rename's empty-PATCH sentinel (name/settings
+                #     at least one required) (v0.2.659)
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
+                "StoreError",
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
@@ -19236,7 +19247,10 @@ class TestResidualGuards(unittest.TestCase):
                 # internal-validator ValueErrors (never reaches the request
                 # path: callers classify it coded inside their own guards).
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 72,  # +1: _utf8's coded surrogate rejection
+            ] + ["StoreError"] * 76,  # +1: _utf8's coded surrogate rejection
+                                      # +4: update_notebook_settings non-dict /
+                                      #     unknown-key / out-of-bounds / missing-
+                                      #     row guards (v0.2.659)
                                       # +2: merge_notebooks self-merge /
                                       #     corrupt-tree guards (v0.2.656)
                                       # +3: update_source_weight type/range/
@@ -21969,4 +21983,203 @@ class TestSourceMeta(unittest.TestCase):
         )
         self.assertEqual(
             main(["--db", db, "source", "meta", "999", "a=b"]), 1
+        )
+
+
+class TestNotebookSettings(unittest.TestCase):
+    """v0.2.659: per-notebook retrieval overrides (product-review #20).
+
+    Weakness #20: TOP_K and the SOURCE_TEXT_TOKENS prompt budget were
+    process-global constants — a research notebook and a quick-facts
+    notebook could not differ. `notebooks.settings` carries a whitelisted
+    override object (top_k, source_text_tokens); retrieval resolves
+    k=None through it, and ask() hands the budget to build_context.
+    """
+
+    def test_settings_defaults_persist_and_validate(self) -> None:
+        store = make_store()
+        nb_id = seed(store)
+        # Migration 13's '{}' default: every pre-existing notebook reads
+        # no-override — global constants still decide everything.
+        self.assertEqual(store.get_notebook(nb_id).settings, {})
+        self.assertEqual(store.notebook_settings(nb_id), {})
+        store.update_notebook_settings(
+            nb_id, {"top_k": 3, "source_text_tokens": 256}
+        )
+        self.assertEqual(
+            store.get_notebook(nb_id).settings,
+            {"top_k": 3, "source_text_tokens": 256},
+        )
+        # Whole-object REPLACE: a second write drops keys the first set.
+        store.update_notebook_settings(nb_id, {"top_k": 2})
+        self.assertEqual(store.get_notebook(nb_id).settings, {"top_k": 2})
+        # Whitelist: an unknown key is a coded 400, not a silently inert
+        # setting. Same for non-dict, non-int, bool, and out-of-bounds.
+        for bad_val in (
+            {"nope": 1},
+            {"top_k": "3"},
+            {"top_k": True},
+            {"top_k": 0},
+            {"top_k": 51},
+            {"source_text_tokens": 63},
+            {"source_text_tokens": 2401},
+            ["top_k"],
+            7,
+            None,
+        ):
+            with self.assertRaises(StoreError) as cm:
+                store.update_notebook_settings(nb_id, bad_val)  # type: ignore[arg-type]
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        with self.assertRaises(StoreError) as cm:
+            store.update_notebook_settings(999, {})
+        self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+        # A dead notebook's settings READ is {} (never a 404): retrieval
+        # paths resolve k without manufacturing their own not-found path.
+        self.assertEqual(store.notebook_settings(999), {})
+
+    def test_settings_survive_round_trips(self) -> None:
+        store = make_store()
+        nb = store.create_notebook("m")
+        store.update_notebook_settings(nb.id, {"top_k": 5})
+        # duplicate preserves settings.
+        dup = store.duplicate_notebook(nb.id, "m2")
+        self.assertEqual(store.get_notebook(dup.id).settings, {"top_k": 5})
+        # export -> import preserves settings.
+        doc = store.export_notebook(nb.id)
+        imp = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp.id).settings, {"top_k": 5})
+        # delete -> trash restore preserves settings (undo-log round trip).
+        store.delete_notebook(nb.id)
+        store.trash_restore(store.trash_list()[0]["id"])
+        self.assertEqual(store.get_notebook(nb.id).settings, {"top_k": 5})
+        # A pre-settings-column export (key absent) imports override-free.
+        del doc["notebook"]["settings"]
+        imp2 = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp2.id).settings, {})
+        # A non-object settings in a foreign document is a coded refusal.
+        doc["notebook"]["settings"] = "freeform"
+        with self.assertRaises(StoreError) as cm:
+            store.import_notebook(doc)
+        self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+
+    def test_top_k_setting_drives_retrieval(self) -> None:
+        from shoin.qa import retrieve_for_question
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        s = store.add_source(nb.id, "txt", "doc", "mem://d", "sd")
+        store.add_chunks(
+            s.id, ["りんごは赤い。", "りんごは甘い。", "りんごの木は大きい。"]
+        )
+        store.update_notebook_settings(nb.id, {"top_k": 1})
+        # k=None hands the decision to the notebook: its top_k=1 binds.
+        hits = retrieve_for_question(store, object(), nb.id, "りんご", None)
+        self.assertEqual(len(hits), 1)
+        # An explicit k wins over the notebook setting.
+        hits = retrieve_for_question(store, object(), nb.id, "りんご", None, k=3)
+        self.assertEqual(len(hits), 3)
+        # Cross-notebook retrieval (nb_id=None) has no settings owner —
+        # k=None there is just the TOP_K global default.
+        store.update_notebook_settings(nb.id, {"top_k": 1})
+        hits = retrieve_for_question(store, object(), None, "りんご", None)
+        self.assertEqual(len(hits), 3)
+
+    def test_source_text_tokens_bounds_ask_prompt(self) -> None:
+        from shoin.qa import ask
+
+        class _CapLLM:
+            embedding_model = ""
+
+            def __init__(self) -> None:
+                self.calls: list[list[dict[str, str]]] = []
+
+            def chat(self, messages, temperature=0.2):
+                self.calls.append(messages)
+                return "答[S1]"
+
+            def embed_one(self, text):
+                raise LLMError("SYSTEM_EMBED_DISABLED", "no embed")
+
+        store = make_store()
+        nb = store.create_notebook("m")
+        s = store.add_source(nb.id, "txt", "doc", "mem://d", "sd")
+        store.add_chunks(s.id, ["テスト。" * 2000])
+        llm = _CapLLM()
+        ask(store, llm, nb.id, "テストとは？")
+        default_len = len(llm.calls[-1][-1]["content"])
+        store.update_notebook_settings(nb.id, {"source_text_tokens": 64})
+        ask(store, llm, nb.id, "テストとは？")
+        small_len = len(llm.calls[-1][-1]["content"])
+        # The notebook budget — not the global 1000-token one — bound the
+        # excerpts handed to the model.
+        self.assertGreater(default_len - small_len, 800)
+
+    def test_settings_update_touches_notebook(self) -> None:
+        # Settings change generated output (retrieval depth, prompt
+        # budget) — content-bearing like rename, not a retrieval-only
+        # preference like weight. updated_at must move.
+        store = make_store()
+        nb = store.create_notebook("m")
+        before = store.get_notebook(nb.id).updated_at
+        store.update_notebook_settings(nb.id, {"top_k": 2})
+        self.assertNotEqual(store.get_notebook(nb.id).updated_at, before)
+
+    def test_cli_notebook_settings(self) -> None:
+        """`shoin notebook settings` — REQ-103 parity with PATCH settings."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, "t.db")
+        with Store(db) as s:
+            nb_id = seed(s)
+        # Merge-style write via key=value pairs.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(
+                    [
+                        "--db", db, "notebook", "settings", str(nb_id),
+                        "top_k=3", "source_text_tokens=512",
+                    ]
+                ),
+                0,
+            )
+        with Store(db) as s:
+            self.assertEqual(
+                s.get_notebook(nb_id).settings,
+                {"top_k": 3, "source_text_tokens": 512},
+            )
+        # No pairs: prints the current object.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(
+                main(["--db", db, "notebook", "settings", str(nb_id)]), 0
+            )
+        self.assertEqual(
+            json.loads(out.getvalue()),
+            {"top_k": 3, "source_text_tokens": 512},
+        )
+        # --clear resets to the empty object.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main(["--db", db, "notebook", "settings", str(nb_id), "--clear"]),
+                0,
+            )
+        with Store(db) as s:
+            self.assertEqual(s.get_notebook(nb_id).settings, {})
+        # Non-int values, unknown keys, malformed pairs, dead ids — all the
+        # coded StoreError path (stderr err.prefix + exit 1).
+        for extra in (["top_k=x"], ["nope=1"], ["noeq"]):
+            self.assertEqual(
+                main(
+                    ["--db", db, "notebook", "settings", str(nb_id), *extra]
+                ),
+                1,
+            )
+        self.assertEqual(
+            main(["--db", db, "notebook", "settings", "999", "top_k=2"]), 1
         )

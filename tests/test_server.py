@@ -1856,6 +1856,70 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_nb_patch_settings(self) -> None:
+        """v0.2.659: PATCH /api/notebooks/{id} accepts {"settings"} — the
+        per-notebook retrieval overrides (product-review #20), echoed back
+        and surfaced on the detail read; {name, settings} may combine."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "set-nb"})
+        nb_id = nb["id"]
+
+        # settings-only PATCH — no name field.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"settings": {"top_k": 3, "source_text_tokens": 256}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["name"], "set-nb")
+        self.assertEqual(
+            out["settings"], {"top_k": 3, "source_text_tokens": 256}
+        )
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(
+            detail["settings"], {"top_k": 3, "source_text_tokens": 256}
+        )
+        # name+settings combine in one PATCH; REPLACE semantics drop keys
+        # absent from the second object.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "set-nb2", "settings": {"top_k": 2}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["name"], "set-nb2")
+        self.assertEqual(out["settings"], {"top_k": 2})
+        # Empty object clears every override.
+        status, out = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}", {"settings": {}}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(out["settings"], {})
+        # An empty PATCH is the coded missing-field 400, not a silent no-op.
+        status, err = self._json("PATCH", f"/api/notebooks/{nb_id}", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_REQUIRED_FIELD_MISSING")
+        # Unknown keys, non-object, non-int, and out-of-bounds values are all
+        # the coded 400 path — a silently inert key is worse than a refusal.
+        for bad_settings in (
+            {"nope": 1},
+            {"top_k": "3"},
+            {"top_k": 0},
+            {"source_text_tokens": 99999},
+            "freeform",
+            [1],
+        ):
+            status, err = self._json(
+                "PATCH", f"/api/notebooks/{nb_id}", {"settings": bad_settings}
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"
+            )
+        # A dead notebook is still the coded 404.
+        status, err = self._json(
+            "PATCH", "/api/notebooks/99999", {"settings": {"top_k": 2}}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
 
 class NonStreamingLLMTest(unittest.TestCase):
     """Server falls back to non-streaming chat() when LLM has no chat_stream method."""

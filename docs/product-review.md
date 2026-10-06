@@ -159,7 +159,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | 17 | **埋込みモデル変更時の自動再索引なし** | `_check_embed_model_ok` は不一致検出→vector leg無効化まで。再indexは `reindex` の手動実行が要る |
 | 18 | ~~ファイルソースの refresh 非対応~~ → **解消済み** (v0.2.633) | ファイル源は記録 origin パスを再読込。消失済みは `INGEST_FETCH_FAILED`、detail の `refreshable` で UI の↻表示を制御 |
 | ~~19~~ | ~~**ソース優先度付けが無い**~~ | **解消 (v0.2.657)**: `sources.weight`(0..8・既定1.0)を融合rawスコアへ正規化前に乗算 (正規化後では床0.0が浮上不能)。w>1優遇・w<1降格・0床固定、`PATCH /api/sources/{id} {weight}` + `shoin source weight` の両面。全往復経路(export/import/trash/merge/duplicate)で保存 |
-| 20 | **ノートブック単位設定が無い** | TOP_K・トークン予算・言語等はプロセスグローバル。プロジェクトごとに変えられない |
+| ~~20~~ | ~~**ノートブック単位設定が無い**~~ | **解消 (v0.2.659)**: `notebooks.settings`(ホワイトリスト: top_k・source_text_tokens)を migration 13 で追加——k未指定の retrieve 全経路が settings.top_k を解決し、ask/SSE の build_context が settings.source_text_tokens を予算化。`PATCH /api/notebooks/{id} {settings}` + `shoin notebook settings` の両面、全往復経路で保存 |
 | 21 | ~~**削除は即物理削除**~~ → **解消済み** (v0.2.654: nb削除が全子表を`trash_items`へJSON undo-log化——同一TXのため巻戻し不能なコミットは構造上存在しない。`GET /api/trash`+restore/purge・`shoin trash`。id衝突はALREADY_EXISTSで拒否=暗黙merge無し) |
 | 22 | ~~**DB全体のバックアップ/エクスポート経路なし**~~ → **解消済み** (v0.2.636: `shoin backup <dest>` が SQLite online backup API でライブ一貫スナップショットを作成。dest=0600・`~`展開・自己上書き拒否・coded失敗経路) |
 | ~~23~~ | ~~ノートブック統合・複製が無い~~ | **解消 v0.2.656** — 複製 (v0.2.645) に続きmerge側も着地: `Store.merge_notebooks` が元nbの全子表を新規idで取込先へ再挿入 (chunk.source_id・citation_report.source_id_map を id_map で再写像・importと `_insert_tree_rows` 共有) した上で `delete_notebook` 経由で元nbをゴミ箱へアーカイブ=復元可能。`POST /api/notebooks/{id}/merge {"source_id"}` + `shoin notebook merge <target> <src>` のCLI/Web両面 |

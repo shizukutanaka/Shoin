@@ -97,6 +97,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "作成: [{id}] {name}",
         "nb.deleted": "削除完了",
         "nb.renamed": "改名完了: [{id}] {name}",
+        "nb.settings_set": "設定完了: [{id}] {settings}",
         "nb.duplicated": "複製完了: [{id}] {name}",
         "nb.merged": "統合完了: [{id}] {name} (nb{src} を吸収・ゴミ箱へアーカイブ)",
         "nb.imported": "インポート完了: [{id}] {name}",
@@ -201,6 +202,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nb.created": "Created: [{id}] {name}",
         "nb.deleted": "Deleted",
         "nb.renamed": "Renamed: [{id}] {name}",
+        "nb.settings_set": "Settings set: [{id}] {settings}",
         "nb.duplicated": "Duplicated: [{id}] {name}",
         "nb.merged": "Merged: [{id}] {name} (absorbed nb{src}, archived to trash)",
         "nb.imported": "Imported: [{id}] {name}",
@@ -337,6 +339,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     nb_mg.add_argument("notebook_id", type=int)
     nb_mg.add_argument("source_id", type=int)
+    nb_set = nbsub.add_parser(
+        "settings",
+        help="nb単位設定 (top_k=N source_text_tokens=N; 引数なしで表示・--clearで消去)",
+    )
+    nb_set.add_argument("notebook_id", type=int)
+    nb_set.add_argument("pairs", nargs="*", metavar="key=value")
+    nb_set.add_argument("--clear", action="store_true")
 
     msgs = sub.add_parser("messages", help="チャット履歴管理")
     msgssub = msgs.add_subparsers(dest="action", required=True)
@@ -398,7 +407,11 @@ def _build_parser() -> argparse.ArgumentParser:
     askp = sub.add_parser("ask", help="ソース限定Q&A")
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
-    askp.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
+    # default=None lets the notebook's own settings.top_k decide (v0.2.659):
+    # an explicit -k still wins over the setting.
+    askp.add_argument(
+        "-k", type=_pos_int, default=None, help="検索深さ (省略時: nb設定か既定値)"
+    )
     askp.add_argument(
         "--source",
         dest="source_ids",
@@ -867,6 +880,38 @@ def _cmd_notebook(store: Store, args: argparse.Namespace) -> int:
                 src=str(args.source_id),
             )
         )
+    elif action == "settings":
+        import json
+        # Same key-level merge surface as `source meta`: read the current
+        # object, merge int-valued `key=value` pairs, write back; --clear
+        # removes the whole override object.
+        nb0 = store.get_notebook(int(args.notebook_id))
+        if not args.pairs and not args.clear:
+            print(json.dumps(nb0.settings, ensure_ascii=False, sort_keys=True))
+        else:
+            settings = {} if args.clear else dict(nb0.settings)
+            for pair in args.pairs:
+                key, sep, value = pair.partition("=")
+                if not sep or not key.strip():
+                    raise StoreError(
+                        "VALIDATION_FIELD_FORMAT_INVALID",
+                        f"settings pair must be key=value, got {pair!r}",
+                    )
+                try:
+                    settings[key.strip()] = int(value)
+                except ValueError:
+                    raise StoreError(
+                        "VALIDATION_FIELD_FORMAT_INVALID",
+                        f"settings.{key.strip()} must be an integer, got {value!r}",
+                    ) from None
+            store.update_notebook_settings(int(args.notebook_id), settings)
+            print(
+                _t(
+                    "nb.settings_set",
+                    id=str(args.notebook_id),
+                    settings=json.dumps(settings, ensure_ascii=False, sort_keys=True),
+                )
+            )
     return 0
 
 
@@ -969,7 +1014,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         llm,
         int(args.notebook_id),
         question,
-        k=int(args.k),
+        k=args.k,
         source_ids=args.source_ids,
         on_delta=_emit,
     )

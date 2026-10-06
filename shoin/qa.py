@@ -654,10 +654,17 @@ def retrieve_for_question(
     notebook_id: int | None,
     retrieval_q: str,
     qvec: list[float] | None,
-    k: int = TOP_K,
+    k: int | None = None,
     source_ids: list[int] | None = None,
 ) -> list[Hit]:
     """Retrieval entry point for ask(): single-query, or RAG-Fusion when opted in.
+
+    k=None means "let the notebook decide" (v0.2.659): a per-notebook
+    settings.top_k override wins over the TOP_K global default, so a
+    project can retrieve deeper or shallower than the process default.
+    notebook_id=None (cross-notebook search) has no settings owner and
+    always falls back to TOP_K. Callers that accept an explicit k (the
+    API's k field, CLI -k) pass it through and it wins over the setting.
 
     With SHOIN_MULTI_QUERY unset (the default) this is exactly retrieve() —
     byte-identical behavior and zero extra LLM traffic. When enabled, the LLM
@@ -677,6 +684,12 @@ def retrieve_for_question(
     lock hold could be spent on a request whose client had already
     disconnected. Skipping serialization here removes both problems.
     """
+    if k is None:
+        if notebook_id is None:
+            k = TOP_K
+        else:
+            settings = store.notebook_settings(notebook_id)
+            k = int(settings.get("top_k") or TOP_K)
     if not multi_query_enabled():
         return retrieve(
             store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
@@ -717,7 +730,7 @@ def ask(
     llm: ChatBackend,
     notebook_id: int,
     question: str,
-    k: int = TOP_K,
+    k: int | None = None,
     persist: bool = True,
     source_ids: list[int] | None = None,
     on_delta: Callable[[str], None] | None = None,
@@ -747,7 +760,14 @@ def ask(
             answer = Answer(no_hit, [], make_report(no_hit, []))
         else:
             try:
-                context = build_context(store, hits)
+                # settings.source_text_tokens overrides the global
+                # SOURCE_TEXT_TOKENS budget for this notebook (v0.2.659).
+                budget = int(
+                    store.notebook_settings(notebook_id).get(
+                        "source_text_tokens", SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=budget)
             except sqlite3.OperationalError as exc:
                 raise StoreError(
                     "SYSTEM_DB_LOCKED",

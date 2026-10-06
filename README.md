@@ -46,6 +46,7 @@ shoin serve                           # Web UI起動
 shoin notebook new "研究ノート"        # CLIでも操作可
 shoin notebook duplicate 1             # ノートブックを複製(ソース/チャンク/ノート全コピー)
 shoin notebook merge 1 2               # nb2をnb1へ統合(元nbはゴミ箱へアーカイブ)
+shoin notebook settings 1 top_k=4 source_text_tokens=512  # nb単位の検索上書き(未設定=グローバル既定)
 shoin add 1 ./paper.pdf https://example.com/article
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
