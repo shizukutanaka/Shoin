@@ -955,9 +955,11 @@ class Store:
         immediately at zero re-embed cost, and recycled rowids can
         never collide with the restore. Source archives (v0.2.667)
         follow the same contract inside their parent notebook, which
-        must still exist (NOTEBOOK_NOT_FOUND): an occupied source id
-        refuses with SOURCE_ALREADY_EXISTS, never a silent merge or
-        id rewrite.
+        must still exist (NOTEBOOK_NOT_FOUND): the probe pairs the
+        archived notebook_id with the archived created_at (v0.2.689),
+        so a rowid recycled by delete+create counts as "parent gone",
+        and an occupied source id refuses with SOURCE_ALREADY_EXISTS,
+        never a silent merge or id rewrite.
         Note archives get a fresh id — nothing outside delete/list
         references note ids, so re-assignment loses nothing and cannot
         collide. INTEGER PRIMARY KEY reuses max(id)+1, so every
@@ -999,9 +1001,17 @@ class Store:
                         c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
                 src["meta"] = _meta_text(src.get("meta"))
                 nb_id = int(src["notebook_id"])
+                nb_created_at = payload.get("nb_created_at")
+                nb_created_at = (
+                    str(nb_created_at) if nb_created_at is not None else None
+                )
             elif kind == "note":
                 note = payload["note"]
                 nb_id = int(note["notebook_id"])
+                nb_created_at = payload.get("nb_created_at")
+                nb_created_at = (
+                    str(nb_created_at) if nb_created_at is not None else None
+                )
             else:
                 raise ValueError(f"unknown trash kind {kind!r}")
         except (KeyError, TypeError, ValueError) as exc:
@@ -1014,8 +1024,10 @@ class Store:
                 nb, sources, chunks, notes, studio_outputs, messages, trash_id
             )
         if kind == "source":
-            return self._restore_trashed_source(src, chunks, nb_id, trash_id)
-        return self._restore_trashed_note(note, nb_id, trash_id)
+            return self._restore_trashed_source(
+                src, chunks, nb_id, trash_id, nb_created_at
+            )
+        return self._restore_trashed_note(note, nb_id, trash_id, nb_created_at)
 
     def _restore_notebook_tree(
         self,
@@ -1066,18 +1078,27 @@ class Store:
         chunks: list[dict[str, Any]],
         nb_id: int,
         trash_id: int,
+        nb_created_at: str | None,
     ) -> dict[str, Any]:
         """Source archive restore (v0.2.667): original id inside its parent
         notebook — chunk INSERTs re-fire the FTS triggers, so the source is
-        searchable again in the same commit that lands it."""
+        searchable again in the same commit that lands it. The parent probe
+        pairs id with the archived created_at (v0.2.689): rowids recycle,
+        so an id-only probe would mis-parent the source into whatever
+        notebook later reoccupied the id. Archives predating the key fall
+        back to the id-only check."""
         with self.conn:
             # BEGIN IMMEDIATE (v0.2.685): both probes run under the write
             # lock — a concurrent delete/create in the gap used to surface
             # as a raw FK/PK IntegrityError instead of the coded refusal.
             self.conn.execute("BEGIN IMMEDIATE")
-            if self.conn.execute(
-                "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-            ).fetchone() is None:
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone()
+            if nb_row is None or (
+                nb_created_at is not None
+                and str(nb_row["created_at"]) != nb_created_at
+            ):
                 raise StoreError(
                     "NOTEBOOK_NOT_FOUND",
                     f"notebook {nb_id} is gone — cannot restore source into it",
@@ -1120,19 +1141,26 @@ class Store:
         return {"kind": "source", "id": int(src["id"]), "name": str(src["title"])}
 
     def _restore_trashed_note(
-        self, note: dict[str, Any], nb_id: int, trash_id: int
+        self, note: dict[str, Any], nb_id: int, trash_id: int,
+        nb_created_at: str | None,
     ) -> dict[str, Any]:
         """Note archive restore (v0.2.667): fresh id inside its parent
         notebook — nothing outside delete/list references note ids, so
-        re-assignment loses nothing and the insert can never collide."""
+        re-assignment loses nothing and the insert can never collide. The
+        parent probe pairs id with the archived created_at (v0.2.689) for
+        the same recycled-rowid reason as the source restore."""
         with self.conn:
             # BEGIN IMMEDIATE (v0.2.685): the parent probe runs under the
             # write lock — a concurrent delete_notebook in the gap used to
             # turn the coded NOTEBOOK_NOT_FOUND into a raw FK violation.
             self.conn.execute("BEGIN IMMEDIATE")
-            if self.conn.execute(
-                "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-            ).fetchone() is None:
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone()
+            if nb_row is None or (
+                nb_created_at is not None
+                and str(nb_row["created_at"]) != nb_created_at
+            ):
                 raise StoreError(
                     "NOTEBOOK_NOT_FOUND",
                     f"notebook {nb_id} is gone — cannot restore note into it",
@@ -1824,11 +1852,21 @@ class Store:
             src_row = self.conn.execute(
                 "SELECT * FROM sources WHERE id=?", (source_id,)
             ).fetchone()
+            # Parent identity beyond the raw id (v0.2.689): INTEGER PRIMARY
+            # KEY rowids recycle as max+1, so the restore probe must pair
+            # id with created_at or a deleted-and-recreated notebook
+            # silently adopts the restored source.
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (src.notebook_id,)
+            ).fetchone()
             payload = json.dumps(
                 {
                     "kind": "source",
                     "source": dict(src_row) if src_row is not None else {},
                     "chunks": self._chunk_dicts(source_id),
+                    "nb_created_at": (
+                        str(nb_row["created_at"]) if nb_row is not None else None
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -2355,7 +2393,21 @@ class Store:
             row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
             if row is None:
                 raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
-            payload = json.dumps({"kind": "note", "note": dict(row)}, ensure_ascii=False)
+            # Same parent-identity capture as delete_source (v0.2.689).
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?",
+                (int(row["notebook_id"]),),
+            ).fetchone()
+            payload = json.dumps(
+                {
+                    "kind": "note",
+                    "note": dict(row),
+                    "nb_created_at": (
+                        str(nb_row["created_at"]) if nb_row is not None else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
                 " VALUES(?,?,?,?,'note')",

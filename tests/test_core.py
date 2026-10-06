@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.688")
+        self.assertEqual(VERSION, "0.2.689")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -22558,6 +22558,74 @@ class TestTrash(unittest.TestCase):
             self.assertNotEqual(res["id"], nid)
             titles = sorted(n["title"] for n in s.list_notes(nb.id))
             self.assertEqual(titles, ["new", "old"])
+
+    def test_child_restore_refuses_recycled_parent_rowid(self) -> None:
+        """v0.2.689: deleting a notebook frees its INTEGER PRIMARY KEY
+        rowid, which a later create_notebook recycles as max+1 — an
+        id-only parent probe would silently adopt the restored child
+        into an unrelated notebook. The probe pairs id with the
+        archived created_at: a live row with a different created_at IS
+        "parent gone" — coded NOTEBOOK_NOT_FOUND, nothing inserted,
+        archive kept."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "a.txt", "mem://a", "sha-a")
+            s.add_chunks(src.id, ["テキスト"])
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_source(src.id)
+            s.delete_note(nid)
+            by_kind = {t["kind"]: t for t in s.trash_list()}
+            # Delete the parent, then recreate: the freed rowid recycles
+            # onto an unrelated notebook with a different created_at.
+            s.delete_notebook(nb.id)
+            nb2 = s.create_notebook("unrelated")
+            self.assertEqual(nb2.id, nb.id)  # rowid recycle is the premise
+            for tid in (by_kind["source"]["id"], by_kind["note"]["id"]):
+                with self.assertRaises(StoreError) as cm:
+                    s.trash_restore(tid)
+                self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(s.counts(nb2.id)["sources"], 0)
+            self.assertEqual(len(s.list_notes(nb2.id)), 0)
+            self.assertEqual(len(s.trash_list()), 3)  # archives intact
+            # Restoring the real parent (its archive keeps the original
+            # id AND created_at) re-enables the children — probe matches.
+            s.delete_notebook(nb2.id)  # free the recycled rowid again
+            nb_item = [
+                t for t in s.trash_list()
+                if t["kind"] == "notebook" and t["name"] == "n"
+            ][0]
+            s.trash_restore(nb_item["id"])
+            res = s.trash_restore(by_kind["source"]["id"])
+            self.assertEqual(res["kind"], "source")
+            self.assertEqual(res["id"], src.id)
+            res2 = s.trash_restore(by_kind["note"]["id"])
+            self.assertEqual(res2["kind"], "note")
+            self.assertEqual(s.counts(nb.id)["sources"], 1)
+            self.assertEqual(len(s.list_notes(nb.id)), 1)
+
+    def test_child_restore_legacy_payload_falls_back_to_id_probe(self) -> None:
+        """v0.2.689: archives written before nb_created_at existed carry
+        no parent identity — the probe falls back to id-only so the undo
+        feature still works on old trash rows (documented limitation)."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_note(nid)
+            tid = s.trash_list()[0]["id"]
+            # Strip the key to simulate a pre-v0.2.689 archive.
+            row = s.conn.execute(
+                "SELECT payload FROM trash_items WHERE id=?", (tid,)
+            ).fetchone()
+            doc = json.loads(row["payload"])
+            del doc["nb_created_at"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?",
+                (json.dumps(doc), tid),
+            )
+            s.conn.commit()
+            res = s.trash_restore(tid)
+            self.assertEqual(res["kind"], "note")
+            self.assertEqual(len(s.list_notes(nb.id)), 1)
 
     def test_trash_unknown_kind_is_coded(self) -> None:
         """v0.2.667: a hand-edited/foreign payload kind must surface as

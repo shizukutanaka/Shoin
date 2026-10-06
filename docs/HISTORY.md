@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.688
+## Version History: v0.1.37 → v0.2.689
+
+### v0.2.689 — source/note restoreの親nb同一性検証(rowid再利用誤帰属の閉塞)
+
+- **新規短所73解消(ソクラテス問いで発掘)**: 「id再利用の影響はprobeの範囲内か」の残面——`_restore_trashed_source`/`_restore_trashed_note`の親nb存在確認は`SELECT 1 FROM notebooks WHERE id=?`の**idのみ**だった。nb削除→`INTEGER PRIMARY KEY`再利用(max+1)で無関係の新規nbが同idを得ると、親確認を素通りして**削除済みnb由来のsource/noteが無関係nbへ誤帰属**——undo-logが間違ったノートブックを汚染する永続的誤り(686のPK衝突と同じrowid再利用族の別面:あちらはprobe範囲外のINSERT衝突、こちらはprobe自体の誤判定)
+- **id+created_at組で同一性検証**: delete時アーカイブに`nb_created_at`を同梱し、restore時`SELECT created_at FROM notebooks WHERE id=?`で照合——再利用rowidはcreated_atが必ず異なる(µs分解能)ため「id一致+created_at不一致=親nb消失」として`NOTEBOOK_NOT_FOUND`拒否。旧形式payload(キー無し)はidのみ検査へフォールバック(undo機能の互換維持)
+- **行動ピン2件**: ①再利用rowidへのsource/note restore→coded NOTEBOOK_NOT_FOUND・無関係nb無変更・アーカイブ温存・真の親restore後は復元成功 ②nb_created_at欠落payload→idのみプローブで復元(back-compat)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.688 — source_idsスコープlistの件数上限化(MAX_SCOPE_IDS)
 
