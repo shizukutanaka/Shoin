@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.709
+## Version History: v0.1.37 → v0.2.710
+
+### v0.2.710 — import文書のsettingsにwriter同値の値レベル検証(範囲外top_k・非int値のverbatim格納を閉塞)
+
+- **新規短所94解消(ソクラテス問いで発掘)**: 「import文書のsettingsもwriterと同じ検証を受けるか」——v0.2.693がkind/role/weight語彙を閉塞した同族で、nb `settings`だけ`_meta_text`(形状のみ)を通して**値をverbatim格納**していた残存面。細工文書は`top_k=10**9`(全テーブル走査)・`"huge"`(読取側`int()`がraw ValueError→500)を永続化——v0.2.659の範囲検証がPATCHのみの未カバー入口
+- **`_import_settings_text`フィルタ**: `_meta_text`(形状ゲート)+per-entry検査——既知キーはintかつ`_NB_SETTING_BOUNDS`範囲内のみ保持(非int/bool/範囲外は**削除**しグローバルデフォルトがbind)。未知キーは保持(不活性・新バージョン前方互換)——「createは厳格・importは寛容」のrepo姿勢に整合
+- **boundsのモジュール定数化**: `_NB_SETTING_BOUNDS`を新設し`update_notebook_settings`のローカルboundsと単一ソース化(trash restore経路も同フィルタ適用)
+- **行動ピン(拡張)**: 細工settings `{top_k:10**9, source_text_tokens:"huge", future_key:"kept"}`→既知値のみ消失+未知キー保持・`{top_k:True}`→`{}`(bool排除も検証)
+- **却下した問い(記録)**: settings PATCH/CLIのlast-writer-wins(REPLACE契約として設計済・merge責任はクライアント側)・trash restoreのrowid衝突(v0.2.685/686/689で3段防御済)
 
 ### v0.2.709 — chunk上限を書込TX内へ移設(並行ingest/refreshで上限突破するTOCTOUを閉塞)
 

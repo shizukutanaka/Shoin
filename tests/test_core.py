@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.709")
+        self.assertEqual(VERSION, "0.2.710")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18332,7 +18332,7 @@ class TestResidualGuards(unittest.TestCase):
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
             "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
-            "store.py": {"MIGRATIONS"},
+            "store.py": {"MIGRATIONS", "_NB_SETTING_BOUNDS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
         }
         ctor_names = {"dict", "set", "list", "OrderedDict", "defaultdict", "Counter"}
@@ -24009,6 +24009,22 @@ class TestNotebookSettings(unittest.TestCase):
         with self.assertRaises(StoreError) as cm:
             store.import_notebook(doc)
         self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+        # v0.2.710: a crafted document's settings get the writer's
+        # value-level guard — a KNOWN key keeps only an in-range int
+        # (out-of-range, non-int and bool all drop so the global default
+        # binds); unknown keys stay — inert here, forward-compatible.
+        doc["notebook"]["settings"] = {
+            "top_k": 10**9,
+            "source_text_tokens": "huge",
+            "future_key": "kept",
+        }
+        imp3 = store.import_notebook(doc)
+        self.assertEqual(
+            store.get_notebook(imp3.id).settings, {"future_key": "kept"}
+        )
+        doc["notebook"]["settings"] = {"top_k": True}
+        imp4 = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp4.id).settings, {})
 
     def test_top_k_setting_drives_retrieval(self) -> None:
         from shoin.qa import retrieve_for_question

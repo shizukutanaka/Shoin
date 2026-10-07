@@ -461,6 +461,44 @@ def _meta_text(value: Any) -> str:
     raise ValueError("meta is not a JSON object")
 
 
+# Per-key bounds every writer and importer agrees on (v0.2.710):
+# update_notebook_settings rejects out-of-range values outright, and
+# _import_settings_text drops them. Retrieval reads these keys raw.
+_NB_SETTING_BOUNDS = {
+    "top_k": (1, SEARCH_K_MAX),
+    "source_text_tokens": (
+        NB_SOURCE_TEXT_TOKENS_MIN,
+        NB_SOURCE_TEXT_TOKENS_MAX,
+    ),
+}
+
+
+def _import_settings_text(value: Any) -> str:
+    """Validate a document's `settings` field to canonical JSON text.
+
+    _meta_text gives the shape gate (None → '{}', non-object →
+    ValueError → the caller's coded error). The value-level check then
+    mirrors update_notebook_settings per-entry rather than per-object:
+    an unknown key stays (it is inert on this build — a newer version
+    may emit it), while a KNOWN key carrying a non-int or out-of-range
+    value is dropped so the global default binds. A verbatim copy would
+    let a crafted document persist e.g. top_k=10**9 (whole-table
+    retrieval) or a non-int that detonates the reader's int() into a
+    raw error (v0.2.710).
+    """
+    parsed = json.loads(_meta_text(value))
+    kept = {
+        k: v for k, v in parsed.items()
+        if k not in _NB_SETTING_BOUNDS
+        or (
+            isinstance(v, int)
+            and not isinstance(v, bool)
+            and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
+        )
+    }
+    return _meta_dump(kept)
+
+
 def _import_str(value: Any) -> None:
     """Reject a document field that is not a storable UTF-8 string.
 
@@ -882,15 +920,8 @@ class Store:
                 f"unknown settings keys: {', '.join(unknown)} "
                 f"(allowed: {', '.join(NB_SETTING_KEYS)})",
             )
-        bounds = {
-            "top_k": (1, SEARCH_K_MAX),
-            "source_text_tokens": (
-                NB_SOURCE_TEXT_TOKENS_MIN,
-                NB_SOURCE_TEXT_TOKENS_MAX,
-            ),
-        }
         for key, value in settings.items():
-            lo, hi = bounds[key]
+            lo, hi = _NB_SETTING_BOUNDS[key]
             if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
                 raise StoreError(
                     "VALIDATION_FIELD_FORMAT_INVALID",
@@ -1099,7 +1130,7 @@ class Store:
                 # a raw ValueError escaping mid-transaction.
                 for s in sources:
                     s["meta"] = _meta_text(s.get("meta"))
-                nb["settings"] = _meta_text(nb.get("settings"))
+                nb["settings"] = _import_settings_text(nb.get("settings"))
             elif kind == "source":
                 src = payload["source"]
                 chunks = payload["chunks"]
@@ -1348,8 +1379,9 @@ class Store:
             messages = payload["messages"]
             # settings is optional in the document (pre-v0.2.659 exports
             # lack it) — absent normalizes to '{}', anything non-object is
-            # malformed like a non-object meta.
-            nb_settings_text = _meta_text(nb.get("settings"))
+            # malformed like a non-object meta; _import_settings_text also
+            # drops out-of-range/non-int values on known keys (v0.2.710).
+            nb_settings_text = _import_settings_text(nb.get("settings"))
             src_ids: set[Any] = set()
             for s in sources:
                 # v0.2.692: a crafted export may repeat a source id —
