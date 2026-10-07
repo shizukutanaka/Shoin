@@ -167,6 +167,20 @@ class LLMClient:
 
     # --- transport ---
 
+    def _scrub_secrets(self, text: str) -> str:
+        """Replace the credentials this client sent with "***" (v0.2.678).
+
+        Any server-produced text — an HTTP error body or a chat_stream
+        ``{"error": ...}`` frame — can echo the request's headers or URL back
+        inside it, reflecting the Bearer token or URL userinfo into every
+        surface the error reaches (the 502 JSON envelope, SSE frames, the
+        UI toast, stderr, the event log). Scrub the secrets; host and path
+        stay visible for diagnosis."""
+        for secret in (llm_api_key(), url_userinfo(self.base_url)):
+            if secret:
+                text = text.replace(secret, "***")
+        return text
+
     def _post(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
         """_post_once + bounded retry on transport failures (v0.2.639).
 
@@ -208,14 +222,9 @@ class LLMClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read(300).decode("utf-8", errors="replace")
             # v0.2.678 (product-review #62): the error body is server-produced —
-            # a misbehaving gateway can echo the request's headers or URL back
-            # inside it, reflecting the Bearer token or URL userinfo into every
-            # surface this message reaches (SSE error frame, UI toast, stderr,
-            # log). Scrub the secrets this client sent before they propagate;
-            # host and path stay visible for diagnosis.
-            for secret in (llm_api_key(), url_userinfo(self.base_url)):
-                if secret:
-                    detail = detail.replace(secret, "***")
+            # see _scrub_secrets. Scrub the secrets this client sent before
+            # they propagate; host and path stay visible for diagnosis.
+            detail = self._scrub_secrets(detail)
             raise LLMError(
                 "SYSTEM_LLM_HTTP_ERROR", f"HTTP {exc.code} from {path}: {detail}"
             ) from exc
@@ -342,9 +351,13 @@ class LLMClient:
                         if "error" in obj:
                             err = obj["error"]
                             msg = err if isinstance(err, str) else json.dumps(err)
+                            # The frame is server-produced text like the HTTP
+                            # error body above — scrub before truncating, or a
+                            # secret split by the cut could survive (v0.2.734).
                             raise LLMError(
                                 "SYSTEM_LLM_BAD_RESPONSE",
-                                f"LLM stream error: {str(msg)[:200]}",
+                                "LLM stream error:"
+                                f" {self._scrub_secrets(str(msg))[:200]}",
                             )
                         # choices[0].finish_reason arrives on the final chunk
                         # (None on intermediate ones); keep the last one. A
