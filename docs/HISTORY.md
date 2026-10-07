@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.707
+## Version History: v0.1.37 → v0.2.708
+
+### v0.2.708 — duplicate_notebookをBEGIN IMMEDIATE化(同時deleteで空複製がコミットされる経路を閉塞)
+
+- **新規短所92解消(ソクラテス問いで発掘)**: 「プローブとコピーは同一コミット点を読むか」——`duplicate_notebook`は`with self.conn:`(deferred TX)内でget_notebook→counts→INSERT..SELECT連鎖を実行するが、TXは最初のwriteまで開始されない。nb削除がギャップにコミットされると存在プローブは通過済みなのにSELECT群が0行を読み、**子行ゼロの「複製」がエラーなしでコミット**される永続破損——delete系のBEGIN IMMEDIATE化(v0.2.683/685)と同族TOCTOUの書込側残存面
+- **`BEGIN IMMEDIATE`+プローブ内包**: `src`の取得・name派生・バリデーションを全てTX内へ移動——ロック下でget_notebookが再プローブし、削除済みならNOT_FOUND。name/settingsのドリフトも同スナップショット由来に
+- **行動ピン**: counts内で別接続がbusy_timeout=0のBEGIN IMMEDIATEを試行→書込ロック保持中はOperationalError(ベースラインdeferred beginでは取得成功)
+- **却下した問い(記録)**: SSRFリダイレクト(fetch_urlは全ホップでvalidate_public_url再検証済)・build_contextの削除source(chunksはpre-delete取得のまま一時的表示→次askで自然解消+titleフォールバック済)
 
 ### v0.2.707 — nb detail応答を単一WALスナップショットへ(合成読取のtorn閉塞)
 

@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.707")
+        self.assertEqual(VERSION, "0.2.708")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -278,6 +278,41 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.duplicate_notebook(nb.id, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_duplicate_notebook_holds_write_lock_across_copy(self) -> None:
+        """v0.2.708: the whole copy — probes AND the INSERT..SELECT
+        chain — must run under BEGIN IMMEDIATE. With the deferred begin
+        the probes read one commit point and the copy pinned a later one,
+        so a concurrent delete in the gap produced a committed
+        'duplicate' with zero child rows. Prove the lock is held before
+        the cap probe: a second connection cannot BEGIN IMMEDIATE while
+        `counts` runs."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.counts
+
+            def probe_then_try_lock(nb_id: int) -> dict[str, int]:
+                got = orig(nb_id)
+                if not locked:
+                    try:
+                        s2.conn.execute("BEGIN IMMEDIATE")
+                        locked.append(False)
+                        s2.conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        locked.append(True)
+                return got
+
+            s.counts = probe_then_try_lock  # type: ignore[method-assign]
+            s.duplicate_notebook(nb.id, "copy")
+
+        self.assertEqual(locked, [True])
 
     def test_rename_notebook_empty_name_rejected(self) -> None:
         with make_store() as s:

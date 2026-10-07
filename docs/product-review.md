@@ -231,6 +231,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~89~~ | origin無害化が`_h_nb_import`限定→CLI importでfile origin文書がverbatim保存→refresh経由で任意ファイル読込(LFI) | v0.2.705 `import_notebook`内部へ移設し全入口をsink側防御 |
 | ~~90~~ | `src_text`ページャーが`total`のみ検査→in-place編集/同件数replaceでtotal不変のまま新旧テキスト混在(torn残存面) | v0.2.706 migration 15 `content_rev`エポック+`p.rev`比較で不変条件完全カバー |
 | ~~91~~ | `_notebook_json`の~8 SELECTがauto-commit連結→同時deleteで埋込リストと`counts`不一致/`omitted`負値 | v0.2.707 `_h_nb_get`を`read_snapshot`で包み単一WALビューへ |
+| ~~92~~ | `duplicate_notebook`のdeferred TXでプローブとコピーが別コミット点を読む→同時deleteで子行ゼロの複製がコミット | v0.2.708 `BEGIN IMMEDIATE`+プローブTX内化で単一スナップショット |
 
 ### 解決済み(記録)
 

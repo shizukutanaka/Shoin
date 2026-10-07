@@ -1745,21 +1745,30 @@ class Store:
         bleeds across the fork. Child rows keep their original timestamps
         — they describe the copied content, not the copy event.
         """
-        src = self.get_notebook(notebook_id)
-        if name is None:
-            suffix = " (copy)"
-            name = src.name[: MAX_NAME_LEN - len(suffix)] + suffix
-        name = name.strip()
-        if not name:
-            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
-        if len(name) > MAX_NAME_LEN:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"name too long (max {MAX_NAME_LEN} chars)",
-            )
-        _utf8(name, "name")
         ts = _now()
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.708): the existence probe, the
+            # chunk-cap probe and every INSERT..SELECT of the copy must
+            # share one write-TX snapshot. Under the deferred begin they
+            # ran on different commit points — a concurrent delete of the
+            # source notebook in the gap produced a committed "duplicate"
+            # with zero child rows and no error.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_notebook(notebook_id)
+            if name is None:
+                suffix = " (copy)"
+                name = src.name[: MAX_NAME_LEN - len(suffix)] + suffix
+            name = name.strip()
+            if not name:
+                raise StoreError(
+                    "VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty"
+                )
+            if len(name) > MAX_NAME_LEN:
+                raise StoreError(
+                    "VALIDATION_FIELD_FORMAT_INVALID",
+                    f"name too long (max {MAX_NAME_LEN} chars)",
+                )
+            _utf8(name, "name")
             # v0.2.672: this fork copies the tree via INSERT..SELECT, not
             # _insert_tree_rows, so it needs its own cap check — a normal
             # notebook cannot breach it (0 + same count), but duplicating
