@@ -254,6 +254,38 @@ class StudioTest(unittest.TestCase):
             hit_texts = {h[2] for h in fp[1]}
             self.assertEqual(hit_texts, {"ALPHA旧テキスト。"})
 
+    def test_suggest_questions_fingerprinted_keys_on_generation_state(self) -> None:
+        """v0.2.723: the cache key must describe the corpus state the
+        questions were actually generated from. _h_questions used to key on
+        a fingerprint computed BEFORE generation — a write landing between
+        the lookup and the generation sampled state B but cached under
+        state A's key, and a later request at state A was served suggestions
+        describing content it never had."""
+        from shoin.studio import (
+            questions_fingerprint,
+            suggest_questions_fingerprinted,
+        )
+
+        llm = FakeLLM(reply="生成された質問は何か?\n別の質問か?")
+        questions, fp = suggest_questions_fingerprinted(
+            self.store, llm, self.nb
+        )
+        # Unchanged corpus: returned fingerprint is exactly the recomputed one.
+        self.assertEqual(fp, questions_fingerprint(self.store, self.nb))
+        self.assertEqual(questions, ["生成された質問は何か?", "別の質問か?"])
+
+        # Corpus moved after a pre-lookup fingerprint: the returned key must
+        # track the NEW state the questions were generated from, not the
+        # stale lookup key the old handler cached under.
+        stale_fp = questions_fingerprint(self.store, self.nb)
+        src = self.store.sources_for_notebook(self.nb)[0]
+        self.store.replace_chunks_for_source(src.id, ["全く別の新本文。"])
+        questions, gen_fp = suggest_questions_fingerprinted(
+            self.store, llm, self.nb
+        )
+        self.assertNotEqual(gen_fp, stale_fp)
+        self.assertEqual(gen_fp, questions_fingerprint(self.store, self.nb))
+
     def test_all_kinds_have_instructions(self) -> None:
         llm = FakeLLM(reply="本文 [S1]。")
         for kind in KINDS:

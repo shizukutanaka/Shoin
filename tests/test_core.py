@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.722")
+        self.assertEqual(VERSION, "0.2.723")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -18382,7 +18382,12 @@ class TestResidualGuards(unittest.TestCase):
         generate(), suggest_questions(), self._stream_chat(). CLI calls are
         single-process by design and live outside this scan."""
         path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
-        call = re.compile(r"\b(generate|suggest_questions)\s*\(|self\._stream_chat\s*\(")
+        # v0.2.723: the questions handler calls the fingerprinted variant —
+        # the alternation must cover it or the site escapes this scan.
+        call = re.compile(
+            r"\b(generate|suggest_questions(?:_fingerprinted)?)\s*\("
+            r"|self\._stream_chat\s*\("
+        )
         problems: list[str] = []
         covered = 0
         lock_indent: int | None = None

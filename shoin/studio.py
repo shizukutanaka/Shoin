@@ -19,7 +19,7 @@ from .llm import LLMError
 from .qa import _LIST_PREFIX_RE, ChatBackend, build_context
 from .qa import _t as _qa_t
 from .search import Hit
-from .store import STUDIO_KINDS, Store, StoreError
+from .store import STUDIO_KINDS, Source, Store, StoreError
 
 # Re-export of store.STUDIO_KINDS — the vocabulary lives in store.py because
 # add_studio_output() guards on it, and store.py cannot import this module back.
@@ -248,27 +248,53 @@ def questions_fingerprint(store: Store, notebook_id: int) -> tuple[object, ...]:
     # (sources@commitA + sampled hits@commitB) would label cached questions
     # with a corpus state that never coherently existed.
     with store.read_snapshot():
-        return (
-            tuple(
-                (s.id, s.sha256, s.title) for s in store.sources_for_notebook(notebook_id)
-            ),
-            # per_source must match suggest_questions()'s sample width below.
-            tuple(
-                (h.chunk_id, h.source_id, h.text, h.context)
-                for h in overview_hits(store, notebook_id, per_source=2)
-            ),
+        # per_source must match suggest_questions()'s sample width below.
+        return _questions_fingerprint_rows(
+            store.sources_for_notebook(notebook_id),
+            overview_hits(store, notebook_id, per_source=2),
         )
+
+
+def _questions_fingerprint_rows(
+    sources: list[Source], hits: list[Hit]
+) -> tuple[object, ...]:
+    """The fingerprint tuple over already-read rows — split from
+    questions_fingerprint() so suggest_questions_fingerprinted() can key the
+    cache on the exact rows it sampled inside its own snapshot (v0.2.723)."""
+    return (
+        tuple((s.id, s.sha256, s.title) for s in sources),
+        tuple((h.chunk_id, h.source_id, h.text, h.context) for h in hits),
+    )
 
 
 def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int = 4) -> list[str]:
     """Suggested questions for a notebook (REQ-102). Best-effort parsing."""
+    return suggest_questions_fingerprinted(store, llm, notebook_id, n)[0]
+
+
+def suggest_questions_fingerprinted(
+    store: Store, llm: ChatBackend, notebook_id: int, n: int = 4
+) -> tuple[list[str], tuple[object, ...]]:
+    """(questions, fingerprint-of-read-state).
+
+    v0.2.723: _h_questions keyed the cache on a fingerprint computed BEFORE
+    generation — a write landing between the two calls cached questions
+    generated from state B under state A's key, so a later request seeing
+    state A was served suggestions describing content that was never in it.
+    Keying on the fingerprint read inside the generation snapshot makes the
+    cache key always describe exactly the corpus the questions were built
+    from.
+    """
     # v0.2.721: probe + sampling SELECTs + build_context under one snapshot —
     # same one-commit corpus contract as generate() and qa.ask() (v0.2.720).
     with store.read_snapshot():
         store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         hits = overview_hits(store, notebook_id, per_source=2)
+        fingerprint = _questions_fingerprint_rows(
+            store.sources_for_notebook(notebook_id), hits
+        )
         if not hits:
-            return []
+            return [], fingerprint
         # Same guard as generate() above and qa.ask() (v0.2.44) around the
         # identical build_context() call. A DB lock is a different failure class
         # from the LLMError this function already swallows into [] below (that's
@@ -299,7 +325,7 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         # Model unreachable must not read as "this notebook has nothing
         # worth asking" — fall back to title-derived skeleton questions
         # (v0.2.660, product-review #43).
-        return _title_questions(store, notebook_id, hits, n)
+        return _title_questions(store, notebook_id, hits, n), fingerprint
     # Question detection is shared with citation.py's uncited_sentences() via
     # looks_like_question() — see that function's docstring for why this used to
     # be two independently-drifting copies of the same heuristic.
@@ -324,7 +350,7 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         ):
             seen.add(key)
             questions.append(q)
-    return questions[:n]
+    return questions[:n], fingerprint
 
 
 # Titles longer than this are skipped rather than wrapped — a filename dump

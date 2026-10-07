@@ -82,7 +82,12 @@ from .qa import (
 )
 from .search import suggest_corrections
 from .store import Source, Store, StoreError
-from .studio import KINDS, generate, questions_fingerprint, suggest_questions
+from .studio import (
+    KINDS,
+    generate,
+    questions_fingerprint,
+    suggest_questions_fingerprinted,
+)
 
 # Startup-log strings for serve(). Kept module-local (same minimal pattern as
 # export.py) rather than imported from cli.py, which imports THIS module.
@@ -1330,7 +1335,13 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             # spec.md STRIDE DoS control: serialize LLM generation (see _h_ask_sse).
             with self.generation_lock:
-                questions = suggest_questions(store, self.llm, nb_id)
+                # v0.2.723: key the cache on the fingerprint the generation
+                # itself sampled — keying on the lookup fingerprint (computed
+                # before the corpus could change mid-generation) caches
+                # state-B questions under state A's key.
+                questions, gen_fp = suggest_questions_fingerprinted(
+                    store, self.llm, nb_id
+                )
             # Cache the result regardless of whether questions is empty.  An LLM
             # failure on an active notebook (non-empty fingerprint) returns [] but
             # NOT caching it causes every subsequent poll to fire a full LLM
@@ -1342,8 +1353,8 @@ class _Handler(BaseHTTPRequestHandler):
             # was running (concurrent source-add could otherwise be overwritten).
             with self.questions_cache_lock:
                 existing = self.questions_cache.get(nb_id)
-                if existing is None or existing[0] == fingerprint:
-                    self.questions_cache[nb_id] = (fingerprint, questions)
+                if existing is None or existing[0] == gen_fp:
+                    self.questions_cache[nb_id] = (gen_fp, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:

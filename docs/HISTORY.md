@@ -29,8 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.722
+## Version History: v0.1.37 → v0.2.723
 
+### v0.2.723 — questions cacheをgeneration実読取stateでキー化
+
+**短所107**: `_h_questions`はlookup fingerprint(生成前state A)でキャッシュキー化→lookup→generation間にcorpus変更が入ると**state Bから生成されたquestionsがstate Aのキーで格納**——state Aを見る後続要求にAに存在しなかった内容を記述するsuggestionsが返る(キーが内容を記述しない真の不整合)。`suggest_questions_fingerprinted()`が生成snapshot内でfingerprintを計算し`(questions, fp)`を返す設計へ——cache keyは常に生成元corpusを記述+generation-lockピンregex追随+行動ピン。
 ### v0.2.722 — ingest失敗時の孤児source行rollback
 
 **短所106**: `index_source`は`add_source`をコミット後`add_chunks`へ進む2段コミット——中間の`add_chunks`/embed失敗で**0-chunkのsource行が永続化**。孤児行は全retrievalから不可視のままsource一覧に残り、同一ファイルのre-addはsha256 dedupeに引っかかり削除しない限り再取込不可能(CLAUDE.md「very unlikely」記録の既知ギャップを閉塞)。except経路で`delete_source`ベストエフォートrollback(失敗時も元例外をmaskしない)+孤児非残存/既存行保全ピン2件。

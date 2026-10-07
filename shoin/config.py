@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.722"
+VERSION = "0.2.723"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 

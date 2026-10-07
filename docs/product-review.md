@@ -246,6 +246,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~104~~ | `ask()`/search端点のgrounding集合組立て(retrieve legs+settings+context+title/meta lookup)がauto-commit連結の複数SELECT→request途中のingest/replace/deleteで異コミット行が混入。永続化されるanswer+reportが一貫して存在しなかった状態を記述 | v0.2.720 `read_snapshot()`をqa.ask・_h_ask_sse・_h_nb_search・_h_global_searchへ(history/writeは境界外)+注入ピン3件 |
 | ~~105~~ | studio/questionsのsampling SELECT群(`overview_hits` sizes+rows・`build_context`再読・`questions_fingerprint`2分割read)がauto-commit連結→request途中のchunk rewriteで永続化されるstudio出力/torn fingerprintが異コミット行を記述 | v0.2.721 `read_snapshot()`をgenerate・suggest_questions・questions_fingerprintへ(LLM呼出/writeは境界外)+注入ピン3件 |
 | ~~106~~ | `index_source`の`add_source`コミット→`add_chunks`間失敗で0-chunk孤児source行が永続化——全retrieval不可視のままsource一覧に残り、re-addはsha256 dedupeに衝突し削除しない限り再取込不可(CLAUDE.md記録の既知ギャップ) | v0.2.722 except経路で`delete_source`ベストエフォートrollback+孤児非残存/既存行保全ピン2件 |
+| ~~107~~ | `_h_questions`がlookup fingerprint(state A)でcache key化→lookup→generation間のcorpus変更でstate B生成questionsをAのキーへ格納——キーが内容を記述せずstate A閲覧者へAに無い内容のsuggestionsが返る | v0.2.723 `suggest_questions_fingerprinted`が生成snapshot内fingerprintを返却しgen stateでキー化+lockピンregex追随+行動ピン |
 
 ### 解決済み(記録)
 
