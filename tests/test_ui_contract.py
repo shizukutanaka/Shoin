@@ -1915,7 +1915,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2758,7 +2758,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2850,7 +2850,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2997,7 +2997,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -3279,6 +3279,78 @@ const sig = {aborted: false};
 })();
 """
         )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
+    def test_src_list_pager_reaches_uncapped_sources(self) -> None:
+        """v0.2.697: sources_omitted>0 renders a src.load_earlier pager that
+        fetches /api/notebooks/{id}/sources?offset=<len>, prepends the DESC
+        page rows so the list stays oldest-first, recomputes omitted from
+        total, re-renders, and skips duplicates; a fetch error re-enables
+        the button and toasts. Executes wireSrcListPager under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = _js_block(src, "function wireSrcListPager")
+        harness = """\
+const calls = {fetches: [], toasts: [], renders: 0};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], className: "",
+    tag: "", type: "", disabled: false, onclick: null,
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ n.children.unshift(x); n.kids.unshift(x); },
+  };
+  return n;
+};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag;
+  n.className = cls; n.textContent = txt || ""; return n; };
+const t = k => k === "src.load_earlier" ? "earlier {n}" : k;
+const toast = m => calls.toasts.push(m);
+let cur = {id: 9, sources: [{id: 3}, {id: 4}], sources_omitted: 2};
+let page = {sources: [{id: 2}, {id: 1}], total: 4, offset: 2, limit: 2};
+const api = p => { calls.fetches.push(p);
+  return Promise.resolve({json: async () => page}); };
+const render = () => { calls.renders++; };
+""" + fn + """
+(async () => {
+  const list = mk();
+  wireSrcListPager(list, cur, render);
+  const holder = list.kids[0];
+  if (!holder || holder.className !== "src-more")
+    { console.error("pager holder missing"); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.textContent !== "earlier 2")
+    { console.error("label: " + btn.textContent); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join() !== "/api/notebooks/9/sources?offset=2")
+    { console.error("fetch: " + calls.fetches); process.exit(1) }
+  // DESC page [2,1] unshifted -> ASC [1,2,3,4]
+  const ids = cur.sources.map(s => s.id).join(",");
+  if (ids !== "1,2,3,4") { console.error("order: " + ids); process.exit(1) }
+  if (cur.sources_omitted !== 0)
+    { console.error("omitted: " + cur.sources_omitted); process.exit(1) }
+  if (calls.renders !== 1)
+    { console.error("renders: " + calls.renders); process.exit(1) }
+  // omitted==0 -> a re-render wires nothing
+  const list2 = mk();
+  wireSrcListPager(list2, cur, render);
+  if (list2.kids.length) { console.error("holder on zero omitted"); process.exit(1) }
+  // duplicate guard: a page replaying an already-listed id is skipped
+  cur = {id: 9, sources: [{id: 3}], sources_omitted: 1};
+  page = {sources: [{id: 3}, {id: 2}], total: 3, offset: 1, limit: 2};
+  const list3 = mk();
+  wireSrcListPager(list3, cur, render);
+  await list3.kids[0].kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  const ids3 = cur.sources.map(s => s.id).join(",");
+  if (ids3 !== "2,3") { console.error("dedup: " + ids3); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
         self.assertIn("ok", out)

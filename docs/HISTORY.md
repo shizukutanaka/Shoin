@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.696
+## Version History: v0.1.37 → v0.2.697
+
+### v0.2.697 — sources_omittedを開示のみから到達可能なページャーへ(スコープ選択救済)
+
+- **新規短所81解消(ソクラテス問いで発掘)**: 「capは到達不能なデータを生んでいないか」——v0.2.694のdetail cap以降、`src.earlier`行は「以前の{n}件は省略」の**開示のみ**で、走査端点`GET /api/notebooks/{id}/sources`は存在するのにUIが呼ばない設計だった。cap範囲外のsourceは`srcSel`/`knownIds`に入らず、**スコープ指定ask(`source_ids`)がそのsourceへ物理的に到達不能**——cap導入が生んだ機能縮退
+- **`wireSrcListPager`**: 開示行を`src-more`型ボタン(`src.load_earlier` ja/en)へ——`?offset=cur.sources.length`で1ページfetchし、DESCページ行を`unshift`で先頭追記（ASC順維持）してrenderNotebook再描画。追記行は通常行と同一のcheckbox/srcIndex配線を自動獲得——`srcSel`への自動追加（新規source既定checked契約）も一貫
+- **補助設計**: `seen`Setでoffset窓ずれ（ページング中の並行追加）由来の重複行を吸収。`cur.sources_omitted`を`total - cur.sources.length`で再計算し、残余があれば次ページボタンを再描画
+- **renderを引数注入**: `renderNotebook`への直接依存を引数化してnode harnessで副作用なし検証を可能に（副作用は`cur`の配列/カウンタのみ）
+- **行動ピン1件**: node実実行で `sources_omitted>0`→ボタン出現→`?offset=`fetch→DESC行がASC順で先頭追記→omitted再計算→再描画→error時はボタン再有効+toast
 
 ### v0.2.696 — /api/notebooksと/api/trashのリスト応答を上限付きページングへ
 

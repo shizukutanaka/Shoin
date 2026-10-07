@@ -27,6 +27,7 @@ const I18N = {
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "notes.earlier":"— 以前の {n} 件は省略 —",
     "src.earlier":"— 以前の {n} 件は省略 —",
+    "src.load_earlier":"以前の {n} 件を表示",
     "src.more":"残り {n} チャンクを表示",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
@@ -69,6 +70,7 @@ const I18N = {
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "notes.earlier":"— {n} earlier notes not shown —",
     "src.earlier":"— {n} earlier sources not shown —",
+    "src.load_earlier":"Show {n} earlier sources",
     "src.more":"Show {n} more chunks",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
@@ -439,10 +441,13 @@ function renderNotebook(){
       }
     });
     // Disclose the server-side sources cap (sources_omitted, v0.2.694)
-    // rather than silently dropping the oldest rows — the full list stays
-    // reachable via GET /api/notebooks/{id}/sources and export().
-    if (cur.sources_omitted)
-      list.prepend(el("div","empty", t("src.earlier").replace("{n}", cur.sources_omitted)));
+    // rather than silently dropping the oldest rows — and make them
+    // reachable (v0.2.697): the disclosure used to be dead text, so a
+    // source past the cap could never join the scope set (scoped ask was
+    // unreachable for it). The pager fetches /api/notebooks/{id}/sources
+    // pages and rebuilds — the paged rows get the same checkbox/srcIndex
+    // wiring a normal row has.
+    wireSrcListPager(list, cur, renderNotebook);
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     updateScopeInfo();
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
@@ -817,6 +822,40 @@ async function refreshQuestions(){
     });
   }catch(_e){ /* suggestions are best-effort */ }
 }
+// v0.2.697: the sources_omitted disclosure is a pager, not dead text —
+// a source beyond the detail cap could never join srcSel, so scoped ask
+// (source_ids) was unreachable for it. Each click fetches one
+// /api/notebooks/{id}/sources page (the scan endpoint the cap already
+// exposed), prepends the older rows to cur.sources, and re-runs the
+// passed-in render so the new rows get the same checkbox/srcIndex wiring.
+// `render` is a parameter so the function stays side-effect-pure for the
+// node harness; the call site passes renderNotebook.
+function wireSrcListPager(list, cur, render){
+  if (!cur.sources_omitted) return;
+  const holder = el("div","src-more");
+  const btn = el("button","btn",
+    t("src.load_earlier").replace("{n}", cur.sources_omitted));
+  btn.type = "button";
+  btn.onclick = async ()=>{
+    btn.disabled = true;
+    try{
+      const pj = await (await api(
+        `/api/notebooks/${cur.id}/sources?offset=${cur.sources.length}`)).json();
+      // unshift each DESC page row -> the list stays oldest-first, and the
+      // id guard absorbs a concurrent add shifting the offset window.
+      const seen = new Set(cur.sources.map(x=>x.id));
+      for (const s2 of (pj.sources || []))
+        if (!seen.has(s2.id)){ seen.add(s2.id); cur.sources.unshift(s2); }
+      cur.sources_omitted = Math.max(0,
+        (typeof pj.total === "number" ? pj.total : cur.sources.length)
+        - cur.sources.length);
+      render();
+    }catch(err){ btn.disabled = false; toast(err.message); }
+  };
+  holder.append(btn);
+  list.prepend(holder);
+}
+
 function scopeSelection(){
   const live = (cur && cur.sources ? cur.sources : []).map(s=>s.id);
   return {live, sel: live.filter(id=>srcSel.has(id))};
