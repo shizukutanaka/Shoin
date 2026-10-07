@@ -3365,7 +3365,11 @@ const render = () => { calls.renders++; };
         total exceeds the first page, loadNotebooks renders a 'nb.more' row
         that fetches ?offset=<seen>, appends the new rows in place, relabels
         itself with the remaining count, and disappears on the last page.
-        Executes the real loadNotebooks under node."""
+        v0.2.702: the second page below deliberately repeats id 2 — a
+        concurrent add/delete shifts the newest-first offset window — and
+        the pager must drop the already-rendered row instead of showing a
+        duplicate notebook in the sidebar. Executes the real loadNotebooks
+        under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -3406,6 +3410,7 @@ const pages = {
     {id: 1, name: "A", counts: {sources: 0}},
     {id: 2, name: "B", counts: {sources: 0}}], total: 3, offset: 0, limit: 2},
   "/api/notebooks?offset=2": {notebooks: [
+    {id: 2, name: "B-dup", counts: {sources: 0}},
     {id: 3, name: "C", counts: {sources: 0}}], total: 3, offset: 2, limit: 2},
 };
 const api = p => { calls.fetches.push(p);
@@ -3427,11 +3432,15 @@ const api = p => { calls.fetches.push(p);
   await new Promise(r => setTimeout(r, 0));
   if (calls.fetches.join("|") !== "/api/notebooks|/api/notebooks?offset=2")
     { console.error("fetches: " + calls.fetches.join("|")); process.exit(1) }
-  // last page appended the third row in place and removed the holder
+  // last page appended the third row in place, dropped the duplicate id-2
+  // row, and removed the holder
   if (ul.kids.length !== 3 || ul.kids.some(k => k.className === "src-more"))
     { console.error("post-page rows: " + ul.kids.map(k=>k.className).join(",")); process.exit(1) }
-  if (notebooks.length !== 3 || notebooks[2].id !== 3)
-    { console.error("notebooks not appended"); process.exit(1) }
+  if (notebooks.length !== 3 || notebooks[2].id !== 3
+      || notebooks.filter(x => x.id === 2).length !== 1
+      || notebooks[1].name !== "B")
+    { console.error("notebooks not appended/deduped: "
+        + JSON.stringify(notebooks)); process.exit(1) }
   if (calls.toasts.length)
     { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
   console.log("ok");

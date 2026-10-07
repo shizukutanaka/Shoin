@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.701
+## Version History: v0.1.37 → v0.2.702
+
+### v0.2.702 — nb.moreページャーのid重複除外(オフセット窓ずれ二重表示閉塞)
+
+- **新規短所86解消(ソクラテス問いで発掘)**: 「リストページャーはオフセット窓ずれを吸収するか」——`nb.more`ページャーはv0.2.696導入時から`seen`重複除外を持たず、newest-first一覧でページ間のnb増減が窓をずらすと**既表示のnb行が再ページに混入→サイドバーに同一書院が二重表示**。wireEarlierPager(v0.2.697)と同族のdedup契約がこの1面のみ未配線だった
+- **seen Setで吸収**: `notebooks.map(x=>x.id)`のSetで既表示idを照合、重複行をスキップ——`left`再計算は実表示数ベースのまま正確
+- **行動ピン**: node実実行テストの第2ページへid重複行を混入、dedup済み3行+holder除去を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.701 — 質問キャッシュ指紋を実入力へ(編集後stale質問閉塞)
 

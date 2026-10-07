@@ -235,7 +235,14 @@ async function loadNotebooks(){
       try{
         const pj = await (await api(`/api/notebooks?offset=${notebooks.length}`)).json();
         if (!holder.isConnected) return;  // a newer loadNotebooks rebuilt the list
+        // The list is newest-first: a notebook created or deleted between
+        // page fetches shifts the offset window, so a row already rendered
+        // can arrive inside the next page. Same seen-set dedupe as
+        // wireEarlierPager's offset-window guard (v0.2.702).
+        const seen = new Set(notebooks.map(x=>x.id));
         for (const nb2 of (pj.notebooks || [])){
+          if (seen.has(nb2.id)) continue;
+          seen.add(nb2.id);
           notebooks.push(nb2); ul.insertBefore(mkNbRow(nb2), holder);
         }
         const left = (typeof pj.total === "number" ? pj.total : notebooks.length)
