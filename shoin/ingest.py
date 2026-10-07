@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
+import os
 import re
 import socket
 import ssl
@@ -761,7 +762,18 @@ def extract_file(path: Path | str) -> Extracted:
     text = text.replace("\x00", "").strip()
     if not text:
         raise IngestError("INGEST_EMPTY", f"no extractable text in {p.name}")
-    return Extracted(kind, title, text, str(p), _digest(data), pages_failed)
+    # The returned origin becomes the source's persisted locator — the only
+    # thing refresh_source() has to re-read the file later. Storing the path
+    # as given (str(p)) keeps a relative path relative to whatever cwd the
+    # *refresh* happens to run from: `shoin add ./a.pdf` run from ~ then
+    # refreshed via `shoin serve` started elsewhere would either fail the
+    # read or silently re-ingest a different file sitting at that relative
+    # path. Anchor it absolute at extraction time (abspath, not resolve:
+    # the user's own path — including a symlink they may repoint — is the
+    # locator they intend).
+    return Extracted(
+        kind, title, text, os.path.abspath(os.fspath(p)), _digest(data), pages_failed
+    )
 
 
 def _charset_from_ctype(ctype: str) -> str | None:

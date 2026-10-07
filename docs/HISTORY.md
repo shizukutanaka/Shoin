@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.729
+## Version History: v0.1.37 → v0.2.730
+
+### v0.2.730 — ファイル源originを絶対パス化(refreshのcwd依存と無言の別ファイル再取込を閉塞)
+
+- 短所114: `extract_file`は`str(p)`でoriginを保存——`shoin add ./doc.txt`の相対パスがcwd依存のままDBへ残り、`refresh_source`の`extract_file(src.origin)`再読が**実行時cwdに解釈を委ねる**。別cwdからのrefresh(`shoin serve`を別ディレクトリで起動するのが典型)で(a)同名ファイル不在→`INGEST_FETCH_FAILED`、(b)同名の別ファイルが在る→**その内容を無言で再取込しチャンクを丸ごと差替**——(b)はdedupe・sha256不整合ガードを全て素通りする静かなcorruption。`Extracted.origin`を`os.path.abspath`化——取込時点の実パスをlocatorとして固定(resolveでなくabspath: ユーザーが渡したsymlinkをre-pointする意図的更新はsymlink側を追跡する方がrefreshの意味に忠実)。行動ピン: 相対パスadd→別cwdでrefresh→元ファイルのbyte-identical no-op確認+origin絶対パス化の両面検証。設計上の残存: v0.2.730以前に取込済みの相対origin(既存DB)はcwd依存のまま——refresh時に記録パスを手動整合させる運用で回避。
 
 ### v0.2.729 — ベクトル書込みをtext照合でガード(recycled rowidへの誤格納を閉塞)
 

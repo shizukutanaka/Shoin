@@ -253,6 +253,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~111~~ | `source_ids`所属検証がretrieval snapshot外(検証とscoped readが別コミット点のtear——間のdelete+re-addでvalidated idが他nbソースへ再利用され他nb chunk混入)+CLI `ask --source`は検証自体欠落 | v0.2.727 `check_source_scope`をqa.ask/両handlerのsnapshot内へ統合——CLIもqa.ask経由で同一SOURCE_NOT_FOUND契約+get_source全呼出snapshot内発火ピン |
 | ~~112~~ | 複数フィールドPATCH(nb name+settings・src weight+meta)が別TX直列で後段拒否時に先段永続化(400応答で部分適用) | v0.2.728 `validate_notebook_settings`/`validate_source_meta`公開helper化+初回書込み前の全フィールド検証——両directionの行動ピン |
 | ~~113~~ | embed書込みが`WHERE id=?`のみ——read→commit間のdelete+rowid再利用で旧text由来vectorが別textの新chunkへ誤格納(静かなcorruption) | v0.2.729 `set_embedding`/`_set_embedding_pair`に`expected_text`ガード(`id=? AND text=?`)→rowcount 0→CHUNK_NOT_FOUND→batch rollback・`_embed_chunks` `expected_texts`全呼出必須化(ASTピン) |
+| ~~114~~ | ファイル源originが`str(p)`相対パス保存——refreshが実行時cwdで再解釈し、別cwdで失敗 or 同名の別ファイルを無言で再取込(内容の静かな差替) | v0.2.730 `extract_file`が`os.path.abspath`化した絶対origin保存——取込時点の実パスをlocatorとして固定(行動ピン: 相対add→別cwd refresh→byte-identical no-op) |
 
 ### 解決済み(記録)
 
@@ -307,7 +308,7 @@ YAGNI。短所の多くは「層の外」(認証/TLS/バイナリ配布/telemetr
 | ノートブック横断検索は必要か | 「資料の集合」はnb単位 | nb横断は関心事の横断検索に使えるが、スコープはsource_idsで7割を満たす | 保留 (設計コスト大) |
 | 認証/TLSは必要か | ローカル単一ユーザー | 前提が変われば必須だが、現公理系では層の外。実装すると広範な負債 | 対象外 (設計前提どおり) |
 | 依存ゼロを守るべきか | 軽量性の根源 | pypdfのみを維持。ANN index等は依存追加が不可欠 | 維持 (短所3の残りは許容) |
-| ファイルrefresh欠落は実害か | `source refresh` がある | 現状URL限定。ローカルファイル編集後は delete→add が必要で実害あり | P1候補 |
+| ファイルrefresh欠落は実害か | `source refresh` がある | **済**——file源も`extract_file(origin)`で再読込(v0.2.633)・`refresh-all`一括経路(v0.2.648)・origin絶対パス化でcwd非依存(v0.2.730) | 済 (v0.2.633/648/730) |
 | `shoin stats` (件数/サイズ表示) は必要か | health で概況は見える | detail APIで概ね代替可。優先度は低い | P3 (任意) |
 | エクスポートに sources メタ (id一覧) を含めるべきか | スコープ指定はidで操作 | CLI `source list` 相当の表示は今の所 API detail のみ | P2 (将来) |
 

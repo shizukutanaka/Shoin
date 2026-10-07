@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.729")
+        self.assertEqual(VERSION, "0.2.730")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -1252,6 +1252,43 @@ class TestStore(unittest.TestCase):
             s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
 
             self.assertEqual(s.get_source(src.id).title, "My Custom Curated Name")
+
+    def test_refresh_re_reads_the_added_file_not_the_refresh_cwd(self) -> None:
+        """A file source's stored origin must anchor to the file it was
+        extracted from — not to whatever cwd a later refresh runs in.
+
+        extract_file() stored str(p): a relative `add ./doc.txt` stayed
+        relative, so refresh_source() re-read `origin` under a *different*
+        cwd — either raising INGEST_FETCH_FAILED, or silently re-ingesting
+        whichever file happened to sit at that relative path there (the
+        different doc.txt below — a quiet content swap, worse than an
+        error). v0.2.730 absolutizes the origin at extraction time.
+        """
+        from shoin.pipeline import index_source, refresh_source
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_a = Path(tmp, "a")
+            dir_b = Path(tmp, "b")
+            dir_a.mkdir()
+            dir_b.mkdir()
+            (dir_a / "doc.txt").write_text("元の文書A", encoding="utf-8")
+            (dir_b / "doc.txt").write_text("別の文書B", encoding="utf-8")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(dir_a)
+                with make_store() as s:
+                    nb = s.create_notebook("nb-rel")
+                    result = index_source(s, nb.id, "doc.txt")  # relative path
+                    self.assertTrue(Path(result.source.origin).is_absolute())
+                    os.chdir(dir_b)
+                    out = refresh_source(s, result.source.id)
+                    texts = [t for _, t in s.text_chunks_for_source(result.source.id)]
+            finally:
+                os.chdir(old_cwd)
+            # Anchored origin: refresh re-read the doc.txt that was added —
+            # byte-identical → no-op path — not dir_b's different one.
+            self.assertEqual(out.n_embedded, 0)
+            self.assertEqual(texts, ["元の文書A"])
 
     def test_replace_chunks_with_sha256_collision_raises_source_already_exists(self) -> None:
         """replace_chunks_for_source with a sha256 that matches another source must raise
