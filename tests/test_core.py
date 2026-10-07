@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.714")
+        self.assertEqual(VERSION, "0.2.715")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -20288,6 +20288,10 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
+                # v0.2.715: _meta_text's SOURCE_META_MAX oversize guard —
+                # same programmer-error builtin class, funnels into the
+                # coded boundary at every caller.
+                "ValueError",
             ] + ["StoreError"] * 98,  # +6: origin/sha256 writer bounds,
                                       #     _import_str field bound, blob
                                       #     bound (v0.2.714); -5: per-field
@@ -23148,7 +23152,7 @@ class TestNbExportImport(unittest.TestCase):
             self.assertEqual(len(s.list_notes(imp.id)), 1)
 
     def test_import_rejects_malformed_documents(self) -> None:
-        from shoin.config import MAX_BODY_LEN
+        from shoin.config import MAX_BODY_LEN, SOURCE_META_MAX
 
         with make_store() as s:
             nb_id, src_ids = self._seed_with_report(s)
@@ -23244,6 +23248,12 @@ class TestNbExportImport(unittest.TestCase):
                     {**good["chunks"][0],
                      "embedding": {"$blob": "x" * (MAX_BODY_LEN + 1)}}
                 ]},
+                # v0.2.715: meta rides _source_json verbatim too — the
+                # writer-side SOURCE_META_MAX bound must reach the doc.
+                {**good, "sources": [
+                    {**good["sources"][0],
+                     "meta": {"a": "x" * SOURCE_META_MAX}}
+                ]},
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):
@@ -23253,23 +23263,41 @@ class TestNbExportImport(unittest.TestCase):
             # nothing leaked in: only the seeded notebook exists
             self.assertEqual(len(s.list_notebooks()), 1)
 
-    def test_import_settings_drops_oversized_entries(self) -> None:
-        """v0.2.714: unknown settings keys stay for forward-compat, but an
-        entry whose key or serialized value exceeds the field bound would
-        persist verbatim and embed in every detail response — drop it."""
-        from shoin.config import MAX_BODY_LEN
+    def test_import_settings_oversized_is_rejected(self) -> None:
+        """v0.2.715: a settings object past SOURCE_META_MAX is rejected
+        whole — per-entry bounds would still let N medium entries amplify
+        the stored text, and settings ride every detail response. Unknown
+        keys under the bound still keep (forward-compat)."""
+        from shoin.config import SOURCE_META_MAX
 
         with make_store() as s:
             nb = s.create_notebook("nb")
             doc = self._tree_doc(s, nb.id)
-            doc["notebook"]["settings"] = {
-                "x" * (MAX_BODY_LEN + 1): 1,
-                "future_key": "x" * (MAX_BODY_LEN + 1),
-                "top_k": 4,
-                "kept": "ok",
-            }
+            doc["notebook"]["settings"] = {"filler": "x" * SOURCE_META_MAX}
+            with self.assertRaises(StoreError) as cm:
+                s.import_notebook(doc)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+            doc["notebook"]["settings"] = {"future_key": "kept", "top_k": 4}
             imp = s.import_notebook(doc)
-            self.assertEqual(imp.settings, {"top_k": 4, "kept": "ok"})
+            self.assertEqual(imp.settings, {"future_key": "kept", "top_k": 4})
+
+    def test_import_source_meta_within_bound_survives(self) -> None:
+        """v0.2.715: a meta object at the SOURCE_META_MAX bound still
+        round-trips — the bound rejects amplification-scale payloads,
+        not descriptive citation data."""
+        from shoin.config import SOURCE_META_MAX
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            s.add_chunks(src.id, ["one"])
+            doc = self._tree_doc(s, nb.id)
+            doc["sources"][0]["meta"] = {"a": "x" * (SOURCE_META_MAX - 20)}
+            imp = s.import_notebook(doc)
+            self.assertEqual(
+                s.sources_for_notebook(imp.id)[0].meta,
+                {"a": "x" * (SOURCE_META_MAX - 20)},
+            )
 
     def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
         """v0.2.664: every chunk-write transaction ends with the FTS5

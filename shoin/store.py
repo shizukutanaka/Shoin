@@ -453,13 +453,22 @@ def _meta_text(value: Any) -> str:
     if value is None:
         return "{}"
     if isinstance(value, dict):
-        return _meta_dump(value)
-    if isinstance(value, str):
+        text = _meta_dump(value)
+    elif isinstance(value, str):
         parsed = json.loads(value)
         if not isinstance(parsed, dict):
             raise ValueError("meta is not a JSON object")
-        return _meta_dump(parsed)
-    raise ValueError("meta is not a JSON object")
+        text = _meta_dump(parsed)
+    else:
+        raise ValueError("meta is not a JSON object")
+    # v0.2.715: the writer-side SOURCE_META_MAX bound applies on every
+    # normalization path, not just update_source_meta's PATCH — an
+    # import/restore document reached _insert_tree_rows with meta
+    # unbounded, so a giant meta object persisted verbatim and
+    # _source_json embedded it on every detail fetch (the #97 family).
+    if len(text.encode("utf-8")) > SOURCE_META_MAX:
+        raise ValueError(f"meta exceeds {SOURCE_META_MAX} bytes")
+    return text
 
 
 # Per-key bounds every writer and importer agrees on (v0.2.710):
@@ -487,18 +496,17 @@ def _import_settings_text(value: Any) -> str:
     retrieval) or a non-int that detonates the reader's int() into a
     raw error (v0.2.710).
     """
+    # _meta_text also bounds the whole object at SOURCE_META_MAX
+    # (v0.2.715): per-entry limits would still let N medium entries
+    # amplify the stored text; settings ride every detail response too.
     parsed = json.loads(_meta_text(value))
     kept = {
         k: v for k, v in parsed.items()
-        if len(k) <= MAX_BODY_LEN
-        and len(json.dumps(v)) <= MAX_BODY_LEN
-        and (
-            k not in _NB_SETTING_BOUNDS
-            or (
-                isinstance(v, int)
-                and not isinstance(v, bool)
-                and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
-            )
+        if k not in _NB_SETTING_BOUNDS
+        or (
+            isinstance(v, int)
+            and not isinstance(v, bool)
+            and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
         )
     }
     return _meta_dump(kept)

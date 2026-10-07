@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.714
+## Version History: v0.1.37 → v0.2.715
+
+### v0.2.715 — meta/settingsオブジェクトのSOURCE_META_MAX sink bound(verbatim embed増幅の最終面)
+
+- **新規短所99解消(ソクラテス問いで発掘)**: 「文書の非文字列フィールド(dict/数値)も全てboundedか」——v0.2.714はstr fieldを一律boundしたが、dict経路が残存: `s["meta"]`は`_meta_text`で形状検証のみ(size unbound)→~10MB metaがverbatim永続化し`_source_json`の`meta` embedで全detail応答へ増幅。`update_source_meta`の`SOURCE_META_MAX=4096`はPATCHのみでimport/restoreをカバーしていなかった
+- **`_meta_text`内部へbound移設**: 全正規化経路(import・trash-restore・将来呼出)を1ゲートで閉塞——oversizeは`ValueError`としてcallerのcoded境界へfunnel(import→NOTEBOOK_IMPORT_INVALID・restore→SYSTEM_INTERNAL_ERROR)
+- **`_import_settings_text`のper-entry len guard除去(v0.2.714の設計ミス訂正)**: N個の中サイズ未知エントリはper-entry boundを潜って合計で増幅する——全オブジェクトboundの方が正しく強い。`_meta_text`経由でsettings全文も4KB上限に(settingsもdetail応答にrideする)
+- **行動ピン3件**: (1)doc meta oversize拒否(malformed casesへ追加) (2)境界内metaのround-trip生存 (3)settings全文超過は全体拒否+境界内未知キー保持
+- **却下した問い(記録)**: `embedding_norm`/`seq`のinf/nan(`float()`受理→retrieval側`math.isfinite→0.0`でno-signal退化=v0.2.630系統のcorrupt-row設計)・`created_at`書式(表示のみcosmetic)・`c["source_id"]`unhashable(TypeError→coded済)
+
+
 
 ### v0.2.714 — 全verbatim-bindフィールドのper-field bound(v0.2.713の残存面を一律閉塞)
 
