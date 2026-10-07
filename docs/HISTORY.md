@@ -29,8 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.721
+## Version History: v0.1.37 → v0.2.722
 
+### v0.2.722 — ingest失敗時の孤児source行rollback
+
+**短所106**: `index_source`は`add_source`をコミット後`add_chunks`へ進む2段コミット——中間の`add_chunks`/embed失敗で**0-chunkのsource行が永続化**。孤児行は全retrievalから不可視のままsource一覧に残り、同一ファイルのre-addはsha256 dedupeに引っかかり削除しない限り再取込不可能(CLAUDE.md「very unlikely」記録の既知ギャップを閉塞)。except経路で`delete_source`ベストエフォートrollback(失敗時も元例外をmaskしない)+孤児非残存/既存行保全ピン2件。
 ### v0.2.721 — studio/questions合成readのsnapshot化(grounding族完結)
 
 - **新規短所105解消(ソクラテス問いで発掘)**: 「永続化されるstudio出力/questionsを組立てるsampling SELECTも同一コミット点か」——`overview_hits`(per-source sizes+rows SELECT群)+`build_context`再読+`questions_fingerprint`の2分割readが全てauto-commit連結。request途中の`replace_chunks_for_source`着弾で**永続化されるstudio出力が異コミット行混入のcorpusを記述**・torn fingerprintが存在しない状態でcache keyを占有——v0.2.720のask/search族のstudio側残存面

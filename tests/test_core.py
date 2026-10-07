@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.721")
+        self.assertEqual(VERSION, "0.2.722")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -16451,7 +16451,9 @@ _EXCEPT_CATALOG = {
     "cli.py": 2,
     # +1: index_source's metrics wrapper — every escaping failure counts once
     # as index.fail, then the original exception propagates (v0.2.653).
-    "pipeline.py": 4,
+    # +1: the orphan-source rollback is best-effort — a delete_source failure
+    # must not mask the original ingest error (v0.2.722).
+    "pipeline.py": 5,
     # +1: ask()'s metrics wrapper — same count-then-propagate contract for
     # ask.fail (v0.2.653).
     "qa.py": 1,
@@ -20192,6 +20194,10 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.653: index_source's usage-metrics wrapper counts every
                 # escaping failure once (index.fail), then re-raises it.
                 "Exception",
+                # v0.2.722: the orphan-source rollback delete is best-effort
+                # — a delete_source failure must not mask the original
+                # ingest error that triggered it.
+                "Exception",
                 # v0.2.648: refresh_all_sources degrades a per-source coded
                 # failure to a 'failed' row — one dead origin must not abort
                 # the batch a cron caller scheduled.
@@ -20319,7 +20325,9 @@ class TestResidualGuards(unittest.TestCase):
             # cli.py +1: _cmd_health's best-effort staleness read (v0.2.661).
             "cli.py": 1,
             # server.py +1: _h_health's best-effort staleness read (v0.2.661).
-            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 12,
+            # pipeline.py +1: the orphan-source rollback delete is
+            # best-effort — it must not mask the original error (v0.2.722).
+            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 12,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).

@@ -207,6 +207,12 @@ def index_source(
     transaction — no second update_source_title commit needed.
     """
     t0 = time.monotonic()
+    # v0.2.722: add_source commits before add_chunks — a failure in between
+    # leaves a committed source row with zero chunks: invisible to every
+    # retrieval path (empty sources never rank) yet still listed as a
+    # source, and a re-add hits the sha256 dedupe against the orphan. Roll
+    # the row back on any failure after it was committed.
+    source: Source | None = None
     try:
         if target.startswith(("http://", "https://")):
             extracted = extract_url(target)
@@ -247,7 +253,13 @@ def index_source(
     except Exception:
         # Catch-all by contract, not by accident: every ingest/index failure —
         # coded or not — is a real usage failure worth one counter tick, then
-        # the original exception propagates unchanged.
+        # the original exception propagates unchanged. The rollback delete is
+        # best-effort: a cleanup failure must not mask the original error.
+        if source is not None:
+            try:
+                store.delete_source(source.id)
+            except Exception:
+                pass
         store.bump_metrics({"index.fail": 1.0})
         raise
     ms = round((time.monotonic() - t0) * 1000)

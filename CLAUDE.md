@@ -148,7 +148,7 @@ Code: `ingest.py` `fetch_url()` and `_check_ip_pinning()`.
 
 ### Atomic Chunk Insertion + Best-Effort Embedding
 
-`add_chunks()` wraps all INSERT statements for a source in a single `with self.conn:` transaction; if any chunk INSERT fails (e.g., disk full) all are rolled back. The source row itself is committed separately by `add_source()` before `add_chunks()` is called, so a disk-full failure between those two steps could leave a source with zero chunks in the DB. In practice this is very unlikely (the source row was just written, so the same disk that accepted it will almost always accept the much larger chunk batch too). Embedding failures are always non-fatal: `_embed_chunks()` catches `LLMError` and leaves the source indexed for BM25-only retrieval.
+`add_chunks()` wraps all INSERT statements for a source in a single `with self.conn:` transaction; if any chunk INSERT fails (e.g., disk full) all are rolled back. The source row itself is committed separately by `add_source()` before `add_chunks()` is called — `index_source` rolls that row back (`delete_source`, best-effort) when any later step fails, so a mid-ingest failure never leaves an orphaned zero-chunk source (v0.2.722). Embedding failures are always non-fatal: `_embed_chunks()` catches `LLMError` and leaves the source indexed for BM25-only retrieval.
 
 ### Token-Aware Truncation
 
@@ -344,7 +344,7 @@ the same way this project's own audit rounds have always searched it (`grep -n
 **Append new entries to the top of `docs/HISTORY.md`'s Version History section, not here.**
 Update only this line's version range and the pin below.
 
-Current version: **v0.2.721** — see `docs/HISTORY.md` for what changed and why.
+Current version: **v0.2.722** — see `docs/HISTORY.md` for what changed and why.
 
 
 ---

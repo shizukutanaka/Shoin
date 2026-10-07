@@ -775,6 +775,44 @@ class PipelineTest(unittest.TestCase):
             result = index_source(self.store, self.nb, self._tmp_txt(td, "本文。" * 50), llm)
         self.assertEqual(result.n_embedded, result.n_chunks)
 
+    def test_index_source_rolls_back_orphan_source_on_chunk_failure(self) -> None:
+        """v0.2.722: add_source commits before add_chunks — a failure in
+        between used to leave a committed source row with zero chunks
+        (invisible to retrieval, listed as a source, and blocking re-add
+        via the sha256 dedupe). The row is rolled back."""
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(StoreError) as ctx:
+                with patch.object(
+                    Store,
+                    "add_chunks",
+                    side_effect=StoreError("SYSTEM_INTERNAL_ERROR", "disk full"),
+                ):
+                    index_source(
+                        self.store, self.nb, self._tmp_txt(td, "本文。" * 50)
+                    )
+        self.assertEqual(ctx.exception.code, "SYSTEM_INTERNAL_ERROR")
+        # No orphan: zero sources committed for this notebook.
+        self.assertEqual(self.store.sources_for_notebook(self.nb), [])
+
+    def test_index_source_failure_does_not_delete_prior_source(self) -> None:
+        """v0.2.722: the rollback only touches the row this call committed —
+        a duplicate-sha re-add attempt fails before add_source and must not
+        disturb the existing source."""
+        with tempfile.TemporaryDirectory() as td:
+            path = self._tmp_txt(td, "本文。" * 50)
+            first = index_source(self.store, self.nb, path)
+            self.assertEqual(
+                len(self.store.sources_for_notebook(self.nb)), 1
+            )
+            # Same file → same sha256 → SOURCE_ALREADY_EXISTS before any
+            # new commit; the original row must survive untouched.
+            with self.assertRaises(StoreError) as ctx:
+                index_source(self.store, self.nb, path)
+            self.assertEqual(ctx.exception.code, "SOURCE_ALREADY_EXISTS")
+            rows = self.store.sources_for_notebook(self.nb)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].id, first.source.id)
+
     def test_embed_partial_failure_keeps_progress(self) -> None:
         src = self.store.add_source(self.nb, "txt", "t", "/tmp/t", "x")
         texts = ["a", "b", "c", "d"]
