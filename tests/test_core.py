@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.711")
+        self.assertEqual(VERSION, "0.2.712")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -311,6 +311,81 @@ class TestStore(unittest.TestCase):
 
             s.counts = probe_then_try_lock  # type: ignore[method-assign]
             s.duplicate_notebook(nb.id, "copy")
+
+        self.assertEqual(locked, [True])
+
+    def test_write_probes_share_the_update_commit_point(self) -> None:
+        """v0.2.712: the metadata writers read their row probes at one
+        autocommit point while the UPDATE/touch/cap-check landed at a
+        later commit point — a delete+rowid-reuse in the gap steered the
+        write (and the notebook touch) at a different row than the probe
+        saw. Probes now run under BEGIN IMMEDIATE: a foreign writer
+        cannot BEGIN while the probe executes."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.get_source
+
+            def probe_then_try_lock(source_id: int):
+                got = orig(source_id)
+                try:
+                    s2.conn.execute("BEGIN IMMEDIATE")
+                    locked.append(False)
+                    s2.conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    locked.append(True)
+                return got
+
+            s.get_source = probe_then_try_lock  # type: ignore[method-assign]
+            s.update_source_meta(src.id, {"a": "1"})
+            s.update_source_title(src.id, "t2", "o")
+            s.update_source_sha256(src.id, "h2", "t2")
+            s.replace_chunks_for_source(src.id, ["c1"])
+
+        # All four probes fired while our write lock was held.
+        self.assertEqual(locked, [True] * 4)
+
+    def test_update_chunk_text_probe_under_write_lock(self) -> None:
+        """v0.2.712: the JOIN probe that feeds the rev bump and touch ran
+        at an autocommit point before the deferred write TX — same
+        cross-commit-point class as the source metadata writers, now
+        under BEGIN IMMEDIATE."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c0"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            real_conn = s.conn
+
+            class _ConnSpy:
+                def execute(self, sql, parameters=()):
+                    if "JOIN sources s ON" in str(sql):
+                        try:
+                            s2.conn.execute("BEGIN IMMEDIATE")
+                            locked.append(False)
+                            s2.conn.execute("ROLLBACK")
+                        except sqlite3.OperationalError:
+                            locked.append(True)
+                    return real_conn.execute(sql, parameters)
+
+                def __enter__(self):
+                    return real_conn.__enter__()
+
+                def __exit__(self, *a):
+                    return real_conn.__exit__(*a)
+
+                def __getattr__(self, k):
+                    return getattr(real_conn, k)
+
+            s.conn = _ConnSpy()  # type: ignore[assignment]
+            chunk_id = s.chunks_for_source(src.id)[0].id
+            s.update_chunk_text(chunk_id, "edited text")
+            s.conn = real_conn
 
         self.assertEqual(locked, [True])
 
@@ -569,22 +644,23 @@ class TestStore(unittest.TestCase):
             self.assertIn("during chunk insertion", str(cm.exception))
 
     def test_update_source_sha256_reread_concurrent_delete_raises(self) -> None:
-        """update_source_sha256 re-reads the title inside its transaction so the
-        context rewrite keys off the live row; when the source vanishes between
-        get_source() and that re-read it must raise SOURCE_NOT_FOUND, not
-        proceed on a stale snapshot. The earlier of its two concurrent-delete
-        guards — the rowcount tail is pinned in test_rowcount_guards above
-        (coverage tail: store.py)."""
+        """update_source_sha256 probes the live row under BEGIN IMMEDIATE so
+        the context rewrite keys off the same commit point as the update;
+        when the source vanishes before that probe it must raise
+        SOURCE_NOT_FOUND, not proceed on a stale snapshot. The earlier of
+        its two concurrent-delete guards — the rowcount tail is pinned in
+        test_rowcount_guards above (coverage tail: store.py)."""
         with make_store() as s:
             nb = s.create_notebook("race-reread")
             src = s.add_source(nb.id, "txt", "t", "o", "sha-rr")
             s.conn = _RacyConn(  # type: ignore[assignment]
-                s.conn, "SELECT title FROM sources", "DELETE FROM sources WHERE id=?", (src.id,)
+                s.conn, "SELECT * FROM sources WHERE id=?",
+                "DELETE FROM sources WHERE id=?", (src.id,),
             )
             with self.assertRaises(StoreError) as cm:
                 s.update_source_sha256(src.id, "sha-rr2", "t2")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
-            self.assertIn("concurrently", str(cm.exception))
+            self.assertIn("not found", str(cm.exception))
 
     def test_replace_chunks_contexts_must_match_texts(self) -> None:
         """contexts shorter/longer than texts is a caller bug — rejected before
@@ -1109,39 +1185,29 @@ class TestStore(unittest.TestCase):
             self.assertEqual(updated.title, "new title")
 
     def test_replace_chunks_title_fallback_does_not_clobber_concurrent_rename(self) -> None:
-        """A concurrent PATCH /api/sources/{id} rename landing between
-        replace_chunks_for_source()'s pre-transaction get_source() read and its
-        own UPDATE must survive — not be silently overwritten by the stale
-        pre-transaction snapshot of the title.
+        """A rename committed at the edge of replace_chunks_for_source()'s
+        write TX must survive — not be silently overwritten by a stale
+        snapshot of the title.
 
-        get_source() reads src.title BEFORE the transaction begins (SQLite's
-        implicit BEGIN only fires at the first DML statement, not at `with
-        self.conn:` entry). refresh_source() (v0.2.87) deliberately passes
-        title=None so this method's own `title or src.title` fallback keeps
-        whatever title is currently set — but resolving that fallback from a
-        pre-transaction Python read meant a rename committed in the race
-        window was clobbered by the stale value, reintroducing exactly the
-        v0.2.87 bug (refresh overwriting a custom rename) via a race instead
-        of unconditionally. Reproduced by injecting the concurrent rename
-        into get_source() itself, exactly where the real race window is.
+        refresh_source() (v0.2.87) deliberately passes title=None so this
+        method's `title or src.title` fallback keeps whatever title is
+        currently set. v0.2.712 reads that fallback under BEGIN IMMEDIATE:
+        a real foreign rename serializes before the lock (read fresh by
+        the probe) or after the commit (landing last — winning either
+        way). _RacyConn injects the rename just before the lock-held
+        probe — the latest commit point the probe can see.
         """
         with make_store() as s:
             nb = s.create_notebook("nb-race")
             src = s.add_source(nb.id, "url", "Original Page Title", "https://x.com", "sha-orig")
             s.add_chunks(src.id, ["old content"])
 
-            orig_get_source = s.get_source
-            calls = {"n": 0}
-
-            def racy_get_source(source_id: int):
-                result = orig_get_source(source_id)
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    s.update_source_title(source_id, "My Custom Curated Name", result.origin)
-                return result
-
-            with patch.object(s, "get_source", side_effect=racy_get_source):
-                s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SELECT * FROM sources WHERE id=?",
+                "UPDATE sources SET title=? WHERE id=?",
+                ("My Custom Curated Name", src.id),
+            )
+            s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
 
             self.assertEqual(s.get_source(src.id).title, "My Custom Curated Name")
 
@@ -20180,7 +20246,10 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 90,  # +2: add_chunks/replace_chunks_for_source
+            ] + ["StoreError"] * 88,  # -2: update_source_title/sha256's in-TX
+                                      #     re-read guards folded into the
+                                      #     lock-held get_source probe (v0.2.712)
+                                      # +2: add_chunks/replace_chunks_for_source
                                       #     sink-side chunk-cap guards (v0.2.709)
                                       # +1: update_chunk_text's content_rev
                                       #     bump deleted-source guard (v0.2.706)

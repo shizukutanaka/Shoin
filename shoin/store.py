@@ -1951,18 +1951,16 @@ class Store:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         _utf8(title, "title")
         _utf8(origin, "origin")
-        src = self.get_source(source_id)  # also validates existence; notebook_id needed below
         with self.conn:
-            # Re-read the title INSIDE the transaction (not src.title from the
-            # pre-transaction snapshot) so the chunk-context prefix rewrite below
-            # keys off the row's actual current value — same stale-snapshot
-            # concern the v0.2.98 COALESCE fix addressed for refresh.
-            row = self.conn.execute(
-                "SELECT title FROM sources WHERE id=?", (source_id,)
-            ).fetchone()
-            if row is None:
-                raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-            old_title = str(row["title"])
+            # BEGIN IMMEDIATE (v0.2.712): the title AND notebook_id must come
+            # from the same commit point the UPDATE lands on — a pre-lock
+            # read could see a rowid later deleted and reused, steering the
+            # context rewrite's old-title and the touch_notebook below to
+            # stale values. src is the locked-snapshot read, so it IS the
+            # re-read the older in-transaction SELECT provided.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+            old_title = str(src.title)
             cur = self.conn.execute(
                 "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
             )
@@ -2168,7 +2166,6 @@ class Store:
         if contexts is not None:
             for ctx in contexts:
                 _utf8(ctx, "chunk context")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -2178,7 +2175,12 @@ class Store:
                 # replaces in one notebook could both pass and over-fill
                 # it. The notebook-total-excluding-this-source formula
                 # mirrors pipeline.refresh_source's.
+                # The src probe also runs under the lock (v0.2.712): a
+                # pre-lock read could see a rowid later deleted and
+                # reused, steering the cap count and the touch to the
+                # wrong notebook.
                 self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
                 nb_chunks = self.counts(src.notebook_id)["chunks"]
                 here = self.count_chunks_for_source(source_id)
                 if nb_chunks - here + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
@@ -2205,13 +2207,10 @@ class Store:
                     (source_id,),
                 )
                 if sha256 is not None:
-                    # COALESCE(?, title), not a Python-side `title or src.title` fallback:
-                    # src.title was read by get_source() BEFORE this transaction began, so
-                    # a concurrent PATCH /api/sources/{id} rename that commits in the window
-                    # between that read and this UPDATE would be silently clobbered by the
-                    # stale snapshot — reintroducing exactly the bug v0.2.87 fixed (refresh
-                    # overwriting a user's custom title), just via a race instead of always.
-                    # Resolving the fallback in SQL reads the CURRENT row value atomically.
+                    # COALESCE(?, title), not a Python-side `title or src.title`
+                    # fallback: resolving the fallback in SQL reads the row's
+                    # own current value atomically — the fix for refresh
+                    # overwriting a user's custom title (v0.2.87).
                     meta_cur = self.conn.execute(
                         "UPDATE sources SET sha256=?, title=COALESCE(?, title) WHERE id=?",
                         (sha256, new_title, source_id),
@@ -2257,21 +2256,15 @@ class Store:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
         _utf8(title, "title")
         _utf8(sha256, "sha256")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:
             with self.conn:
-                # Re-read inside the transaction so the context rewrite keys off
-                # the row's actual value, not a stale snapshot — same concern as
-                # update_source_title's in-transaction read.
-                row = self.conn.execute(
-                    "SELECT title FROM sources WHERE id=?", (source_id,)
-                ).fetchone()
-                if row is None:
-                    raise StoreError(
-                        "SOURCE_NOT_FOUND",
-                        f"source {source_id} was concurrently deleted",
-                    )
-                old_title = str(row["title"])
+                # BEGIN IMMEDIATE + src probe under the lock (v0.2.712):
+                # same single-commit-point fix as update_source_title —
+                # src.title is now the locked-snapshot value, so it IS the
+                # in-transaction re-read the older SELECT provided.
+                self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+                old_title = str(src.title)
                 cur = self.conn.execute(
                     "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
                 )
@@ -2363,8 +2356,12 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"meta exceeds {SOURCE_META_MAX} bytes",
             )
-        src = self.get_source(source_id)
         with self.conn:
+            # BEGIN IMMEDIATE + src probe under the lock (v0.2.712): the
+            # notebook_id the touch below targets must come from the same
+            # commit point the UPDATE lands on.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)
             cur = self.conn.execute(
                 "UPDATE sources SET meta=? WHERE id=?", (text, source_id)
             )
@@ -2551,14 +2548,20 @@ class Store:
                 "VALIDATION_REQUIRED_FIELD_MISSING", "chunk text is empty"
             )
         _utf8(text, "text")
-        row = self.conn.execute(
-            "SELECT c.id, c.source_id, s.notebook_id FROM chunks c"
-            " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
-            (chunk_id,),
-        ).fetchone()
-        if row is None:
-            raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         with self.conn:
+            # BEGIN IMMEDIATE + the JOIN probe under the lock (v0.2.712):
+            # source_id/notebook_id must come from the same commit point
+            # the UPDATE and rev-bump land on — a pre-lock read could see
+            # a chunk rowid later deleted and reused under a different
+            # source, steering the edit and the touch at the wrong rows.
+            self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT c.id, c.source_id, s.notebook_id FROM chunks c"
+                " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
+                (chunk_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
             cur = self.conn.execute(
                 "UPDATE chunks SET text=?, embedding=NULL, embedding_norm=NULL"
                 " WHERE id=?",

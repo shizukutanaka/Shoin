@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.711
+## Version History: v0.1.37 → v0.2.712
+
+### v0.2.712 — 書込TXプローブをロック内へ移動(メタデータwriterのcross-commit-point経路を閉塞)
+
+- **新規短所96解消(ソクラテス問いで発掘)**: 「write-TX内で使う値は全て同一コミット点由来か」——v0.2.683-709のBEGIN IMMEDIATE族の残存面: メタデータwriter群が`get_source`/JOIN probeを**TX外auto-commitで読み**、その値(`src.notebook_id`・`source_id`・`notebook_id`)を後続の`UPDATE`/`touch_notebook`/cap-probeに流用していた。deferred TX(or lock外probe)のためprobe点Aと書込点Bがずれ、A→B間のsource/nb削除+rowid再利用で**wrong-row UPDATE・wrong-nb touch・wrong-nb cap計算**がコミットされる経路
+- **5面を同一パターンで修正**: `update_chunk_text`(JOIN probe)・`update_source_title`・`update_source_sha256`・`update_source_meta`・`replace_chunks_for_source`——全て`BEGIN IMMEDIATE`+probeをロック内へ移動し、ロック下スナップショットがprobeとwriteの唯一の読取点に
+- **副次簡素化**: `update_source_title`/`update_source_sha256`のin-TX `SELECT title`再読はロック内`src.title`と同一化——冗長SELECT削除(v0.2.87の同名防衛はSQL COALESCE側で保持)
+- **行動ピン2件**: (1)`get_source`スパイでforeign BEGIN IMMEDIATE(busy_timeout=0)試行→4メソッド全てロック下プローブ証明 (2)`_ConnSpy`でJOIN probe時点のforeign BEGIN失敗→update_chunk_textも同契約
+- **却下した問い(記録)**: update_source_weight(単発UPDATE+rowcount・cross-point値なし=identity semantics)・add_source/add_note/add_message(プローブはINPUT id検証のみ・FKがmid-gap deleteをcoded化)・clear_messages/rename_notebook(id入力+単発write=直列化意味論で正)・add_sourceのdup事前チェック(UNIQUE制約がB点で再保証)
 
 ### v0.2.711 — pagerのid dedupをrefresh-mergeへ(ページ間のrename/count変化が画面に残る経路を閉塞)
 
