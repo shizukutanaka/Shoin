@@ -83,11 +83,17 @@ def _embed_chunks(
     texts: list[str],
     *,
     force: bool = False,
+    expected_texts: list[str] | None = None,
 ) -> int:
     """Best-effort batch embedding. Returns the number of embedded chunks.
 
     force=True skips the model-mismatch guard. Pass it only from reindex_notebook,
     which is specifically designed to rebuild embeddings after a model change.
+
+    expected_texts parallels chunk_ids with each row's raw text — the write is
+    then guarded (`WHERE id=? AND text=?`) so a concurrent replace that deleted
+    the row and recycled its rowid under different text cannot receive a vector
+    computed for the old content (v0.2.729).
     """
     current_model = (llm.embedding_model or "").strip()
     if not current_model:
@@ -135,8 +141,13 @@ def _embed_chunks(
                 )
             count = 0
             n_pair = min(len(vectors), len(batch_ids))
-            for cid, vec in zip(
-                batch_ids[:n_pair], vectors[:n_pair], strict=True
+            exp_batch = (
+                expected_texts[i : i + batch_size]
+                if expected_texts is not None
+                else None
+            )
+            for j, (cid, vec) in enumerate(
+                zip(batch_ids[:n_pair], vectors[:n_pair], strict=True)
             ):
                 # Establish expected dimension from the first vector and validate all
                 # subsequent vectors against it.  A mismatched dimension (e.g. from a
@@ -150,7 +161,12 @@ def _embed_chunks(
                         "SYSTEM_LLM_BAD_RESPONSE",
                         f"embedding dimension mismatch: expected {expected_dim}, got {len(vec)}",
                     )
-                store.set_embedding(cid, vec, commit=False)
+                store.set_embedding(
+                    cid,
+                    vec,
+                    commit=False,
+                    expected_text=None if exp_batch is None else exp_batch[j],
+                )
                 count += 1
             store.conn.commit()  # one commit per batch, not per chunk
             done += count
@@ -207,6 +223,12 @@ def index_source(
     transaction — no second update_source_title commit needed.
     """
     t0 = time.monotonic()
+    # v0.2.722: add_source commits before add_chunks — a failure in between
+    # leaves a committed source row with zero chunks: invisible to every
+    # retrieval path (empty sources never rank) yet still listed as a
+    # source, and a re-add hits the sha256 dedupe against the orphan. Roll
+    # the row back on any failure after it was committed.
+    source: Source | None = None
     try:
         if target.startswith(("http://", "https://")):
             extracted = extract_url(target)
@@ -243,11 +265,20 @@ def index_source(
         embed_texts = [
             _embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)
         ]
-        n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+        n_embedded = _embed_chunks(
+            store, llm or _NoEmbed(), chunk_ids, embed_texts,
+            expected_texts=texts,
+        )
     except Exception:
         # Catch-all by contract, not by accident: every ingest/index failure —
         # coded or not — is a real usage failure worth one counter tick, then
-        # the original exception propagates unchanged.
+        # the original exception propagates unchanged. The rollback delete is
+        # best-effort: a cleanup failure must not mask the original error.
+        if source is not None:
+            try:
+                store.delete_source(source.id)
+            except Exception:
+                pass
         store.bump_metrics({"index.fail": 1.0})
         raise
     ms = round((time.monotonic() - t0) * 1000)
@@ -311,7 +342,10 @@ def rename_source(
     # The context column now holds the rewritten title prefix, so this reproduces
     # exactly the string index_source would have embedded for the new title.
     texts = [_embed_input(r[1], r[2]) for r in rows]
-    return _embed_chunks(store, llm or _NoEmbed(), chunk_ids, texts)
+    return _embed_chunks(
+        store, llm or _NoEmbed(), chunk_ids, texts,
+        expected_texts=[r[2] for r in rows],
+    )
 
 
 def refresh_source(
@@ -411,7 +445,10 @@ def refresh_source(
         source_id, texts, sha256=extracted.sha256, contexts=full_contexts
     )
     embed_texts = [_embed_input(fc, t) for fc, t in zip(full_contexts, texts, strict=True)]
-    n_embedded = _embed_chunks(store, llm or _NoEmbed(), chunk_ids, embed_texts)
+    n_embedded = _embed_chunks(
+        store, llm or _NoEmbed(), chunk_ids, embed_texts,
+        expected_texts=texts,
+    )
     updated_src = store.get_source(source_id)
     return IndexResult(
         updated_src, len(chunk_ids), n_embedded, pages_failed=extracted.pages_failed
@@ -483,5 +520,8 @@ def reindex_notebook(store: Store, llm: ChatBackend, notebook_id: int) -> tuple[
     # notebook never mixes context-aware and text-only vectors. The stored context
     # column already holds the full title+breadcrumb, so no reconstruction needed.
     embed_texts = [_embed_input(r[1], r[2]) for r in rows]
-    n_embedded = _embed_chunks(store, llm, chunk_ids, embed_texts, force=True)
+    n_embedded = _embed_chunks(
+        store, llm, chunk_ids, embed_texts, force=True,
+        expected_texts=[r[2] for r in rows],
+    )
     return n_embedded, len(rows)

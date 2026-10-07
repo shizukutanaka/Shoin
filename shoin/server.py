@@ -27,15 +27,22 @@ from .citation import make_report
 from .config import (
     API_VERSION,
     EMBED_MODEL_SETTING_KEY,
+    MAX_IN_FLIGHT_REQUESTS,
     MAX_QUESTION_LEN,
+    MAX_SCOPE_IDS,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
+    NB_LIST_LIMIT,
     NB_MESSAGES_LIMIT,
     NB_NOTES_LIMIT,
+    NB_SOURCES_LIMIT,
     REQUEST_SOCKET_SEC,
     SEARCH_K_MAX,
     SOURCE_WEIGHT_MAX,
+    SRC_TEXT_BATCH,
+    SRC_TEXT_BYTES_MAX,
     TOP_K,
+    TRASH_LIST_LIMIT,
     VERSION,
     db_path,
     endpoint_is_external,
@@ -66,16 +73,29 @@ from .qa import (
     _query_vector,
     build_context,
     build_messages,
+    check_source_scope,
     expand_query,
     history_messages,
-    retrieve_for_question,
+    prepare_retrieval,
+    retrieve_prepared,
 )
 from .qa import (
     _t as _qa_t,
 )
 from .search import suggest_corrections
-from .store import Store, StoreError
-from .studio import KINDS, generate, suggest_questions
+from .store import (
+    Source,
+    Store,
+    StoreError,
+    validate_notebook_settings,
+    validate_source_meta,
+)
+from .studio import (
+    KINDS,
+    generate,
+    questions_fingerprint,
+    suggest_questions_fingerprinted,
+)
 
 # Startup-log strings for serve(). Kept module-local (same minimal pattern as
 # export.py) rather than imported from cli.py, which imports THIS module.
@@ -116,23 +136,6 @@ def _read_packaged_asset(name: str) -> bytes:
 # v0.2.643: bound the user-theme response — a cosmetic hook must not be a
 # DoS backdoor by pointing SHOIN_THEME_CSS at a giant file.
 _THEME_CSS_LIMIT = 256 * 1024
-_IMPORTED_ORIGIN_PREFIX = "imported:"
-
-
-def _neutralize_import_origins(doc: Json) -> Json:
-    """File-path origins in an HTTP-supplied export must not become
-    refreshable: refresh re-reads file origins from disk, so the HTTP API
-    would read arbitrary server-side files (the confused deputy _h_src_add
-    refuses). Non-URL origins are kept, prefixed, for display only."""
-    sources = doc.get("sources")
-    if isinstance(sources, list):
-        for s in sources:
-            origin = s.get("origin") if isinstance(s, dict) else None
-            if isinstance(origin, str) and not origin.startswith(("http://", "https://")):
-                s["origin"] = _IMPORTED_ORIGIN_PREFIX + origin
-    return doc
-
-
 _EXPORT_MIME = {
     "md": "text/markdown; charset=utf-8",
     "bibtex": "application/x-bibtex; charset=utf-8",
@@ -194,6 +197,24 @@ def _safe_report(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _source_json(s: Source) -> Json:
+    return {
+        "id": s.id,
+        "kind": s.kind,
+        "title": s.title,
+        "origin": s.origin,
+        "weight": s.weight,
+        "meta": s.meta,
+        # Refreshability is decided by what the origin can still be
+        # read from, not by kind: URL sources always qualify; a file
+        # source qualifies only while its recorded path still exists
+        # (an upload's tmp copy is unlinked after ingest, so it reads
+        # false and the UI hides a button that could only error).
+        # Shared with the batch path — see pipeline.source_is_refreshable.
+        "refreshable": source_is_refreshable(s),
+    }
+
+
 def _notebook_json(store: Store, nb_id: int) -> Json:
     nb = store.get_notebook(nb_id)
     # Chats grow monotonically; without a cap every mutation round-trips the
@@ -215,29 +236,22 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
     all_notes = store.list_notes(nb_id)
     notes_omitted = max(0, len(all_notes) - NB_NOTES_LIMIT)
     notes = all_notes[notes_omitted:]
+    # Same cap for sources (v0.2.694): the last unbounded embed on this
+    # payload — every detail fetch grew with the source count. Newest
+    # NB_SOURCES_LIMIT are kept so a just-added source is always visible;
+    # sources_omitted discloses the hidden count, counts.sources still
+    # reports the true total, and the full list remains reachable via
+    # GET /api/notebooks/{id}/sources and export().
+    all_sources = store.sources_for_notebook(nb_id)
+    sources_omitted = max(0, len(all_sources) - NB_SOURCES_LIMIT)
+    sources = all_sources[sources_omitted:]
     return {
         "id": nb.id,
         "name": nb.name,
         "settings": nb.settings,
         "counts": store.counts(nb_id),
-        "sources": [
-            {
-                "id": s.id,
-                "kind": s.kind,
-                "title": s.title,
-                "origin": s.origin,
-                "weight": s.weight,
-                "meta": s.meta,
-                # Refreshability is decided by what the origin can still be
-                # read from, not by kind: URL sources always qualify; a file
-                # source qualifies only while its recorded path still exists
-                # (an upload's tmp copy is unlinked after ingest, so it reads
-                # false and the UI hides a button that could only error).
-                # Shared with the batch path — see pipeline.source_is_refreshable.
-                "refreshable": source_is_refreshable(s),
-            }
-            for s in store.sources_for_notebook(nb_id)
-        ],
+        "sources": [_source_json(s) for s in sources],
+        "sources_omitted": sources_omitted,
         "notes": [
             {"id": n["id"], "title": n["title"], "body": n["body"]} for n in notes
         ],
@@ -252,6 +266,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
         ],
         "messages": [
             {
+                "id": m["id"],
                 "role": m["role"],
                 "body": m["body"],
                 "report": _safe_report(m["citation_report"]),
@@ -273,8 +288,8 @@ class _Handler(BaseHTTPRequestHandler):
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[
-        int, tuple[tuple[tuple[int, str, str], ...], list[str]]
-    ]  # set by make_server; fingerprint = (source id, sha256, title) per source
+        int, tuple[tuple[object, ...], list[str]]
+    ]  # set by make_server; fingerprint = questions_fingerprint() (v0.2.701)
     questions_cache_lock: threading.Lock  # guards questions_cache across threads
     generation_lock: threading.Lock  # serializes LLM generation (spec.md STRIDE DoS control)
 
@@ -438,6 +453,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"{key} must be a list, got {type(raw).__name__}",
             )
+        if len(raw) > MAX_SCOPE_IDS:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"{key} too long (max {MAX_SCOPE_IDS} items)",
+            )
         out: list[int] = []
         for item in raw:
             if not isinstance(item, int) or isinstance(item, bool) or item < 1:
@@ -564,6 +584,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("POST", r"^/api/notebooks/import$", "nb_import"),
         ("GET", r"^/api/notebooks/(\d+)/messages$", "nb_messages"),
         ("GET", r"^/api/notebooks/(\d+)/notes$", "nb_notes"),
+        ("GET", r"^/api/notebooks/(\d+)/sources$", "nb_sources"),
         ("POST", r"^/api/notebooks/(\d+)/sources$", "src_add"),
         ("POST", r"^/api/notebooks/(\d+)/upload$", "src_upload"),
         ("PATCH", r"^/api/sources/(\d+)$", "src_patch"),
@@ -810,8 +831,18 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
     def _h_trash_list(self) -> None:
+        # v0.2.696: last unbounded list responses — page like nb_messages.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, TRASH_LIST_LIMIT, TRASH_LIST_LIMIT)
         with Store(self.db) as store:
-            self._json({"trash": store.trash_list()})
+            self._json(
+                {
+                    "trash": store.trash_list(limit=limit, offset=offset),
+                    "total": store.count_trash(),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_trash_restore(self, item_id: int) -> None:
         with Store(self.db) as store:
@@ -834,8 +865,21 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(res)
 
     def _h_nb_list(self) -> None:
+        # v0.2.696: bound the list response — every dashboard load refetched
+        # all notebooks; {total,offset,limit} discloses and pages the rest.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_LIST_LIMIT, NB_LIST_LIMIT)
         with Store(self.db) as store:
-            self._json({"notebooks": store.list_notebooks_with_counts()})
+            self._json(
+                {
+                    "notebooks": store.list_notebooks_with_counts(
+                        limit=limit, offset=offset
+                    ),
+                    "total": store.count_notebooks(),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_nb_create(self) -> None:
         name = self._require(self._read_json(), "name")
@@ -845,7 +889,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_get(self, nb_id: int) -> None:
         with Store(self.db) as store:
-            self._json(_notebook_json(store, nb_id))
+            # _notebook_json composes ~8 auto-commit SELECTs (row, counts,
+            # capped messages/notes/sources, studio outputs) — each reads
+            # its own commit point, so a concurrent mutation lands
+            # mid-build: embedded lists disagree with `counts`, and the
+            # `omitted` disclosures can go negative (v0.2.707). One WAL
+            # snapshot frames the whole composition.
+            with store.read_snapshot():
+                self._json(_notebook_json(store, nb_id))
 
     def _h_nb_rename(self, nb_id: int) -> None:
         # PATCH accepts {name} and/or {settings} (v0.2.659) — either field
@@ -858,6 +909,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_REQUIRED_FIELD_MISSING",
                 "missing field: name or settings",
             )
+        # v0.2.728 (#112): a multi-field PATCH must validate every field
+        # before the first write — the settings rejection previously ran
+        # inside update_notebook_settings AFTER rename_notebook had already
+        # committed, so the 400 response left the new name persisted.
+        if settings is not None:
+            validate_notebook_settings(settings)
         with Store(self.db) as store:
             nb = store.get_notebook(nb_id)
             if name is not None:
@@ -892,7 +949,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_import(self) -> None:
         with Store(self.db) as store:
-            nb = store.import_notebook(_neutralize_import_origins(self._read_json()))
+            nb = store.import_notebook(self._read_json())
             self._json({"id": nb.id, "name": nb.name}, status=201)
 
     def _h_nb_duplicate(self, nb_id: int) -> None:
@@ -974,6 +1031,23 @@ class _Handler(BaseHTTPRequestHandler):
                         for n in store.list_notes_page(nb_id, offset, limit)
                     ],
                     "total": store.count_notes(nb_id),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+
+    def _h_nb_sources(self, nb_id: int) -> None:
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_SOURCES_LIMIT, NB_SOURCES_LIMIT)
+        with Store(self.db) as store:
+            store.get_notebook(nb_id)
+            self._json(
+                {
+                    "sources": [
+                        _source_json(s)
+                        for s in store.list_sources_page(nb_id, offset, limit)
+                    ],
+                    "total": store.count_sources(nb_id),
                     "offset": offset,
                     "limit": limit,
                 }
@@ -1075,6 +1149,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_REQUIRED_FIELD_MISSING",
                 "missing field: title, weight, or meta",
             )
+        # v0.2.728 (#112): a multi-field PATCH must validate every field
+        # before the first write — the meta rejection previously ran after
+        # update_source_weight had already committed, so the 400 still left
+        # the new weight persisted.
+        if meta is not None:
+            validate_source_meta(meta)
         with Store(self.db) as store:
             src = store.get_source(src_id)
             if weight is not None:
@@ -1150,13 +1230,84 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"results": results})
 
     def _h_src_text(self, src_id: int) -> None:
+        # v0.2.695: bound the response — the last unbounded payload on the
+        # API. ingest-produced sources top out near the 10MB upload cap, but
+        # import documents bound chunk COUNT, not text length, so a crafted
+        # export can put ~1GiB behind one source id. fetchall would
+        # materialize all of it (json.dumps doubling it), and a few such
+        # responses inside MAX_IN_FLIGHT_REQUESTS exhaust the process.
+        # Return whole chunks until SRC_TEXT_BYTES_MAX of text accumulates;
+        # a boundary chunk that wouldn't fit defers whole to the next page
+        # (no text is lost), while a single chunk larger than the cap itself
+        # is sliced by bytes (decode-tolerant, never mid-codepoint — hostile
+        # import only, since a legit chunk is ~2KB / ≤10MB of PATCH input;
+        # its tail past the slice is the one unreachable region).
+        # `truncated`+`next_offset` disclose and continue the cut.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
         with Store(self.db) as store:
-            store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
-            # `id` lets the viewer mark which chunks an answer actually cited
-            # (citation_report.source_chunk_ids, v0.2.139). Additive field.
-            rows = store.id_seq_text_chunks_for_source(src_id)
+            # v0.2.719: the batched loop issues one SELECT per batch on
+            # auto-commit snapshots — a concurrent replace_chunks_for_source
+            # or update_chunk_text landing mid-request splices rows from
+            # different commits into one response while `rev`/`total` (read
+            # once, up front) still vouch for the old state: an intra-page
+            # tear the client's epoch check cannot see (it compares pages,
+            # not the rows inside one). One WAL snapshot frames the whole
+            # page build, same boundary as _h_nb_get (v0.2.707).
+            with store.read_snapshot():
+                src = store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
+                total = store.count_chunks_for_source(src_id)
+                out: list[Json] = []
+                used = 0
+                pos = offset
+                done = False
+                # `id` lets the viewer mark which chunks an answer actually cited
+                # (citation_report.source_chunk_ids, v0.2.139). Additive field.
+                while not done:
+                    batch = store.id_seq_text_chunks_for_source(
+                        src_id, limit=SRC_TEXT_BATCH, offset=pos
+                    )
+                    if not batch:
+                        break
+                    for cid, seq, text in batch:
+                        n = len(text.encode("utf-8"))
+                        if used + n > SRC_TEXT_BYTES_MAX:
+                            if out:
+                                # Boundary chunk, not an oversized one: leave it
+                                # whole for the next page so no text is lost.
+                                done = True
+                                break
+                            # A single chunk larger than the cap can't ever be
+                            # returned whole — slice it by bytes (decode-tolerant,
+                            # never mid-codepoint) and count it consumed; its
+                            # tail is the one unreachable region (hostile import
+                            # only — a legit chunk is ~2KB / ≤10MB of PATCH).
+                            cut = (
+                                text.encode("utf-8")[:SRC_TEXT_BYTES_MAX]
+                                .decode("utf-8", "ignore")
+                            )
+                            if cut:
+                                out.append({"id": cid, "seq": seq, "text": cut})
+                            pos += 1
+                            done = True
+                            break
+                        out.append({"id": cid, "seq": seq, "text": text})
+                        used += n
+                        pos += 1
+                    else:
+                        continue
             self._json(
-                {"chunks": [{"id": cid, "seq": seq, "text": text} for cid, seq, text in rows]}
+                {
+                    "chunks": out,
+                    "total": total,
+                    "offset": offset,
+                    "truncated": pos < total,
+                    "next_offset": pos,
+                    "bytes_cap": SRC_TEXT_BYTES_MAX,
+                    # Content epoch (v0.2.706): bumped on every chunk-text
+                    # mutation so the pager can reject a page crossing a
+                    # mid-read edit `total` cannot see.
+                    "rev": src.content_rev,
+                }
             )
 
     def _h_chunk_patch(self, chunk_id: int) -> None:
@@ -1190,15 +1341,13 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)
             # Suggestions change when the source SET or its content changes;
             # cache per notebook so reopening the UI does not re-run the LLM
-            # every time. sha256 moves on refresh (same-source-id content
-            # rewrite — including `shoin src refresh` from another process,
-            # which the per-request fingerprint is the only check that can
-            # see) and title feeds the chunk contexts suggest_questions()
-            # reads. `shoin reindex` only re-embeds; suggestions read chunk
-            # text/context, not vectors, so reindex does not move it.
-            fingerprint = tuple(
-                (s.id, s.sha256, s.title) for s in store.sources_for_notebook(nb_id)
-            )
+            # every time. The fingerprint keys on exactly what
+            # suggest_questions() reads — the source rows PLUS the sampled
+            # overview hits — so it also moves on an in-place chunk edit:
+            # update_chunk_text deliberately keeps sha256 (it labels the
+            # origin document, not the current text), which the old
+            # (id, sha, title)-only fingerprint could not see (v0.2.701).
+            fingerprint = questions_fingerprint(store, nb_id)
             with self.questions_cache_lock:
                 cached = self.questions_cache.get(nb_id)
             if cached is not None and cached[0] == fingerprint:
@@ -1206,7 +1355,13 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             # spec.md STRIDE DoS control: serialize LLM generation (see _h_ask_sse).
             with self.generation_lock:
-                questions = suggest_questions(store, self.llm, nb_id)
+                # v0.2.723: key the cache on the fingerprint the generation
+                # itself sampled — keying on the lookup fingerprint (computed
+                # before the corpus could change mid-generation) caches
+                # state-B questions under state A's key.
+                questions, gen_fp = suggest_questions_fingerprinted(
+                    store, self.llm, nb_id
+                )
             # Cache the result regardless of whether questions is empty.  An LLM
             # failure on an active notebook (non-empty fingerprint) returns [] but
             # NOT caching it causes every subsequent poll to fire a full LLM
@@ -1218,8 +1373,8 @@ class _Handler(BaseHTTPRequestHandler):
             # was running (concurrent source-add could otherwise be overwritten).
             with self.questions_cache_lock:
                 existing = self.questions_cache.get(nb_id)
-                if existing is None or existing[0] == fingerprint:
-                    self.questions_cache[nb_id] = (fingerprint, questions)
+                if existing is None or existing[0] == gen_fp:
+                    self.questions_cache[nb_id] = (gen_fp, questions)
             self._json({"questions": questions})
 
     def _h_note_add(self, nb_id: int) -> None:
@@ -1321,26 +1476,36 @@ class _Handler(BaseHTTPRequestHandler):
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404, same contract as /ask
-            for sid in scope_ids or ():
-                # Same non-leak rule as /ask: a foreign source id is a dead id.
-                if store.get_source(sid).notebook_id != nb_id:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
             retrieval_q = expand_query(question, [])
             qvec = (
                 _query_vector(self.llm, retrieval_q)
                 if _check_embed_model_ok(store, self.llm)
                 else None
             )
-            hits = retrieve_for_question(
-                store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
-            )
-            titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
-            # Zero hits is a dead end (product-review #42): offer the nearest
-            # in-corpus spellings so a typo'd query has somewhere to go. Only
-            # emitted on the empty path — a non-empty list never needs it.
-            suggestions = (
-                suggest_corrections(store, nb_id, question) if not hits else []
-            )
+            # v0.2.720: the retrieval legs and the provenance/suggestion
+            # reads must describe one commit point — on auto-commit
+            # snapshots a concurrent ingest/replace mid-request splices rows
+            # from different commits into the hit list and its titles.
+            # v0.2.726: multi-query expansion is pure LLM traffic — it runs
+            # BEFORE the snapshot so a network round-trip can't pin the
+            # WAL read point for its duration.
+            # v0.2.727: the scope-membership check joins the snapshot — an
+            # outside check could validate a source that a concurrent
+            # delete+re-add then replaces with a recycled id on another
+            # notebook.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
+            with store.read_snapshot():
+                check_source_scope(store, nb_id, scope_ids)
+                hits = retrieve_prepared(
+                    store, nb_id, queries, vecs, k=k, source_ids=scope_ids
+                )
+                titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
+                # Zero hits is a dead end (product-review #42): offer the nearest
+                # in-corpus spellings so a typo'd query has somewhere to go. Only
+                # emitted on the empty path — a non-empty list never needs it.
+                suggestions = (
+                    suggest_corrections(store, nb_id, question) if not hits else []
+                )
             self._json(
                 {
                     "question": question,
@@ -1385,17 +1550,19 @@ class _Handler(BaseHTTPRequestHandler):
                 if _check_embed_model_ok(store, self.llm)
                 else None
             )
-            hits = retrieve_for_question(
-                store, self.llm, None, retrieval_q, qvec, k=k
-            )
-            meta = store.notebooks_for_sources([h.source_id for h in hits])
-            # A source deleted by a concurrent request between the search and
-            # this provenance lookup is dropped rather than KeyErroring — the
-            # same toleration nb_search's titles.get() already applies.
-            hits = [h for h in hits if h.source_id in meta]
-            suggestions = (
-                suggest_corrections(store, None, question) if not hits else []
-            )
+            # v0.2.720: same one-snapshot corpus contract as _h_nb_search.
+            # v0.2.726: the LLM expansion phase stays outside it.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
+            with store.read_snapshot():
+                hits = retrieve_prepared(store, None, queries, vecs, k=k)
+                meta = store.notebooks_for_sources([h.source_id for h in hits])
+                # A source deleted by a concurrent request between the search and
+                # this provenance lookup is dropped rather than KeyErroring — the
+                # same toleration nb_search's titles.get() already applies.
+                hits = [h for h in hits if h.source_id in meta]
+                suggestions = (
+                    suggest_corrections(store, None, question) if not hits else []
+                )
             self._json(
                 {
                     "question": question,
@@ -1435,13 +1602,6 @@ class _Handler(BaseHTTPRequestHandler):
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404 before headers go out
-            for sid in scope_ids or ():
-                # A foreign source id must 404 exactly like a dead one —
-                # answering scoped to another notebook's sources would both
-                # leak its existence and silently ground the reply in content
-                # the user never attached to this notebook.
-                if store.get_source(sid).notebook_id != nb_id:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
             qvec = (
@@ -1453,10 +1613,36 @@ class _Handler(BaseHTTPRequestHandler):
             # this call's rewrite LLM request nor the qvec embedding call above
             # it is serialized under generation_lock (spec.md single-generation
             # DoS control) — only the actual answer-generation streaming call
-            # below is. See retrieve_for_question()'s own docstring for why.
-            hits = retrieve_for_question(
-                store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
-            )
+            # below is. See prepare_retrieval()'s own docstring for why.
+            # v0.2.720: the legs run under one WAL snapshot so a concurrent
+            # replace/ingest mid-request can't splice different commits into
+            # the grounding set (history stays outside — conversation state).
+            # v0.2.726: the expansion itself runs BEFORE the snapshot — it is
+            # pure LLM traffic and must not pin the WAL read point across a
+            # network round-trip.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
+            with store.read_snapshot():
+                # v0.2.727: the scope-membership check shares the retrieval
+                # commit — an outside check could validate a source that a
+                # concurrent delete+re-add replaces with a recycled id from
+                # another notebook, and the scoped read would then silently
+                # ground the answer in that notebook's chunks.
+                check_source_scope(store, nb_id, scope_ids)
+                hits = retrieve_prepared(
+                    store, nb_id, queries, vecs, source_ids=scope_ids
+                )
+                # v0.2.724: the per-notebook budget read and the context
+                # build join the retrieval snapshot — they used to run after
+                # the SSE headers on their own auto-commit snapshots, so a
+                # mid-flight replace/ingest could splice titles and chunk
+                # text from a newer commit into an answer the hit list came
+                # from an older one.
+                nb_budget = int(
+                    store.notebook_settings(nb_id).get(
+                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=nb_budget)
             store.add_message(nb_id, "user", question, "{}")
 
             try:
@@ -1485,44 +1671,6 @@ class _Handler(BaseHTTPRequestHandler):
                     store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
                 except Exception:
                     pass  # post-SSE persist: notebook deleted or DB error; stream already clean
-                return
-
-            try:
-                # Per-notebook retrieval budget override (v0.2.659) — the
-                # same knob qa.ask() applies on its own build_context call.
-                nb_budget = int(
-                    store.notebook_settings(nb_id).get(
-                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
-                    )
-                )
-                context = build_context(store, hits, budget_tokens=nb_budget)
-            except Exception as exc:
-                # Headers already committed; must not let this propagate to _dispatch
-                # (it would write a new HTTP status line into the SSE body stream).
-                # Message policy mirrors _dispatch: coded errors carry their
-                # curated (code, message); anything else leaks only the type
-                # name — str(exc) can carry internals (SQL text, paths).
-                # Full detail still goes to stderr.
-                print(
-                    f"build_context failed mid-SSE: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                try:
-                    if isinstance(exc, (StoreError, IngestError, LLMError)):
-                        self._sse("error", {"code": exc.code, "message": str(exc)})
-                    else:
-                        self._sse(
-                            "error",
-                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
-                        )
-                except ConnectionError:
-                    pass
-                # Prevent dangling user turn: save an empty assistant message so
-                # history_messages() sees a complete pair instead of an orphaned user turn.
-                try:
-                    store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))
-                except Exception:
-                    pass
                 return
 
             try:
@@ -1685,6 +1833,29 @@ class _HTTPServer(ThreadingHTTPServer):
     # dead-at-exit thread strictly correct (the same choice python -m
     # http.server makes).
     daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._in_flight = threading.BoundedSemaphore(MAX_IN_FLIGHT_REQUESTS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # v0.2.691 (product-review #75): cap in-flight connections — each
+        # accepted connection used to spawn a thread with no ceiling, so a
+        # connection flood exhausted threads before REQUEST_SOCKET_SEC ever
+        # freed one. Acquiring here (in the accept loop) parks excess clients
+        # in the kernel listen backlog instead of spawning unbounded
+        # threads; the slot is returned by process_request_thread's finally.
+        # If Thread.start() itself fails, stdlib's own except handles the
+        # request internally — the semaphore is precisely what keeps that
+        # failure unreachable, so the (unreachable) slot leak needs no code.
+        self._in_flight.acquire()
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._in_flight.release()
 
     def server_bind(self) -> None:
         # stdlib HTTPServer.server_bind calls socket.getfqdn(host) — a PTR

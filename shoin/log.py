@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+import unicodedata
 
 from .config import log_json_enabled
 from .store import _now
@@ -54,3 +55,60 @@ def emit(event: str, **fields: object) -> None:
         print(line, file=sys.stderr)
     except (OSError, ValueError, UnicodeEncodeError):
         pass
+
+
+# v0.2.717: terminal-injection hygiene for untrusted bytes. Stored fields
+# (titles, origins, imported notebook names, message/studio bodies, section
+# breadcrumbs, suggestion terms) are attacker-controlled — a crafted export
+# document or hostile local-LLM endpoint can smuggle ESC sequences (color
+# rewrite, OSC 8 links, OSC 52 clipboard write, cursor/home) or Cf bidi
+# overrides (Trojan Source-style visual spoofing) that the terminal
+# interprets when printed. Escaping preserves the row/line shape and keeps
+# the original bytes readable as literal escapes.
+_ESCAPED_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
+
+
+def one_line(text: str) -> str:
+    """Render an externally-controlled string safe for single-line output.
+
+    Status rows and label fields are emitted one-per-line; a stored title,
+    CLI argument, or env value containing a control character (\n, \r, ESC,
+    U+2028…) would split the row or rewrite earlier terminal output — a
+    forged `✓` line is indistinguishable from a real one.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif unicodedata.category(ch) in _ESCAPED_CATEGORIES:
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def safe_text(text: str) -> str:
+    """Like one_line but keeps \n and \t for multi-line untrusted bodies.
+
+    LLM answers, stored message bodies, and Studio output are printed as
+    real multi-line text; escaping newlines would destroy the layout the
+    user asked for. \r is still escaped (it overwrites the current line),
+    as are every other Cc/Cf/Zl/Zp codepoint.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch in "\n\t":
+            out.append(ch)
+        elif ch == "\r":
+            out.append("\\r")
+        elif unicodedata.category(ch) in _ESCAPED_CATEGORIES:
+            cp = ord(ch)
+            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)

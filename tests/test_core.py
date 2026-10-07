@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.680")
+        self.assertEqual(VERSION, "0.2.733")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -279,6 +279,202 @@ class TestStore(unittest.TestCase):
                 s.duplicate_notebook(nb.id, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
+    def test_duplicate_notebook_remaps_report_chunk_ids(self) -> None:
+        """v0.2.733: a duplicated report's source_chunk_ids must point at
+        the FORK's fresh chunk rows — duplicate_notebook's INSERT..SELECT
+        built no chunk_id_map, so the 2-arg _remap_report_source_ids left
+        each pointer at the SOURCE notebook's (still-live) chunk rowids:
+        a verbatim cross-notebook pointer that import/merge/restore
+        already remap (v0.2.686)."""
+        import json
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            cids = s.add_chunks(src.id, ["一文目。", "二文目。"])
+            report = json.dumps(
+                {
+                    "source_id_map": {"S1": src.id},
+                    "source_chunk_ids": {"S1": cids},
+                },
+                ensure_ascii=False,
+            )
+            s.add_message(nb.id, "assistant", "a [S1]", report)
+            s.add_studio_output(nb.id, "briefing", "b", report)
+
+            dup = s.duplicate_notebook(nb.id)
+            d_src = s.sources_for_notebook(dup.id)[0]
+            d_cids = sorted(c.id for c in s.chunks_for_source(d_src.id))
+            self.assertEqual(len(d_cids), 2)
+
+            for table in ("messages", "studio_outputs"):
+                row = s.conn.execute(
+                    "SELECT citation_report FROM " + table
+                    + " WHERE notebook_id=?",
+                    (dup.id,),
+                ).fetchone()
+                rep = json.loads(row["citation_report"])
+                # every chunk pointer lands on the fork's own rows —
+                # never back on the source notebook's live chunks
+                self.assertEqual(sorted(rep["source_chunk_ids"]["S1"]), d_cids)
+                self.assertNotIn(cids[0], rep["source_chunk_ids"]["S1"])
+                self.assertEqual(rep["source_id_map"], {"S1": d_src.id})
+
+    def test_duplicate_notebook_holds_write_lock_across_copy(self) -> None:
+        """v0.2.708: the whole copy — probes AND the INSERT..SELECT
+        chain — must run under BEGIN IMMEDIATE. With the deferred begin
+        the probes read one commit point and the copy pinned a later one,
+        so a concurrent delete in the gap produced a committed
+        'duplicate' with zero child rows. Prove the lock is held before
+        the cap probe: a second connection cannot BEGIN IMMEDIATE while
+        `counts` runs."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.counts
+
+            def probe_then_try_lock(nb_id: int) -> dict[str, int]:
+                got = orig(nb_id)
+                if not locked:
+                    try:
+                        s2.conn.execute("BEGIN IMMEDIATE")
+                        locked.append(False)
+                        s2.conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        locked.append(True)
+                return got
+
+            s.counts = probe_then_try_lock  # type: ignore[method-assign]
+            s.duplicate_notebook(nb.id, "copy")
+
+        self.assertEqual(locked, [True])
+
+    def test_write_probes_share_the_update_commit_point(self) -> None:
+        """v0.2.712: the metadata writers read their row probes at one
+        autocommit point while the UPDATE/touch/cap-check landed at a
+        later commit point — a delete+rowid-reuse in the gap steered the
+        write (and the notebook touch) at a different row than the probe
+        saw. Probes now run under BEGIN IMMEDIATE: a foreign writer
+        cannot BEGIN while the probe executes."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.get_source
+
+            def probe_then_try_lock(source_id: int):
+                got = orig(source_id)
+                try:
+                    s2.conn.execute("BEGIN IMMEDIATE")
+                    locked.append(False)
+                    s2.conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    locked.append(True)
+                return got
+
+            s.get_source = probe_then_try_lock  # type: ignore[method-assign]
+            s.update_source_meta(src.id, {"a": "1"})
+            s.update_source_title(src.id, "t2", "o")
+            s.update_source_sha256(src.id, "h2", "t2")
+            s.replace_chunks_for_source(src.id, ["c1"])
+
+        # All four probes fired while our write lock was held.
+        self.assertEqual(locked, [True] * 4)
+
+    def test_update_chunk_text_probe_under_write_lock(self) -> None:
+        """v0.2.712: the JOIN probe that feeds the rev bump and touch ran
+        at an autocommit point before the deferred write TX — same
+        cross-commit-point class as the source metadata writers, now
+        under BEGIN IMMEDIATE."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c0"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            real_conn = s.conn
+
+            class _ConnSpy:
+                def execute(self, sql, parameters=()):
+                    if "JOIN sources s ON" in str(sql):
+                        try:
+                            s2.conn.execute("BEGIN IMMEDIATE")
+                            locked.append(False)
+                            s2.conn.execute("ROLLBACK")
+                        except sqlite3.OperationalError:
+                            locked.append(True)
+                    return real_conn.execute(sql, parameters)
+
+                def __enter__(self):
+                    return real_conn.__enter__()
+
+                def __exit__(self, *a):
+                    return real_conn.__exit__(*a)
+
+                def __getattr__(self, k):
+                    return getattr(real_conn, k)
+
+            s.conn = _ConnSpy()  # type: ignore[assignment]
+            chunk_id = s.chunks_for_source(src.id)[0].id
+            s.update_chunk_text(chunk_id, "edited text")
+            s.conn = real_conn
+
+        self.assertEqual(locked, [True])
+
+    def test_child_writes_probe_parent_under_the_write_lock(self) -> None:
+        """v0.2.731: add_source / add_chunks / add_note / add_studio_output /
+        add_message / clear_messages probed the parent row at autocommit and
+        wrote the child at a later commit point — a delete+rowid-reuse in the
+        gap steered the write at a parent the probe never saw (the FK accepts
+        any live rowid). Probes now run under BEGIN IMMEDIATE: a foreign
+        writer cannot BEGIN while a probe executes."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c0"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig_nb, orig_src = s.get_notebook, s.get_source
+
+            def _try_foreign_begin() -> None:
+                try:
+                    s2.conn.execute("BEGIN IMMEDIATE")
+                    locked.append(False)
+                    s2.conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    locked.append(True)
+
+            def nb_probe(row_id: int):
+                got = orig_nb(row_id)
+                _try_foreign_begin()
+                return got
+
+            def src_probe(row_id: int):
+                got = orig_src(row_id)
+                _try_foreign_begin()
+                return got
+
+            s.get_notebook = nb_probe  # type: ignore[method-assign]
+            s.get_source = src_probe  # type: ignore[method-assign]
+            s.add_source(nb.id, "txt", "d2", "o2", "h2")
+            s.add_chunks(src.id, ["c1"])
+            s.add_note(nb.id, "n", "b")
+            s.add_studio_output(nb.id, "briefing", "body", "{}")
+            s.add_message(nb.id, "user", "hi")
+            s.clear_messages(nb.id)
+
+        self.assertEqual(locked, [True] * 6)
+
     def test_rename_notebook_empty_name_rejected(self) -> None:
         with make_store() as s:
             nb = s.create_notebook("研究")
@@ -348,6 +544,48 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_note(nb.id, "   ", "body")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_body_len_bound_on_writers(self) -> None:
+        """v0.2.713: free-text bodies carry a per-row bound — the NB_*_LIMIT
+        caps bound how MANY rows embed in the detail payload, nothing bound
+        how BIG each row is, so a single ~10MB body persisted verbatim and
+        multiplied on every fetch."""
+        from shoin.config import MAX_BODY_LEN
+
+        big = "x" * (MAX_BODY_LEN + 1)
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            s.add_chunks(src.id, ["chunk one"])
+            cid = s.chunks_for_notebook(nb.id)[0].id
+            writers = (
+                lambda: s.add_note(nb.id, "t", big),
+                lambda: s.add_message(nb.id, "user", big),
+                lambda: s.add_studio_output(nb.id, "briefing", big, "{}"),
+                lambda: s.update_chunk_text(cid, big),
+                # v0.2.714: origin/sha256 ride _source_json verbatim on
+                # every detail fetch — same amplification class as body.
+                lambda: s.add_source(nb.id, "txt", "t2", big, "h2"),
+                lambda: s.add_source(nb.id, "txt", "t2", "o2", big),
+                lambda: s.update_source_title(src.id, "t2", big),
+                lambda: s.update_source_sha256(src.id, big, "t2"),
+            )
+            for i, write in enumerate(writers):
+                with self.subTest(writer=i):
+                    with self.assertRaises(StoreError) as cm:
+                        write()
+                    self.assertEqual(
+                        cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID"
+                    )
+            # At the bound the same fields still write.
+            ok = "x" * MAX_BODY_LEN
+            s.add_note(nb.id, "t", ok)
+            s.add_message(nb.id, "user", ok)
+            s.add_studio_output(nb.id, "briefing", ok, "{}")
+            s.update_chunk_text(cid, ok)
+            s.add_source(nb.id, "txt", "t2", ok, ok)
+            s.update_source_title(src.id, "t2", ok)
+            s.update_source_sha256(src.id, "y" * MAX_BODY_LEN, "t2")
 
     def test_get_chunk_unknown_id_raises(self) -> None:
         with make_store() as s:
@@ -534,22 +772,23 @@ class TestStore(unittest.TestCase):
             self.assertIn("during chunk insertion", str(cm.exception))
 
     def test_update_source_sha256_reread_concurrent_delete_raises(self) -> None:
-        """update_source_sha256 re-reads the title inside its transaction so the
-        context rewrite keys off the live row; when the source vanishes between
-        get_source() and that re-read it must raise SOURCE_NOT_FOUND, not
-        proceed on a stale snapshot. The earlier of its two concurrent-delete
-        guards — the rowcount tail is pinned in test_rowcount_guards above
-        (coverage tail: store.py)."""
+        """update_source_sha256 probes the live row under BEGIN IMMEDIATE so
+        the context rewrite keys off the same commit point as the update;
+        when the source vanishes before that probe it must raise
+        SOURCE_NOT_FOUND, not proceed on a stale snapshot. The earlier of
+        its two concurrent-delete guards — the rowcount tail is pinned in
+        test_rowcount_guards above (coverage tail: store.py)."""
         with make_store() as s:
             nb = s.create_notebook("race-reread")
             src = s.add_source(nb.id, "txt", "t", "o", "sha-rr")
             s.conn = _RacyConn(  # type: ignore[assignment]
-                s.conn, "SELECT title FROM sources", "DELETE FROM sources WHERE id=?", (src.id,)
+                s.conn, "SELECT * FROM sources WHERE id=?",
+                "DELETE FROM sources WHERE id=?", (src.id,),
             )
             with self.assertRaises(StoreError) as cm:
                 s.update_source_sha256(src.id, "sha-rr2", "t2")
             self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
-            self.assertIn("concurrently", str(cm.exception))
+            self.assertIn("not found", str(cm.exception))
 
     def test_replace_chunks_contexts_must_match_texts(self) -> None:
         """contexts shorter/longer than texts is a caller bug — rejected before
@@ -963,6 +1202,80 @@ class TestStore(unittest.TestCase):
                 s.update_chunk_text(cid, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
 
+    def test_chunk_text_mutations_bump_content_rev(self) -> None:
+        """v0.2.706 (migration 15): the src_text pager's `total` frame
+        cannot see a same-count text change, so chunk-text mutators bump
+        sources.content_rev — update_chunk_text and
+        replace_chunks_for_source advance it; set_embedding does not
+        (the displayed text never moved)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["a", "b"])
+            self.assertEqual(s.get_source(src.id).content_rev, 0)
+
+            cid = s.chunks_for_source(src.id)[0].id
+            s.set_embedding(cid, [0.1, 0.2])
+            self.assertEqual(s.get_source(src.id).content_rev, 0)
+
+            s.update_chunk_text(cid, "edited")
+            self.assertEqual(s.get_source(src.id).content_rev, 1)
+
+            s.replace_chunks_for_source(src.id, ["x", "y"])
+            self.assertEqual(s.get_source(src.id).content_rev, 2)
+
+    def test_chunk_cap_enforced_at_the_sink_under_lock(self) -> None:
+        """v0.2.709: MAX_CHUNKS_PER_NOTEBOOK probes ran in pipeline before
+        the write TX — a concurrent ingest could read the same sub-cap
+        count and both commits land, over-filling the notebook. The cap
+        now runs at the sink under BEGIN IMMEDIATE: the second writer
+        serializes behind the first and sees the post-commit count."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "a", "o", "h1")
+            src2 = s.add_source(nb.id, "txt", "b", "o", "h2")
+            s.add_chunks(src.id, ["a", "b"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.counts
+
+            def counts_then_try_other(nb_id: int) -> dict[str, int]:
+                got = orig(nb_id)
+                if not locked:
+                    try:
+                        s2.conn.execute("BEGIN IMMEDIATE")
+                        locked.append(False)
+                        s2.conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        locked.append(True)
+                return got
+
+            with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 4):
+                # The cap probe runs while the write lock is held.
+                s.counts = counts_then_try_other  # type: ignore[method-assign]
+                s.add_chunks(src.id, ["x", "y"])
+                self.assertEqual(locked, [True])
+                # Sink-side cap: the second commit sees the post-first
+                # count — 4 + 1 > 4 → coded rejection, zero rows written.
+                with self.assertRaises(StoreError) as cm:
+                    s2.add_chunks(src2.id, ["z"])
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(s.chunks_for_source(src2.id), [])
+                # refresh path: the source's own rows are excluded — at
+                # 4 total, replacing 4 with 4 fits, replacing 4 with 5
+                # over-fills.
+                s.replace_chunks_for_source(src.id, ["1", "2", "3", "4"])
+                with self.assertRaises(StoreError) as cm:
+                    s.replace_chunks_for_source(
+                        src.id, ["1", "2", "3", "4", "5"]
+                    )
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(
+                    [c.text for c in s.chunks_for_source(src.id)],
+                    ["1", "2", "3", "4"],
+                )
+
     def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
         """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
         collides with another source in the same notebook (UNIQUE constraint on sha256)."""
@@ -1000,41 +1313,68 @@ class TestStore(unittest.TestCase):
             self.assertEqual(updated.title, "new title")
 
     def test_replace_chunks_title_fallback_does_not_clobber_concurrent_rename(self) -> None:
-        """A concurrent PATCH /api/sources/{id} rename landing between
-        replace_chunks_for_source()'s pre-transaction get_source() read and its
-        own UPDATE must survive — not be silently overwritten by the stale
-        pre-transaction snapshot of the title.
+        """A rename committed at the edge of replace_chunks_for_source()'s
+        write TX must survive — not be silently overwritten by a stale
+        snapshot of the title.
 
-        get_source() reads src.title BEFORE the transaction begins (SQLite's
-        implicit BEGIN only fires at the first DML statement, not at `with
-        self.conn:` entry). refresh_source() (v0.2.87) deliberately passes
-        title=None so this method's own `title or src.title` fallback keeps
-        whatever title is currently set — but resolving that fallback from a
-        pre-transaction Python read meant a rename committed in the race
-        window was clobbered by the stale value, reintroducing exactly the
-        v0.2.87 bug (refresh overwriting a custom rename) via a race instead
-        of unconditionally. Reproduced by injecting the concurrent rename
-        into get_source() itself, exactly where the real race window is.
+        refresh_source() (v0.2.87) deliberately passes title=None so this
+        method's `title or src.title` fallback keeps whatever title is
+        currently set. v0.2.712 reads that fallback under BEGIN IMMEDIATE:
+        a real foreign rename serializes before the lock (read fresh by
+        the probe) or after the commit (landing last — winning either
+        way). _RacyConn injects the rename just before the lock-held
+        probe — the latest commit point the probe can see.
         """
         with make_store() as s:
             nb = s.create_notebook("nb-race")
             src = s.add_source(nb.id, "url", "Original Page Title", "https://x.com", "sha-orig")
             s.add_chunks(src.id, ["old content"])
 
-            orig_get_source = s.get_source
-            calls = {"n": 0}
-
-            def racy_get_source(source_id: int):
-                result = orig_get_source(source_id)
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    s.update_source_title(source_id, "My Custom Curated Name", result.origin)
-                return result
-
-            with patch.object(s, "get_source", side_effect=racy_get_source):
-                s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
+            s.conn = _RacyConn(  # type: ignore[assignment]
+                s.conn, "SELECT * FROM sources WHERE id=?",
+                "UPDATE sources SET title=? WHERE id=?",
+                ("My Custom Curated Name", src.id),
+            )
+            s.replace_chunks_for_source(src.id, ["new content"], sha256="sha-new")
 
             self.assertEqual(s.get_source(src.id).title, "My Custom Curated Name")
+
+    def test_refresh_re_reads_the_added_file_not_the_refresh_cwd(self) -> None:
+        """A file source's stored origin must anchor to the file it was
+        extracted from — not to whatever cwd a later refresh runs in.
+
+        extract_file() stored str(p): a relative `add ./doc.txt` stayed
+        relative, so refresh_source() re-read `origin` under a *different*
+        cwd — either raising INGEST_FETCH_FAILED, or silently re-ingesting
+        whichever file happened to sit at that relative path there (the
+        different doc.txt below — a quiet content swap, worse than an
+        error). v0.2.730 absolutizes the origin at extraction time.
+        """
+        from shoin.pipeline import index_source, refresh_source
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_a = Path(tmp, "a")
+            dir_b = Path(tmp, "b")
+            dir_a.mkdir()
+            dir_b.mkdir()
+            (dir_a / "doc.txt").write_text("元の文書A", encoding="utf-8")
+            (dir_b / "doc.txt").write_text("別の文書B", encoding="utf-8")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(dir_a)
+                with make_store() as s:
+                    nb = s.create_notebook("nb-rel")
+                    result = index_source(s, nb.id, "doc.txt")  # relative path
+                    self.assertTrue(Path(result.source.origin).is_absolute())
+                    os.chdir(dir_b)
+                    out = refresh_source(s, result.source.id)
+                    texts = [t for _, t in s.text_chunks_for_source(result.source.id)]
+            finally:
+                os.chdir(old_cwd)
+            # Anchored origin: refresh re-read the doc.txt that was added —
+            # byte-identical → no-op path — not dir_b's different one.
+            self.assertEqual(out.n_embedded, 0)
+            self.assertEqual(texts, ["元の文書A"])
 
     def test_replace_chunks_with_sha256_collision_raises_source_already_exists(self) -> None:
         """replace_chunks_for_source with a sha256 that matches another source must raise
@@ -4123,6 +4463,54 @@ class TestIngest(unittest.TestCase):
             with self.assertRaises(IngestError) as ctx:
                 pdf_to_text(b"fake pdf bytes")
         self.assertEqual(ctx.exception.code, "INGEST_PARSE_FAILED")
+
+    def test_pdf_to_text_bounds_pages_and_extracted_text(self) -> None:
+        """v0.2.716: the upload cap bounds file bytes, not what extraction
+        produces — a page object is ~200 file bytes but costs one
+        extract_text() call each (CPU burn at 10⁴+ pages), and flate-
+        compressed content streams let extracted text run ~100x the file
+        size. Both excesses are INGEST_FILE_TOO_LARGE rejections."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.ingest import IngestError, pdf_to_text
+
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+
+        fake_reader = MagicMock()
+        fake_reader.pages = [MagicMock() for _ in range(4)]
+        with patch("shoin.ingest.MAX_PDF_PAGES", 3), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_FILE_TOO_LARGE")
+
+        # Page count at the bound still extracts.
+        for p in fake_reader.pages:
+            p.extract_text.return_value = "ok"
+        fake_reader.pages = fake_reader.pages[:3]
+        with patch("shoin.ingest.MAX_PDF_PAGES", 3), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            text, n_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(n_failed, 0)
+        self.assertIn("ok", text)
+
+        # Accumulated extracted text past the bound rejects mid-loop.
+        big1 = MagicMock()
+        big1.extract_text.return_value = "x" * 10
+        big2 = MagicMock()
+        big2.extract_text.return_value = "y" * 10
+        fake_reader.pages = [big1, big2]
+        with patch("shoin.ingest.MAX_EXTRACT_CHARS", 15), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_FILE_TOO_LARGE")
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
@@ -11130,10 +11518,11 @@ class TestChunkLimit(unittest.TestCase):
 
                 # import: a document whose tree alone exceeds the cap →
                 # refused BEFORE the notebook row commits (no half-import).
-                # (add_chunks is the low-level writer and holds no cap, so
-                # an over-cap document is buildable directly — the same way
-                # a foreign export file arrives.)
-                big = _nb_with_chunks(s, "big", 6)
+                # An over-cap notebook can only exist if created under a
+                # looser cap — v0.2.709 closed the direct add_chunks path —
+                # so seed it inside a wider window.
+                with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 100):
+                    big = _nb_with_chunks(s, "big", 6)
                 doc = s.export_notebook(big)
                 nb_count = len(s.list_notebooks())
                 with self.assertRaises(StoreError) as cm2:
@@ -11225,6 +11614,89 @@ class TestExport(unittest.TestCase):
         self.assertIn("2. 第二の資料 (txt) — o2", src_section)
         # The answer's own legend still maps S1 -> 第二の資料 (retrieval rank).
         self.assertIn("S1=第二の資料", md)
+
+    def test_export_markdown_consistent_snapshot_under_concurrent_delete(self) -> None:
+        """v0.2.700: export must read one snapshot, not N auto-commit reads.
+
+        Each getter used to see its own commit point, so a concurrent
+        delete landing between them tore the document: sources listed
+        (first read) while their notes/messages were already gone (later
+        reads). export_* wraps every read in Store.read_snapshot (explicit
+        BEGIN — `with conn` never snapshots SELECTs), so the whole file
+        reflects the state at export start.
+        """
+        import json
+        import tempfile
+
+        from shoin.export import export_markdown
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "資料", "o", "sha")
+            s.add_chunks(src.id, ["本文。"])
+            s.add_note(nb.id, "メモ", "中身")
+            s.add_message(nb.id, "assistant", "回答[S1]。",
+                          json.dumps({"cited": [1], "invalid": []}))
+            torn = {"done": False}
+            orig = s.sources_for_notebook
+
+            def read_then_delete(nb_id: int) -> list:
+                rows = orig(nb_id)
+                if not torn["done"]:
+                    torn["done"] = True
+                    # A concurrent writer deletes the whole notebook between
+                    # the first and second reads of the export.
+                    s2.delete_notebook(nb_id)
+                return rows
+
+            s.sources_for_notebook = read_then_delete  # type: ignore[method-assign]
+            md = export_markdown(s, nb.id)
+
+        self.assertTrue(torn["done"])
+        self.assertIn("1. 資料 (txt) — o", md)
+        self.assertIn("メモ", md)
+        self.assertIn("回答[S1]。", md)
+
+    def test_export_notebook_consistent_snapshot_under_concurrent_delete(self) -> None:
+        """v0.2.703: the JSON tree export must read one snapshot too.
+
+        export_notebook drives _notebook_tree_dict's several auto-commit
+        SELECTs — without a WAL snapshot a concurrent delete lands between
+        them and the *machine-transfer* envelope goes out torn (sources
+        listed, children gone), then gets imported and the loss persists
+        on the far side. Same guard the md/bib/ris exports took in
+        v0.2.700, now on the standalone read boundary.
+        """
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "資料", "o", "sha")
+            s.add_chunks(src.id, ["本文。"])
+            s.add_note(nb.id, "メモ", "中身")
+            s.add_message(nb.id, "assistant", "回答[S1]。",
+                          json.dumps({"cited": [1], "invalid": []}))
+            torn = {"done": False}
+            orig = s.get_notebook
+
+            def read_then_delete(nb_id: int):
+                row = orig(nb_id)
+                if not torn["done"]:
+                    torn["done"] = True
+                    s2.delete_notebook(nb_id)
+                return row
+
+            s.get_notebook = read_then_delete  # type: ignore[method-assign]
+            doc = s.export_notebook(nb.id)
+
+        self.assertTrue(torn["done"])
+        self.assertEqual(len(doc["sources"]), 1)
+        self.assertEqual(len(doc["chunks"]), 1)
+        self.assertEqual(len(doc["notes"]), 1)
+        self.assertEqual(len(doc["messages"]), 1)
 
     def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
         """Embedded newline in note title must not break the Markdown heading."""
@@ -14390,6 +14862,190 @@ class TestCLINoteSourceParity(unittest.TestCase):
             os.unlink(db_file)
 
 
+class TestTerminalEscape(unittest.TestCase):
+    """v0.2.717: untrusted bytes must not reach the terminal raw. Stored
+    fields (titles, imported notebook names, message bodies, section
+    breadcrumbs, suggestion terms) are attacker-controlled — a crafted
+    export document or hostile local-LLM endpoint can smuggle ESC
+    sequences or Cf bidi overrides the terminal would interpret.
+    """
+
+    def test_one_line_escapes_cc_cf_zl_zp(self) -> None:
+        from shoin.log import one_line
+
+        out = one_line("a\x1b[2Jb\u202e.c\r\n\t z\u2028w")
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        self.assertNotIn("\u2028", out)
+        self.assertIn("\\x1b", out)
+        self.assertIn("\\u202e", out)
+        self.assertIn("\\r", out)
+        self.assertIn("\\n", out)
+        self.assertIn("\\t", out)
+
+    def test_safe_text_keeps_newlines_escapes_controls(self) -> None:
+        from shoin.log import safe_text
+
+        out = safe_text("line1\nline2\x1b]52;;Rm9v\a\rhide")
+        self.assertIn("\n", out)  # layout newlines survive
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\a", out)
+        self.assertNotIn("\r", out)
+        self.assertIn("\\x1b", out)
+        self.assertIn("\\r", out)
+
+    def test_cli_messages_list_escapes_body_controls(self) -> None:
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("esc-test").id
+                s.add_message(
+                    nb_id,
+                    "user",
+                    "first\nsecond \x1b[2Jcleared \u202e spoofy",
+                    "{}",
+                )
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "messages", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("\u202e", text)
+            self.assertIn("\\x1b", text)
+            self.assertIn("\\u202e", text)
+            self.assertIn("first\nsecond", text)  # body layout survives
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_stats_escapes_notebook_name(self) -> None:
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("evil\x1b[1m-name").id
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "stats", str(nb_id)])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn("\x1b", text)
+            self.assertIn("\\x1b", text)
+        finally:
+            os.unlink(db_file)
+
+
+class TestCliDeepJsonCodedErrors(unittest.TestCase):
+    """v0.2.718: a deeply nested JSON file raises RecursionError inside
+    json.loads. server.py's _read_json already codes that shape as a 400-class
+    input defect (v0.2.314); the CLI's three file-parse sites (import doc,
+    eval cases, eval --diff baseline) let it fall through to the catch-all's
+    SYSTEM_INTERNAL_ERROR — a 500 misclassification of a 400-class defect."""
+
+    _DEEP = "[" * 20000 + "]" * 20000
+
+    def _tmp(self, content: str) -> str:
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        f.write(content)
+        f.close()
+        return f.name
+
+    def _db(self) -> tuple[str, int]:
+        import tempfile
+
+        from shoin.store import Store
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        with Store(f.name) as s:
+            nb_id = s.create_notebook("deep-json").id
+        return f.name, nb_id
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        import io
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = main(argv)
+        return rc, err.getvalue()
+
+    def test_import_deep_doc_is_coded_400(self) -> None:
+        import os
+
+        db_file, _ = self._db()
+        doc = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(["--db", db_file, "import", doc])
+            self.assertEqual(rc, 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(doc)
+
+    def test_eval_cases_deep_file_is_coded_400(self) -> None:
+        import os
+
+        db_file, nb_id = self._db()
+        cases = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(
+                ["--db", db_file, "eval", str(nb_id), cases]
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(cases)
+
+    def test_eval_diff_deep_baseline_is_coded_400(self) -> None:
+        import os
+
+        db_file, nb_id = self._db()
+        cases = self._tmp("[]")
+        deep = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(
+                [
+                    "--db", db_file, "eval", str(nb_id), cases,
+                    "--diff", deep,
+                ]
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(cases)
+            os.unlink(deep)
+
+
 class TestCLIMessagesList(unittest.TestCase):
     """CLI `messages list` (v0.2.74): cli.py's own module docstring claims 'the
     CLI exposes every core capability so the product is fully usable headless
@@ -15469,6 +16125,58 @@ class TestRenameReembed(unittest.TestCase):
         finally:
             st.close()
 
+    def test_embed_write_never_lands_on_a_recycled_rowid(self) -> None:
+        """v0.2.729 (#113): between id_context_text's read and the batch
+        commit, a concurrent replace can delete the row and reuse its rowid
+        for DIFFERENT text — the guarded write (`WHERE id=? AND text=?`)
+        must miss and leave the new chunk vector-NULL rather than store a
+        vector describing foreign content (rowcount=0 → CHUNK_NOT_FOUND →
+        batch rolled back, same contract as a plainly deleted row)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "s.db")
+            st = Store(db)
+            nb = st.create_notebook("N")
+            a = st.add_source(nb.id, "md", "旧題", "mem://a", "sha-a")
+            st.add_chunks(a.id, ["ワクチンの話題についての本文"], contexts=["旧題"])
+
+            class _SwapMidEmbed(TestRenameReembed._FakeLLM):
+                def __init__(
+                    self,
+                    vec: Callable[[str], list[float]],
+                    db_path: str,
+                    src_id: int,
+                ) -> None:
+                    super().__init__(vec)
+                    self._db, self._src = db_path, src_id
+
+                def embed(self, texts: list[str]) -> list[list[float]]:
+                    # The concurrent write lands mid-embed, on a second
+                    # connection — the exact commit tear the guard covers.
+                    with Store(self._db) as other:
+                        other.replace_chunks_for_source(
+                            self._src,
+                            ["全く別の本文に差し替えられたチャンク"],
+                            sha256="sha-x",
+                        )
+                    return super().embed(texts)
+
+            try:
+                n = rename_source(
+                    st, a.id, "新しい題", "mem://a",
+                    _SwapMidEmbed(self._vec, db, a.id),
+                )
+                self.assertEqual(n, 0)
+                row = st.conn.execute(
+                    "SELECT embedding, text FROM chunks WHERE source_id=?",
+                    (a.id,),
+                ).fetchone()
+                # The recycled rowid keeps the swapped text but must NOT
+                # carry a vector computed for the deleted text.
+                self.assertIsNone(row["embedding"])
+                self.assertEqual(row["text"], "全く別の本文に差し替えられたチャンク")
+            finally:
+                st.close()
+
 
 class TestQueryVectorCache(unittest.TestCase):
     """_query_vector must not re-embed a repeated (model, question) pair.
@@ -15914,11 +16622,16 @@ class TestCitationCoverageTail(unittest.TestCase):
 # test_doc_catalog_counts_match_spec to compare without duplicating them.
 _EXCEPT_CATALOG = {
     "ingest.py": 4,
-    "server.py": 9,
+    # v0.2.724: -2 — _h_ask_sse's build_context guard and its repair-persist
+    # swallow folded into the pre-headers snapshot; failures now ride
+    # _dispatch's JSON envelope like every other handler.
+    "server.py": 7,
     "cli.py": 2,
     # +1: index_source's metrics wrapper — every escaping failure counts once
     # as index.fail, then the original exception propagates (v0.2.653).
-    "pipeline.py": 4,
+    # +1: the orphan-source rollback is best-effort — a delete_source failure
+    # must not mask the original ingest error (v0.2.722).
+    "pipeline.py": 5,
     # +1: ask()'s metrics wrapper — same count-then-propagate contract for
     # ask.fail (v0.2.653).
     "qa.py": 1,
@@ -17419,7 +18132,11 @@ class TestResidualGuards(unittest.TestCase):
             "_migrate_once": None,  # executescript issues its own COMMIT
             "touch_notebook": 1,  # callee — docstring: callers must commit
             "_rewrite_chunk_context_titles": 1,  # runs inside caller's with
-            "_set_embedding_pair": 2,  # caller-transacted when commit=False
+            # v0.2.729: +1 for the guarded-write branch — `expected_text`
+            # selects `UPDATE ... WHERE id=? AND text=?` vs the unguarded
+            # UPDATE, both literal, then the norm UPDATE (3 sites, still
+            # 2 statements per call path).
+            "_set_embedding_pair": 3,  # caller-transacted when commit=False
             "create_notebook": 1,
             "rename_notebook": 1,
             "trash_purge": 1,  # single-statement writer like rename_notebook
@@ -17847,7 +18564,12 @@ class TestResidualGuards(unittest.TestCase):
         generate(), suggest_questions(), self._stream_chat(). CLI calls are
         single-process by design and live outside this scan."""
         path = Path(__file__).resolve().parent.parent / "shoin" / "server.py"
-        call = re.compile(r"\b(generate|suggest_questions)\s*\(|self\._stream_chat\s*\(")
+        # v0.2.723: the questions handler calls the fingerprinted variant —
+        # the alternation must cover it or the site escapes this scan.
+        call = re.compile(
+            r"\b(generate|suggest_questions(?:_fingerprinted)?)\s*\("
+            r"|self\._stream_chat\s*\("
+        )
         problems: list[str] = []
         covered = 0
         lock_indent: int | None = None
@@ -18139,7 +18861,7 @@ class TestResidualGuards(unittest.TestCase):
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
             "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
-            "store.py": {"MIGRATIONS"},
+            "store.py": {"MIGRATIONS", "_NB_SETTING_BOUNDS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
         }
         ctor_names = {"dict", "set", "list", "OrderedDict", "defaultdict", "Counter"}
@@ -19075,8 +19797,10 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(
             problems, [], f"locale-dependent text I/O: {problems}"
         )
+        # v0.2.732: the two eval write_text sites now funnel through
+        # _atomic_write_text's single write_text — visible sites 3 -> 2.
         self.assertGreaterEqual(
-            sites, 3,
+            sites, 2,
             "non-vacuous: read_text/write_text call sites must be visible",
         )
 
@@ -19404,8 +20128,9 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "cli.py": 2,     # Path(args.save).write_text — eval baseline export
-            # +1: Path(args.gen).write_text — eval --gen case-scaffold (v0.2.651)
+            "cli.py": 3,     # _atomic_write_text: tmp.write_text + os.replace
+            #     + finally tmp.unlink — the eval --gen/--save writers funnel
+            #     through one atomic helper (v0.2.732)
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)
@@ -19561,11 +20286,14 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": [
                 "(IngestError,StoreError)",
                 "(IngestError,LLMError,StoreError)",
-                "(UnicodeDecodeError,json.JSONDecodeError)",
-                "(UnicodeDecodeError,json.JSONDecodeError)",
+                # v0.2.718: RecursionError joins all three CLI file-parse
+                # tuples — deeply nested JSON is a 400-class input defect
+                # (server.py's _read_json sets the same classification).
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
                 # +1: _cmd_import maps a non-UTF-8/non-JSON export file to
                 # NOTEBOOK_IMPORT_INVALID — same coded contract (v0.2.655).
-                "(UnicodeDecodeError,json.JSONDecodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 # v0.2.627: process-boundary catch-all in main() — a custom
                 # ChatBackend raising a non-LLMError escaped every handler as
@@ -19576,6 +20304,10 @@ class TestResidualGuards(unittest.TestCase):
                 # SYSTEM_IO_ERROR contract with _cmd_eval's cases file
                 # (v0.2.655).
                 "OSError", "OSError", "OSError", "OSError", "OSError",
+                # +1: _atomic_write_text maps a failed staging write/rename
+                # to SYSTEM_IO_ERROR — same coded OSError contract, now on
+                # the write side (v0.2.732).
+                "OSError",
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
                 # crash print() on strict-UTF-8 stdout — boundary catch in
@@ -19656,6 +20388,10 @@ class TestResidualGuards(unittest.TestCase):
                 # v0.2.653: index_source's usage-metrics wrapper counts every
                 # escaping failure once (index.fail), then re-raises it.
                 "Exception",
+                # v0.2.722: the orphan-source rollback delete is best-effort
+                # — a delete_source failure must not mask the original
+                # ingest error that triggered it.
+                "Exception",
                 # v0.2.648: refresh_all_sources degrades a per-source coded
                 # failure to a 'failed' row — one dead origin must not abort
                 # the batch a cron caller scheduled.
@@ -19677,15 +20413,18 @@ class TestResidualGuards(unittest.TestCase):
                 "(ValueError,json.JSONDecodeError)",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
-                "ConnectionError",
                 # v0.2.665: per-delta write guard inside the generation loop —
                 # a dead client must not abort the paid-for stream; the
                 # handler finishes generating so the persisted row is the
                 # COMPLETE answer (resume via re-fetch, product-review #48).
                 "ConnectionError",
+                # v0.2.724: -1 ConnectionError / -2 Exception — the
+                # build_context error-frame path and its empty-assistant
+                # repair persist are gone (context now builds inside the
+                # pre-headers snapshot, so a failure is a plain _dispatch
+                # envelope, never a mid-stream frame).
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
-                "Exception", "Exception",
                 "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
                 "UnicodeEncodeError",
@@ -19783,7 +20522,12 @@ class TestResidualGuards(unittest.TestCase):
             # cli.py +1: _cmd_health's best-effort staleness read (v0.2.661).
             "cli.py": 1,
             # server.py +1: _h_health's best-effort staleness read (v0.2.661).
-            "pipeline.py": 2, "qa.py": 2, "search.py": 1, "server.py": 12,
+            # pipeline.py +1: the orphan-source rollback delete is
+            # best-effort — it must not mask the original error (v0.2.722).
+            # server.py -2: the build_context error-frame send guard and
+            # the repair-persist swallow folded into the pre-headers
+            # snapshot (v0.2.724).
+            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 10,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).
@@ -19912,14 +20656,28 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _cmd_source meta's malformed key=value pair (v0.2.658)
                 # +2: _cmd_notebook settings' pair-shape / int-value guards
                 #     (v0.2.659)
+                # +3: _cmd_import's oversize gates — file stat-gate, grew-
+                #     during-read, and stdin stream; the coded instance is
+                #     built once and re-raised by reference (v0.2.681)
+                "oversize(ref)", "oversize(ref)", "oversize(ref)",
+                # +4: _cmd_eval's same pair of gates on the cases file and
+                #     the --diff baseline file (v0.2.690)
+                "oversize(ref)", "oversize(ref)",
+                "base_oversize(ref)", "base_oversize(ref)",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
+                # +1: _atomic_write_text's OSError -> SYSTEM_IO_ERROR wrap
+                #     (v0.2.732).
+                "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
             # +1: _decode's binary guard (INGEST_BINARY) — v0.2.673.
-            "ingest.py": ["IngestError"] * 28 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 30 + ["zlib.error", "RE-RAISE"],
+             # +2: pdf_to_text's page-count + extracted-text bounds —
+             #     PDF-internal amplification past the 10MB file cap
+             #     (v0.2.716)
              # +1: extract_file's non-regular-file guard — a FIFO/device
              #     passes st_size 0 then blocks read_bytes forever (v0.2.680)
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,
@@ -19934,7 +20692,10 @@ class TestResidualGuards(unittest.TestCase):
             ],
             # +1 RE-RAISE: the metrics wrapper re-raises after counting
             # ask.fail (v0.2.653).
-            "qa.py": ["RE-RAISE", "StoreError"],
+            # +1 StoreError: check_source_scope's foreign-source guard —
+            # membership validation moved inside the retrieval snapshot
+            # (v0.2.727).
+            "qa.py": ["RE-RAISE", "StoreError", "StoreError"],
             "server.py": [
                 "IngestError", "IngestError", "IngestError",
                 "IngestError", "IngestError",
@@ -19951,9 +20712,14 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _optional_json_obj's non-dict field guard (v0.2.658)
                 # +1: _h_nb_rename's empty-PATCH sentinel (name/settings
                 #     at least one required) (v0.2.659)
-                "StoreError", "StoreError", "StoreError",
+                # +1: _optional_id_list's scope-length guard
+                #     (MAX_SCOPE_IDS) (v0.2.688)
                 "StoreError", "StoreError", "StoreError",
                 "StoreError",
+                "StoreError", "StoreError",
+                # -2: the two per-handler scope-validation raises folded
+                #     into qa.check_source_scope inside the snapshot
+                #     (v0.2.727)
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",
@@ -19976,7 +20742,27 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 81,  # +1: _utf8's coded surrogate rejection
+                # v0.2.715: _meta_text's SOURCE_META_MAX oversize guard —
+                # same programmer-error builtin class, funnels into the
+                # coded boundary at every caller.
+                "ValueError",
+            ] + ["StoreError"] * 98,  # +6: origin/sha256 writer bounds,
+                                      #     _import_str field bound, blob
+                                      #     bound (v0.2.714); -5: per-field
+                                      #     doc checks folded into _import_str
+                                      # +9: per-row body bounds on the four
+                                      #     writers and the import document
+                                      #     (v0.2.713)
+                                      # -2: update_source_title/sha256's in-TX
+                                      #     re-read guards folded into the
+                                      #     lock-held get_source probe (v0.2.712)
+                                      # +2: add_chunks/replace_chunks_for_source
+                                      #     sink-side chunk-cap guards (v0.2.709)
+                                      # +1: update_chunk_text's content_rev
+                                      #     bump deleted-source guard (v0.2.706)
+                                      # +5: import field-guard parity (v0.2.693)
+                                      # +1: import_notebook's duplicate
+                                      #     source-id rejection (v0.2.692)
                                       # +2: _insert_tree_rows / duplicate_notebook
                                       #     chunk-cap guards (v0.2.672)
                                       # +4: update_notebook_settings non-dict /
@@ -20054,7 +20840,11 @@ class TestResidualGuards(unittest.TestCase):
         with a rationale."""
         import ast
 
-        allowed = {"staticmethod", "classmethod", "property", "wraps"}
+        # contextlib.contextmanager wraps Store.read_snapshot's BEGIN/
+        # ROLLBACK pair — a reader-side TX the caller invokes via `with`;
+        # no exception swallowing (the generator re-raises to the caller).
+        allowed = {"staticmethod", "classmethod", "property", "wraps",
+                   "contextlib.contextmanager"}
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         problems: list[str] = []
         n_seen = 0
@@ -20709,7 +21499,12 @@ class TestResidualGuards(unittest.TestCase):
             # fields) — monotonic durations, not clock reads.
             "pipeline.py": ["time.monotonic", "time.monotonic"],
             "qa.py": ["threading.Lock", "time.monotonic", "time.monotonic"],
-            "server.py": ["threading.Lock", "threading.Lock"],
+            # v0.2.691: the in-flight request cap — a bounded semaphore is
+            # the concurrency primitive, not a new thread source.
+            "server.py": [
+                "threading.BoundedSemaphore",
+                "threading.Lock", "threading.Lock",
+            ],
         }
         actual: dict[str, list[str]] = {}
         sites: list[str] = []
@@ -21664,6 +22459,43 @@ class TestResidualGuards(unittest.TestCase):
             "initial/inherit:\n" + "\n".join(missing),
         )
 
+    def test_embed_chunks_callers_pass_expected_texts(self) -> None:
+        """v0.2.729: every production _embed_chunks() call must pass
+        expected_texts= so the vector write is guarded (`WHERE id=? AND
+        text=?`) against the delete-then-rowid-recycled tear — a caller
+        omitting it silently reopens foreign-content vector storage."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        calls = 0
+        problems: list[str] = []
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_target = (
+                    (isinstance(func, ast.Name) and func.id == "_embed_chunks")
+                    or (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "_embed_chunks"
+                    )
+                )
+                if not is_target:
+                    continue
+                calls += 1
+                if not any(k.arg == "expected_texts" for k in node.keywords):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: _embed_chunks() without "
+                        "expected_texts="
+                    )
+        self.assertGreaterEqual(
+            calls, 4, "non-vacuous: the scan must see every production call"
+        )
+        self.assertFalse(
+            problems, "unguarded embed call(s):\n" + "\n".join(problems)
+        )
 
 
 if __name__ == "__main__":
@@ -21740,6 +22572,55 @@ class TestCliEvalGen(unittest.TestCase):
                 self.assertIn("1", out.getvalue())  # {n} in the saved line
         finally:
             os.unlink(db_file)
+
+    def test_cli_json_writes_are_atomic(self) -> None:
+        """v0.2.732: `eval --gen FILE` / `eval --save FILE` staged through
+        write_text — an interrupt mid-write left a torn JSON document behind
+        that --diff/gen consumers then failed to parse (a "successful" save
+        that was never a document). _atomic_write_text stages to a
+        pid-suffixed sibling temp and os.replace()s it whole: the target is
+        either the complete new document or the previous one, never half."""
+        import tempfile
+
+        from shoin.cli import _atomic_write_text
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "base.json"
+            _atomic_write_text(target, '{"a": 1}\n')
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"a": 1}\n')
+            # an overwrite replaces the whole document — never appends or merges
+            _atomic_write_text(target, '{"b": 2}\n')
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"b": 2}\n')
+            # the staging file never outlives the write
+            self.assertEqual([f.name for f in Path(td).iterdir()], ["base.json"])
+            # a failed write surfaces the coded IO error and leaves no debris:
+            # no target and no staging file
+            with self.assertRaises(StoreError) as cm:
+                _atomic_write_text(Path(td) / "missing-dir" / "x.json", "{}")
+            self.assertEqual(cm.exception.code, "SYSTEM_IO_ERROR")
+            self.assertEqual([f.name for f in Path(td).iterdir()], ["base.json"])
+            # end-to-end: --gen leaves no staging file beside its output
+            import io
+            import os
+            from contextlib import redirect_stdout
+
+            from shoin.cli import main
+
+            db_file, nb_id = self._db()
+            try:
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = main(
+                        ["--db", db_file, "eval", str(nb_id), "--gen",
+                         str(Path(td) / "gen.json")]
+                    )
+                self.assertEqual(rc, 0)
+                self.assertEqual(
+                    sorted(f.name for f in Path(td).iterdir()),
+                    ["base.json", "gen.json"],
+                )
+            finally:
+                os.unlink(db_file)
 
     def test_eval_without_cases_or_gen_is_coded(self) -> None:
         import io
@@ -22052,8 +22933,9 @@ class TestUsageMetrics(unittest.TestCase):
 
 class TestTrash(unittest.TestCase):
     """Undo-log trash (v0.2.654): delete archives the whole tree in the same
-    transaction; restore re-inserts it with original ids (chunks re-fire the
-    FTS triggers, embedding BLOBs decode back verbatim)."""
+    transaction; restore re-inserts it keeping the notebook id while
+    children take fresh rowids (chunks re-fire the FTS triggers,
+    embedding BLOBs decode back verbatim)."""
 
     def _tmpdb(self) -> str:
         import shutil
@@ -22065,7 +22947,7 @@ class TestTrash(unittest.TestCase):
     def test_delete_archives_and_restore_recovers_byte_identical(self) -> None:
         with make_store() as s:
             nb_id = seed(s)
-            note_id = s.add_note(nb_id, "memo", "本文メモ")
+            s.add_note(nb_id, "memo", "本文メモ")
             s.add_message(nb_id, "user", "質問", "{}")
             chunk_id = int(
                 s.conn.execute("SELECT id FROM chunks LIMIT 1").fetchone()["id"]
@@ -22073,9 +22955,14 @@ class TestTrash(unittest.TestCase):
             s.set_embedding(chunk_id, [0.1, 0.2, 0.3])
             before = s.counts(nb_id)
             saved = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
+                "SELECT source_id, seq, embedding, embedding_norm"
+                " FROM chunks WHERE id=?",
                 (chunk_id,),
             ).fetchone()
+            saved_sha = s.conn.execute(
+                "SELECT sha256 FROM sources WHERE id=?",
+                (saved["source_id"],),
+            ).fetchone()["sha256"]
             s.delete_notebook(nb_id)
             # live view: gone. archive: present.
             with self.assertRaises(StoreError) as cm:
@@ -22089,9 +22976,13 @@ class TestTrash(unittest.TestCase):
             self.assertEqual(nb["id"], nb_id)
             self.assertEqual(nb["kind"], "notebook")
             self.assertEqual(s.counts(nb_id), before)
+            # v0.2.686: children restore under FRESH rowids — locate the
+            # restored chunk by (source sha, seq), not the archived id.
             row = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
-                (chunk_id,),
+                "SELECT c.embedding, c.embedding_norm FROM chunks c"
+                " JOIN sources sc ON c.source_id = sc.id"
+                " WHERE sc.notebook_id=? AND sc.sha256=? AND c.seq=?",
+                (nb_id, saved_sha, saved["seq"]),
             ).fetchone()
             # BLOB bytes + cached norm round-tripped verbatim
             self.assertEqual(row["embedding"], saved["embedding"])
@@ -22102,16 +22993,212 @@ class TestTrash(unittest.TestCase):
                 " WHERE chunks_fts MATCH '猫は液'"
             ).fetchone()["n"]
             self.assertEqual(int(hits), 1)
-            # notes/messages restored with original ids
+            # notes/messages restored under fresh rowids (v0.2.686)
             self.assertEqual(
                 int(
                     s.conn.execute(
-                        "SELECT COUNT(*) AS n FROM notes WHERE id=?", (note_id,)
+                        "SELECT COUNT(*) AS n FROM notes"
+                        " WHERE notebook_id=? AND title=?",
+                        (nb_id, "memo"),
                     ).fetchone()["n"]
                 ),
                 1,
             )
             self.assertEqual(s.trash_list(), [])  # archive consumed
+
+    def test_deletes_serialize_under_write_lock(self) -> None:
+        """v0.2.683 (Devin Review #358 finding #2): the archive payload used to
+        be serialized BEFORE the write lock was taken — a row committed by
+        another writer in the serialize→DELETE gap was removed without ever
+        entering the archive (TOCTOU). Each trash delete now opens with
+        BEGIN IMMEDIATE inside `with self.conn:`, so the payload read itself
+        runs under the write lock. Pin: at each delete's serialization seam
+        the connection is in_transaction AND the lock is real — a foreign
+        writer with a tiny busy_timeout fails instead of interleaving."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            nb_id = seed(s)
+            src_id = int(
+                s.conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+            )
+            note_id = s.add_note(nb_id, "m", "本文")
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_get_source = s.get_source
+            s.get_source = lambda i: (probe(), orig_get_source(i))[1]
+            s.delete_source(src_id)
+
+            orig_touch = s.touch_notebook
+            s.touch_notebook = lambda i: (probe(), orig_touch(i))
+            s.delete_note(note_id)
+
+            orig_tree = s._notebook_tree_payload
+            s._notebook_tree_payload = lambda i: (probe(), orig_tree(i))[1]
+            s.delete_notebook(nb_id)
+
+        self.assertEqual(seen, [True, True] * 3)
+
+    def test_restores_probe_under_write_lock(self) -> None:
+        """v0.2.685: the restore side had the same TOCTOU class as the
+        deletes — the ALREADY_EXISTS / NOT_FOUND probes ran as auto-commit
+        reads before `with self.conn:`, so a concurrent create/delete in
+        the gap surfaced as a raw IntegrityError (or FK violation) instead
+        of the coded refusal. Each restore path now opens BEGIN IMMEDIATE;
+        pin in_transaction at an in-TX seam for all three kinds plus a
+        blocked foreign writer (tiny busy_timeout)."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            nb_id = seed(s)
+            src_id = int(
+                s.conn.execute("SELECT id FROM sources LIMIT 1").fetchone()["id"]
+            )
+            s.delete_source(src_id)
+            note_id = s.add_note(nb_id, "m", "本文")
+            s.delete_note(note_id)
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_opt = s._optimize_fts
+            s._optimize_fts = lambda: (probe(), orig_opt())
+            orig_touch = s.touch_notebook
+            s.touch_notebook = lambda i: (probe(), orig_touch(i))
+
+            def tid(kind: str) -> int:
+                return next(
+                    t["id"] for t in s.trash_list() if t["kind"] == kind
+                )
+
+            # Source restore first: after the notebook restore its fresh
+            # child ids may occupy the archived source id, and the coded
+            # SOURCE_ALREADY_EXISTS refusal (not a probe failure) would
+            # end the scenario early.
+            s.trash_restore(tid("source"))    # probes via touch + optimize
+            s.delete_notebook(nb_id)
+            s.trash_restore(tid("notebook"))  # probes via _optimize_fts
+            s.trash_restore(tid("note"))      # probes via touch_notebook
+
+        self.assertEqual(seen, [True, True] * 4)
+
+    def test_restore_rowid_reuse_restores_under_fresh_ids(self) -> None:
+        """v0.2.686: restore used to re-insert the ARCHIVED ids verbatim,
+        but INTEGER PRIMARY KEY rowids recycle as max(rowid)+1 — once a
+        later insert took an archived source/chunk/note/studio/message id,
+        restore died on a raw PRIMARY KEY conflict the probes never
+        covered (the only probe checked the notebook id itself). Children
+        now re-insert under fresh ids via the shared tree writer."""
+        with make_store() as s:
+            nb_id = seed(s)
+            before = s.counts(nb_id)
+            old_src_ids = {
+                int(r["id"])
+                for r in s.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (nb_id,)
+                )
+            }
+            nb2 = s.create_notebook("reuse")  # keep nb1's id free
+            s.delete_notebook(nb_id)
+            new_src = s.add_source(
+                nb2.id, "txt", "new.txt", "mem://new", "sha-new"
+            )
+            s.add_chunks(new_src.id, ["再利用されたrowidの検証本文。"])
+            # Premise: a freed rowid was actually re-occupied.
+            self.assertIn(new_src.id, old_src_ids)
+            res = s.trash_restore(s.trash_list()[0]["id"])
+            self.assertEqual(res["id"], nb_id)
+            self.assertEqual(s.counts(nb_id), before)
+            restored_ids = {
+                int(r["id"])
+                for r in s.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (nb_id,)
+                )
+            }
+            self.assertFalse(restored_ids & {new_src.id})
+
+    def test_restore_remaps_report_chunk_pointers(self) -> None:
+        """v0.2.686: citation_report's source_chunk_ids carried archived
+        chunk rowids — a verbatim copy left them pointing at dead or
+        unrelated rows once children re-insert under fresh ids. Reports
+        are now rewritten through the same remap as source_id_map."""
+        with make_store() as s:
+            nb_id = seed(s)
+            src = s.conn.execute(
+                "SELECT id, sha256 FROM sources WHERE notebook_id=?"
+                " ORDER BY id LIMIT 1",
+                (nb_id,),
+            ).fetchone()
+            chk = s.conn.execute(
+                "SELECT id FROM chunks WHERE source_id=? ORDER BY seq"
+                " LIMIT 1",
+                (src["id"],),
+            ).fetchone()
+            report = json.dumps(
+                {
+                    "source_id_map": {"S1": int(src["id"])},
+                    "source_chunk_ids": {"S1": [int(chk["id"])]},
+                }
+            )
+            s.add_message(nb_id, "assistant", "回答", report)
+            s.delete_notebook(nb_id)
+            s.trash_restore(s.trash_list()[0]["id"])
+            rep = json.loads(
+                s.conn.execute(
+                    "SELECT citation_report FROM messages"
+                    " WHERE notebook_id=?",
+                    (nb_id,),
+                ).fetchone()["citation_report"]
+            )
+            live_src = s.conn.execute(
+                "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
+                (nb_id, src["sha256"]),
+            ).fetchone()
+            live_chk = s.conn.execute(
+                "SELECT id FROM chunks WHERE source_id=? ORDER BY seq"
+                " LIMIT 1",
+                (live_src["id"],),
+            ).fetchone()
+            self.assertEqual(rep["source_id_map"], {"S1": int(live_src["id"])})
+            self.assertEqual(
+                rep["source_chunk_ids"], {"S1": [int(live_chk["id"])]}
+            )
 
     def test_restore_id_conflict_is_coded_and_archive_kept(self) -> None:
         """INTEGER PRIMARY KEY reuses max(id)+1 — a fresh notebook can take
@@ -22264,7 +23351,8 @@ class TestTrash(unittest.TestCase):
             src = s.add_source(nb.id, "txt", "cats.txt", "mem://cats", "sha-c")
             s.add_chunks(src.id, ["猫は液体である説は流動性の比喩である。"])
             chunk = s.conn.execute(
-                "SELECT id, embedding, embedding_norm FROM chunks WHERE source_id=?",
+                "SELECT id, seq, embedding, embedding_norm"
+                " FROM chunks WHERE source_id=?",
                 (src.id,),
             ).fetchone()
             nid = s.add_note(nb.id, "memo", "本文")
@@ -22277,9 +23365,12 @@ class TestTrash(unittest.TestCase):
             self.assertEqual(res["kind"], "source")
             self.assertEqual(res["id"], src.id)
             self.assertEqual(s.get_source(src.id).title, "cats.txt")
+            # v0.2.686: chunks restore under FRESH rowids — locate the
+            # restored chunk by (source, seq), not the archived id.
             row = s.conn.execute(
-                "SELECT embedding, embedding_norm FROM chunks WHERE id=?",
-                (chunk["id"],),
+                "SELECT embedding, embedding_norm FROM chunks"
+                " WHERE source_id=? AND seq=?",
+                (src.id, chunk["seq"]),
             ).fetchone()
             self.assertEqual(row["embedding"], chunk["embedding"])
             self.assertEqual(row["embedding_norm"], chunk["embedding_norm"])
@@ -22341,6 +23432,74 @@ class TestTrash(unittest.TestCase):
             self.assertNotEqual(res["id"], nid)
             titles = sorted(n["title"] for n in s.list_notes(nb.id))
             self.assertEqual(titles, ["new", "old"])
+
+    def test_child_restore_refuses_recycled_parent_rowid(self) -> None:
+        """v0.2.689: deleting a notebook frees its INTEGER PRIMARY KEY
+        rowid, which a later create_notebook recycles as max+1 — an
+        id-only parent probe would silently adopt the restored child
+        into an unrelated notebook. The probe pairs id with the
+        archived created_at: a live row with a different created_at IS
+        "parent gone" — coded NOTEBOOK_NOT_FOUND, nothing inserted,
+        archive kept."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            src = s.add_source(nb.id, "txt", "a.txt", "mem://a", "sha-a")
+            s.add_chunks(src.id, ["テキスト"])
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_source(src.id)
+            s.delete_note(nid)
+            by_kind = {t["kind"]: t for t in s.trash_list()}
+            # Delete the parent, then recreate: the freed rowid recycles
+            # onto an unrelated notebook with a different created_at.
+            s.delete_notebook(nb.id)
+            nb2 = s.create_notebook("unrelated")
+            self.assertEqual(nb2.id, nb.id)  # rowid recycle is the premise
+            for tid in (by_kind["source"]["id"], by_kind["note"]["id"]):
+                with self.assertRaises(StoreError) as cm:
+                    s.trash_restore(tid)
+                self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(s.counts(nb2.id)["sources"], 0)
+            self.assertEqual(len(s.list_notes(nb2.id)), 0)
+            self.assertEqual(len(s.trash_list()), 3)  # archives intact
+            # Restoring the real parent (its archive keeps the original
+            # id AND created_at) re-enables the children — probe matches.
+            s.delete_notebook(nb2.id)  # free the recycled rowid again
+            nb_item = [
+                t for t in s.trash_list()
+                if t["kind"] == "notebook" and t["name"] == "n"
+            ][0]
+            s.trash_restore(nb_item["id"])
+            res = s.trash_restore(by_kind["source"]["id"])
+            self.assertEqual(res["kind"], "source")
+            self.assertEqual(res["id"], src.id)
+            res2 = s.trash_restore(by_kind["note"]["id"])
+            self.assertEqual(res2["kind"], "note")
+            self.assertEqual(s.counts(nb.id)["sources"], 1)
+            self.assertEqual(len(s.list_notes(nb.id)), 1)
+
+    def test_child_restore_legacy_payload_falls_back_to_id_probe(self) -> None:
+        """v0.2.689: archives written before nb_created_at existed carry
+        no parent identity — the probe falls back to id-only so the undo
+        feature still works on old trash rows (documented limitation)."""
+        with make_store() as s:
+            nb = s.create_notebook("n")
+            nid = s.add_note(nb.id, "memo", "本文")
+            s.delete_note(nid)
+            tid = s.trash_list()[0]["id"]
+            # Strip the key to simulate a pre-v0.2.689 archive.
+            row = s.conn.execute(
+                "SELECT payload FROM trash_items WHERE id=?", (tid,)
+            ).fetchone()
+            doc = json.loads(row["payload"])
+            del doc["nb_created_at"]
+            s.conn.execute(
+                "UPDATE trash_items SET payload=? WHERE id=?",
+                (json.dumps(doc), tid),
+            )
+            s.conn.commit()
+            res = s.trash_restore(tid)
+            self.assertEqual(res["kind"], "note")
+            self.assertEqual(len(s.list_notes(nb.id)), 1)
 
     def test_trash_unknown_kind_is_coded(self) -> None:
         """v0.2.667: a hand-edited/foreign payload kind must surface as
@@ -22533,6 +23692,8 @@ class TestNbExportImport(unittest.TestCase):
             self.assertEqual(len(s.list_notes(imp.id)), 1)
 
     def test_import_rejects_malformed_documents(self) -> None:
+        from shoin.config import MAX_BODY_LEN, SOURCE_META_MAX
+
         with make_store() as s:
             nb_id, src_ids = self._seed_with_report(s)
             good = self._tree_doc(s, nb_id)
@@ -22550,6 +23711,89 @@ class TestNbExportImport(unittest.TestCase):
                     {**good["chunks"][0],
                      "embedding": {"$blob": "%%%not-b64"}}
                 ]},  # undecodable blob
+                # v0.2.692: duplicate source ids — id_map keeps the last
+                # duplicate, so chunks/reports would silently rebind to
+                # the wrong source (first row lands with zero chunks).
+                {**good, "sources": [
+                    good["sources"][0], good["sources"][0],
+                ]},
+                # v0.2.693: document fields bypass the write-path
+                # guards — verbatim binds in _insert_tree_rows skip
+                # the kind/role vocabularies, the finite weight
+                # range, and utf8 encodability the writers enforce.
+                {**good, "sources": [
+                    {**good["sources"][0], "kind": "exe"}
+                ]},  # out-of-vocab source kind
+                {**good, "sources": [
+                    {**good["sources"][0], "weight": float("nan")}
+                ]},  # NaN weight (died raw on NOT NULL before)
+                {**good, "sources": [
+                    {**good["sources"][0], "weight": float("inf")}
+                ]},  # Infinity weight (stored before)
+                {**good, "sources": [
+                    {**good["sources"][0], "title": "t\ud800x"}
+                ]},  # lone surrogate (died raw on bind before)
+                {**good, "sources": [
+                    {**good["sources"][0], "title": {"x": 1}}
+                ]},  # unbindable non-str field
+                {**good, "studio_outputs": [
+                    {"kind": "evil", "body": "b",
+                     "citation_report": "{}", "created_at": "t"}
+                ]},  # out-of-vocab studio kind
+                {**good, "messages": [
+                    {"role": "system", "body": "b",
+                     "citation_report": "{}", "created_at": "t"}
+                ]},  # out-of-vocab message role
+                # v0.2.713: document rows bypass the writers' MAX_BODY_LEN
+                # bound through _insert_tree_rows — an oversized row would
+                # embed verbatim in every detail fetch.
+                {**good, "notes": [
+                    {"title": "t", "body": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
+                {**good, "studio_outputs": [
+                    {"kind": "briefing", "body": "x" * (MAX_BODY_LEN + 1),
+                     "citation_report": "{}", "created_at": "t"}
+                ]},
+                {**good, "studio_outputs": [
+                    {"kind": "briefing", "body": "b",
+                     "citation_report": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
+                {**good, "messages": [
+                    {"role": "user", "body": "x" * (MAX_BODY_LEN + 1),
+                     "citation_report": "{}", "created_at": "t"}
+                ]},
+                {**good, "messages": [
+                    {"role": "user", "body": "b",
+                     "citation_report": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
+                # v0.2.714: every document string field shares the bound —
+                # _import_str covers title/origin/sha256/chunk text/context
+                # and the timestamp fields verbatim.
+                {**good, "sources": [
+                    {**good["sources"][0], "title": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "sources": [
+                    {**good["sources"][0], "origin": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0], "text": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0], "context": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0],
+                     "embedding": {"$blob": "x" * (MAX_BODY_LEN + 1)}}
+                ]},
+                # v0.2.715: meta rides _source_json verbatim too — the
+                # writer-side SOURCE_META_MAX bound must reach the doc.
+                {**good, "sources": [
+                    {**good["sources"][0],
+                     "meta": {"a": "x" * SOURCE_META_MAX}}
+                ]},
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):
@@ -22558,6 +23802,42 @@ class TestNbExportImport(unittest.TestCase):
                     self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
             # nothing leaked in: only the seeded notebook exists
             self.assertEqual(len(s.list_notebooks()), 1)
+
+    def test_import_settings_oversized_is_rejected(self) -> None:
+        """v0.2.715: a settings object past SOURCE_META_MAX is rejected
+        whole — per-entry bounds would still let N medium entries amplify
+        the stored text, and settings ride every detail response. Unknown
+        keys under the bound still keep (forward-compat)."""
+        from shoin.config import SOURCE_META_MAX
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            doc = self._tree_doc(s, nb.id)
+            doc["notebook"]["settings"] = {"filler": "x" * SOURCE_META_MAX}
+            with self.assertRaises(StoreError) as cm:
+                s.import_notebook(doc)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+            doc["notebook"]["settings"] = {"future_key": "kept", "top_k": 4}
+            imp = s.import_notebook(doc)
+            self.assertEqual(imp.settings, {"future_key": "kept", "top_k": 4})
+
+    def test_import_source_meta_within_bound_survives(self) -> None:
+        """v0.2.715: a meta object at the SOURCE_META_MAX bound still
+        round-trips — the bound rejects amplification-scale payloads,
+        not descriptive citation data."""
+        from shoin.config import SOURCE_META_MAX
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            s.add_chunks(src.id, ["one"])
+            doc = self._tree_doc(s, nb.id)
+            doc["sources"][0]["meta"] = {"a": "x" * (SOURCE_META_MAX - 20)}
+            imp = s.import_notebook(doc)
+            self.assertEqual(
+                s.sources_for_notebook(imp.id)[0].meta,
+                {"a": "x" * (SOURCE_META_MAX - 20)},
+            )
 
     def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
         """v0.2.664: every chunk-write transaction ends with the FTS5
@@ -22578,7 +23858,7 @@ class TestNbExportImport(unittest.TestCase):
                 nb2 = s.create_notebook("n2")
                 src2 = s.add_source(nb2.id, "txt", "t2", "o2", "h2")
                 s.add_chunks(src2.id, ["eta theta iota"])           # 5
-                # trash_restore: archive then re-insert under old ids
+                # trash_restore: archive then re-insert under fresh ids
                 # (before merge — merge deletes the source notebook)
                 s.delete_notebook(nb.id)
                 trash_id = int(s.conn.execute(
@@ -22641,6 +23921,86 @@ class TestNbExportImport(unittest.TestCase):
         with Store(db) as s:
             self.assertEqual(len(s.list_notebooks()), 2)
 
+    def test_cli_import_rejects_oversize_document(self) -> None:
+        """v0.2.681: the CLI import path must bound the document.
+
+        The file/stdin used to be read in full with no cap — a hostile or
+        accidental giant export OOM-killed the process mid-parse. Patch
+        MAX_IMPORT_BYTES down so a tiny file exercises every gate: the
+        stat()-size pre-check, the grew-during-read recheck, and the stdin
+        stream (which has no stat at all).
+        """
+        import io
+        import sys
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+
+        db = self._tmpdb_cli()
+        doc = b'{"format": "shoin-nb-tree-v1", "notebook": {}, "sources": []}'
+        f = os.path.join(tempfile.mkdtemp(), "big.json")
+        Path(f).write_bytes(doc)
+        err = io.StringIO()
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 8),
+            redirect_stderr(err),
+        ):
+            # stat() sees the oversize file before any read
+            self.assertEqual(main(["--db", db, "import", f]), 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err.getvalue())
+            # the stdin stream has no stat — the bounded read is the gate
+            err = io.StringIO()
+            fake_stdin = io.TextIOWrapper(io.BytesIO(doc), encoding="utf-8")
+            with (
+                patch.object(sys, "stdin", fake_stdin),
+                redirect_stderr(err),
+            ):
+                self.assertEqual(main(["--db", db, "import", "-"]), 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err.getvalue())
+        # nothing was imported in either rejected run
+        with Store(db) as s:
+            self.assertEqual(len(s.list_notebooks()), 0)
+
+    def test_cli_eval_rejects_oversize_documents(self) -> None:
+        """v0.2.690: the eval cases and --diff baseline files get the same
+        MAX_IMPORT_BYTES bound as the import document — both were read in
+        full with no cap, the same OOM-before-parse defect class."""
+        import io
+        from contextlib import redirect_stderr
+
+        from shoin.cli import main
+        from tests.test_qa import FakeLLM
+
+        db = self._tmpdb_cli()
+        with Store(db) as s:
+            nb = s.create_notebook("nb")
+        td = tempfile.mkdtemp()
+        cases = Path(td) / "cases.json"
+        cases.write_text('[{"q": "q", "sources": [1]}]', encoding="utf-8")
+        err = io.StringIO()
+        # stat gate on the cases file — patched cap smaller than the file
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 8),
+            redirect_stderr(err),
+        ):
+            rc = main(["--db", db, "eval", str(nb.id), str(cases)], llm=FakeLLM())
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
+        # the --diff baseline read takes the same bound (cases under cap)
+        base = Path(td) / "base.json"
+        base.write_bytes(b" " * 80)
+        err = io.StringIO()
+        with (
+            patch("shoin.cli.MAX_IMPORT_BYTES", 64),
+            redirect_stderr(err),
+        ):
+            rc = main(
+                ["--db", db, "eval", str(nb.id), str(cases), "--diff", str(base)],
+                llm=FakeLLM(),
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err.getvalue())
+
     def _tmpdb_cli(self) -> str:
         import shutil
 
@@ -22652,10 +24012,17 @@ class TestNbExportImport(unittest.TestCase):
 class TestNbMerge(unittest.TestCase):
     """merge_notebooks (v0.2.656): folds one notebook's tree into another
     under fresh ids — the merge half of ledger #23 duplicate_notebook
-    left open. The emptied source is archived to trash by
-    delete_notebook in the same delete TX, so a merge is recoverable;
-    copy commits before the delete begins, so a crash can duplicate
-    content but never lose it."""
+    left open. v0.2.687 makes it one transaction: serialize, copy,
+    archive and delete all run under a single BEGIN IMMEDIATE — a crash
+    rolls everything back and no foreign commit can slip a row into the
+    archive that the copy never saw."""
+
+    def _tmpdb(self) -> str:
+        import shutil
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return os.path.join(d, "t.db")
 
     def test_merge_folds_children_and_trashes_source(self) -> None:
         with make_store() as s:
@@ -22699,14 +24066,20 @@ class TestNbMerge(unittest.TestCase):
     def test_merge_dedupes_identical_sources(self) -> None:
         """v0.2.679 (product-review #63): merging two notebooks sharing a
         source sha256 used to die on a raw UNIQUE IntegrityError (HTTP
-        500, partial write rolled back). Same sha means identical text —
-        identical deterministic chunks — so the merge keeps the existing
-        row, remaps the incoming tree onto it via id_map, and skips its
-        chunk INSERTs; reports still resolve to the kept row."""
+        500, partial write rolled back). v0.2.682 makes the corpus check
+        explicit: same sha + identical (seq, text) chunks means identical
+        content, so the merge keeps the existing row, remaps the incoming
+        tree onto it via id_map, and skips its chunk INSERTs; reports
+        still resolve to the kept row."""
         with make_store() as s:
             target = s.create_notebook("取込先")
             kept = s.add_source(target.id, "txt", "doc-ja-copy", "mem://ja2", "sha-ja")
-            s.add_chunks(kept.id, ["取込先の既存チャンク"])
+            # v0.2.682: dedupe requires an identical (seq, text) corpus —
+            # the kept copy carries doc-ja's exact chunks.
+            s.add_chunks(
+                kept.id,
+                [JA, "本日の天気は晴れ。気温は二十五度。", "猫は液体である説。"],
+            )
             src_nb = seed(s)
             src_ids = {
                 x.title: int(x.id) for x in s.sources_for_notebook(src_nb)
@@ -22722,16 +24095,16 @@ class TestNbMerge(unittest.TestCase):
             )
             self.assertEqual(titles, ["doc-en", "doc-ja-copy"])
             counts = s.counts(target.id)
-            # kept source (1 chunk) + doc-en (2 chunks); doc-ja's 3 chunks
+            # kept source (3 chunks) + doc-en (2 chunks); doc-ja's 3 chunks
             # were content-identical and skipped.
             self.assertEqual(counts["sources"], 2)
-            self.assertEqual(counts["chunks"], 3)
+            self.assertEqual(counts["chunks"], 5)
             self.assertEqual(
                 s.conn.execute(
                     "SELECT count(*) FROM chunks WHERE source_id=?",
                     (kept.id,),
                 ).fetchone()[0],
-                1,
+                3,
                 "deduped source must not gain the incoming chunks",
             )
             # citation_report remapped the deduped source onto the KEPT id.
@@ -22745,26 +24118,154 @@ class TestNbMerge(unittest.TestCase):
         """v0.2.679 (product-review #63): a crafted export listing the same
         source sha256 twice also hit the UNIQUE constraint — the dedupe
         pass treats in-document duplicates the same way (second source
-        folds onto the first; its chunks are skipped)."""
+        folds onto the first; its chunks are skipped). v0.2.682 requires
+        an identical (seq, text) corpus, so the clone copies every chunk."""
         with make_store() as s:
             src_nb = seed(s)
             doc = s._notebook_tree_dict(src_nb)
-            # Clone doc-ja's source row (new id, same sha) + one chunk.
+            # Clone doc-ja's source row (new id, same sha) + ALL its
+            # chunks — a partial corpus is different content now and
+            # would be kept under a recomputed label instead of deduped.
             dup_src = dict(doc["sources"][0])
             dup_src["id"] = "dup-id"
             doc["sources"].append(dup_src)
-            dup_chunk = dict(doc["chunks"][0])
-            dup_chunk["source_id"] = "dup-id"
-            doc["chunks"].append(dup_chunk)
+            n_dup = 0
+            for c in list(doc["chunks"]):
+                if c["source_id"] == doc["sources"][0]["id"]:
+                    d = dict(c)
+                    d["source_id"] = "dup-id"
+                    doc["chunks"].append(d)
+                    n_dup += 1
 
             nb = s.import_notebook(doc)
             counts = s.counts(nb.id)
             self.assertEqual(counts["sources"], 2)
             self.assertEqual(
                 counts["chunks"],
-                len(doc["chunks"]) - 1,
+                len(doc["chunks"]) - n_dup,
                 "the in-document duplicate contributes zero chunks",
             )
+
+    def test_merge_keeps_edited_chunks_on_sha_collision(self) -> None:
+        """v0.2.682 (Devin Review on #358): update_chunk_text edits text
+        without touching the source's origin-sha — an edited copy carries
+        a stale label. Same sha + DIFFERENT corpus must not dedupe:
+        discarding the incoming chunks was silent data loss. The doc's
+        sha no longer describes its content, so the incoming source is
+        re-labeled from its own chunks and BOTH versions survive."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            kept = s.add_source(target.id, "txt", "doc", "mem://a", "sha-x")
+            s.add_chunks(kept.id, ["原文テキスト"])
+            src_nb = s.create_notebook("統合元")
+            edited = s.add_source(src_nb.id, "txt", "doc", "mem://b", "sha-x")
+            s.add_chunks(edited.id, ["原文テキスト"])
+            # edit the chunk in place — sha stays, text diverges
+            s.update_chunk_text(
+                s.chunks_for_source(edited.id)[0].id, "編集済みテキスト"
+            )
+
+            s.merge_notebooks(target.id, src_nb.id)
+
+            texts = sorted(
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT c.text FROM chunks c"
+                    " JOIN sources s2 ON c.source_id=s2.id"
+                    " WHERE s2.notebook_id=?",
+                    (target.id,),
+                )
+            )
+            self.assertEqual(texts, ["原文テキスト", "編集済みテキスト"])
+            self.assertEqual(s.counts(target.id)["sources"], 2)
+            shas = [
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT sha256 FROM sources WHERE notebook_id=?",
+                    (target.id,),
+                )
+            ]
+            self.assertEqual(
+                len(set(shas)), 2,
+                "the relabeled source must satisfy UNIQUE(notebook_id, sha256)",
+            )
+            # the edited corpus's chunks are FTS-searchable post-merge
+            hits = s.conn.execute(
+                "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH '編集済み'"
+            ).fetchone()[0]
+            self.assertEqual(hits, 1)
+
+    def test_import_relabels_in_doc_same_sha_different_text(self) -> None:
+        """v0.2.682: a crafted export listing the same sha for sources
+        with different chunks must not drop the diverging text either —
+        the same corpus check applies to in-document duplicates."""
+        with make_store() as s:
+            src_nb = seed(s)
+            doc = s._notebook_tree_dict(src_nb)
+            dup_src = dict(doc["sources"][0])
+            dup_src["id"] = "dup-id"
+            dup_src["title"] = "dup"
+            doc["sources"].append(dup_src)
+            dup_chunk = dict(doc["chunks"][0])
+            dup_chunk["source_id"] = "dup-id"
+            dup_chunk["text"] = "書き換えられた別テキスト"
+            doc["chunks"].append(dup_chunk)
+
+            nb = s.import_notebook(doc)
+            counts = s.counts(nb.id)
+            self.assertEqual(counts["sources"], 3)
+            texts = {
+                r[0]
+                for r in s.conn.execute(
+                    "SELECT c.text FROM chunks c"
+                    " JOIN sources s2 ON c.source_id=s2.id"
+                    " WHERE s2.notebook_id=?",
+                    (nb.id,),
+                )
+            }
+            self.assertIn("書き換えられた別テキスト", texts)
+
+    def test_import_neutralizes_file_origins_at_the_sink(self) -> None:
+        """v0.2.705: an untrusted export's file-path origins must not
+        become refreshable — refresh_source re-reads file origins from
+        disk, so a shared document naming /etc/passwd would turn the
+        CLI `shoin refresh` and the API refresh endpoint into an
+        arbitrary-file read. The guard lives in import_notebook itself
+        (not just _h_nb_import) so the CLI import entry shares it; URL
+        origins stay refreshable."""
+        from shoin.pipeline import (
+            _NoEmbed,
+            refresh_source,
+            source_is_refreshable,
+        )
+
+        with make_store() as s:
+            doc = {
+                "format": "shoin-nb-tree-v1",
+                "notebook": {"name": "x"},
+                "sources": [
+                    {"id": 1, "kind": "txt", "title": "a",
+                     "origin": "/etc/passwd", "sha256": "x1",
+                     "added_at": "t"},
+                    {"id": 2, "kind": "url", "title": "b",
+                     "origin": "https://example.com/x", "sha256": "x2",
+                     "added_at": "t"},
+                ],
+                "chunks": [], "notes": [],
+                "studio_outputs": [], "messages": [],
+            }
+            imp = s.import_notebook(doc)
+            rows = {
+                r.origin: r for r in s.sources_for_notebook(imp.id)
+            }
+            file_row = rows["imported:/etc/passwd"]
+            self.assertFalse(source_is_refreshable(file_row))
+            self.assertIn("https://example.com/x", rows)
+            # The refresh sink itself also fails closed on the
+            # prefixed path — coded ingest error, never a read.
+            with self.assertRaises(IngestError) as cm:
+                refresh_source(s, file_row.id, _NoEmbed())
+            self.assertEqual(cm.exception.code, "INGEST_UNSUPPORTED_FORMAT")
 
     def test_merge_rejects_self_and_missing(self) -> None:
         with make_store() as s:
@@ -22782,6 +24283,74 @@ class TestNbMerge(unittest.TestCase):
             # A failed merge writes nothing: both notebooks still live,
             # nothing was archived.
             self.assertEqual(len(s.list_notebooks()), 2)
+
+    def test_merge_runs_under_one_write_lock(self) -> None:
+        """v0.2.687: serialize→copy→archive→delete inside one BEGIN
+        IMMEDIATE — pin in_transaction at the serialize and optimize
+        seams plus a blocked foreign writer (tiny busy_timeout), the
+        same probe style as the delete/restore lock pins."""
+        path = self._tmpdb()
+
+        def foreign_write_blocked() -> bool:
+            other = sqlite3.connect(path)
+            try:
+                other.execute("PRAGMA busy_timeout=50")
+                other.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(0,'x','t','{}')"
+                )
+                other.commit()
+                return False
+            except sqlite3.OperationalError:
+                return True
+            finally:
+                other.close()
+
+        seen: list[object] = []
+        with Store(path) as s:
+            target = s.create_notebook("取込先")
+            src_nb = seed(s)
+
+            def probe() -> None:
+                seen.append(s.conn.in_transaction)
+                seen.append(foreign_write_blocked())
+
+            orig_tree = s._notebook_tree_dict
+            s._notebook_tree_dict = lambda i: (probe(), orig_tree(i))[1]
+            orig_opt = s._optimize_fts
+            s._optimize_fts = lambda: (probe(), orig_opt())
+
+            merged = s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(merged.id, target.id)
+            with self.assertRaises(StoreError) as cm:
+                s.get_notebook(src_nb)
+            self.assertEqual(cm.exception.code, "NOTEBOOK_NOT_FOUND")
+            self.assertEqual(len(s.trash_list()), 1)
+
+        self.assertEqual(seen, [True, True] * 2)
+
+    def test_merge_copy_failure_rolls_back_everything(self) -> None:
+        """v0.2.687: a copy-side failure aborts the single TX — source
+        notebook stays live and unarchived, target unchanged. The old
+        two-TX shape committed the copy separately, so this is also the
+        crash-atomicity pin."""
+        with make_store() as s:
+            target = s.create_notebook("取込先")
+            t_src = s.add_source(target.id, "txt", "t", "mem://t", "sha-t")
+            s.add_chunks(t_src.id, ["対象側本文"])
+            src_nb = seed(s)
+            before = s.counts(target.id)
+
+            def boom(*_a: object, **_k: object) -> None:
+                raise ValueError("bad tree")
+
+            s._insert_tree_rows = boom
+            with self.assertRaises(StoreError) as cm:
+                s.merge_notebooks(target.id, src_nb)
+            self.assertEqual(cm.exception.code, "SYSTEM_INTERNAL_ERROR")
+            s.get_notebook(src_nb)  # still live
+            self.assertEqual(s.trash_list(), [])
+            self.assertEqual(s.counts(target.id), before)
             self.assertEqual(s.trash_list(), [])
 
     def test_cli_notebook_merge(self) -> None:
@@ -23190,6 +24759,22 @@ class TestNotebookSettings(unittest.TestCase):
         with self.assertRaises(StoreError) as cm:
             store.import_notebook(doc)
         self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
+        # v0.2.710: a crafted document's settings get the writer's
+        # value-level guard — a KNOWN key keeps only an in-range int
+        # (out-of-range, non-int and bool all drop so the global default
+        # binds); unknown keys stay — inert here, forward-compatible.
+        doc["notebook"]["settings"] = {
+            "top_k": 10**9,
+            "source_text_tokens": "huge",
+            "future_key": "kept",
+        }
+        imp3 = store.import_notebook(doc)
+        self.assertEqual(
+            store.get_notebook(imp3.id).settings, {"future_key": "kept"}
+        )
+        doc["notebook"]["settings"] = {"top_k": True}
+        imp4 = store.import_notebook(doc)
+        self.assertEqual(store.get_notebook(imp4.id).settings, {})
 
     def test_top_k_setting_drives_retrieval(self) -> None:
         from shoin.qa import retrieve_for_question

@@ -35,7 +35,7 @@ from shoin.qa import (
     history_messages,
 )
 from shoin.search import retrieve
-from shoin.store import Store
+from shoin.store import Store, StoreError
 
 
 class FakeLLM:
@@ -398,6 +398,118 @@ class TestAsk(unittest.TestCase):
         with s:
             ask(s, FakeLLM(), nb, "zzz無関係qqq")
             self.assertEqual(len(s.list_messages(nb)), 2)
+
+    def test_ask_corpus_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: hits + settings + build_context describe one commit
+        point — a replace_chunks_for_source landing inside the composition
+        (here, between retrieve_for_question's settings probe and its legs)
+        is invisible to the whole grounding view: no spliced-in post-commit
+        rows, no stale-text context."""
+        import tempfile
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "論文A", "mem://a", "ha")
+                s.add_chunks(
+                    src.id,
+                    ["書院は知の書斎である。", "引用検証が差別化の核。"],
+                )
+            old_texts = {"書院は知の書斎である。", "引用検証が差別化の核。"}
+
+            orig = Store.notebook_settings
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                rows = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    # Commit a full chunk replacement while the composition
+                    # is mid-flight — auto-commit legs would read these new
+                    # rows into the grounding set.
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["全然別の新しい本文。"]
+                        )
+                return rows
+
+            with Store(db) as s:
+                with patch.object(Store, "notebook_settings", inject):
+                    ans = ask(
+                        s,
+                        FakeLLM(reply="書斎の核[S1]。"),
+                        nb.id,
+                        "差別化は何か？",
+                        persist=False,
+                    )
+            self.assertTrue(fired)
+            self.assertTrue(ans.hits)
+            self.assertLessEqual({h.text for h in ans.hits}, old_texts)
+
+    def test_ask_rejects_foreign_and_dead_scope(self) -> None:
+        """v0.2.727 (#111): the library ask path enforces the API's non-leak
+        contract — a foreign or dead source id raises SOURCE_NOT_FOUND
+        (CLI parity: cli ask --source reaches this through qa.ask)."""
+        s, nb = seeded_store()
+        with s:
+            nb2 = s.create_notebook("他")
+            other = s.add_source(nb2.id, "txt", "x", "o", "sh")
+            for bad in (other.id, 99999):
+                with self.assertRaises(StoreError) as cm:
+                    ask(
+                        s,
+                        FakeLLM(),
+                        nb,
+                        "差別化は何か？",
+                        persist=False,
+                        source_ids=[bad],
+                    )
+                self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_ask_scope_check_runs_inside_the_snapshot(self) -> None:
+        """v0.2.727 (#111): the scope-membership get_source reads must share
+        the retrieval commit — on a different commit a concurrent
+        delete+re-add could swap a validated id onto another notebook's
+        source and ground the answer in its chunks."""
+        import contextlib
+
+        s, nb = seeded_store()
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+        orig_gs = Store.get_source
+
+        @contextlib.contextmanager
+        def rs(self2: Store):
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        def gs(self2: Store, source_id: int) -> object:
+            flags.append(inside["v"])
+            return orig_gs(self2, source_id)
+
+        with s:
+            with patch.object(Store, "read_snapshot", rs), patch.object(
+                Store, "get_source", gs
+            ):
+                ans = ask(
+                    s,
+                    FakeLLM(reply="書斎の核は引用検証[S1]。"),
+                    nb,
+                    "差別化は何か？",
+                    persist=False,
+                    source_ids=[1],
+                )
+        self.assertFalse(ans.degraded)
+        self.assertTrue(flags)
+        self.assertNotIn(False, flags)
 
 
 class TestMultiTurn(unittest.TestCase):
@@ -1761,6 +1873,48 @@ class TestMultiQuery(unittest.TestCase):
                 ans = ask(s, llm, nb, "差別化は何か？", persist=False)
             self.assertFalse(ans.degraded)
             self.assertIn("引用検証", ans.text)
+
+    def test_ask_multi_query_llm_traffic_stays_outside_the_snapshot(self) -> None:
+        """v0.2.726 (product-review #110): with SHOIN_MULTI_QUERY on, the
+        rewrite chat call (and any per-rewrite embedding) is pure network
+        traffic — inside the WAL read snapshot it would pin the read point
+        for the whole round-trip, so writers appending meanwhile can't be
+        checkpointed. Every LLM call must fire with the snapshot CLOSED."""
+        import contextlib
+
+        s, nb = seeded_store()
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+
+        @contextlib.contextmanager
+        def rs(self2: Store):
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        class SpyLLM(FakeLLM):
+            def chat(self, messages: list[Message], temperature: float = 0.2) -> str:
+                flags.append(inside["v"])
+                return super().chat(messages, temperature)
+
+            def embed_one(self, text: str) -> list[float]:
+                flags.append(inside["v"])
+                return super().embed_one(text)
+
+        with s:
+            with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+                with patch.object(Store, "read_snapshot", rs):
+                    llm = SpyLLM(reply="書斎の核は引用検証[S1]。")
+                    ask(s, llm, nb, "差別化は何か？", persist=False)
+        # rewrite + answer chat calls both fired, none inside the snapshot.
+        self.assertEqual(len(llm.chat_calls), 2)
+        self.assertTrue(flags)
+        self.assertNotIn(True, flags)
 
 
 if __name__ == "__main__":

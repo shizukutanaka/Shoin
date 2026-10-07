@@ -150,6 +150,167 @@ class StudioTest(unittest.TestCase):
             generate(self.store, FakeLLM(), empty.id, "briefing")
         self.assertEqual(ctx.exception.code, "NOTEBOOK_EMPTY")
 
+    def test_generate_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: the sampling SELECTs and build_context describe one
+        commit point — a replace_chunks_for_source landing mid-composition
+        must not splice post-commit rows into the persisted output."""
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.get_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                row = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return row
+
+            with Store(db) as s:
+                llm = FakeLLM(reply="要点 [S1]。")
+                with patch.object(Store, "get_notebook", inject):
+                    generate(s, llm, nb.id, "briefing", persist=False)
+            self.assertTrue(fired)
+            prompt = llm.chat_prompts[-1]
+            self.assertIn("ALPHA旧テキスト", prompt)
+            self.assertNotIn("NEWx", prompt)
+
+    def test_suggest_questions_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: same one-commit corpus contract for suggested
+        questions — the prompt must carry only pre-replace rows."""
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.get_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                row = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return row
+
+            with Store(db) as s:
+                llm = FakeLLM(reply="1. 目的は何か？")
+                with patch.object(Store, "get_notebook", inject):
+                    suggest_questions(s, llm, nb.id)
+            self.assertTrue(fired)
+            prompt = llm.chat_prompts[-1]
+            self.assertIn("ALPHA旧テキスト", prompt)
+            self.assertNotIn("NEWx", prompt)
+
+    def test_questions_fingerprint_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: a torn fingerprint (sources@commitA + hits@commitB)
+        would label cached questions with a state that never existed —
+        both halves read under one snapshot."""
+        from typing import Any
+
+        from shoin.studio import questions_fingerprint
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.sources_for_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                rows = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return rows
+
+            with Store(db) as s:
+                with patch.object(Store, "sources_for_notebook", inject):
+                    fp = questions_fingerprint(s, nb.id)
+            self.assertTrue(fired)
+            hit_texts = {h[2] for h in fp[1]}
+            self.assertEqual(hit_texts, {"ALPHA旧テキスト。"})
+
+    def test_suggest_questions_fingerprinted_keys_on_generation_state(self) -> None:
+        """v0.2.723: the cache key must describe the corpus state the
+        questions were actually generated from. _h_questions used to key on
+        a fingerprint computed BEFORE generation — a write landing between
+        the lookup and the generation sampled state B but cached under
+        state A's key, and a later request at state A was served suggestions
+        describing content it never had."""
+        from shoin.studio import (
+            questions_fingerprint,
+            suggest_questions_fingerprinted,
+        )
+
+        llm = FakeLLM(reply="生成された質問は何か?\n別の質問か?")
+        questions, fp = suggest_questions_fingerprinted(
+            self.store, llm, self.nb
+        )
+        # Unchanged corpus: returned fingerprint is exactly the recomputed one.
+        self.assertEqual(fp, questions_fingerprint(self.store, self.nb))
+        self.assertEqual(questions, ["生成された質問は何か?", "別の質問か?"])
+
+        # Corpus moved after a pre-lookup fingerprint: the returned key must
+        # track the NEW state the questions were generated from, not the
+        # stale lookup key the old handler cached under.
+        stale_fp = questions_fingerprint(self.store, self.nb)
+        src = self.store.sources_for_notebook(self.nb)[0]
+        self.store.replace_chunks_for_source(src.id, ["全く別の新本文。"])
+        questions, gen_fp = suggest_questions_fingerprinted(
+            self.store, llm, self.nb
+        )
+        self.assertNotEqual(gen_fp, stale_fp)
+        self.assertEqual(gen_fp, questions_fingerprint(self.store, self.nb))
+
+    def test_suggest_questions_fallback_titles_share_the_snapshot(self) -> None:
+        """v0.2.725 (product-review #109): the title fallback must reuse
+        the titles read inside the generation snapshot, not re-read
+        sources_for_notebook after it — a rename landing between the two
+        reads cached a question naming the NEW title under a fingerprint
+        describing the OLD one (the key/content mismatch v0.2.723 closed
+        on the primary path). The call-count pin is what keeps the second
+        read from silently re-opening the tear."""
+        from typing import Any
+
+        calls = 0
+        orig = Store.sources_for_notebook
+
+        def spy(self2: Store, *a: Any, **kw: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            return orig(self2, *a, **kw)
+
+        with patch.object(Store, "sources_for_notebook", spy):
+            qs = suggest_questions(
+                self.store, FakeLLM(chat_error=True), self.nb
+            )
+        self.assertEqual(calls, 1)
+        self.assertEqual(qs, ["「資料1」とは何ですか", "「資料2」とは何ですか"])
+
     def test_all_kinds_have_instructions(self) -> None:
         llm = FakeLLM(reply="本文 [S1]。")
         for kind in KINDS:
@@ -670,6 +831,44 @@ class PipelineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             result = index_source(self.store, self.nb, self._tmp_txt(td, "本文。" * 50), llm)
         self.assertEqual(result.n_embedded, result.n_chunks)
+
+    def test_index_source_rolls_back_orphan_source_on_chunk_failure(self) -> None:
+        """v0.2.722: add_source commits before add_chunks — a failure in
+        between used to leave a committed source row with zero chunks
+        (invisible to retrieval, listed as a source, and blocking re-add
+        via the sha256 dedupe). The row is rolled back."""
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(StoreError) as ctx:
+                with patch.object(
+                    Store,
+                    "add_chunks",
+                    side_effect=StoreError("SYSTEM_INTERNAL_ERROR", "disk full"),
+                ):
+                    index_source(
+                        self.store, self.nb, self._tmp_txt(td, "本文。" * 50)
+                    )
+        self.assertEqual(ctx.exception.code, "SYSTEM_INTERNAL_ERROR")
+        # No orphan: zero sources committed for this notebook.
+        self.assertEqual(self.store.sources_for_notebook(self.nb), [])
+
+    def test_index_source_failure_does_not_delete_prior_source(self) -> None:
+        """v0.2.722: the rollback only touches the row this call committed —
+        a duplicate-sha re-add attempt fails before add_source and must not
+        disturb the existing source."""
+        with tempfile.TemporaryDirectory() as td:
+            path = self._tmp_txt(td, "本文。" * 50)
+            first = index_source(self.store, self.nb, path)
+            self.assertEqual(
+                len(self.store.sources_for_notebook(self.nb)), 1
+            )
+            # Same file → same sha256 → SOURCE_ALREADY_EXISTS before any
+            # new commit; the original row must survive untouched.
+            with self.assertRaises(StoreError) as ctx:
+                index_source(self.store, self.nb, path)
+            self.assertEqual(ctx.exception.code, "SOURCE_ALREADY_EXISTS")
+            rows = self.store.sources_for_notebook(self.nb)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].id, first.source.id)
 
     def test_embed_partial_failure_keeps_progress(self) -> None:
         src = self.store.add_source(self.nb, "txt", "t", "/tmp/t", "x")

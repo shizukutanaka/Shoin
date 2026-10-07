@@ -9,13 +9,14 @@ from __future__ import annotations
 import array
 import base64
 import contextlib
+import hashlib
 import json
 import math
 import operator
 import os
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
 from .config import (
+    MAX_BODY_LEN,
     MAX_CHUNKS_PER_NOTEBOOK,
     MAX_NAME_LEN,
     MAX_TITLE_LEN,
@@ -407,6 +409,18 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE trash_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'notebook';
         """,
     ),
+    (
+        15,
+        # Content epoch for the src_text pager (v0.2.706): a chunk-text
+        # mutation that keeps the count constant (update_chunk_text, or a
+        # refresh whose re-chunk lands the same count) moves no row the
+        # pager's `total` frame can see — splicing post-change rows under
+        # pre-change ones tears the displayed document. The mutators bump
+        # this counter so every page fetch can detect any content change.
+        """
+        ALTER TABLE sources ADD COLUMN content_rev INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]
 
 
@@ -426,6 +440,61 @@ def _meta_dump(meta: dict[str, Any]) -> str:
     )
 
 
+def validate_source_meta(meta: Any) -> None:
+    """Enforce the source-meta contract: dict, JSON-serializable,
+    serialized form ≤ SOURCE_META_MAX — shared by update_source_meta and
+    request-side pre-validation so a multi-field PATCH rejects before the
+    first write, never after a sibling field already committed (v0.2.728).
+    """
+    if not isinstance(meta, dict):
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"meta must be a JSON object, got {type(meta).__name__}",
+        )
+    try:
+        text = _meta_dump(meta)
+    except (TypeError, ValueError) as e:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            "meta must be JSON-serializable",
+        ) from e
+    if len(text.encode("utf-8")) > SOURCE_META_MAX:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"meta exceeds {SOURCE_META_MAX} bytes",
+        )
+
+
+def validate_notebook_settings(settings: Any) -> None:
+    """Enforce the notebook settings contract: NB_SETTING_KEYS only,
+    bounded non-bool ints (config.py bounds mirror).
+
+    Shared by update_notebook_settings and request-side pre-validation —
+    a multi-field PATCH validates every field before the first write so a
+    rejection never lands after a sibling field already committed
+    (v0.2.728).
+    """
+    if not isinstance(settings, dict):
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"settings must be a JSON object, got {type(settings).__name__}",
+        )
+    unknown = sorted(k for k in settings if k not in NB_SETTING_KEYS)
+    if unknown:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"unknown settings keys: {', '.join(unknown)} "
+            f"(allowed: {', '.join(NB_SETTING_KEYS)})",
+        )
+    for key, value in settings.items():
+        lo, hi = _NB_SETTING_BOUNDS[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"settings.{key} must be an integer in {lo}..{hi}",
+            )
+
+
 def _meta_text(value: Any) -> str:
     """Normalize a payload's `meta` field to canonical JSON text.
 
@@ -439,13 +508,116 @@ def _meta_text(value: Any) -> str:
     if value is None:
         return "{}"
     if isinstance(value, dict):
-        return _meta_dump(value)
-    if isinstance(value, str):
+        text = _meta_dump(value)
+    elif isinstance(value, str):
         parsed = json.loads(value)
         if not isinstance(parsed, dict):
             raise ValueError("meta is not a JSON object")
-        return _meta_dump(parsed)
-    raise ValueError("meta is not a JSON object")
+        text = _meta_dump(parsed)
+    else:
+        raise ValueError("meta is not a JSON object")
+    # v0.2.715: the writer-side SOURCE_META_MAX bound applies on every
+    # normalization path, not just update_source_meta's PATCH — an
+    # import/restore document reached _insert_tree_rows with meta
+    # unbounded, so a giant meta object persisted verbatim and
+    # _source_json embedded it on every detail fetch (the #97 family).
+    if len(text.encode("utf-8")) > SOURCE_META_MAX:
+        raise ValueError(f"meta exceeds {SOURCE_META_MAX} bytes")
+    return text
+
+
+# Per-key bounds every writer and importer agrees on (v0.2.710):
+# update_notebook_settings rejects out-of-range values outright, and
+# _import_settings_text drops them. Retrieval reads these keys raw.
+_NB_SETTING_BOUNDS = {
+    "top_k": (1, SEARCH_K_MAX),
+    "source_text_tokens": (
+        NB_SOURCE_TEXT_TOKENS_MIN,
+        NB_SOURCE_TEXT_TOKENS_MAX,
+    ),
+}
+
+
+def _import_settings_text(value: Any) -> str:
+    """Validate a document's `settings` field to canonical JSON text.
+
+    _meta_text gives the shape gate (None → '{}', non-object →
+    ValueError → the caller's coded error). The value-level check then
+    mirrors update_notebook_settings per-entry rather than per-object:
+    an unknown key stays (it is inert on this build — a newer version
+    may emit it), while a KNOWN key carrying a non-int or out-of-range
+    value is dropped so the global default binds. A verbatim copy would
+    let a crafted document persist e.g. top_k=10**9 (whole-table
+    retrieval) or a non-int that detonates the reader's int() into a
+    raw error (v0.2.710).
+    """
+    # _meta_text also bounds the whole object at SOURCE_META_MAX
+    # (v0.2.715): per-entry limits would still let N medium entries
+    # amplify the stored text; settings ride every detail response too.
+    parsed = json.loads(_meta_text(value))
+    kept = {
+        k: v for k, v in parsed.items()
+        if k not in _NB_SETTING_BOUNDS
+        or (
+            isinstance(v, int)
+            and not isinstance(v, bool)
+            and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
+        )
+    }
+    return _meta_dump(kept)
+
+
+def _import_str(value: Any) -> None:
+    """Reject a document field that is not a storable UTF-8 string.
+
+    _insert_tree_rows binds document fields verbatim: a non-str reaches
+    sqlite as a raw InterfaceError (unbindable) or silently coerced
+    garbage, and a lone surrogate dies as UnicodeEncodeError — never the
+    coded document rejection. The StoreError carries
+    NOTEBOOK_IMPORT_INVALID straight through the caller's except;
+    .encode()'s UnicodeEncodeError is a ValueError, so the same generic
+    rejection follows from the surrounding try either way.
+    """
+    if not isinstance(value, str):
+        raise StoreError(
+            "NOTEBOOK_IMPORT_INVALID", "export field is not a string"
+        )
+    # v0.2.714: a per-field size bound on EVERY document string, not just
+    # bodies — _insert_tree_rows binds fields verbatim, so a giant title,
+    # origin, sha256, chunk text or timestamp also persists at whatever
+    # size the MAX_IMPORT_BYTES doc cap allows and then amplifies through
+    # the verbatim embeds (title/origin ride _source_json on every detail
+    # fetch; chunk text is loaded whole on every retrieval).
+    if len(value) > MAX_BODY_LEN:
+        raise StoreError(
+            "NOTEBOOK_IMPORT_INVALID", "export field exceeds the field limit"
+        )
+    value.encode("utf-8")
+
+
+_IMPORTED_ORIGIN_PREFIX = "imported:"
+
+
+def _neutralize_import_origins(doc: dict[str, Any]) -> dict[str, Any]:
+    """File-path origins in an untrusted export must not become
+    refreshable: refresh re-reads file origins from disk, so a shared
+    document carrying /etc/passwd would turn refresh_source — and the
+    API refresh endpoint that calls it — into an arbitrary-file read of
+    whatever the doc named. Non-URL origins are kept, prefixed, for
+    display only. Enforced inside import_notebook itself so the CLI
+    `shoin import` entry shares the guard _h_nb_import used to apply
+    alone (v0.2.705 — the store is the sink every caller funnels
+    through; merge/trash-restore skip it because their rows come from
+    the user's own archives, not a foreign document)."""
+    sources = doc.get("sources") if isinstance(doc, dict) else None
+    if isinstance(sources, list):
+        for s in sources:
+            origin = s.get("origin") if isinstance(s, dict) else None
+            if isinstance(origin, str) and not origin.startswith(
+                ("http://", "https://")
+            ):
+                s["origin"] = _IMPORTED_ORIGIN_PREFIX + origin
+    return doc
 
 
 def _settings_of(row: sqlite3.Row) -> dict[str, Any]:
@@ -476,16 +648,22 @@ def unpack_vector(blob: bytes) -> list[float]:
 
 
 def _remap_report_source_ids(
-    report_json: str | None, id_map: dict[Any, int]
+    report_json: str | None,
+    id_map: dict[Any, int],
+    chunk_map: dict[Any, int] | None = None,
 ) -> str | None:
-    """Rewrite a citation_report's source_id_map through an id remap.
+    """Rewrite a citation_report's id pointers through an id remap.
 
     Reports carry real source ids ({"S1": 4}) — a verbatim copy across
-    duplicate/import leaves dead or wrong pointers once the tree is
-    re-inserted under fresh ids. S# keys and every other field pass
-    through; an entry whose source did not come along is dropped rather
-    than left pointing at a dead row. A non-JSON or non-dict report
-    passes through verbatim (corrupt-report convention).
+    duplicate/import/restore leaves dead or wrong pointers once the
+    tree is re-inserted under fresh ids. S# keys and every other field
+    pass through; an entry whose source did not come along is dropped
+    rather than left pointing at a dead row. With `chunk_map`, each
+    source_chunk_ids list ({"S1": [12, 13]}) is rewritten the same way
+    (v0.2.686) — chunk rowids are re-assigned on every re-insert, so a
+    verbatim copy pointed at dead or unrelated chunks. A non-JSON or
+    non-dict report passes through verbatim (corrupt-report
+    convention).
     """
     if report_json is None:
         return None
@@ -499,6 +677,22 @@ def _remap_report_source_ids(
                 if isinstance(v, int) and not isinstance(v, bool) and v in id_map:
                     mapped[str(k)] = id_map[v]
             report["source_id_map"] = mapped
+        sci = report.get("source_chunk_ids")
+        if chunk_map is not None and isinstance(sci, dict):
+            mapped_sci: dict[str, list[int]] = {}
+            for k, ids in sci.items():
+                if not isinstance(ids, list):
+                    continue
+                kept = [
+                    chunk_map[i]
+                    for i in ids
+                    if isinstance(i, int)
+                    and not isinstance(i, bool)
+                    and i in chunk_map
+                ]
+                if kept:
+                    mapped_sci[str(k)] = kept
+            report["source_chunk_ids"] = mapped_sci
         return json.dumps(report, ensure_ascii=False)
     except (ValueError, TypeError, AttributeError):
         return report_json
@@ -529,6 +723,11 @@ class Source:
     # Freeform JSON object of descriptive metadata (author/year/…), parsed
     # from the meta column on read — never a raw TEXT leak to callers.
     meta: dict[str, Any] = field(default_factory=dict)
+    # Chunk-content epoch (v0.2.706, migration 15): bumped by every
+    # mutation of the source's chunk text so the src_text pager can reject
+    # a page that crosses a mid-read edit — the `total` count cannot see
+    # same-count replacements.
+    content_rev: int = 0
 
 
 @dataclass(frozen=True)
@@ -603,6 +802,27 @@ class Store:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Hold one consistent read view across several SELECTs.
+
+        pysqlite never begins a transaction for SELECT, so `with self.conn`
+        leaves every statement on its own auto-commit snapshot — a concurrent
+        writer's commit lands between two of them and the caller assembles
+        state that never existed together (an export with sources listed but
+        their chunks already deleted). An explicit BEGIN pins the WAL read
+        snapshot for the whole block; writers on other connections proceed
+        unblocked (WAL readers don't serialize against writers).
+        """
+        self.conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            # Reads never mutate, so ROLLBACK is unconditional: it ends the
+            # snapshot on the success path AND on exceptions alike — and is a
+            # no-op should the body somehow have ended the TX already.
+            self.conn.rollback()
 
     # --- migrations ---
 
@@ -766,32 +986,7 @@ class Store:
         change generated output (retrieval depth / prompt budget), the
         same content-bearing class as rename.
         """
-        if not isinstance(settings, dict):
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"settings must be a JSON object, got {type(settings).__name__}",
-            )
-        unknown = sorted(k for k in settings if k not in NB_SETTING_KEYS)
-        if unknown:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"unknown settings keys: {', '.join(unknown)} "
-                f"(allowed: {', '.join(NB_SETTING_KEYS)})",
-            )
-        bounds = {
-            "top_k": (1, SEARCH_K_MAX),
-            "source_text_tokens": (
-                NB_SOURCE_TEXT_TOKENS_MIN,
-                NB_SOURCE_TEXT_TOKENS_MAX,
-            ),
-        }
-        for key, value in settings.items():
-            lo, hi = bounds[key]
-            if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
-                raise StoreError(
-                    "VALIDATION_FIELD_FORMAT_INVALID",
-                    f"settings.{key} must be an integer in {lo}..{hi}",
-                )
+        validate_notebook_settings(settings)
         text = _meta_dump(settings)
         with self.conn:
             cur = self.conn.execute(
@@ -889,9 +1084,15 @@ class Store:
         # Undo-log trash (v0.2.654): archive-then-delete in ONE
         # transaction — the undo record can never be missing for a
         # committed delete, and live read paths need no filter changes.
-        nb = self.get_notebook(notebook_id)
-        payload = self._notebook_tree_payload(notebook_id)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): take the write lock BEFORE the
+            # payload read. With the default deferred begin, the
+            # auto-commit payload SELECTs ran under no lock — a row
+            # committed by another writer in the gap between serialize
+            # and DELETE was removed without ever being archived.
+            self.conn.execute("BEGIN IMMEDIATE")
+            nb = self.get_notebook(notebook_id)
+            payload = self._notebook_tree_payload(notebook_id)
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload)"
                 " VALUES(?,?,?,?)",
@@ -899,12 +1100,32 @@ class Store:
             )
             self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
 
-    def trash_list(self) -> list[TrashItem]:
-        """Newest-first trash index — columns only, payload never parsed."""
-        rows = self.conn.execute(
-            "SELECT id, notebook_id, name, deleted_at, kind"
-            " FROM trash_items ORDER BY deleted_at DESC, id DESC"
-        ).fetchall()
+    def count_notebooks(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM notebooks"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def trash_list(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TrashItem]:
+        """Newest-first trash index — columns only, payload never parsed.
+
+        limit/offset page the result (GET /api/trash, v0.2.696) — the CLI
+        keeps passing no limit and still gets the full list.
+        """
+        if limit is not None:
+            rows = self.conn.execute(
+                "SELECT id, notebook_id, name, deleted_at, kind"
+                " FROM trash_items ORDER BY deleted_at DESC, id DESC"
+                " LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT id, notebook_id, name, deleted_at, kind"
+                " FROM trash_items ORDER BY deleted_at DESC, id DESC"
+            ).fetchall()
         return [
             TrashItem(
                 id=int(r["id"]),
@@ -916,16 +1137,27 @@ class Store:
             for r in rows
         ]
 
+    def count_trash(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM trash_items"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
     def trash_restore(self, trash_id: int) -> dict[str, Any]:
         """Re-insert a trashed entity in one TX, dispatching on payload kind.
 
-        Notebook archives (v0.2.654) re-insert with their original ids —
-        chunk INSERTs re-fire the FTS triggers and base64 vectors land
-        verbatim, so a restored tree is searchable immediately at zero
-        re-embed cost. Source archives (v0.2.667) follow the same
-        contract inside their parent notebook, which must still exist
-        (NOTEBOOK_NOT_FOUND): an occupied source id refuses with
-        SOURCE_ALREADY_EXISTS, never a silent merge or id rewrite.
+        Notebook archives (v0.2.654) keep the notebook's own id and
+        re-insert children under fresh rowids via the shared tree
+        writer (v0.2.686) — chunk INSERTs re-fire the FTS triggers and
+        base64 vectors land verbatim, so a restored tree is searchable
+        immediately at zero re-embed cost, and recycled rowids can
+        never collide with the restore. Source archives (v0.2.667)
+        follow the same contract inside their parent notebook, which
+        must still exist (NOTEBOOK_NOT_FOUND): the probe pairs the
+        archived notebook_id with the archived created_at (v0.2.689),
+        so a rowid recycled by delete+create counts as "parent gone",
+        and an occupied source id refuses with SOURCE_ALREADY_EXISTS,
+        never a silent merge or id rewrite.
         Note archives get a fresh id — nothing outside delete/list
         references note ids, so re-assignment loses nothing and cannot
         collide. INTEGER PRIMARY KEY reuses max(id)+1, so every
@@ -958,7 +1190,7 @@ class Store:
                 # a raw ValueError escaping mid-transaction.
                 for s in sources:
                     s["meta"] = _meta_text(s.get("meta"))
-                nb["settings"] = _meta_text(nb.get("settings"))
+                nb["settings"] = _import_settings_text(nb.get("settings"))
             elif kind == "source":
                 src = payload["source"]
                 chunks = payload["chunks"]
@@ -967,9 +1199,17 @@ class Store:
                         c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
                 src["meta"] = _meta_text(src.get("meta"))
                 nb_id = int(src["notebook_id"])
+                nb_created_at = payload.get("nb_created_at")
+                nb_created_at = (
+                    str(nb_created_at) if nb_created_at is not None else None
+                )
             elif kind == "note":
                 note = payload["note"]
                 nb_id = int(note["notebook_id"])
+                nb_created_at = payload.get("nb_created_at")
+                nb_created_at = (
+                    str(nb_created_at) if nb_created_at is not None else None
+                )
             else:
                 raise ValueError(f"unknown trash kind {kind!r}")
         except (KeyError, TypeError, ValueError) as exc:
@@ -982,8 +1222,10 @@ class Store:
                 nb, sources, chunks, notes, studio_outputs, messages, trash_id
             )
         if kind == "source":
-            return self._restore_trashed_source(src, chunks, nb_id, trash_id)
-        return self._restore_trashed_note(note, nb_id, trash_id)
+            return self._restore_trashed_source(
+                src, chunks, nb_id, trash_id, nb_created_at
+            )
+        return self._restore_trashed_note(note, nb_id, trash_id, nb_created_at)
 
     def _restore_notebook_tree(
         self,
@@ -995,70 +1237,35 @@ class Store:
         messages: list[dict[str, Any]],
         trash_id: int,
     ) -> dict[str, Any]:
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
-        ).fetchone():
-            raise StoreError(
-                "NOTEBOOK_ALREADY_EXISTS",
-                f"notebook {nb['id']} already exists — cannot restore over it",
-            )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): the ALREADY_EXISTS probe must run
+            # under the write lock — an auto-commit read left a gap where a
+            # concurrent create turned the coded refusal into a raw
+            # IntegrityError on INSERT (same TOCTOU class as v0.2.683).
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.conn.execute(
+                "SELECT 1 FROM notebooks WHERE id=?", (nb["id"],)
+            ).fetchone():
+                raise StoreError(
+                    "NOTEBOOK_ALREADY_EXISTS",
+                    f"notebook {nb['id']} already exists — cannot restore over it",
+                )
             self.conn.execute(
                 "INSERT INTO notebooks(id, name, created_at, updated_at, settings)"
                 " VALUES(?,?,?,?,?)",
                 (nb["id"], nb["name"], nb["created_at"], nb["updated_at"],
                  nb["settings"]),
             )
-            for s in sources:
-                self.conn.execute(
-                    "INSERT INTO sources(id, notebook_id, kind, title, origin,"
-                    " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        s["id"], s["notebook_id"], s["kind"], s["title"],
-                        s["origin"], s["sha256"], s["added_at"],
-                        # Archives written before migration 11/12 carry no
-                        # weight/meta key — restore them neutral rather
-                        # than refusing.
-                        float(s.get("weight", 1.0)),
-                        s["meta"],
-                    ),
-                )
-            for c in chunks:
-                self.conn.execute(
-                    "INSERT INTO chunks(id, source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
-                    (
-                        c["id"], c["source_id"], c["seq"], c["text"],
-                        c["context"], c["embedding"], c["embedding_norm"],
-                    ),
-                )
-            for n in notes:
-                self.conn.execute(
-                    "INSERT INTO notes(id, notebook_id, title, body, created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (
-                        n["id"], n["notebook_id"], n["title"],
-                        n["body"], n["created_at"],
-                    ),
-                )
-            for o in studio_outputs:
-                self.conn.execute(
-                    "INSERT INTO studio_outputs(id, notebook_id, kind, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        o["id"], o["notebook_id"], o["kind"], o["body"],
-                        o["citation_report"], o["created_at"],
-                    ),
-                )
-            for m in messages:
-                self.conn.execute(
-                    "INSERT INTO messages(id, notebook_id, role, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        m["id"], m["notebook_id"], m["role"], m["body"],
-                        m["citation_report"], m["created_at"],
-                    ),
-                )
+            # v0.2.686: children re-insert through the shared tree writer
+            # under FRESH ids. This path used to re-insert the archived
+            # ids verbatim, but INTEGER PRIMARY KEY rowids recycle as
+            # max(rowid)+1 — once a later insert took an archived
+            # source/chunk/note/studio/message id, restore died on a raw
+            # PRIMARY KEY conflict the probes never covered (the only
+            # probe checked the notebook id itself).
+            self._insert_tree_rows(
+                nb["id"], sources, chunks, notes, studio_outputs, messages
+            )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
             self._optimize_fts()
         return {"kind": "notebook", "id": nb["id"], "name": nb["name"]}
@@ -1069,25 +1276,38 @@ class Store:
         chunks: list[dict[str, Any]],
         nb_id: int,
         trash_id: int,
+        nb_created_at: str | None,
     ) -> dict[str, Any]:
         """Source archive restore (v0.2.667): original id inside its parent
         notebook — chunk INSERTs re-fire the FTS triggers, so the source is
-        searchable again in the same commit that lands it."""
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-        ).fetchone() is None:
-            raise StoreError(
-                "NOTEBOOK_NOT_FOUND",
-                f"notebook {nb_id} is gone — cannot restore source into it",
-            )
-        if self.conn.execute(
-            "SELECT 1 FROM sources WHERE id=?", (src["id"],)
-        ).fetchone():
-            raise StoreError(
-                "SOURCE_ALREADY_EXISTS",
-                f"source {src['id']} already exists — cannot restore over it",
-            )
+        searchable again in the same commit that lands it. The parent probe
+        pairs id with the archived created_at (v0.2.689): rowids recycle,
+        so an id-only probe would mis-parent the source into whatever
+        notebook later reoccupied the id. Archives predating the key fall
+        back to the id-only check."""
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): both probes run under the write
+            # lock — a concurrent delete/create in the gap used to surface
+            # as a raw FK/PK IntegrityError instead of the coded refusal.
+            self.conn.execute("BEGIN IMMEDIATE")
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone()
+            if nb_row is None or (
+                nb_created_at is not None
+                and str(nb_row["created_at"]) != nb_created_at
+            ):
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND",
+                    f"notebook {nb_id} is gone — cannot restore source into it",
+                )
+            if self.conn.execute(
+                "SELECT 1 FROM sources WHERE id=?", (src["id"],)
+            ).fetchone():
+                raise StoreError(
+                    "SOURCE_ALREADY_EXISTS",
+                    f"source {src['id']} already exists — cannot restore over it",
+                )
             self.conn.execute(
                 "INSERT INTO sources(id, notebook_id, kind, title, origin,"
                 " sha256, added_at, weight, meta) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1102,11 +1322,14 @@ class Store:
                 ),
             )
             for c in chunks:
+                # v0.2.686: chunks take fresh rowids — deleted ids recycle
+                # as max(rowid)+1, so re-inserting the archived ids
+                # collided with whatever later insert reused them.
                 self.conn.execute(
-                    "INSERT INTO chunks(id, source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO chunks(source_id, seq, text, context,"
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
                     (
-                        c["id"], src["id"], c["seq"], c["text"],
+                        src["id"], c["seq"], c["text"],
                         c["context"], c["embedding"], c["embedding_norm"],
                     ),
                 )
@@ -1116,19 +1339,30 @@ class Store:
         return {"kind": "source", "id": int(src["id"]), "name": str(src["title"])}
 
     def _restore_trashed_note(
-        self, note: dict[str, Any], nb_id: int, trash_id: int
+        self, note: dict[str, Any], nb_id: int, trash_id: int,
+        nb_created_at: str | None,
     ) -> dict[str, Any]:
         """Note archive restore (v0.2.667): fresh id inside its parent
         notebook — nothing outside delete/list references note ids, so
-        re-assignment loses nothing and the insert can never collide."""
-        if self.conn.execute(
-            "SELECT 1 FROM notebooks WHERE id=?", (nb_id,)
-        ).fetchone() is None:
-            raise StoreError(
-                "NOTEBOOK_NOT_FOUND",
-                f"notebook {nb_id} is gone — cannot restore note into it",
-            )
+        re-assignment loses nothing and the insert can never collide. The
+        parent probe pairs id with the archived created_at (v0.2.689) for
+        the same recycled-rowid reason as the source restore."""
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.685): the parent probe runs under the
+            # write lock — a concurrent delete_notebook in the gap used to
+            # turn the coded NOTEBOOK_NOT_FOUND into a raw FK violation.
+            self.conn.execute("BEGIN IMMEDIATE")
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (nb_id,)
+            ).fetchone()
+            if nb_row is None or (
+                nb_created_at is not None
+                and str(nb_row["created_at"]) != nb_created_at
+            ):
+                raise StoreError(
+                    "NOTEBOOK_NOT_FOUND",
+                    f"notebook {nb_id} is gone — cannot restore note into it",
+                )
             cur = self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
                 " VALUES(?,?,?,?)",
@@ -1159,8 +1393,19 @@ class Store:
     def export_notebook(self, notebook_id: int) -> dict[str, Any]:
         """Portable notebook-tree document (v0.2.655) — the same envelope
         as the trash undo-log: a deleted notebook's archive is already a
-        valid import document, and vice versa."""
-        return self._notebook_tree_dict(notebook_id)
+        valid import document, and vice versa.
+
+        Read under one WAL snapshot (v0.2.703): _notebook_tree_dict issues
+        several auto-commit SELECTs, so a concurrent delete could land
+        between them and serialize a torn document — sources present but
+        chunks/notes/messages gone. The md/bib/ris exports got the same
+        guard in v0.2.700; this path is the machine-transfer envelope, so
+        a torn doc here gets *imported* and the loss persists on the far
+        side. Trash-restore callers run inside their own write TX and
+        call _notebook_tree_dict directly, so the snapshot lives here at
+        the standalone-read boundary only."""
+        with self.read_snapshot():
+            return self._notebook_tree_dict(notebook_id)
 
     def import_notebook(self, payload: dict[str, Any]) -> Notebook:
         """Insert an export document as a NEW notebook (v0.2.655).
@@ -1173,8 +1418,14 @@ class Store:
         BLOBs decode back verbatim — same model, zero re-embed cost —
         and chunk INSERTs re-fire the FTS triggers, so the notebook is
         searchable the moment import returns.
+
+        The payload is untrusted bytes: file-path origins it carries are
+        neutralized before anything else reads them (v0.2.705). The call
+        stays inside the try so a non-dict payload still classifies as
+        NOTEBOOK_IMPORT_INVALID rather than a raw AttributeError.
         """
         try:
+            _neutralize_import_origins(payload)
             nb = payload["notebook"]
             name = nb["name"]
             if not isinstance(name, str):
@@ -1188,18 +1439,54 @@ class Store:
             messages = payload["messages"]
             # settings is optional in the document (pre-v0.2.659 exports
             # lack it) — absent normalizes to '{}', anything non-object is
-            # malformed like a non-object meta.
-            nb_settings_text = _meta_text(nb.get("settings"))
+            # malformed like a non-object meta; _import_settings_text also
+            # drops out-of-range/non-int values on known keys (v0.2.710).
+            nb_settings_text = _import_settings_text(nb.get("settings"))
             src_ids: set[Any] = set()
             for s in sources:
+                # v0.2.692: a crafted export may repeat a source id —
+                # _insert_tree_rows keys id_map by the doc id, so the LAST
+                # duplicate wins and every chunk/report bound to that id
+                # silently rebinds to the wrong source (the earlier row
+                # lands with zero chunks). Reject duplicates outright.
+                if s["id"] in src_ids:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export lists the same source id more than once",
+                    )
                 src_ids.add(s["id"])
                 for k in ("kind", "title", "origin", "sha256", "added_at"):
                     s[k]
+                # v0.2.693: document rows bypass every guard the write
+                # path enforces — _insert_tree_rows binds fields verbatim
+                # while add_source/update_source_weight/add_studio_output/
+                # add_message enforce the kind/role vocabularies and a
+                # finite 0..SOURCE_WEIGHT_MAX range, and _utf8 every bound
+                # string. Without the same checks here a crafted export
+                # persists an out-of-vocabulary kind or role (phantom rows
+                # no caller can overwrite) or an Infinity weight; a NaN
+                # weight, a dict field, or a lone surrogate instead died
+                # on a raw sqlite error — not the coded document
+                # rejection. _import_str enforces str-typed, UTF-8-
+                # encodable text fields; encode failures surface as
+                # ValueError → NOTEBOOK_IMPORT_INVALID below.
+                if s["kind"] not in SOURCE_KINDS:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export source kind is not a known kind",
+                    )
                 # weight is optional in the document (pre-v0.2.657 exports
                 # lack it) but must be numeric when present; meta is the
                 # same — absent or the canonical object/string only
                 # (pre-v0.2.658).
-                float(s.get("weight", 1.0))
+                w = float(s.get("weight", 1.0))
+                if not math.isfinite(w) or not 0.0 <= w <= SOURCE_WEIGHT_MAX:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export source weight is outside the finite range",
+                    )
+                for k in ("title", "origin", "sha256", "added_at"):
+                    _import_str(s[k])
                 _meta_text(s.get("meta"))
             for c in chunks:
                 if c["source_id"] not in src_ids:
@@ -1209,17 +1496,52 @@ class Store:
                     )
                 for k in ("seq", "text", "context", "embedding_norm"):
                     c[k]
+                for k in ("text", "context"):
+                    _import_str(c[k])
+                float(c["seq"])
+                # embedding_norm is NULL whenever the chunk carries no
+                # embedding — a legit export emits null, only a present
+                # value must be numeric.
+                if c["embedding_norm"] is not None:
+                    float(c["embedding_norm"])
                 if c["embedding"] is not None:
-                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+                    # v0.2.714: bound the base64 BEFORE decode — the blob
+                    # binds verbatim and is loaded on every vector
+                    # retrieval, so a giant one amplifies like a giant
+                    # text field. (Legit embeddings are ~dim*4 bytes,
+                    # i.e. ≤~22KB base64 for 4k-dim vectors.)
+                    blob64 = c["embedding"]["$blob"]
+                    if isinstance(blob64, str) and len(blob64) > MAX_BODY_LEN:
+                        raise StoreError(
+                            "NOTEBOOK_IMPORT_INVALID",
+                            "export embedding blob exceeds the field limit",
+                        )
+                    c["embedding"] = base64.b64decode(blob64)
             for n in notes:
                 for k in ("title", "body", "created_at"):
                     n[k]
+                for k in ("title", "body", "created_at"):
+                    _import_str(n[k])
             for o in studio_outputs:
                 for k in ("kind", "body", "citation_report", "created_at"):
                     o[k]
+                if o["kind"] not in STUDIO_KINDS:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export studio kind is not a known kind",
+                    )
+                for k in ("body", "citation_report", "created_at"):
+                    _import_str(o[k])
             for m in messages:
                 for k in ("role", "body", "citation_report", "created_at"):
                     m[k]
+                if m["role"] not in ("user", "assistant"):
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export message role is not a known role",
+                    )
+                for k in ("body", "citation_report", "created_at"):
+                    _import_str(m[k])
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "NOTEBOOK_IMPORT_INVALID",
@@ -1275,24 +1597,66 @@ class Store:
         # (notebook_id, sha256), so a merge whose source notebook shares
         # content with the target — or a crafted import listing the same
         # sha twice — used to die on a raw IntegrityError (HTTP 500) after
-        # partially inserting. Identical sha means identical text, which
-        # the deterministic chunker turns into identical chunks: keep the
-        # existing row, remap the incoming tree onto it through id_map,
-        # and skip its chunk INSERTs (the index gains no duplicate
-        # content; citation_reports still resolve via the remap).
-        seen_sha: dict[str, int] = {
+        # partially inserting.
+        # v0.2.682: dedupe only on identical CONTENT, not just an
+        # identical sha — update_chunk_text edits a chunk without
+        # touching the source's origin-sha, so an edited copy carries a
+        # stale label. Same sha + same (seq, text) corpus → remap onto
+        # the existing row and skip its chunk INSERTs (identical chunks,
+        # citation_reports resolve via the remap). Same sha + different
+        # corpus → the doc's sha no longer describes its content, so
+        # recompute the label from the doc's own chunks and keep BOTH
+        # versions — discarding the incoming chunks was silent data loss.
+        src_chunks: dict[Any, list[tuple[Any, str]]] = {}
+        for c in chunks:
+            src_chunks.setdefault(c["source_id"], []).append(
+                (c["seq"], c["text"])
+            )
+        # sha -> owner: an existing sources.id (int) or the dict of a doc
+        # source still waiting for its INSERT (in-document collisions).
+        seen_sha: dict[str, Any] = {
             str(row[1]): int(row[0])
             for row in self.conn.execute(
                 "SELECT id, sha256 FROM sources WHERE notebook_id=?",
                 (notebook_id,),
             )
         }
+
+        def _corpus(owner: Any) -> list[tuple[Any, str]]:
+            if isinstance(owner, int):
+                return [
+                    (r[0], r[1])
+                    for r in self.conn.execute(
+                        "SELECT seq, text FROM chunks WHERE source_id=?",
+                        (owner,),
+                    )
+                ]
+            return list(src_chunks.get(owner["id"], []))
+
         deduped: set[Any] = set()
+        dedupe_owner: dict[Any, Any] = {}
         for s in sources:
-            if s["sha256"] in seen_sha:
-                deduped.add(s["id"])
-            else:
-                seen_sha[str(s["sha256"])] = -1  # placeholder until INSERT
+            mine = sorted(src_chunks.get(s["id"], []))
+            sha = str(s["sha256"])
+            n = -1  # -1 = the doc's own sha; >=0 = rehash with salt n
+            while True:
+                owner = seen_sha.get(sha)
+                if owner is None:
+                    seen_sha[sha] = s
+                    s["sha256"] = sha
+                    break
+                if sorted(_corpus(owner)) == mine:
+                    deduped.add(s["id"])
+                    dedupe_owner[s["id"]] = owner
+                    break
+                n += 1
+                h = hashlib.sha256()
+                if n:
+                    h.update(str(n).encode("ascii"))
+                for _seq, t in mine:
+                    h.update(t.encode("utf-8"))
+                    h.update(b"\n")
+                sha = h.hexdigest()
         # v0.2.672: the per-notebook chunk cap is a product invariant, not
         # an ingest-rate limit — the vector leg scans every chunk in a
         # notebook, so an over-cap corpus slows EVERY query on it. Until
@@ -1312,7 +1676,13 @@ class Store:
         id_map: dict[Any, int] = {}
         for s in sources:
             if s["id"] in deduped:
-                id_map[s["id"]] = seen_sha[str(s["sha256"])]
+                owner = dedupe_owner[s["id"]]
+                # An int owner is an existing row; a dict owner is a doc
+                # source already INSERTed earlier in this loop.
+                if isinstance(owner, int):
+                    id_map[s["id"]] = owner
+                else:
+                    id_map[s["id"]] = id_map[owner["id"]]
                 continue
             cur = self.conn.execute(
                 "INSERT INTO sources"
@@ -1329,10 +1699,11 @@ class Store:
             )
             id_map[s["id"]] = int(cur.lastrowid or 0)
             seen_sha[str(s["sha256"])] = id_map[s["id"]]
+        chunk_id_map: dict[Any, int] = {}
         for c in chunks:
             if c["source_id"] in deduped:
                 continue
-            self.conn.execute(
+            cur = self.conn.execute(
                 "INSERT INTO chunks(source_id, seq, text, context,"
                 " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
                 (
@@ -1340,6 +1711,10 @@ class Store:
                     c["context"], c["embedding"], c["embedding_norm"],
                 ),
             )
+            # v0.2.686: reports also carry source_chunk_ids — remap the
+            # chunk pointers through a fresh-id map too, or re-inserted
+            # reports point at dead or unrelated rows.
+            chunk_id_map[c["id"]] = int(cur.lastrowid or 0)
         for n in notes:
             self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
@@ -1352,7 +1727,9 @@ class Store:
                 " citation_report, created_at) VALUES(?,?,?,?,?)",
                 (
                     notebook_id, o["kind"], o["body"],
-                    _remap_report_source_ids(o["citation_report"], id_map),
+                    _remap_report_source_ids(
+                        o["citation_report"], id_map, chunk_id_map
+                    ),
                     o["created_at"],
                 ),
             )
@@ -1362,7 +1739,9 @@ class Store:
                 " citation_report, created_at) VALUES(?,?,?,?,?)",
                 (
                     notebook_id, m["role"], m["body"],
-                    _remap_report_source_ids(m["citation_report"], id_map),
+                    _remap_report_source_ids(
+                        m["citation_report"], id_map, chunk_id_map
+                    ),
                     m["created_at"],
                 ),
             )
@@ -1391,14 +1770,16 @@ class Store:
         the same re-keying as duplicate/import (chunk source_ids and
         citation_report source_id_maps remapped, embeddings carried
         verbatim, FTS re-indexed on INSERT). The source notebook is
-        then deleted through delete_notebook, which archives the whole
-        tree to trash in the same transaction: a merge is recoverable
-        via `trash restore`.
+        then archived to trash and deleted in the same transaction:
+        a merge is recoverable via `trash restore`.
 
-        Ordering is copy-then-delete, two transactions: a crash
-        mid-merge can duplicate content (target gains the rows, source
-        still lives and can be retried or trashed by hand), never
-        lose it.
+        One transaction (v0.2.687): serialize, copy, archive and delete
+        all run under a single BEGIN IMMEDIATE write lock. The earlier
+        two-transaction shape serialized the source under auto-commit
+        and deleted afterwards — a row committed by another writer in
+        between was archived into trash but never copied into the
+        target. A crash anywhere now rolls the whole merge back:
+        nothing is duplicated, nothing is dropped.
         """
         self.get_notebook(target_id)
         self.get_notebook(source_id)
@@ -1407,12 +1788,20 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 "cannot merge a notebook into itself",
             )
-        doc = self._notebook_tree_dict(source_id)
-        try:
-            for c in doc["chunks"]:
-                if c["embedding"] is not None:
-                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
-            with self.conn:
+        with self.conn:
+            # Re-probe + serialize under the write lock: an existence
+            # result older than the lock is stale, and serialize-then-
+            # delete must not observe a tree that changed mid-way.
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.get_notebook(target_id)
+            try:
+                doc = self._notebook_tree_dict(source_id)
+                payload = json.dumps(doc, ensure_ascii=False)
+                for c in doc["chunks"]:
+                    if c["embedding"] is not None:
+                        c["embedding"] = base64.b64decode(
+                            c["embedding"]["$blob"]
+                        )
                 self._insert_tree_rows(
                     target_id,
                     doc["sources"],
@@ -1421,14 +1810,28 @@ class Store:
                     doc["studio_outputs"],
                     doc["messages"],
                 )
+                # The archive is the same serialized tree — under the
+                # lock it is exactly what the delete removes.
+                self.conn.execute(
+                    "INSERT INTO trash_items(notebook_id, name, deleted_at,"
+                    " payload) VALUES(?,?,?,?)",
+                    (
+                        source_id,
+                        doc["notebook"]["name"],
+                        _now(),
+                        payload,
+                    ),
+                )
+                self.conn.execute(
+                    "DELETE FROM notebooks WHERE id=?", (source_id,)
+                )
                 self.touch_notebook(target_id)
                 self._optimize_fts()
-        except (KeyError, TypeError, ValueError) as exc:
-            raise StoreError(
-                "SYSTEM_INTERNAL_ERROR",
-                f"notebook {source_id} tree could not be serialized",
-            ) from exc
-        self.delete_notebook(source_id)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StoreError(
+                    "SYSTEM_INTERNAL_ERROR",
+                    f"notebook {source_id} tree could not be serialized",
+                ) from exc
         return self.get_notebook(target_id)
 
     def touch_notebook(self, notebook_id: int) -> None:
@@ -1445,26 +1848,37 @@ class Store:
         bleeds across the fork. Child rows keep their original timestamps
         — they describe the copied content, not the copy event.
         """
-        src = self.get_notebook(notebook_id)
-        if name is None:
-            suffix = " (copy)"
-            name = src.name[: MAX_NAME_LEN - len(suffix)] + suffix
-        name = name.strip()
-        if not name:
-            raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty")
-        if len(name) > MAX_NAME_LEN:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"name too long (max {MAX_NAME_LEN} chars)",
-            )
-        _utf8(name, "name")
         ts = _now()
         with self.conn:
-            # v0.2.672: this fork copies the tree via INSERT..SELECT, not
-            # _insert_tree_rows, so it needs its own cap check — a normal
-            # notebook cannot breach it (0 + same count), but duplicating
-            # an already over-limit notebook would replicate the broken
-            # invariant. Inside the transaction like the sibling guard.
+            # BEGIN IMMEDIATE (v0.2.708): the existence probe, the
+            # chunk-cap probe and every INSERT..SELECT of the copy must
+            # share one write-TX snapshot. Under the deferred begin they
+            # ran on different commit points — a concurrent delete of the
+            # source notebook in the gap produced a committed "duplicate"
+            # with zero child rows and no error.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_notebook(notebook_id)
+            if name is None:
+                suffix = " (copy)"
+                name = src.name[: MAX_NAME_LEN - len(suffix)] + suffix
+            name = name.strip()
+            if not name:
+                raise StoreError(
+                    "VALIDATION_REQUIRED_FIELD_MISSING", "notebook name is empty"
+                )
+            if len(name) > MAX_NAME_LEN:
+                raise StoreError(
+                    "VALIDATION_FIELD_FORMAT_INVALID",
+                    f"name too long (max {MAX_NAME_LEN} chars)",
+                )
+            _utf8(name, "name")
+            # v0.2.672: this fork copies the tree itself rather than via
+            # _insert_tree_rows (INSERT..SELECT then, per-row since v0.2.733
+            # so the fresh chunk rowids can be mapped), so it needs its own
+            # cap check — a normal notebook cannot breach it (0 + same
+            # count), but duplicating an already over-limit notebook would
+            # replicate the broken invariant. Inside the transaction like
+            # the sibling guard.
             if self.counts(notebook_id)["chunks"] > MAX_CHUNKS_PER_NOTEBOOK:
                 raise StoreError(
                     "INGEST_NOTEBOOK_FULL",
@@ -1493,14 +1907,30 @@ class Store:
                      row["meta"]),
                 )
                 id_map[int(row["id"])] = int(cur.lastrowid or 0)
-            for old_src, new_src in id_map.items():
-                self.conn.execute(
+            chunk_id_map: dict[int, int] = {}
+            for row in self.conn.execute(
+                "SELECT c.id, c.source_id, c.seq, c.text, c.context,"
+                " c.embedding, c.embedding_norm FROM chunks c"
+                " JOIN sources s ON s.id=c.source_id WHERE s.notebook_id=?"
+                " ORDER BY c.source_id, c.seq",
+                (notebook_id,),
+            ).fetchall():
+                cur = self.conn.execute(
                     "INSERT INTO chunks(source_id, seq, text, context,"
-                    " embedding, embedding_norm)"
-                    " SELECT ?, seq, text, context, embedding, embedding_norm"
-                    " FROM chunks WHERE source_id=? ORDER BY seq",
-                    (new_src, old_src),
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                    (
+                        id_map[int(row["source_id"])], row["seq"], row["text"],
+                        row["context"], row["embedding"], row["embedding_norm"],
+                    ),
                 )
+                # v0.2.733: the per-row insert replaces INSERT..SELECT so the
+                # fresh chunk rowid lands in chunk_id_map — the report remap
+                # below rewrites source_chunk_ids through it. Without it a
+                # duplicated report kept pointing at the SOURCE notebook's
+                # chunks (live rows under a different notebook — a verbatim
+                # cross-notebook pointer, the exact tear v0.2.686 closed on
+                # the import/merge/restore paths).
+                chunk_id_map[int(row["id"])] = int(cur.lastrowid or 0)
             self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
                 " SELECT ?, title, body, created_at FROM notes WHERE notebook_id=?",
@@ -1516,7 +1946,9 @@ class Store:
                     " citation_report, created_at) VALUES(?,?,?,?,?)",
                     (
                         new_id, row["kind"], row["body"],
-                        _remap_report_source_ids(row["citation_report"], id_map),
+                        _remap_report_source_ids(
+                            row["citation_report"], id_map, chunk_id_map
+                        ),
                         row["created_at"],
                     ),
                 )
@@ -1530,7 +1962,9 @@ class Store:
                     " citation_report, created_at) VALUES(?,?,?,?,?)",
                     (
                         new_id, row["role"], row["body"],
-                        _remap_report_source_ids(row["citation_report"], id_map),
+                        _remap_report_source_ids(
+                            row["citation_report"], id_map, chunk_id_map
+                        ),
                         row["created_at"],
                     ),
                 )
@@ -1558,19 +1992,19 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(origin, str) and len(origin) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"origin too long (max {MAX_BODY_LEN} chars)",
+            )
+        if isinstance(sha256, str) and len(sha256) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"sha256 too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(origin, "origin")
         _utf8(sha256, "sha256")
-        self.get_notebook(notebook_id)
-        dup = self.conn.execute(
-            "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
-            (notebook_id, sha256),
-        ).fetchone()
-        if dup is not None:
-            raise StoreError(
-                "SOURCE_ALREADY_EXISTS",
-                f"identical source already in notebook (source id {dup['id']})",
-            )
         ts = _now()
         try:
             # `with self.conn:` commits INSERT+touch atomically and rolls both
@@ -1579,6 +2013,22 @@ class Store:
             # caller sees an error yet the source appears). Same leak class
             # as the v0.2.417-418 add_studio_output fixes.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe AND the dedupe
+                # probe must see the same commit point the INSERT lands on —
+                # run at autocommit, they could see a notebook rowid later
+                # deleted and reused, inserting the source under a notebook
+                # the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)
+                dup = self.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
+                    (notebook_id, sha256),
+                ).fetchone()
+                if dup is not None:
+                    raise StoreError(
+                        "SOURCE_ALREADY_EXISTS",
+                        f"identical source already in notebook (source id {dup['id']})",
+                    )
                 cur = self.conn.execute(
                     "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
                     " VALUES (?,?,?,?,?,?)",
@@ -1608,20 +2058,23 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(origin, str) and len(origin) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"origin too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(origin, "origin")
-        src = self.get_source(source_id)  # also validates existence; notebook_id needed below
         with self.conn:
-            # Re-read the title INSIDE the transaction (not src.title from the
-            # pre-transaction snapshot) so the chunk-context prefix rewrite below
-            # keys off the row's actual current value — same stale-snapshot
-            # concern the v0.2.98 COALESCE fix addressed for refresh.
-            row = self.conn.execute(
-                "SELECT title FROM sources WHERE id=?", (source_id,)
-            ).fetchone()
-            if row is None:
-                raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} was concurrently deleted")
-            old_title = str(row["title"])
+            # BEGIN IMMEDIATE (v0.2.712): the title AND notebook_id must come
+            # from the same commit point the UPDATE lands on — a pre-lock
+            # read could see a rowid later deleted and reused, steering the
+            # context rewrite's old-title and the touch_notebook below to
+            # stale values. src is the locked-snapshot read, so it IS the
+            # re-read the older in-transaction SELECT provided.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+            old_title = str(src.title)
             cur = self.conn.execute(
                 "UPDATE sources SET title=?, origin=? WHERE id=?", (title, origin, source_id)
             )
@@ -1662,29 +2115,8 @@ class Store:
                 (new_ctx[:_MAX_CONTEXT_CHARS], r["id"]),
             )
 
-    def sources_for_notebook(self, notebook_id: int) -> list[Source]:
-        rows = self.conn.execute(
-            "SELECT * FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,)
-        ).fetchall()
-        return [
-            Source(
-                r["id"],
-                r["notebook_id"],
-                r["kind"],
-                r["title"],
-                r["origin"],
-                r["sha256"],
-                r["added_at"],
-                float(r["weight"]),
-                json.loads(r["meta"]),
-            )
-            for r in rows
-        ]
-
-    def get_source(self, source_id: int) -> Source:
-        row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
-        if row is None:
-            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
+    @staticmethod
+    def _source_of(row: sqlite3.Row) -> Source:
         return Source(
             row["id"],
             row["notebook_id"],
@@ -1695,7 +2127,41 @@ class Store:
             row["added_at"],
             float(row["weight"]),
             json.loads(row["meta"]),
+            int(row["content_rev"]) if "content_rev" in row.keys() else 0,
         )
+
+    def sources_for_notebook(self, notebook_id: int) -> list[Source]:
+        rows = self.conn.execute(
+            "SELECT * FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,)
+        ).fetchall()
+        return [self._source_of(r) for r in rows]
+
+    def list_sources_page(
+        self, notebook_id: int, offset: int, limit: int
+    ) -> list[Source]:
+        # Newest-first: page 0 overlaps the detail payload's embedded sources.
+        return [
+            self._source_of(r)
+            for r in self.conn.execute(
+                "SELECT * FROM sources WHERE notebook_id=? ORDER BY id DESC"
+                " LIMIT ? OFFSET ?",
+                (notebook_id, limit, offset),
+            ).fetchall()
+        ]
+
+    def count_sources(self, notebook_id: int) -> int:
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM sources WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["n"]
+        )
+
+    def get_source(self, source_id: int) -> Source:
+        row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if row is None:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {source_id} not found")
+        return self._source_of(row)
 
     def notebooks_for_sources(
         self, source_ids: list[int]
@@ -1722,23 +2188,37 @@ class Store:
         }
 
     def delete_source(self, source_id: int) -> None:
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         # Undo-log trash (v0.2.667): same archive-then-delete TX as
         # delete_notebook — a deleted upload whose tmp origin is long
         # gone is unrecoverable without this record. Chunks ride in the
         # payload (base64 embeddings) and re-fire FTS triggers on restore.
-        src_row = self.conn.execute(
-            "SELECT * FROM sources WHERE id=?", (source_id,)
-        ).fetchone()
-        payload = json.dumps(
-            {
-                "kind": "source",
-                "source": dict(src_row) if src_row is not None else {},
-                "chunks": self._chunk_dicts(source_id),
-            },
-            ensure_ascii=False,
-        )
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): same TOCTOU as delete_notebook —
+            # the payload read must run under the write lock or a
+            # concurrent refresh/commit is deleted unarchived.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+            src_row = self.conn.execute(
+                "SELECT * FROM sources WHERE id=?", (source_id,)
+            ).fetchone()
+            # Parent identity beyond the raw id (v0.2.689): INTEGER PRIMARY
+            # KEY rowids recycle as max+1, so the restore probe must pair
+            # id with created_at or a deleted-and-recreated notebook
+            # silently adopts the restored source.
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?", (src.notebook_id,)
+            ).fetchone()
+            payload = json.dumps(
+                {
+                    "kind": "source",
+                    "source": dict(src_row) if src_row is not None else {},
+                    "chunks": self._chunk_dicts(source_id),
+                    "nb_created_at": (
+                        str(nb_row["created_at"]) if nb_row is not None else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
                 " VALUES(?,?,?,?,'source')",
@@ -1800,10 +2280,30 @@ class Store:
         if contexts is not None:
             for ctx in contexts:
                 _utf8(ctx, "chunk context")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.709): the chunk-cap probe must see
+                # the same commit point the inserts land on — pipeline's
+                # pre-check read an unlocked count, so two concurrent
+                # replaces in one notebook could both pass and over-fill
+                # it. The notebook-total-excluding-this-source formula
+                # mirrors pipeline.refresh_source's.
+                # The src probe also runs under the lock (v0.2.712): a
+                # pre-lock read could see a rowid later deleted and
+                # reused, steering the cap count and the touch to the
+                # wrong notebook.
+                self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+                nb_chunks = self.counts(src.notebook_id)["chunks"]
+                here = self.count_chunks_for_source(source_id)
+                if nb_chunks - here + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+                    raise StoreError(
+                        "INGEST_NOTEBOOK_FULL",
+                        f"notebook chunk limit exceeded: {nb_chunks - here} existing"
+                        f" (excl. this source) + {len(texts)} new"
+                        f" > {MAX_CHUNKS_PER_NOTEBOOK}",
+                    )
                 self.conn.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
@@ -1812,14 +2312,19 @@ class Store:
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                # Bump the content epoch (v0.2.706): a same-count
+                # replacement changes every chunk's text while `total`
+                # stays put — the src_text pager needs this flag to
+                # refuse splicing post-change pages under pre-change ones.
+                self.conn.execute(
+                    "UPDATE sources SET content_rev=content_rev+1 WHERE id=?",
+                    (source_id,),
+                )
                 if sha256 is not None:
-                    # COALESCE(?, title), not a Python-side `title or src.title` fallback:
-                    # src.title was read by get_source() BEFORE this transaction began, so
-                    # a concurrent PATCH /api/sources/{id} rename that commits in the window
-                    # between that read and this UPDATE would be silently clobbered by the
-                    # stale snapshot — reintroducing exactly the bug v0.2.87 fixed (refresh
-                    # overwriting a user's custom title), just via a race instead of always.
-                    # Resolving the fallback in SQL reads the CURRENT row value atomically.
+                    # COALESCE(?, title), not a Python-side `title or src.title`
+                    # fallback: resolving the fallback in SQL reads the row's
+                    # own current value atomically — the fix for refresh
+                    # overwriting a user's custom title (v0.2.87).
                     meta_cur = self.conn.execute(
                         "UPDATE sources SET sha256=?, title=COALESCE(?, title) WHERE id=?",
                         (sha256, new_title, source_id),
@@ -1863,23 +2368,22 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(sha256, str) and len(sha256) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"sha256 too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(sha256, "sha256")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         try:
             with self.conn:
-                # Re-read inside the transaction so the context rewrite keys off
-                # the row's actual value, not a stale snapshot — same concern as
-                # update_source_title's in-transaction read.
-                row = self.conn.execute(
-                    "SELECT title FROM sources WHERE id=?", (source_id,)
-                ).fetchone()
-                if row is None:
-                    raise StoreError(
-                        "SOURCE_NOT_FOUND",
-                        f"source {source_id} was concurrently deleted",
-                    )
-                old_title = str(row["title"])
+                # BEGIN IMMEDIATE + src probe under the lock (v0.2.712):
+                # same single-commit-point fix as update_source_title —
+                # src.title is now the locked-snapshot value, so it IS the
+                # in-transaction re-read the older SELECT provided.
+                self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+                old_title = str(src.title)
                 cur = self.conn.execute(
                     "UPDATE sources SET sha256=?, title=? WHERE id=?", (sha256, title, source_id)
                 )
@@ -1954,25 +2458,14 @@ class Store:
         a rename is. Single-statement UPDATE + rowcount covers both
         never-existed and concurrently-deleted ids as SOURCE_NOT_FOUND.
         """
-        if not isinstance(meta, dict):
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"meta must be a JSON object, got {type(meta).__name__}",
-            )
-        try:
-            text = _meta_dump(meta)
-        except (TypeError, ValueError) as e:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                "meta must be JSON-serializable",
-            ) from e
-        if len(text.encode("utf-8")) > SOURCE_META_MAX:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"meta exceeds {SOURCE_META_MAX} bytes",
-            )
-        src = self.get_source(source_id)
+        validate_source_meta(meta)
+        text = _meta_dump(meta)
         with self.conn:
+            # BEGIN IMMEDIATE + src probe under the lock (v0.2.712): the
+            # notebook_id the touch below targets must come from the same
+            # commit point the UPDATE lands on.
+            self.conn.execute("BEGIN IMMEDIATE")
+            src = self.get_source(source_id)
             cur = self.conn.execute(
                 "UPDATE sources SET meta=? WHERE id=?", (text, source_id)
             )
@@ -1999,10 +2492,28 @@ class Store:
         if contexts is not None:
             for ctx in contexts:
                 _utf8(ctx, "chunk context")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.709): the cap probe must see the
+                # same commit point the inserts land on — pipeline's
+                # pre-check read an unlocked count, so two concurrent
+                # ingests could each pass and both commit, breaching
+                # MAX_CHUNKS_PER_NOTEBOOK. The probe moves to the sink.
+                # v0.2.731: the parent-source probe moves under the same
+                # lock — at autocommit it could see a source rowid later
+                # deleted and reused, steering the cap count and the
+                # touch at a notebook the probe never saw while the
+                # INSERT lands on the recycled row.
+                self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
+                existing = self.counts(src.notebook_id)["chunks"]
+                if existing + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+                    raise StoreError(
+                        "INGEST_NOTEBOOK_FULL",
+                        f"notebook chunk limit exceeded: {existing} existing"
+                        f" + {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
+                    )
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
@@ -2029,7 +2540,13 @@ class Store:
             ) from e
         return ids
 
-    def _set_embedding_pair(self, chunk_id: int, blob: bytes, norm: float) -> None:
+    def _set_embedding_pair(
+        self,
+        chunk_id: int,
+        blob: bytes,
+        norm: float,
+        expected_text: str | None = None,
+    ) -> None:
         # Two statements, one transaction, and the order matters: writing the
         # embedding fires the migration-9 trigger, which clears the cached norm
         # unconditionally; the second statement then writes the norm that belongs
@@ -2037,16 +2554,34 @@ class Store:
         # trigger to guess whether a writer knew about the norm column, and every
         # guess has a case it gets wrong (migration 8's did — see its note).
         # Measured: the split costs nothing (29.1 us vs 32.5 us per chunk).
-        cur = self.conn.execute(
-            "UPDATE chunks SET embedding=? WHERE id=?", (blob, chunk_id)
-        )
+        if expected_text is None:
+            cur = self.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=?", (blob, chunk_id)
+            )
+        else:
+            # The vector only lands while the row still carries the exact text
+            # it was computed from. A deleted rowid that has been reused for a
+            # different chunk's text misses the WHERE — same CHUNK_NOT_FOUND
+            # contract as a plainly missing row, instead of silently storing
+            # a vector that describes foreign content (v0.2.729).
+            cur = self.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=? AND text=?",
+                (blob, chunk_id, expected_text),
+            )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         self.conn.execute(
             "UPDATE chunks SET embedding_norm=? WHERE id=?", (norm, chunk_id)
         )
 
-    def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
+    def set_embedding(
+        self,
+        chunk_id: int,
+        vec: list[float],
+        *,
+        commit: bool = True,
+        expected_text: str | None = None,
+    ) -> None:
         if not vec:
             raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
         # Norm computed from the float32 round-trip (array("f", vec)), not from the
@@ -2060,11 +2595,15 @@ class Store:
             # leave the vector write pending for a later commit on this
             # connection to publish unnormed (v0.2.417-418 leak class).
             with self.conn:
-                self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
+                self._set_embedding_pair(
+                    chunk_id, packed.tobytes(), norm, expected_text
+                )
         else:
             # commit=False callers own the surrounding transaction
             # (_embed_chunks rolls back a partial batch on failure).
-            self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
+            self._set_embedding_pair(
+                chunk_id, packed.tobytes(), norm, expected_text
+            )
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(
@@ -2102,18 +2641,33 @@ class Store:
         ).fetchall()
         return [(int(r["id"]), str(r["text"])) for r in rows]
 
-    def id_seq_text_chunks_for_source(self, source_id: int) -> list[tuple[int, int, str]]:
+    def id_seq_text_chunks_for_source(
+        self, source_id: int, *, limit: int | None = None, offset: int = 0
+    ) -> list[tuple[int, int, str]]:
         """Return (chunk_id, seq, text) triples for a source, ordered by seq.
 
         The chunk id lets the source viewer mark exactly which passages an
         answer was grounded in (citation_report's source_chunk_ids). The older
         text_chunks_for_source() returns only (seq, text) and is kept as-is
         because other callers depend on that shape.
+
+        limit/offset page the seq ordering (v0.2.695) — the text endpoint
+        batches row fetches so an oversized source can't materialize its
+        whole text in one shot.
         """
-        rows = self.conn.execute(
-            "SELECT id, seq, text FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
-        ).fetchall()
+        sql = "SELECT id, seq, text FROM chunks WHERE source_id=? ORDER BY seq"
+        args: tuple[int, ...] = (source_id,)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args = (source_id, limit, offset)
+        rows = self.conn.execute(sql, args).fetchall()
         return [(int(r["id"]), int(r["seq"]), str(r["text"])) for r in rows]
+
+    def count_chunks_for_source(self, source_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()
+        return int(row["n"])
 
     def update_chunk_text(self, chunk_id: int, text: str) -> Chunk:
         """Replace one chunk's text (v0.2.647 — the fix path for extraction
@@ -2130,21 +2684,43 @@ class Store:
             raise StoreError(
                 "VALIDATION_REQUIRED_FIELD_MISSING", "chunk text is empty"
             )
+        if len(text) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"text too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(text, "text")
-        row = self.conn.execute(
-            "SELECT c.id, s.notebook_id FROM chunks c"
-            " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
-            (chunk_id,),
-        ).fetchone()
-        if row is None:
-            raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         with self.conn:
+            # BEGIN IMMEDIATE + the JOIN probe under the lock (v0.2.712):
+            # source_id/notebook_id must come from the same commit point
+            # the UPDATE and rev-bump land on — a pre-lock read could see
+            # a chunk rowid later deleted and reused under a different
+            # source, steering the edit and the touch at the wrong rows.
+            self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT c.id, c.source_id, s.notebook_id FROM chunks c"
+                " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
+                (chunk_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
             cur = self.conn.execute(
                 "UPDATE chunks SET text=?, embedding=NULL, embedding_norm=NULL"
                 " WHERE id=?",
                 (text, chunk_id),
             )
             if cur.rowcount == 0:
+                raise StoreError(
+                    "CHUNK_NOT_FOUND", f"chunk {chunk_id} was concurrently deleted"
+                )
+            # Bump the source's content epoch (v0.2.706): a src_text page
+            # fetched after this commits must not splice under the
+            # pre-edit page — the row count did not move.
+            rev_cur = self.conn.execute(
+                "UPDATE sources SET content_rev=content_rev+1 WHERE id=?",
+                (int(row["source_id"]),),
+            )
+            if rev_cur.rowcount == 0:
                 raise StoreError(
                     "CHUNK_NOT_FOUND", f"chunk {chunk_id} was concurrently deleted"
                 )
@@ -2199,13 +2775,23 @@ class Store:
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"title too long (max {MAX_NAME_LEN} chars)",
             )
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(body, "body")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
             # (v0.2.419): a failed touch must not leave the new note pending.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the note under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
                     (notebook_id, title, body, _now()),
@@ -2252,13 +2838,31 @@ class Store:
         )
 
     def delete_note(self, note_id: int) -> None:
-        row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
-        if row is None:
-            raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
         # Undo-log trash (v0.2.667): a user-typed note is unrecoverable
         # text — same archive-then-delete contract as notebook/source.
-        payload = json.dumps({"kind": "note", "note": dict(row)}, ensure_ascii=False)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.683): the row SELECT must run under
+            # the write lock — an update committed between read and
+            # delete used to be archived stale and removed fresh.
+            self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
+            if row is None:
+                raise StoreError("NOTE_NOT_FOUND", f"note {note_id} not found")
+            # Same parent-identity capture as delete_source (v0.2.689).
+            nb_row = self.conn.execute(
+                "SELECT created_at FROM notebooks WHERE id=?",
+                (int(row["notebook_id"]),),
+            ).fetchone()
+            payload = json.dumps(
+                {
+                    "kind": "note",
+                    "note": dict(row),
+                    "nb_created_at": (
+                        str(nb_row["created_at"]) if nb_row is not None else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
             self.conn.execute(
                 "INSERT INTO trash_items(notebook_id, name, deleted_at, payload, kind)"
                 " VALUES(?,?,?,?,'note')",
@@ -2279,9 +2883,13 @@ class Store:
             # to overwrite it. Same fail-at-the-write class as add_message()'s
             # role guard.
             raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # `with self.conn:` commits INSERT+DELETE atomically and rolls
             # both back on failure — a failed prune must not leave the
@@ -2290,6 +2898,12 @@ class Store:
             # displace the good output). Insert-then-delete also scopes the
             # prune to `id < lastrowid`, preserving a newer concurrent row.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the output under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
                     " created_at) VALUES (?,?,?,?,?)",
@@ -2336,13 +2950,23 @@ class Store:
             # typo'd literal would silently corrupt turn alternation, so fail
             # loudly at the write.
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown message role: {role!r}")
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
             # (v0.2.419): a failed touch must not leave the new message pending.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the turn under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
                     " VALUES (?,?,?,?,?)",
@@ -2398,8 +3022,13 @@ class Store:
         return list(reversed(rows))
 
     def clear_messages(self, notebook_id: int) -> None:
-        self.get_notebook(notebook_id)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the same
+            # commit point the DELETE lands on — at autocommit it could see a
+            # notebook rowid later deleted and reused, wiping the messages of
+            # a notebook the probe never saw.
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.get_notebook(notebook_id)
             self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
             self.touch_notebook(notebook_id)
 
@@ -2530,18 +3159,38 @@ class Store:
             "unembedded": int(chunk_row["miss"] or 0),
         }
 
-    def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
-        """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
-        rows = self.conn.execute(
-            "SELECT n.id, n.name,"
-            " COUNT(DISTINCT s.id) AS sources,"
-            " COUNT(DISTINCT c.id) AS chunks"
-            " FROM notebooks n"
-            " LEFT JOIN sources s ON s.notebook_id = n.id"
-            " LEFT JOIN chunks c ON c.source_id = s.id"
-            " GROUP BY n.id"
-            " ORDER BY n.updated_at DESC, n.id DESC"
-        ).fetchall()
+    def list_notebooks_with_counts(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[NotebookWithCounts]:
+        """Return all notebooks with source/chunk counts in a single query (avoids N+1).
+
+        limit/offset page the result (GET /api/notebooks, v0.2.696) — the
+        CLI keeps passing no limit and still gets the full list.
+        """
+        if limit is not None:
+            rows = self.conn.execute(
+                "SELECT n.id, n.name,"
+                " COUNT(DISTINCT s.id) AS sources,"
+                " COUNT(DISTINCT c.id) AS chunks"
+                " FROM notebooks n"
+                " LEFT JOIN sources s ON s.notebook_id = n.id"
+                " LEFT JOIN chunks c ON c.source_id = s.id"
+                " GROUP BY n.id"
+                " ORDER BY n.updated_at DESC, n.id DESC"
+                " LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT n.id, n.name,"
+                " COUNT(DISTINCT s.id) AS sources,"
+                " COUNT(DISTINCT c.id) AS chunks"
+                " FROM notebooks n"
+                " LEFT JOIN sources s ON s.notebook_id = n.id"
+                " LEFT JOIN chunks c ON c.source_id = s.id"
+                " GROUP BY n.id"
+                " ORDER BY n.updated_at DESC, n.id DESC"
+            ).fetchall()
         return [
             {
                 "id": int(r["id"]),

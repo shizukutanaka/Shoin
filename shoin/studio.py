@@ -19,7 +19,7 @@ from .llm import LLMError
 from .qa import _LIST_PREFIX_RE, ChatBackend, build_context
 from .qa import _t as _qa_t
 from .search import Hit
-from .store import STUDIO_KINDS, Store, StoreError
+from .store import STUDIO_KINDS, Source, Store, StoreError
 
 # Re-export of store.STUDIO_KINDS — the vocabulary lives in store.py because
 # add_studio_output() guards on it, and store.py cannot import this module back.
@@ -176,29 +176,35 @@ def generate(
     """Generate one Studio output. Raises LLMError when the endpoint is down."""
     if kind not in KINDS:
         raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
-    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    hits = overview_hits(store, notebook_id)
-    if not hits:
-        raise StoreError("NOTEBOOK_EMPTY", "notebook has no sources to ground on")
-    # Mirrors qa.ask()'s identical guard (v0.2.44) around the same build_context()
-    # call: a bare sqlite3.OperationalError from a WAL busy_timeout would otherwise
-    # propagate to server.py's catch-all, which returns HTTP 500 with only
-    # type(exc).__name__ as the message (the real "database is locked" text is
-    # dropped) instead of ask()'s clean HTTP 400 SYSTEM_DB_LOCKED with the actual
-    # lock message.
-    try:
-        # rank_weighted=False (v0.2.552): overview hits carry no relevance
-        # ranking — every sampled chunk scores 1.0 in source-id order — so the
-        # harmonic decay would arbitrarily hand source #1 ~6x source #10's
-        # excerpt in outputs documented to cover all sources equally.
-        context = build_context(
-            store, hits, budget_tokens=STUDIO_BUDGET_TOKENS, rank_weighted=False
-        )
-    except sqlite3.OperationalError as exc:
-        raise StoreError(
-            "SYSTEM_DB_LOCKED",
-            f"database locked during context build: {exc}",
-        ) from exc
+    # v0.2.721: the sampling SELECTs (per-source sizes, then rows), the
+    # notebook probe and build_context's source re-reads all run under one
+    # WAL snapshot — on auto-commit reads a concurrent
+    # replace_chunks_for_source/delete landing mid-flight splices chunks
+    # from different commits into the one output this call persists.
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+        hits = overview_hits(store, notebook_id)
+        if not hits:
+            raise StoreError("NOTEBOOK_EMPTY", "notebook has no sources to ground on")
+        # Mirrors qa.ask()'s identical guard (v0.2.44) around the same
+        # build_context() call: a bare sqlite3.OperationalError from a WAL
+        # busy_timeout would otherwise propagate to server.py's catch-all,
+        # which returns HTTP 500 with only type(exc).__name__ as the message
+        # (the real "database is locked" text is dropped) instead of ask()'s
+        # clean HTTP 400 SYSTEM_DB_LOCKED with the actual lock message.
+        try:
+            # rank_weighted=False (v0.2.552): overview hits carry no relevance
+            # ranking — every sampled chunk scores 1.0 in source-id order — so the
+            # harmonic decay would arbitrarily hand source #1 ~6x source #10's
+            # excerpt in outputs documented to cover all sources equally.
+            context = build_context(
+                store, hits, budget_tokens=STUDIO_BUDGET_TOKENS, rank_weighted=False
+            )
+        except sqlite3.OperationalError as exc:
+            raise StoreError(
+                "SYSTEM_DB_LOCKED",
+                f"database locked during context build: {exc}",
+            ) from exc
     sh = _t("sources_header")
     ih = _t("instructions_header")
     cn = _t("citation_note")
@@ -224,27 +230,92 @@ def generate(
     return StudioResult(kind, body, report)
 
 
+def questions_fingerprint(store: Store, notebook_id: int) -> tuple[object, ...]:
+    """Fingerprint of everything suggest_questions() reads (v0.2.701).
+
+    (id, sha256, title) alone misses the one content mutation that keeps
+    all three: update_chunk_text() rewrites a chunk's text in place while
+    sources.sha256 stays put — the sha labels the *origin* document by
+    design (the v0.2.682 dedupe relies on that), so the edit moved nothing
+    in the tuple while changing exactly what suggestions would be built
+    from. The fingerprint therefore also carries the sampled hit rows
+    themselves — the same overview_hits(per_source=2) the generator
+    consumes — so every mutation that could change the output moves it:
+    add/delete/refresh/rename AND in-place edits. Sampling keeps the check
+    cheap too: O(sources + per_source×source_count), never the corpus.
+    """
+    # v0.2.721: both halves under one snapshot — a torn fingerprint
+    # (sources@commitA + sampled hits@commitB) would label cached questions
+    # with a corpus state that never coherently existed.
+    with store.read_snapshot():
+        # per_source must match suggest_questions()'s sample width below.
+        return _questions_fingerprint_rows(
+            store.sources_for_notebook(notebook_id),
+            overview_hits(store, notebook_id, per_source=2),
+        )
+
+
+def _questions_fingerprint_rows(
+    sources: list[Source], hits: list[Hit]
+) -> tuple[object, ...]:
+    """The fingerprint tuple over already-read rows — split from
+    questions_fingerprint() so suggest_questions_fingerprinted() can key the
+    cache on the exact rows it sampled inside its own snapshot (v0.2.723)."""
+    return (
+        tuple((s.id, s.sha256, s.title) for s in sources),
+        tuple((h.chunk_id, h.source_id, h.text, h.context) for h in hits),
+    )
+
+
 def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int = 4) -> list[str]:
     """Suggested questions for a notebook (REQ-102). Best-effort parsing."""
-    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    hits = overview_hits(store, notebook_id, per_source=2)
-    if not hits:
-        return []
-    # Same guard as generate() above and qa.ask() (v0.2.44) around the identical
-    # build_context() call. A DB lock is a different failure class from the
-    # LLMError this function already swallows into [] below (that's specifically
-    # for "LLM unreachable", a best-effort degradation) — raise so the caller gets
-    # a diagnosable SYSTEM_DB_LOCKED error instead of a silent, misleading "no
-    # suggestions" result indistinguishable from "no sources".
-    try:
-        context = build_context(
-            store, hits, budget_tokens=1600, rank_weighted=False
-        )
-    except sqlite3.OperationalError as exc:
-        raise StoreError(
-            "SYSTEM_DB_LOCKED",
-            f"database locked during context build: {exc}",
-        ) from exc
+    return suggest_questions_fingerprinted(store, llm, notebook_id, n)[0]
+
+
+def suggest_questions_fingerprinted(
+    store: Store, llm: ChatBackend, notebook_id: int, n: int = 4
+) -> tuple[list[str], tuple[object, ...]]:
+    """(questions, fingerprint-of-read-state).
+
+    v0.2.723: _h_questions keyed the cache on a fingerprint computed BEFORE
+    generation — a write landing between the two calls cached questions
+    generated from state B under state A's key, so a later request seeing
+    state A was served suggestions describing content that was never in it.
+    Keying on the fingerprint read inside the generation snapshot makes the
+    cache key always describe exactly the corpus the questions were built
+    from.
+    """
+    # v0.2.721: probe + sampling SELECTs + build_context under one snapshot —
+    # same one-commit corpus contract as generate() and qa.ask() (v0.2.720).
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+        hits = overview_hits(store, notebook_id, per_source=2)
+        sources = store.sources_for_notebook(notebook_id)
+        fingerprint = _questions_fingerprint_rows(sources, hits)
+        # v0.2.725: the title fallback's titles must come from THIS
+        # snapshot, not a second sources_for_notebook() after it — a
+        # rename landing between the two reads cached a question naming
+        # the new title under a fingerprint describing the old one (the
+        # same key/content mismatch v0.2.723 closed on the primary path).
+        titles = {s.id: s.title for s in sources}
+        if not hits:
+            return [], fingerprint
+        # Same guard as generate() above and qa.ask() (v0.2.44) around the
+        # identical build_context() call. A DB lock is a different failure class
+        # from the LLMError this function already swallows into [] below (that's
+        # specifically for "LLM unreachable", a best-effort degradation) — raise
+        # so the caller gets a diagnosable SYSTEM_DB_LOCKED error instead of a
+        # silent, misleading "no suggestions" result indistinguishable from "no
+        # sources".
+        try:
+            context = build_context(
+                store, hits, budget_tokens=1600, rank_weighted=False
+            )
+        except sqlite3.OperationalError as exc:
+            raise StoreError(
+                "SYSTEM_DB_LOCKED",
+                f"database locked during context build: {exc}",
+            ) from exc
     sh = _t("sources_header")
     prompt = _t("question_prompt").format(n=n)
     user = f"## {sh}\n{context.block}\n\n{prompt}"
@@ -259,7 +330,7 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         # Model unreachable must not read as "this notebook has nothing
         # worth asking" — fall back to title-derived skeleton questions
         # (v0.2.660, product-review #43).
-        return _title_questions(store, notebook_id, hits, n)
+        return _title_questions(titles, hits, n), fingerprint
     # Question detection is shared with citation.py's uncited_sentences() via
     # looks_like_question() — see that function's docstring for why this used to
     # be two independently-drifting copies of the same heuristic.
@@ -284,7 +355,7 @@ def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int =
         ):
             seen.add(key)
             questions.append(q)
-    return questions[:n]
+    return questions[:n], fingerprint
 
 
 # Titles longer than this are skipped rather than wrapped — a filename dump
@@ -295,7 +366,7 @@ _FALLBACK_TITLE_MAX = 60
 
 
 def _title_questions(
-    store: Store, notebook_id: int, hits: list[Hit], n: int
+    titles: dict[int, str], hits: list[Hit], n: int
 ) -> list[str]:
     """Deterministic question seeds derived from source titles (v0.2.660).
 
@@ -305,15 +376,15 @@ def _title_questions(
     is not. Title questions are answerable by construction (their source is
     in the notebook) but deliberately shallow — they name a source, not a
     theme inside it, mirroring the eval --gen skeleton. URL-lookalike,
-    oversized, and duplicate-folded titles are skipped; a hit whose source
-    disappeared between the two reads is simply absent from the map.
+    oversized, and duplicate-folded titles are skipped. The caller hands in
+    the titles map read inside the generation snapshot (v0.2.725), so a
+    hit's source is always present in the map.
     """
-    titles = {s.id: s.title for s in store.sources_for_notebook(notebook_id)}
     out: list[str] = []
     seen: set[str] = set()
     done: set[int] = set()
     for h in hits:
-        if h.source_id in done or h.source_id not in titles:
+        if h.source_id in done:
             continue
         done.add(h.source_id)
         title = unicodedata.normalize("NFKC", titles[h.source_id]).strip()

@@ -9,6 +9,7 @@ const I18N = {
     "sources.addurl":"取込","sources.added":"取込完了","src.pages_failed":"⚠ {n} ページの抽出に失敗（索引が不完全です）","src.embed_short":"⚠ 埋め込み {n}/{total} 件 — 意味検索が不完全です",
     "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.rename":"名前を変更","nb.delete":"この書院を削除",
     "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
+    "nb.more":"残り {n} 書院を表示",
     "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
@@ -25,6 +26,12 @@ const I18N = {
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "notes.earlier":"— 以前の {n} 件は省略 —",
+    "src.earlier":"— 以前の {n} 件は省略 —",
+    "src.load_earlier":"以前の {n} 件を表示",
+    "chat.load_earlier":"以前の {n} 件を表示",
+    "notes.load_earlier":"以前の {n} 件を表示",
+    "src.more":"残り {n} チャンクを表示",
+    "src.changed":"ソースが更新されました——開き直してください",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
@@ -48,6 +55,7 @@ const I18N = {
     "sources.addurl":"Fetch","sources.added":"Source added","src.pages_failed":"⚠ {n} page(s) could not be extracted — index is incomplete","src.embed_short":"⚠ {n}/{total} chunks embedded — semantic search is partial",
     "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.rename":"Rename","nb.delete":"Delete this notebook",
     "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
+    "nb.more":"Show {n} more notebooks",
     "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
@@ -64,6 +72,12 @@ const I18N = {
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "notes.earlier":"— {n} earlier notes not shown —",
+    "src.earlier":"— {n} earlier sources not shown —",
+    "src.load_earlier":"Show {n} earlier sources",
+    "chat.load_earlier":"Show {n} earlier messages",
+    "notes.load_earlier":"Show {n} earlier notes",
+    "src.more":"Show {n} more chunks",
+    "src.changed":"Source changed — reopen it",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
@@ -166,7 +180,7 @@ async function loadNotebooks(){
   const j = await (await api("/api/notebooks")).json();
   notebooks = j.notebooks || [];
   const ul = $("#nbList"); ul.replaceChildren();
-  for (const nb of notebooks){
+  const mkNbRow = nb => {
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
     const name = el("span","name", nb.name);
     const c = el("span","c", `${nb.counts.sources}册`);
@@ -205,7 +219,51 @@ async function loadNotebooks(){
       // running openNotebook when the user asked for rename/delete.
       if (e.target!==li) return;
       if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openNotebook(nb.id); } };
-    ul.append(li);
+    return li;
+  };
+  for (const nb of notebooks) ul.append(mkNbRow(nb));
+  // v0.2.696: the list response is now paged (total/offset/limit). Beyond the
+  // first page a pager row fetches ?offset= pages and appends — same
+  // src-more contract the source viewer uses. Absent `total` (older payload
+  // shapes, stubbed tests) means "no more pages".
+  const nbTotal = typeof j.total === "number" ? j.total : notebooks.length;
+  if (notebooks.length < nbTotal){
+    const holder = el("li","src-more");
+    const btn = el("button","btn",
+      t("nb.more").replace("{n}", nbTotal - notebooks.length));
+    btn.type = "button";
+    btn.onclick = async ()=>{
+      btn.disabled = true;
+      try{
+        const pj = await (await api(`/api/notebooks?offset=${notebooks.length}`)).json();
+        if (!holder.isConnected) return;  // a newer loadNotebooks rebuilt the list
+        // The list is newest-first: a notebook created or deleted between
+        // page fetches shifts the offset window, so a row already rendered
+        // can arrive inside the next page. Same dedupe-with-refresh merge
+        // as wireEarlierPager's offset-window guard (v0.2.702/711): the id
+        // still dedupes, but the newer read overwrites the cached row AND
+        // its DOM element, or a rename/count drift between pages stays on
+        // screen until the next full reload.
+        const seen = new Map(notebooks.map((x,i)=>[x.id, i]));
+        for (const nb2 of (pj.notebooks || [])){
+          const at = seen.get(nb2.id);
+          if (at !== undefined){
+            notebooks[at] = nb2;
+            ul.children[at].replaceWith(mkNbRow(nb2));
+            continue;
+          }
+          seen.set(nb2.id, notebooks.length);
+          notebooks.push(nb2); ul.insertBefore(mkNbRow(nb2), holder);
+        }
+        const left = (typeof pj.total === "number" ? pj.total : notebooks.length)
+          - notebooks.length;
+        if (left > 0){ btn.textContent = t("nb.more").replace("{n}", left);
+          btn.disabled = false; }
+        else holder.remove();
+      }catch(err){ btn.disabled = false; toast(err.message); }
+    };
+    holder.append(btn);
+    ul.append(holder);
   }
   if (!notebooks.length){
     cur = null; renderNotebook();
@@ -404,6 +462,19 @@ function renderNotebook(){
         restored.setSelectionRange(pendingRename.selStart, pendingRename.selEnd);
       }
     });
+    // Disclose the server-side sources cap (sources_omitted, v0.2.694)
+    // rather than silently dropping the oldest rows — and make them
+    // reachable (v0.2.697): the disclosure used to be dead text, so a
+    // source past the cap could never join the scope set (scoped ask was
+    // unreachable for it). The pager fetches /api/notebooks/{id}/sources
+    // pages and rebuilds — the paged rows get the same checkbox/srcIndex
+    // wiring a normal row has.
+    wireEarlierPager(list, cur, "sources_omitted",
+      "src.load_earlier", renderNotebook, async ()=>{
+        const pj = await (await api(
+          `/api/notebooks/${cur.id}/sources?offset=${cur.sources.length}`)).json();
+        return {arr: cur.sources, rows: pj.sources || [], total: pj.total};
+      });
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     updateScopeInfo();
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
@@ -524,8 +595,7 @@ function closeViewer(){
 // to the first one. This is the last mile of "verifiable citation": the reader
 // sees the cited wording in its original position, not just a detached excerpt.
 // citedIds absent (old persisted report / Studio output) → plain text, unmarked.
-function renderFullSource(container, chunks, citedIds, excerpt){
-  container.replaceChildren();
+function appendSourceChunks(container, chunks, citedIds, excerpt, continuing){
   const marked = new Set(citedIds || []);
   // chunks.id is a plain rowid (no AUTOINCREMENT) — a refreshed source's new
   // chunks can REUSE the ids an old report stored, so an id match alone can
@@ -536,7 +606,10 @@ function renderFullSource(container, chunks, citedIds, excerpt){
   const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
   (chunks || []).forEach((c, i) => {
-    if (i) container.append(el("div","chunk-sep","⋯"));
+    // Separator between every pair — including the page boundary when this
+    // call appends a fetched page onto an already-rendered window
+    // (continuing=true from the pager, v0.2.695).
+    if (i || continuing) container.append(el("div","chunk-sep","⋯"));
     const isCited = marked.has(c.id) &&
       (!provable || excerpt.includes(String(c.text).slice(0, 24)));
     const block = el("div", isCited ? "src-chunk cited-chunk" : "src-chunk", c.text);
@@ -546,9 +619,44 @@ function renderFullSource(container, chunks, citedIds, excerpt){
     }
     container.append(block);
   });
+  return first;
+}
+function renderFullSource(container, chunks, citedIds, excerpt){
+  container.replaceChildren();
+  const first = appendSourceChunks(container, chunks, citedIds, excerpt);
   // Bring the first cited passage into view so a long document doesn't require
   // manual scanning. Guarded: no cited chunks (or an old report) → no scroll.
   if (first) first.scrollIntoView({block:"nearest"});
+}
+// v0.2.695: the text endpoint caps one response at SRC_TEXT_BYTES_MAX — when
+// `truncated` is set, offer the next page on demand instead of dropping it
+// (every row stays reachable; the disclosure count is honest via `total`).
+function wireSrcTextPager(container, id, j, citedIds, excerpt, sig){
+  let next = j.next_offset, total = j.total, left = j.truncated;
+  const rev = j.rev;
+  if (!left) return;
+  const holder = el("div","src-more");
+  const btn = el("button","btn", t("src.more").replace("{n}", total - next));
+  btn.type = "button";
+  holder.append(btn);
+  container.append(holder);
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try{
+      const p = await (await api(`/api/sources/${id}/text?offset=${next}`, {signal:sig})).json();
+      if (sig.aborted) return;
+      holder.remove();
+      // The pager's frame is the first page's snapshot: a refresh replacing
+      // chunks mid-read shifts `total`, and a same-count edit shifts only
+      // `rev` — either way splicing post-change rows under pre-change ones
+      // silently tears the displayed document (v0.2.704, v0.2.706).
+      if (p.total !== total || p.rev !== rev){ toast(t("src.changed")); return; }
+      appendSourceChunks(container, p.chunks, citedIds, excerpt, true);
+      wireSrcTextPager(container, id, p, citedIds, excerpt, sig);
+    }catch(e){
+      if (!sig.aborted){ btn.disabled = false; toast(e.message); }
+    }
+  };
 }
 async function showSource(id, title, excerpt, section, citedIds, detail){
   if (_srcAbort) _srcAbort.abort();
@@ -596,6 +704,7 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
         renderFullSource(body, j.chunks, citedIds, excerpt);
+        wireSrcTextPager(body, id, j, citedIds, excerpt, sig);
       }catch(e){
         // Failure must clear `loaded` — collapse→reopen is the retry gesture,
         // and keeping the flag set would pin the error text on permanently.
@@ -611,6 +720,7 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
       const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
       if (sig.aborted) return;
       renderFullSource(vt, j.chunks, citedIds);
+      wireSrcTextPager(vt, id, j, citedIds, null, sig);
       $("#viewer").classList.add("open");
       $("#viewerClose").focus();
     }catch(e){ if (!sig.aborted) toast(e.message); }
@@ -707,11 +817,15 @@ function addMsg(role, body, report){
 function renderChatHistory(){
   $("#degBadge").hidden = true;
   $("#chat").replaceChildren();
-  // Disclose the server-side history cap (messages_omitted) rather than
-  // silently rendering a partial log — same honesty convention as the
-  // budget-cut marker and truncated badge.
-  if (cur.messages_omitted)
-    $("#chat").prepend(el("div","empty", t("chat.earlier").replace("{n}", cur.messages_omitted)));
+  // Disclose the server-side history cap (messages_omitted) — and make
+  // it a pager (v0.2.698): a disclosure without a fetch left the older
+  // log unreachable even though the ?offset= endpoint exists.
+  wireEarlierPager($("#chat"), cur, "messages_omitted",
+    "chat.load_earlier", renderChatHistory, async ()=>{
+      const pj = await (await api(
+        `/api/notebooks/${cur.id}/messages?offset=${cur.messages.length}`)).json();
+      return {arr: cur.messages, rows: pj.messages || [], total: pj.total};
+    });
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
   const hasChat = (cur.messages||[]).length > 0;
   $("#chatEmpty").hidden = hasChat;
@@ -729,7 +843,11 @@ $("#clearChat").onclick = async ()=>{
 };
 async function refreshQuestions(){
   $("#qs").replaceChildren();
-  if (!cur || !cur.sources?.length || !window._llmOn) return;
+  // v0.2.684: no _llmOn gate — the endpoint itself returns the
+  // _title_questions fallback when the model is unreachable (v0.2.660),
+  // so skipping the request offline meant suggestions could never
+  // appear without a live LLM.
+  if (!cur || !cur.sources?.length) return;
   const nbId = cur.id;  // capture before await to detect notebook switches
   try{
     const j = await (await api(`/api/notebooks/${nbId}/questions`)).json();
@@ -741,6 +859,59 @@ async function refreshQuestions(){
     });
   }catch(_e){ /* suggestions are best-effort */ }
 }
+// v0.2.697/698: a cap disclosure is a pager, not dead text — every
+// *_omitted field is accompanied by a GET ...?offset= scan endpoint the
+// UI must actually call, or the rows beyond the cap are unreachable
+// (for sources that meant they could never join srcSel, so scoped ask
+// was physically impossible for them; for messages/notes the older
+// history simply could not be viewed). One click merges one page:
+// `fetch` is a per-kind literal-endpoint callback (kept at each call
+// site so the route pins can resolve the URL) returning
+// {arr, rows, total}; the DESC rows are unshifted so the ASC list stays
+// oldest-first, the omitted counter recomputes from total, and the
+// passed-in render re-runs so new rows get the same wiring. Parameters
+// keep the function side-effect-pure for the node harness. `target` is
+// deliberately not named `cur`: the click handler must compare against
+// the LIVE module-level cur to drop a page that resolves after the
+// user switched notebooks — a `cur` parameter would shadow it and the
+// guard could never fire.
+function wireEarlierPager(list, target, omitKey, i18nKey, render, fetch){
+  if (!target[omitKey]) return;
+  const holder = el("div","src-more");
+  const btn = el("button","btn",
+    t(i18nKey).replace("{n}", target[omitKey]));
+  btn.type = "button";
+  btn.onclick = async ()=>{
+    btn.disabled = true;
+    const nb = target;
+    try{
+      const r = await fetch();
+      // A page can resolve after the user switched notebooks — cur now
+      // points at a different object, so merging would inject this nb's
+      // rows into that nb's array and rewrite its omitted counter.
+      if (cur !== nb) return;
+      // unshift each DESC page row -> the list stays oldest-first. The id
+      // map absorbs a concurrent add shifting the offset window, and a
+      // re-encountered row REFRESHES the cached copy's fields rather than
+      // being skipped whole: a rename (sources) or any mutable field edit
+      // between pages must not leave the stale value on screen until the
+      // next full reload (v0.2.711, product-review #95).
+      const seen = new Map(r.arr.map(x=>[x.id, x]));
+      for (const row of r.rows){
+        const prev = seen.get(row.id);
+        if (prev !== undefined){ Object.assign(prev, row); continue; }
+        seen.set(row.id, row); r.arr.unshift(row);
+      }
+      nb[omitKey] = Math.max(0,
+        (typeof r.total === "number" ? r.total : r.arr.length)
+        - r.arr.length);
+      render();
+    }catch(err){ btn.disabled = false; toast(err.message); }
+  };
+  holder.append(btn);
+  list.prepend(holder);
+}
+
 function scopeSelection(){
   const live = (cur && cur.sources ? cur.sources : []).map(s=>s.id);
   return {live, sel: live.filter(id=>srcSel.has(id))};
@@ -905,10 +1076,17 @@ function renderNotes(){
     const e0 = el("div","empty"); e0.append(el("b",null,t("notes.empty.title")), el("span",null,t("notes.empty.body")));
     out.append(e0); return;
   }
-  // Disclose the server-side notes cap (notes_omitted) rather than silently
-  // dropping the oldest notes — same honesty rule as chat.earlier (v0.2.250).
-  if (cur.notes_omitted)
-    out.append(el("div","empty", t("notes.earlier").replace("{n}", cur.notes_omitted)));
+  // Disclose the server-side notes cap (notes_omitted) — and make it a
+  // pager (v0.2.698). The old disclosure line was also appended at the
+  // BOTTOM, i.e. below the newest note, while cur.notes is oldest-first —
+  // the marker sat at the wrong end. Prepending it here fixes the
+  // position and makes the omitted rows reachable.
+  wireEarlierPager(out, cur, "notes_omitted",
+    "notes.load_earlier", renderNotes, async ()=>{
+      const pj = await (await api(
+        `/api/notebooks/${cur.id}/notes?offset=${cur.notes.length}`)).json();
+      return {arr: cur.notes, rows: pj.notes || [], total: pj.total};
+    });
   items.forEach(n=>{
     const card = el("div","card");
     const x = el("button","x","×"); x.setAttribute("aria-label",t("a11y.delnote"));

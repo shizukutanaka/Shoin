@@ -486,6 +486,57 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_search_scope_check_shares_the_retrieval_snapshot(self) -> None:
+        """v0.2.727 (#111): the membership get_source reads on /search must
+        run inside the request's read_snapshot — an outside check could
+        validate a source that a concurrent delete+re-add then replaces
+        with a recycled id belonging to a different notebook."""
+        import contextlib
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "scopetear"})
+        nb_id = nb["id"]
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            b"scope corpus text.",
+            {"X-Filename": urllib.parse.quote("s.txt")},
+        )
+        self.assertEqual(status, 201)
+        src_id = json.loads(raw)["source"]["id"]
+
+        from shoin.store import Store
+
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+        orig_gs = Store.get_source
+
+        @contextlib.contextmanager
+        def rs(self2: Store) -> Iterator[None]:
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        def gs(self2: Store, source_id: int) -> object:
+            flags.append(inside["v"])
+            return orig_gs(self2, source_id)
+
+        with patch.object(Store, "read_snapshot", rs), patch.object(
+            Store, "get_source", gs
+        ):
+            status, out = self._json(
+                "POST",
+                f"/api/notebooks/{nb_id}/search",
+                {"question": "scope", "source_ids": [src_id]},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(flags)
+        self.assertNotIn(False, flags)
+
     def test_global_search_endpoint_crosses_notebooks(self) -> None:
         """v0.2.649: POST /api/search is the notebook-less sibling of
         /notebooks/{id}/search — the same retrieve pipeline with scope
@@ -580,6 +631,371 @@ class ServerTest(unittest.TestCase):
         status, err = self._json("POST", "/api/notebooks/999999/duplicate")
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_src_text_paged_at_bytes_cap(self) -> None:
+        """v0.2.695: GET /api/sources/{id}/text bounds one response at
+        SRC_TEXT_BYTES_MAX — the last unbounded payload on the API (import
+        documents bound chunk COUNT, not text length, so a crafted export
+        can put ~1GiB behind one source id and fetchall+dumps materializes
+        it twice). Pages carry truncated/next_offset/total; ?offset continues
+        the cut; a single >cap chunk is itself sliced by bytes."""
+        import shoin.server as srv
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "txt"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "s.db")) as store:
+            src = store.add_source(nb_id, "txt", "big", "o", "h")
+            # 20 chunks of ~256B each; cap 1000B pages them ~7 deep.
+            store.add_chunks(src.id, [f"t{i}" * 64 for i in range(20)])
+            src2 = store.add_source(nb_id, "txt", "huge", "o", "h2")
+            store.add_chunks(src2.id, ["x" * 2000, "tail"])
+
+        with patch.object(srv, "SRC_TEXT_BYTES_MAX", 1000), patch.object(
+            srv, "SRC_TEXT_BATCH", 4
+        ):
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["total"], 20)
+            # v0.2.706: the content epoch rides every page — a same-count
+            # chunk edit bumps it so the pager refuses a stale splice.
+            self.assertEqual(j["rev"], 0)
+            self.assertTrue(j["truncated"])
+            self.assertEqual(j["offset"], 0)
+            self.assertLess(j["next_offset"], 20)
+            self.assertGreater(j["next_offset"], 0)
+            self.assertEqual(len(j["chunks"]), j["next_offset"])
+            # Every row stays reachable: walking next_offset pages the rest.
+            got = [c["text"] for c in j["chunks"]]
+            off = j["next_offset"]
+            while True:
+                status, p = self._json(
+                    "GET", f"/api/sources/{src.id}/text?offset={off}"
+                )
+                self.assertEqual(status, 200)
+                got += [c["text"] for c in p["chunks"]]
+                off = p["next_offset"]
+                if not p["truncated"]:
+                    break
+            self.assertEqual(off, 20)
+            self.assertEqual(len(got), 20)
+            self.assertEqual(got[0], "t0" * 64)
+            self.assertEqual(got[-1], "t19" * 64)
+            # Same-count text edit (PATCH equivalent) advances the epoch.
+            with Store(str(Path(self.tmp.name) / "s.db")) as store:
+                cid = store.chunks_for_source(src.id)[0].id
+                store.update_chunk_text(cid, "edited in place")
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["rev"], 1)
+
+            # A single chunk larger than the cap is sliced by bytes, not
+            # dropped — and the remainder is disclosed by the same flag.
+            status, j = self._json("GET", f"/api/sources/{src2.id}/text")
+            self.assertEqual(status, 200)
+            self.assertTrue(j["truncated"])
+            self.assertEqual(len(j["chunks"]), 1)
+            self.assertEqual(len(j["chunks"][0]["text"]), 1000)
+            self.assertEqual(j["total"], 2)
+
+        # Under the cap the flag is honestly false and no offset is needed.
+        status, j = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertFalse(j["truncated"])
+        self.assertEqual(len(j["chunks"]), 20)
+
+        for bad in ("offset=-1", "offset=abc"):
+            status, err = self._json(
+                "GET", f"/api/sources/{src.id}/text?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/sources/999999/text")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
+
+    def test_nb_detail_reads_under_one_snapshot(self) -> None:
+        """v0.2.707: GET /api/notebooks/{id} composes ~8 auto-commit
+        SELECTs (row, counts, capped messages/notes/sources, studio
+        outputs). Without one WAL snapshot a concurrent mutation lands
+        mid-build — here: a source deleted between `sources_for_notebook`
+        and `counts` would report a source the tally denies. read_snapshot
+        pins the whole response to one commit point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "snap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-snap")
+            store.add_chunks(src.id, ["c"])
+
+        orig = Store.sources_for_notebook
+        fired = []
+
+        def inject(self2: Store, notebook_id: int) -> list[object]:
+            rows = orig(self2, notebook_id)
+            if notebook_id == nb_id and not fired:
+                fired.append(True)
+                # Commit a concurrent delete between this SELECT and the
+                # counts SELECT — torn without a pinned snapshot.
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "sources_for_notebook", inject):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # The snapshot answers entirely pre-delete: the embedded row and
+        # the tally agree.
+        self.assertEqual(j["counts"]["sources"], 1)
+        self.assertEqual(len(j["sources"]), 1)
+        self.assertEqual(j["sources"][0]["id"], src.id)
+
+    def test_src_text_reads_under_one_snapshot(self) -> None:
+        """v0.2.719: GET /api/sources/{id}/text builds its page across one
+        SELECT per batch on auto-commit snapshots. A concurrent
+        replace_chunks_for_source landing mid-loop spliced new rows after
+        old ones — a torn page whose `rev`/`total` still described the old
+        state, invisible to the client's per-page epoch check. read_snapshot
+        pins every batch to the same commit point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "srcsnap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-ss")
+            store.add_chunks(src.id, ["c1", "c2", "c3", "c4"])
+            rev0 = src.content_rev
+
+        orig = Store.id_seq_text_chunks_for_source
+        fired = []
+
+        def inject(self2: Store, src_id: int, **kw: object) -> list[object]:
+            rows = orig(self2, src_id, **kw)
+            if src_id == src.id and not fired:
+                fired.append(True)
+                # Commit a full chunk replacement between batch fetches —
+                # batch N+1 would read new rows behind batch N's old rows.
+                with Store(db) as other:
+                    other.replace_chunks_for_source(
+                        src.id, ["NEW1", "NEW2", "NEW3"]
+                    )
+            return rows
+
+        with (
+            patch.object(Store, "id_seq_text_chunks_for_source", inject),
+            patch("shoin.server.SRC_TEXT_BATCH", 2),
+        ):
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # The snapshot answers entirely pre-replace: all four original
+        # chunks, none of the replacement's.
+        texts = [c["text"] for c in j["chunks"]]
+        self.assertEqual(texts, ["c1", "c2", "c3", "c4"])
+        self.assertEqual(j["total"], 4)
+        self.assertEqual(j["rev"], rev0)
+
+    def test_nb_search_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: POST /api/notebooks/{id}/search composes the hit list
+        and its title map across separate SELECTs — a concurrent
+        delete_source landing between retrieve and sources_for_notebook
+        made a hit point at a source the response could no longer name
+        (title ''). read_snapshot pins hits + provenance to one commit
+        point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ssearch"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-gs")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.sources_for_notebook
+        fired = []
+
+        def inject(self2: Store, notebook_id: int) -> list[object]:
+            rows = orig(self2, notebook_id)
+            if notebook_id == nb_id and not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "sources_for_notebook", inject):
+            status, j = self._json(
+                "POST",
+                f"/api/notebooks/{nb_id}/search",
+                {"question": "原料"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # Pre-delete snapshot: the hit and its title agree — the source the
+        # hit grounds to is still named.
+        self.assertTrue(j["hits"])
+        self.assertEqual(j["hits"][0]["title"], "doc")
+
+    def test_global_search_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: POST /api/search's provenance lookup read a different
+        commit than the retrieval legs — a concurrent delete_source
+        between them dropped real hits (meta missing the just-deleted
+        source), returning an empty answer despite matching corpus."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "gsearch"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-gg")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.notebooks_for_sources
+        fired = []
+
+        def inject(self2: Store, source_ids: list[int]) -> object:
+            rows = orig(self2, source_ids)
+            if not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "notebooks_for_sources", inject):
+            status, j = self._json(
+                "POST", "/api/search", {"question": "原料"}
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # Pre-delete snapshot: this notebook's hit survives — other
+        # notebooks' hits may rank ahead (global search spans the DB).
+        self.assertTrue(
+            any(h["source_id"] == src.id for h in j["hits"]),
+            f"expected a hit for source {src.id}: {j['hits']!r}",
+        )
+
+    def test_ask_sse_grounding_reads_under_one_snapshot(self) -> None:
+        """v0.2.724: the SSE ask's budget read and context build used to run
+        after the headers on their own auto-commit snapshots — a concurrent
+        delete_source landing between the retrieval legs and the context
+        build could splice a newer commit into the streamed answer (missing
+        title row, or a source the meta no longer lists). read_snapshot
+        pins hits + settings + context to one commit."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "sse-snap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "論文A", "o", "h-sse")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.notebook_settings
+        fired = []
+
+        def inject(self2: Store, *a: object, **kw: object) -> dict[str, object]:
+            rows = orig(self2, *a, **kw)
+            if not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "notebook_settings", inject):
+            status, _, raw = self._req(
+                "POST",
+                f"/api/notebooks/{nb_id}/ask",
+                json.dumps({"question": "原料は何か？"}).encode(),
+                {"Content-Type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        events = parse_sse(raw.decode())
+        kinds = [e for e, _ in events]
+        self.assertIn("meta", kinds)
+        self.assertIn("done", kinds)
+        meta = [d for e, d in events if e == "meta"][0]
+        # Pre-delete snapshot: the deleted source's hit still streams with
+        # its real title — a post-headers context build would have seen the
+        # row vanish under it.
+        self.assertEqual(meta["sources"][0]["title"], "論文A")
+
+    def test_nb_list_and_trash_paged_at_limit(self) -> None:
+        """v0.2.696: GET /api/notebooks and GET /api/trash were the last
+        unbounded LIST responses — every dashboard load refetched every row.
+        Now paged ?offset&limit with total disclosed, same contract as the
+        messages|notes|sources endpoints (newest-first, offset 0..i64-1,
+        limit 1..cap). The CLI still gets the full list (store-level)."""
+        import shoin.server as srv
+
+        # Class fixture DB is shared — measure totals relative to baseline.
+        status, base = self._json("GET", "/api/notebooks?limit=1")
+        base_nbs = base["total"]
+        status, base = self._json("GET", "/api/trash?limit=1")
+        base_trash = base["total"]
+
+        ids = []
+        for i in range(5):
+            status, nb = self._json("POST", "/api/notebooks", {"name": f"nb{i}"})
+            self.assertEqual(status, 201)
+            ids.append(nb["id"])
+        # One trash row: deleting nb4 archives it.
+        status, _ = self._json("DELETE", f"/api/notebooks/{ids[4]}")
+        self.assertEqual(status, 200)
+
+        with patch.object(srv, "NB_LIST_LIMIT", 2), patch.object(
+            srv, "TRASH_LIST_LIMIT", 1
+        ):
+            status, j = self._json("GET", "/api/notebooks")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["total"], base_nbs + 4)
+            self.assertEqual(len(j["notebooks"]), 2)
+            self.assertEqual(j["offset"], 0)
+            self.assertEqual(j["limit"], 2)
+            # Newest-first: the page-0 rows are the just-created notebooks.
+            self.assertEqual(
+                [r["id"] for r in j["notebooks"]], [ids[3], ids[2]]
+            )
+            status, p2 = self._json(
+                "GET", "/api/notebooks?offset=2&limit=2"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                [r["id"] for r in p2["notebooks"]], [ids[1], ids[0]]
+            )
+            self.assertEqual(p2["total"], base_nbs + 4)
+            status, p3 = self._json("GET", "/api/notebooks?offset=9999")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(p3["notebooks"]), 0)
+            self.assertEqual(p3["total"], base_nbs + 4)
+
+            status, tr = self._json("GET", "/api/trash")
+            self.assertEqual(status, 200)
+            self.assertEqual(tr["total"], base_trash + 1)
+            self.assertEqual(len(tr["trash"]), 1)
+            status, tr2 = self._json("GET", "/api/trash?offset=9999")
+            self.assertEqual(status, 200)
+            self.assertEqual(tr2["total"], base_trash + 1)
+            self.assertEqual(len(tr2["trash"]), 0)
+
+            for bad in ("offset=-1", "offset=abc", "limit=0", "limit=x"):
+                status, err = self._json("GET", f"/api/notebooks?{bad}")
+                self.assertEqual(status, 400, bad)
+                self.assertEqual(
+                    err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+                )
+                status, err = self._json("GET", f"/api/trash?{bad}")
+                self.assertEqual(status, 400, bad)
+
+        # Without params and within the cap the response is unchanged-shape.
+        status, j = self._json("GET", "/api/notebooks")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(j["notebooks"]), 4)
+        self.assertEqual(j["total"], len(j["notebooks"]))
 
     def test_nb_messages_and_notes_pagination(self) -> None:
         """v0.2.646: GET .../messages and .../notes page the full record the
@@ -1020,6 +1436,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(
             err["error"]["code"], "VALIDATION_INTEGER_OVERFLOW"  # type: ignore[index]
         )
+        # v0.2.688: the scope list itself is bounded — without a length cap a
+        # ~10MB body could name millions of ids and the per-id get_source loop
+        # burned one SELECT each on the request thread.
+        from shoin.config import MAX_SCOPE_IDS
+
+        status, err = ask(
+            {"question": "楮は？", "source_ids": list(range(1, MAX_SCOPE_IDS + 2))}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID"  # type: ignore[index]
+        )
         status, err = ask({"question": "楮は？", "source_ids": [99999]})
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")  # type: ignore[index]
@@ -1106,6 +1534,38 @@ class ServerTest(unittest.TestCase):
             other.replace_chunks_for_source(
                 src.id, ["変わった内容。" * 50], sha256="fresh-sha", title=src.title
             )
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.llm.chat_count, before + 1)  # regenerated, not stale
+
+    def test_questions_cache_invalidates_on_chunk_edit(self) -> None:
+        """An in-place chunk edit must expire the questions cache (v0.2.701).
+
+        update_chunk_text (the v0.2.647 fix path) replaces a chunk's text
+        without touching sources.sha256 — the sha labels the *origin*
+        document, not the current text, so the (id, sha256, title)
+        fingerprint never moved on the edit and suggestions generated from
+        the old text were served indefinitely. The v0.2.701 fingerprint
+        carries the sampled overview hits themselves, so an edit to any
+        chunk the generator reads moves it."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "fp-edit"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("編集前の文書。" * 50).encode(),
+            {"X-Filename": "e.txt"},
+        )
+        self._json("GET", f"/api/notebooks/{nb_id}/questions")  # prime cache
+        before = self.llm.chat_count
+        # Cross-process edit: same chunk row, new text, unchanged source sha —
+        # exactly what PATCH /api/chunks/{id} / CLI chunk edit performs.
+        with Store(str(Path(self.tmp.name) / "s.db")) as other:
+            src = other.sources_for_notebook(nb_id)[0]
+            chunk = other.id_seq_text_chunks_for_source(src.id, limit=1, offset=0)[0]
+            other.update_chunk_text(chunk[0], "編集後の内容。" * 50)
         status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
         self.assertEqual(status, 200)
         self.assertEqual(self.llm.chat_count, before + 1)  # regenerated, not stale
@@ -1380,6 +1840,62 @@ class ServerTest(unittest.TestCase):
         # close returns immediately.
         self.assertLess(elapsed, 2.0)
         self.assertTrue(srv.daemon_threads)
+
+    def test_inflight_semaphore_bounds_handler_threads(self) -> None:
+        """v0.2.691 (product-review #75): ThreadingHTTPServer spawned one
+        thread per connection with no ceiling — the socket timeout caps each
+        connection's LIFETIME but nothing capped the COUNT, so a connection
+        flood exhausted threads before a timeout ever freed one. The
+        MAX_IN_FLIGHT_REQUESTS semaphore parks excess connections in the
+        kernel backlog and returns the slot when the handler exits."""
+        import socket
+        import threading as _th
+
+        import shoin.server as srv_mod
+
+        with patch.object(srv_mod, "MAX_IN_FLIGHT_REQUESTS", 1):
+            srv = srv_mod.make_server(
+                port=0, db=str(Path(self.tmp.name) / "s-cap.db"), llm=FakeLLM()
+            )
+        th = _th.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+        th.start()
+        held = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+        waiter = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+        try:
+            # Partial request line parks this connection's handler in
+            # rfile.read() — it owns the only slot for the rest of the test.
+            held.sendall(b"GET /api/health HT")
+            deadline = time.monotonic() + 5
+            while srv._in_flight.acquire(blocking=False):
+                srv._in_flight.release()
+                if time.monotonic() > deadline:
+                    self.fail("held connection never took the slot")
+                time.sleep(0.02)
+            # The second connection is accepted but parked at the gate: its
+            # complete request gets no response while the slot is taken.
+            waiter.settimeout(1.0)
+            waiter.sendall(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            with self.assertRaises(TimeoutError):
+                waiter.recv(1)
+            # Dropping the held connection frees the slot; the parked request
+            # is now served from the bytes already in its send buffer.
+            held.close()
+            waiter.settimeout(5.0)
+            head = b""
+            while b"\r\n" not in head:
+                chunk = waiter.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            self.assertIn(b" 200 ", head.split(b"\r\n", 1)[0] + b" ")
+        finally:
+            held.close()
+            waiter.close()
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
 
     def test_json_body_deep_nesting_returns_400(self) -> None:
         """v0.2.314: a deeply nested body exceeds json.loads' recursion depth
@@ -2088,6 +2604,30 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_src_patch_rejection_leaves_no_field_applied(self) -> None:
+        """v0.2.728 (#112): a multi-field PATCH validates every field before
+        the first write — previously an oversize meta ran AFTER the weight
+        update had already committed, so the 400 left the weight persisted."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "atomic"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "m.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["本文"])
+
+        # good weight + bad meta: 400 and weight must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/sources/{src.id}",
+            {"weight": 5.0, "meta": {"k": "x" * 5000}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["weight"], 1.0)
+        self.assertEqual(detail["sources"][0]["meta"], {})
+
     def test_nb_patch_settings(self) -> None:
         """v0.2.659: PATCH /api/notebooks/{id} accepts {"settings"} — the
         per-notebook retrieval overrides (product-review #20), echoed back
@@ -2151,6 +2691,36 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_nb_patch_rejection_leaves_no_field_applied(self) -> None:
+        """v0.2.728 (#112): a multi-field PATCH validates every field before
+        the first write — previously a settings rejection ran AFTER the
+        rename committed, so the 400 still left the new name persisted.
+        Both directions must leave state untouched."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "atomic"})
+        nb_id = nb["id"]
+
+        # good name + bad settings: 400 and the name must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "renamed", "settings": {"nope": 1}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "atomic")
+        self.assertEqual(detail["settings"], {})
+
+        # bad name + good settings: 400 and settings must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "x" * 500, "settings": {"top_k": 4}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "atomic")
+        self.assertEqual(detail["settings"], {})
 
 
 class NonStreamingLLMTest(unittest.TestCase):
@@ -2720,15 +3290,15 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
-    def test_context_failure_on_dead_socket_swallows_both_writes(self) -> None:
-        """build_context raising after SSE headers commits the status line, so
-        the error frame is best-effort: when that frame hits a dead socket AND
-        the repair persist also fails, both must be swallowed quietly."""
+    def test_context_failure_before_headers_logs_and_500s(self) -> None:
+        """v0.2.724: build_context lives inside the pre-headers snapshot, so
+        a failure can no longer strand mid-stream — _dispatch catches it,
+        logs the internal detail to stderr, and answers a JSON 500. The
+        SSE path stays untouched (no frame ever opened)."""
         import io
         from unittest.mock import patch
 
         import shoin.server as srv_mod
-        from shoin.store import Store, StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-dead"})
         nb_id = nb["id"]
@@ -2741,26 +3311,18 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         with urllib.request.urlopen(req):
             pass
 
-        original = Store.add_message
-
-        def failing(self_s, nb_id_arg, role, body, meta):
-            if role == "assistant":
-                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
-            return original(self_s, nb_id_arg, role, body, meta)
-
         err = io.StringIO()
         with (
             patch.object(srv_mod, "build_context", side_effect=RuntimeError("ctx boom")),
-            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
-            patch.object(Store, "add_message", failing),
             patch("sys.stderr", err),
         ):
-            status, raw = self._sse(
-                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            status, j = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
             )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(raw, "")
+        self.assertEqual(status, 500)
+        self.assertEqual(j["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertIn("RuntimeError: ctx boom", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
@@ -3257,6 +3819,81 @@ class NotebookMessagesCapTest(unittest.TestCase):
         self.assertEqual(j2["notes_omitted"], 0)
         self.assertEqual(len(j2["notes"]), 12)
 
+    def test_notebook_payload_caps_sources_and_reports_omitted(self) -> None:
+        """v0.2.694: sources were the last unbounded embed on the detail
+        payload — every detail fetch (openNotebook, the SSE-drop recovery
+        refetch) grew with the source count, and nothing bounded it (the
+        chunk cap bounds rows, not sources). Mirrors the notes/messages
+        cap: newest NB_SOURCES_LIMIT embedded, sources_omitted discloses
+        the hidden count, the full list stays reachable via the paged
+        /sources endpoint and export()."""
+        import shoin.server as srv
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "cap"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "mc.db")) as store:
+            for i in range(12):
+                store.add_source(nb_id, "txt", f"s{i}", f"o{i}", f"h{i}")
+        with patch.object(srv, "NB_SOURCES_LIMIT", 4):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(j["sources"]), 4)
+        self.assertEqual(j["sources_omitted"], 8)
+        # The newest sources are the embedded ones — the source a user
+        # just added must always be visible after its own refetch.
+        self.assertEqual(j["sources"][0]["title"], "s8")
+        self.assertEqual(j["sources"][-1]["title"], "s11")
+        # counts still reports the true total — the disclosure is honest.
+        self.assertEqual(j["counts"]["sources"], 12)
+        # Under the cap the count is honestly 0, not guessed or absent.
+        status, j2 = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(j2["sources_omitted"], 0)
+        self.assertEqual(len(j2["sources"]), 12)
+
+    def test_nb_sources_pagination(self) -> None:
+        """v0.2.694: GET .../sources pages the full source list the detail
+        cap can't reach — newest-first (page 0 overlaps the embedded tail),
+        offset/limit bounded, total disclosed, invalid params coded 400,
+        dead notebook 404."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "paged"})
+        self.assertEqual(status, 201)
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "mc.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            for i in range(5):
+                store.add_source(nb_id, "txt", f"s{i}", f"o{i}", f"h{i}")
+
+        status, page = self._json(
+            "GET", f"/api/notebooks/{nb_id}/sources?offset=1&limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual([s["title"] for s in page["sources"]], ["s3", "s2"])
+        self.assertIn("refreshable", page["sources"][0])
+
+        status, page = self._json("GET", f"/api/notebooks/{nb_id}/sources")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page["sources"]), 5)
+        self.assertEqual(page["sources"][0]["title"], "s4")
+
+        for bad in ("offset=-1", "offset=abc", "limit=0", "limit=2001"):
+            status, err = self._json(
+                "GET", f"/api/notebooks/{nb_id}/sources?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/notebooks/999999/sources")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
 
 class SafeReportTest(unittest.TestCase):
     """Unit tests for the _safe_report helper in server.py."""
@@ -3622,10 +4259,10 @@ class SSEConnectionErrorTest(unittest.TestCase):
     def test_headers_write_connection_error_does_not_orphan_user_turn(self) -> None:
         """ConnectionError while writing the initial SSE headers (self._headers(),
         server.py, before any _sse() event is ever attempted) must not leave the
-        just-persisted user turn dangling with no assistant reply. The three
-        sibling ConnectionError/exception guards in _h_ask_sse() (build_context
-        exceptions v0.2.39, meta-send v0.2.49, zero-token replies v0.2.55) all
-        compensate by persisting an empty assistant message — this path, one
+        just-persisted user turn dangling with no assistant reply. The
+        sibling ConnectionError guards in _h_ask_sse() (meta-send v0.2.49,
+        zero-token replies v0.2.55) all compensate by persisting an empty
+        assistant message — this path, one
         statement earlier in the same function, previously had no guard at all
         and let the raw ConnectionError propagate to _dispatch()'s generic
         exception handler instead.
@@ -3829,11 +4466,11 @@ class SSEConnectionErrorTest(unittest.TestCase):
             done[0]["report"].get("self_contradiction"), ["治療の効果はない。"]
         )
 
-    def test_build_context_error_frame_and_no_dangling_turn(self) -> None:
-        """build_context raising after hits are found (e.g. WAL busy_timeout)
-        must emit an SSE error frame — headers already committed, so no HTTP
-        status can be sent — and persist an EMPTY assistant message so the
-        orphaned user turn can't corrupt history_messages pairing."""
+    def test_build_context_failure_returns_500_before_headers(self) -> None:
+        """build_context runs inside the pre-headers snapshot (v0.2.724), so
+        a failure is a plain _dispatch envelope — JSON 500, type-name-only
+        message — and no user turn is persisted (add_message runs only
+        after the whole grounding view is built)."""
         from shoin.store import Store
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-err"})
@@ -3848,28 +4485,25 @@ class SSEConnectionErrorTest(unittest.TestCase):
             pass
 
         with patch("shoin.server.build_context", side_effect=RuntimeError("ctx boom")):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        events = parse_sse(raw.decode())
-        kinds = [e for e, _ in events]
-        self.assertIn("error", kinds)
-        self.assertNotIn("done", kinds)
-        err_payload = [d for e, d in events if e == "error"][0]
-        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
-        # v0.2.508: the client sees only the exception type name — the raw
-        # str(exc) ("ctx boom" here, but DB paths/LLM internals in general)
-        # stays on stderr, matching the _dispatch 500 path's policy.
-        self.assertEqual(err_payload["message"], "RuntimeError")
-        # The dangling-turn guard: an empty assistant turn was persisted.
-        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask",
+                {"question": "テスト文書の内容は？"},
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        # v0.2.508 policy, unchanged by the move: only the exception type
+        # name leaks — the raw str(exc) stays on stderr.
+        self.assertEqual(err["error"]["message"], "RuntimeError")
+        # No user turn persisted — the ask left zero messages behind.
+        with Store(str(Path(self.tmp.name) / "s.db")) as store:
             msgs = store.list_messages(nb_id)
-        self.assertEqual(msgs[-1]["role"], "assistant")
-        self.assertEqual(msgs[-1]["body"], "")
+        self.assertEqual(msgs, [])
 
-    def test_build_context_error_frame_leaks_type_name_only(self) -> None:
-        """An unhandled build_context failure must mirror _dispatch's
-        catch-all: the SSE error frame carries only type(exc).__name__,
-        never str(exc) — raw messages can contain internals (SQL text,
-        filesystem paths) that must not reach the client."""
+    def test_build_context_error_leaks_type_name_only(self) -> None:
+        """An unhandled build_context failure now rides _dispatch's
+        catch-all directly: the JSON error carries only
+        type(exc).__name__, never str(exc) — raw messages can contain
+        internals (SQL text, filesystem paths)."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-leak"})
         nb_id = nb["id"]
         req = urllib.request.Request(
@@ -3885,16 +4519,18 @@ class SSEConnectionErrorTest(unittest.TestCase):
             "shoin.server.build_context",
             side_effect=RuntimeError("secret path /Users/x/internal.db"),
         ):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
-        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
-        self.assertEqual(err_payload["message"], "RuntimeError")
-        self.assertNotIn("secret", err_payload["message"])
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "内容は？"}
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertEqual(err["error"]["message"], "RuntimeError")
+        self.assertNotIn("secret", err["error"]["message"])
 
-    def test_build_context_error_frame_passes_coded_errors(self) -> None:
+    def test_build_context_error_passes_coded_errors(self) -> None:
         """A coded error (StoreError/IngestError/LLMError) carries its
-        curated (code, message) into the SSE error frame — mirroring the
-        _dispatch envelope mapping rather than flattening to 500."""
+        curated (code, message) through the _dispatch envelope — same
+        mapping POST /ask applies, no SSE-specific flattening."""
         from shoin.store import StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-coded"})
@@ -3912,10 +4548,12 @@ class SSEConnectionErrorTest(unittest.TestCase):
             "shoin.server.build_context",
             side_effect=StoreError("NOTEBOOK_NOT_FOUND", "notebook 7 not found"),
         ):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
-        self.assertEqual(err_payload["code"], "NOTEBOOK_NOT_FOUND")
-        self.assertEqual(err_payload["message"], "notebook 7 not found")
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "内容は？"}
+            )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        self.assertEqual(err["error"]["message"], "notebook 7 not found")
 
 
 class HostnameOfTest(unittest.TestCase):

@@ -548,6 +548,9 @@ console.log("ok");
         )
         sent_params = set(re.findall(r"/api/[^`\"?\s]*\?(\w+)=", script))
         read_params = set(re.findall(r'self\._query\.get\("([^"]+)"', server))
+        # Typed accessors (_q_int et al) resolve the same _query dict — a
+        # literal-key scan alone would miss every param read through them.
+        read_params |= set(re.findall(r'self\._q_int\("([^"]+)"', server))
         self.assertEqual(
             sent_params - read_params, set(),
             f"?params the UI sends but the server never reads: "
@@ -1874,17 +1877,9 @@ console.log("ok");
         if not node:
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        start = src.index("function renderFullSource")
-        depth, end = 0, start
-        for i in range(start, len(src)):
-            if src[i] == "{":
-                depth += 1
-            elif src[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        fn = src[start:end]
+        fn = _js_block(src, "function appendSourceChunks") + "\n" + _js_block(
+            src, "function renderFullSource"
+        )
         harness = """\
 let appended = [];
 function el(tag, cls, text){ return {tag, cls, text, children: [],
@@ -1920,7 +1915,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2474,7 +2469,8 @@ main().catch(e => { console.error(e.message || e); process.exit(1) })
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
         try:
-            block = _js_block(src, "function renderChatHistory")
+            block = _js_block(src, "function renderChatHistory")\
+                + _js_block(src, "function wireEarlierPager")
         except ValueError:
             self.fail("no renderChatHistory function in index.html")
         harness = (
@@ -2491,15 +2487,18 @@ const degBadge = {hidden: false}, chatEmpty = {hidden: true}, clearChat = {hidde
 const map = {"#degBadge": degBadge, "#chat": chat,
              "#chatEmpty": chatEmpty, "#clearChat": clearChat};
 const $ = s => map[s];
-function el(tag, cls, txt){ return {tag, cls, text: txt} }
+function el(tag, cls, txt){ return {tag, cls, text: txt, textContent: txt,
+  kids: [], append(...xs){ this.kids.push(...xs) },
+  setAttribute(){}, type: "", disabled: false, onclick: null} }
 function t(k){ return k + "={n}" }
 function addMsg(role, body, report){ calls.added.push(role + ":" + body) }
 """
             + block
             + """
 renderChatHistory();
-if (calls.prepended.length !== 1 || !String(calls.prepended[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended));
+if (calls.prepended.length !== 1 ||
+    !String(calls.prepended[0].kids[0].text).includes("8"))
+  { console.error("omitted pager missing: " + JSON.stringify(calls.prepended));
     process.exit(1) }
 if (calls.added.length !== 2)
   { console.error("messages not rendered: " + calls.added.length); process.exit(1) }
@@ -2526,7 +2525,8 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
         try:
-            block = _js_block(src, "function renderNotes")
+            block = _js_block(src, "function renderNotes")\
+                + _js_block(src, "function wireEarlierPager")
         except ValueError:
             self.fail("no renderNotes function in index.html")
         harness = (
@@ -2536,7 +2536,8 @@ let cur = {id: 1, notes: [{id: 5, title: "n5", body: "b5"},
            notes_omitted: 8};
 const noteList = {cleared: 0, kids: [],
   replaceChildren(){ this.cleared++; this.kids = [] },
-  append(x){ this.kids.push(x) }};
+  append(x){ this.kids.push(x) },
+  prepend(x){ this.kids.unshift(x) }};
 const map = {"#noteList": noteList};
 const $ = s => map[s];
 function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
@@ -2551,8 +2552,8 @@ function toast(){}
 renderNotes();
 if (noteList.kids.length !== 3)
   { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
-if (!String(noteList.kids[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0]));
+if (!String(noteList.kids[0].kids[0].text).includes("8"))
+  { console.error("omitted pager missing: " + JSON.stringify(noteList.kids[0]));
     process.exit(1) }
 cur.notes_omitted = 0;
 renderNotes();
@@ -2687,8 +2688,11 @@ console.log("ok")
     def test_refreshQuestions_chips_guards_and_race(self) -> None:
         """v0.2.265: pin refreshQuestions' three contract surfaces under node —
         chips render as buttons that fill #askInput on click, the guard skips
-        fetching entirely when there is no notebook/sources/LLM, and chips for
-        a stale (switched-away) notebook id are dropped rather than shown."""
+        fetching entirely when there is no notebook/sources, and chips for
+        a stale (switched-away) notebook id are dropped rather than shown.
+        v0.2.684: the LLM-off case now fetches on purpose — the endpoint's
+        own _title_questions fallback (v0.2.660) answers when the model is
+        unreachable, so suggestions must not be gated on _llmOn."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -2722,14 +2726,20 @@ chip.onclick();
 if (reg["#askInput"].value !== "質問Aですか?" || !reg["#askInput"].focused)
   { console.error("chip click did not fill+focus input"); process.exit(1) }
 
-// Guards: no sources / llm off / no notebook -> cleared, no fetch.
-cur = { id: 1, sources: [] };
-await refreshQuestions();
+// LLM off -> still fetches (endpoint-side _title_questions fallback).
 window._llmOn = false; cur = { id: 1, sources: [{id: 5}] };
+await refreshQuestions();
+if (calls.length !== 2 || reg["#qs"].children.length !== 2)
+  { console.error("offline fallback path did not fetch/render: calls="
+      + calls.length + " chips=" + reg["#qs"].children.length); process.exit(1) }
+
+// Guards: no sources / no notebook -> cleared, no fetch.
+reg["#qs"].children = [];
+cur = { id: 1, sources: [] };
 await refreshQuestions();
 cur = null;
 await refreshQuestions();
-if (calls.length !== 1 || reg["#qs"].children.length !== 0)
+if (calls.length !== 2 || reg["#qs"].children.length !== 0)
   { console.error("guards fetched or kept chips: calls=" + calls.length
       + " chips=" + reg["#qs"].children.length); process.exit(1) }
 
@@ -2754,7 +2764,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2846,7 +2856,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2993,7 +3003,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -3129,6 +3139,7 @@ const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec);
   return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = m => calls.toasts.push(m);
 const closeViewer = () => {};
 """
@@ -3183,6 +3194,391 @@ const closeViewer = () => {};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_src_text_pager_fetches_next_page(self) -> None:
+        """v0.2.695: when GET /api/sources/{id}/text answers truncated:true,
+        wireSrcTextPager renders a 'src.more' button that fetches the next
+        page via ?offset=next_offset, removes the holder, appends the page's
+        chunks (a separator spans the page boundary), and re-wires itself —
+        so the whole document stays reachable without one giant response.
+        v0.2.704: a page whose `total` moved since the wiring page means a
+        refresh rewrote the chunks mid-read — the pager must toast
+        src.changed and splice nothing. Executes the real wireSrcTextPager
+        + appendSourceChunks under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = (
+            _js_block(src, "function appendSourceChunks")
+            + "\n"
+            + _js_block(src, "function wireSrcTextPager")
+        )
+        harness = (
+            """\
+const calls = {fetches: [], toasts: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, type: "", className: "", tag: "", onclick: null,
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ xs.forEach(x => { x._parent = n; });
+      n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ x._parent = n; n.children.unshift(x); n.kids.unshift(x); },
+    classList: {add(){}, remove(){}, contains: () => false},
+    remove(){ const c = n._parent; if (c){
+      c.kids = c.kids.filter(k => k !== n); c.children = c.children.filter(k => k !== n); } },
+    focus(){}, addEventListener(){}, setAttribute(){}, scrollIntoView(){},
+  };
+  return n;
+};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+const toast = m => calls.toasts.push(m);
+const pages = {
+  2: {chunks: [{id: 4, seq: 4, text: "D"}], total: 5, offset: 2,
+      truncated: true, next_offset: 3, bytes_cap: 1000},
+  3: {chunks: [{id: 5, seq: 5, text: "E"}], total: 5, offset: 3,
+      truncated: false, next_offset: 5, bytes_cap: 1000},
+  // v0.2.704: a refresh replaced the chunks between pages — the count
+  // moved, so the pager must refuse to splice post-change rows under
+  // pre-change ones.
+  9: {chunks: [{id: 91, seq: 0, text: "NEW"}], total: 2, offset: 9,
+      truncated: false, next_offset: 10, bytes_cap: 1000},
+  // v0.2.706: an in-place edit changed the text but not the count —
+  // only the rev epoch diverges from the wiring page's.
+  10: {chunks: [{id: 92, seq: 0, text: "EDITED"}], total: 5, offset: 10,
+      truncated: false, next_offset: 11, bytes_cap: 1000, rev: 6},
+};
+const api = (p, opts) => {
+  const off = Number(p.split("offset=")[1]);
+  calls.fetches.push(off);
+  return Promise.resolve({json: async () => pages[off]});
+};
+const container = mk();
+const sig = {aborted: false};
+"""
+            + fn
+            + """
+(async () => {
+  // Page 1 already rendered 2 chunks (boundary test: separator must appear
+  // before the first chunk of page 2).
+  container.append(el("div","src-chunk","C"));
+  wireSrcTextPager(container, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 2, bytes_cap: 1000}, [4], null, sig);
+  const holder = container.kids.find(k => k.className === "src-more");
+  if (!holder) { console.error("pager holder missing"); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.disabled) { console.error("button pre-disabled"); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join() !== "2")
+    { console.error("fetch offset wrong: " + calls.fetches); process.exit(1) }
+  if (container.kids.includes(holder))
+    { console.error("holder not removed after page"); process.exit(1) }
+  const texts = container.kids.map(k => k.className + ":" + k.textContent);
+  // page-2 chunk appended with a leading separator across the boundary
+  const sepIdx = texts.findIndex(x => x === "chunk-sep:⋯");
+  if (sepIdx < 0 || !texts[sepIdx + 1].startsWith("src-chunk"))
+    { console.error("boundary order wrong: " + texts.join("|")); process.exit(1) }
+  // cited id 4 → marked chunk (excerpt null → id-only provable path)
+  if (!texts.includes("src-chunk cited-chunk:D"))
+    { console.error("cited mark lost on paged chunk: " + texts.join("|")); process.exit(1) }
+  // still truncated → re-wired with the remaining count
+  const holder2 = container.kids.find(k => k.className === "src-more");
+  if (!holder2) { console.error("pager not re-wired"); process.exit(1) }
+  await holder2.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join(",") !== "2,3")
+    { console.error("second fetch wrong: " + calls.fetches); process.exit(1) }
+  if (container.kids.some(k => k.className === "src-more"))
+    { console.error("holder left after last page"); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  // v0.2.704: wire a fresh pager whose next page reports a different total
+  // (refresh mid-read) — it must toast and append nothing.
+  const c2 = mk();
+  wireSrcTextPager(c2, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 9, bytes_cap: 1000}, [], null, sig);
+  const h3 = c2.kids.find(k => k.className === "src-more");
+  if (!h3) { console.error("stale pager holder missing"); process.exit(1) }
+  await h3.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.toasts.length !== 1)
+    { console.error("no change toast: " + calls.toasts); process.exit(1) }
+  if (c2.kids.some(k => k.className === "src-chunk"))
+    { console.error("torn rows spliced: "
+        + c2.kids.map(k=>k.textContent).join("|")); process.exit(1) }
+  // v0.2.706: same total, divergent rev — an in-place edit moved only
+  // the epoch, and the pager must still refuse the splice.
+  const c3 = mk();
+  wireSrcTextPager(c3, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 10, bytes_cap: 1000, rev: 5},
+    [], null, sig);
+  const h4 = c3.kids.find(k => k.className === "src-more");
+  if (!h4) { console.error("rev pager holder missing"); process.exit(1) }
+  await h4.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.toasts.length !== 2)
+    { console.error("no rev-change toast: " + calls.toasts); process.exit(1) }
+  if (c3.kids.some(k => k.className === "src-chunk"))
+    { console.error("edited rows spliced: "
+        + c3.kids.map(k=>k.textContent).join("|")); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
+    def test_src_list_pager_reaches_uncapped_sources(self) -> None:
+        """v0.2.697: sources_omitted>0 renders a src.load_earlier pager that
+        fetches /api/notebooks/{id}/sources?offset=<len>, prepends the DESC
+        page rows so the list stays oldest-first, recomputes omitted from
+        total, re-renders, and skips duplicates; a fetch error re-enables
+        the button and toasts. Executes wireEarlierPager under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = _js_block(src, "function wireEarlierPager")
+        harness = """\
+const calls = {toasts: [], renders: 0};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], className: "",
+    tag: "", type: "", disabled: false, onclick: null,
+    append(...xs){ n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ n.children.unshift(x); n.kids.unshift(x); },
+  };
+  return n;
+};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag;
+  n.className = cls; n.textContent = txt || ""; return n; };
+const t = k => k === "src.load_earlier" ? "earlier {n}" : k;
+const toast = m => calls.toasts.push(m);
+let cur = {id: 9, sources: [{id: 3}, {id: 4}], sources_omitted: 2};
+let page = {sources: [{id: 2}, {id: 1}], total: 4, offset: 2, limit: 2};
+const render = () => { calls.renders++; };
+""" + fn + """
+(async () => {
+  const list = mk();
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
+  const holder = list.kids[0];
+  if (!holder || holder.className !== "src-more")
+    { console.error("pager holder missing"); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.textContent !== "earlier 2")
+    { console.error("label: " + btn.textContent); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  // DESC page [2,1] unshifted -> ASC [1,2,3,4]
+  const ids = cur.sources.map(s => s.id).join(",");
+  if (ids !== "1,2,3,4") { console.error("order: " + ids); process.exit(1) }
+  if (cur.sources_omitted !== 0)
+    { console.error("omitted: " + cur.sources_omitted); process.exit(1) }
+  if (calls.renders !== 1)
+    { console.error("renders: " + calls.renders); process.exit(1) }
+  // omitted==0 -> a re-render wires nothing
+  const list2 = mk();
+  wireEarlierPager(list2, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
+  if (list2.kids.length) { console.error("holder on zero omitted"); process.exit(1) }
+  // duplicate guard: a page replaying an already-listed id skips the
+  // append but REFRESHES the cached row's fields (v0.2.711) — a rename
+  // between pages must not leave the stale title on screen
+  cur = {id: 9, sources: [{id: 3, title: "old"}], sources_omitted: 1};
+  page = {sources: [{id: 3, title: "new"}, {id: 2, title: "two"}],
+    total: 3, offset: 1, limit: 2};
+  const list3 = mk();
+  wireEarlierPager(list3, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
+  await list3.kids[0].kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  const ids3 = cur.sources.map(s => s.id).join(",");
+  if (ids3 !== "2,3") { console.error("dedup: " + ids3); process.exit(1) }
+  if (cur.sources[1].title !== "new" || cur.sources[0].title !== "two")
+    { console.error("refresh: " + JSON.stringify(cur.sources)); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
+    def test_nb_list_pager_fetches_next_page(self) -> None:
+        """v0.2.696: GET /api/notebooks is paged (total/offset/limit). When
+        total exceeds the first page, loadNotebooks renders a 'nb.more' row
+        that fetches ?offset=<seen>, appends the new rows in place, relabels
+        itself with the remaining count, and disappears on the last page.
+        v0.2.702: the second page below deliberately repeats id 2 — a
+        concurrent add/delete shifts the newest-first offset window — and
+        the pager must drop the already-rendered row instead of showing a
+        duplicate notebook in the sidebar. v0.2.711: the re-encountered id
+        REFRESHES the cached row and its DOM element (name/counts can drift
+        between pages — a rename in another tab must not stay stale until
+        the next full reload), it is only the duplicate APPEND that is
+        skipped. Executes the real loadNotebooks under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = _js_block(src, "async function loadNotebooks")
+        harness = """\
+const calls = {fetches: [], toasts: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, type: "", className: "", tag: "", title: "",
+    onclick: null, onkeydown: null, tabIndex: 0, isConnected: true,
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ xs.forEach(x => { x._parent = n; });
+      n.children.push(...xs); n.kids.push(...xs); },
+    insertBefore(x, ref){ x._parent = n;
+      const i = n.kids.indexOf(ref);
+      if (i < 0) { n.children.push(x); n.kids.push(x); }
+      else { n.children.splice(i, 0, x); n.kids.splice(i, 0, x); } },
+    remove(){ const c = n._parent; if (c){
+      c.kids = c.kids.filter(k => k !== n);
+      c.children = c.children.filter(k => k !== n); }
+      n.isConnected = false; },
+    replaceWith(x){ const c = n._parent; if (!c) return;
+      const i = c.kids.indexOf(n); if (i >= 0) c.kids[i] = x;
+      const j = c.children.indexOf(n); if (j >= 0) c.children[j] = x;
+      x._parent = c; n._parent = null; },
+    setAttribute(){}, focus(){}, addEventListener(){},
+  };
+  return n;
+};
+const reg = {};
+const $ = sel => { if (!reg[sel]) reg[sel] = mk(); return reg[sel]; };
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag;
+  n.className = cls; if (txt != null) n.textContent = txt; n.text = txt;
+  return n; };
+const t = k => k === "nb.more" ? "more {n}" : k;
+const toast = m => calls.toasts.push(m);
+const renderNotebook = () => {};
+let notebooks = [], cur = null;
+const openNotebook = () => {};
+const pages = {
+  "/api/notebooks": {notebooks: [
+    {id: 1, name: "A", counts: {sources: 0}},
+    {id: 2, name: "B", counts: {sources: 0}}], total: 3, offset: 0, limit: 2},
+  "/api/notebooks?offset=2": {notebooks: [
+    {id: 2, name: "B-dup", counts: {sources: 0}},
+    {id: 3, name: "C", counts: {sources: 0}}], total: 3, offset: 2, limit: 2},
+};
+const api = p => { calls.fetches.push(p);
+  return Promise.resolve({json: async () => pages[p]}); };
+""" + fn + """
+(async () => {
+  await loadNotebooks();
+  const ul = $("#nbList");
+  // 2 rows + 1 pager row
+  const rows = ul.kids;
+  if (rows.length !== 3) { console.error("row count " + rows.length); process.exit(1) }
+  const holder = rows[2];
+  if (holder.className !== "src-more")
+    { console.error("pager holder class: " + holder.className); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.textContent !== "more 1")
+    { console.error("label: " + btn.textContent); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join("|") !== "/api/notebooks|/api/notebooks?offset=2")
+    { console.error("fetches: " + calls.fetches.join("|")); process.exit(1) }
+  // last page appended the third row in place, refreshed the duplicate
+  // id-2 row IN PLACE (newer fields win), and removed the holder
+  if (ul.kids.length !== 3 || ul.kids.some(k => k.className === "src-more"))
+    { console.error("post-page rows: " + ul.kids.map(k=>k.className).join(",")); process.exit(1) }
+  if (notebooks.length !== 3 || notebooks[2].id !== 3
+      || notebooks.filter(x => x.id === 2).length !== 1
+      || notebooks[1].name !== "B-dup")
+    { console.error("notebooks not appended/refreshed: "
+        + JSON.stringify(notebooks)); process.exit(1) }
+  // the rendered row was rebuilt too — its name span shows the fresh name
+  if (ul.kids[1].kids[0].textContent !== "B-dup")
+    { console.error("row not re-rendered: "
+        + ul.kids[1].kids[0].textContent); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
+    def test_earlier_pager_drops_page_after_notebook_switch(self) -> None:
+        """v0.2.699: a wireEarlierPager page that resolves after the user
+        switched notebooks must be dropped — otherwise this nb's rows
+        would be merged into the OTHER notebook's array (r.arr binds the
+        live cur inside the fetch callback) and the open notebook's list
+        would show foreign rows. Executes the real function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        try:
+            block = _js_block(src, "function wireEarlierPager")
+        except ValueError:
+            self.fail("no wireEarlierPager function in index.html")
+        harness = (
+            """\
+let cur = {id: 9, sources: [{id: 3}], sources_omitted: 2};
+const calls = {prepended: [], renders: 0, toasts: []};
+const list = {prepend(x){ calls.prepended.push(x) }};
+function el(tag, cls, txt){ return {tag, cls, text: txt, textContent: txt,
+  kids: [], append(...xs){ this.kids.push(...xs) },
+  setAttribute(){}, type: "", disabled: false, onclick: null} }
+function t(k){ return k + "={n}" }
+function toast(m){ calls.toasts.push(m) }
+const render = () => { calls.renders++; };
+let resolveFetch;
+const fetchFn = () => new Promise(res => { resolveFetch = res; });
+"""
+            + block
+            + """
+(async () => {
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier",
+    render, fetchFn);
+  const btn = calls.prepended[0].kids[0];
+  const oldNb = cur;
+  const clickDone = btn.onclick();
+  // user opens notebook 42 while the page fetch is still in flight
+  cur = {id: 42, sources: [{id: 90}], sources_omitted: 5};
+  // the stale callback binds the live cur -> returns nb42's array
+  resolveFetch({arr: cur.sources, rows: [{id: 2}], total: 4});
+  await clickDone;
+  await new Promise(r => setTimeout(r, 0));
+  if (oldNb.sources.length !== 1 || cur.sources.length !== 1 ||
+      cur.sources[0].id !== 90)
+    { console.error("stale page merged into the open notebook");
+      process.exit(1) }
+  if (cur.sources_omitted !== 5)
+    { console.error("stale page rewrote the open notebook counter");
+      process.exit(1) }
+  if (calls.renders !== 0)
+    { console.error("stale page triggered a merge render"); process.exit(1) }
+  // same-nb still merges (guard must not over-fire)
+  cur = oldNb;
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier",
+    render, fetchFn);
+  const btn2 = calls.prepended[1].kids[0];
+  const done2 = btn2.onclick();
+  resolveFetch({arr: cur.sources, rows: [{id: 2}], total: 4});
+  await done2;
+  await new Promise(r => setTimeout(r, 0));
+  if (cur.sources.length !== 2 || cur.sources[0].id !== 2 ||
+      cur.sources_omitted !== 2 || calls.renders !== 1)
+    { console.error("fresh page not merged"); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
     def test_lazy_details_retries_after_failure(self) -> None:
         """v0.2.489: a failed lazy full-source fetch must clear
         `dataset.loaded` so the collapse→reopen gesture retries — before
@@ -3223,6 +3619,7 @@ const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec);
   return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = () => {};
 const closeViewer = () => {};
 """
@@ -3558,10 +3955,16 @@ console.log("ok");
         self.assertIn("(j.questions || []).forEach", src)
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        fn = _js_block(src, "function renderFullSource")
+        fn = _js_block(src, "function appendSourceChunks") + "\n" + _js_block(
+            src, "function renderFullSource"
+        )
         harness = (
             "let replaced = 0;\n"
-            "const container = { replaceChildren(){replaced++}, append(){} };\n"
+            "const container = { replaceChildren(){replaced++}, append(){},\n"
+            "  querySelector(){return null} };\n"
+            "function el(tag, cls, text){ return {tag, cls, text, prepend(){},\n"
+            "  append(){}, scrollIntoView(){}} }\n"
+            "function t(k){ return k }\n"
             + fn
             + """
 renderFullSource(container);            // chunks entirely absent
@@ -3785,6 +4188,7 @@ console.log("ok")
         for name, marker in (
             ("noteForm", '$("#noteForm").onsubmit'),
             ("renderNotes", "function renderNotes()"),
+            ("wireEarlierPager", "function wireEarlierPager"),
             ("reindex", '$("#reindexBtn").onclick'),
             ("clearChat", '$("#clearChat").onclick'),
             ("buildKinds", "function buildKindButtons()"),
@@ -3803,7 +4207,8 @@ const clearEl = {disabled: false};
 const kindsEl = {kids: [], replaceChildren(){ this.kids = [] },
   append(x){ this.kids.push(x) }};
 const noteList = {kids: [], replaceChildren(){ this.kids = [] },
-  append(x){ this.kids.push(x) }};
+  append(x){ this.kids.push(x) },
+  prepend(x){ this.kids.unshift(x) }};
 const $ = s => s === "#noteTitle" ? noteTitle : s === "#noteBody" ? noteBody
     : s === "#reindexBtn" ? reindexEl : s === "#clearChat" ? clearEl
     : s === "#kinds" ? kindsEl : s === "#noteList" ? noteList : {};
@@ -3836,6 +4241,7 @@ const events = {};
             + "events.clearChat = async ()=>\n"
             + f"{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
             + f"{blocks['buildKinds']}\n"
+            + f"{blocks['wireEarlierPager']}\n"
             + f"{blocks['renderNotes']}\n"
             + """\
 const noteBtn = {disabled: false};
@@ -3947,6 +4353,7 @@ const deferred = [];
 const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec); return new Promise(res => { rec.res = res; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = m => calls.toasts.push(m);
 const closeViewer = () => calls.closed++;
 """

@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.680"
+VERSION = "0.2.733"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -17,6 +17,16 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
 MAX_QUESTION_LEN = 2000  # chars; a longer FTS5 OR-expression becomes pathologically slow
 MAX_NAME_LEN = 200       # chars; notebook names and note titles
 MAX_TITLE_LEN = 500      # chars; source titles silently truncated (external content)
+# v0.2.713: per-row bound on free-text bodies (note/message/studio output
+# bodies, citation_report JSON, edited chunk text). NB_*_LIMIT caps bound
+# the COUNT of rows embedded in GET /api/notebooks/{id} but nothing bound
+# the BYTES each row carries — the request-side 10MB cap let one ~10MB
+# body persist verbatim, and 500 such rows made every detail fetch build
+# a multi-GB JSON body (write once, amplified on every read). 100k chars
+# is far beyond legitimate content (LLM outputs are bounded by
+# MAX_TOKENS≈16KB; notes are memos) while keeping the worst-case embed
+# at ~50MB instead of ~5GB.
+MAX_BODY_LEN = 100_000   # chars; note/message/studio/chunk-edit bodies
 CHUNK_TOKENS = 512  # REQ-003: target tokens per chunk
 CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth
@@ -27,10 +37,75 @@ URL_MAX_REDIRECTS = 3
 # client that opens a socket and sends nothing (or a partial body) holds its
 # request thread forever — unbounded local connection leaks exhaust threads.
 REQUEST_SOCKET_SEC = 120
+# v0.2.691: bound on in-flight HTTP connections. ThreadingHTTPServer spawns
+# one handler thread per accepted connection with no ceiling — the socket
+# timeout caps each connection's LIFETIME but nothing caps the COUNT, so a
+# local process holding thousands of connections exhausts threads/memory
+# long before any timeout frees them. 64 slots turn excess connections into
+# kernel-backlog queueing (a bounded wait) instead of unbounded threads;
+# every slot's hold is still capped by REQUEST_SOCKET_SEC, so the pool
+# cannot deadlock — a stalled slot always frees within the timeout.
+MAX_IN_FLIGHT_REQUESTS = 64
 MAX_CHUNKS_PER_NOTEBOOK = 50_000  # spec.md STRIDE DoS control; generous headroom
+# v0.2.681: bound on a JSON document the CLI slurps into memory at once —
+# the `shoin import` file/stdin and (v0.2.691) the `shoin eval` cases file.
+# Both used to be read in full uncapped, so a hostile or accidental giant
+# document OOM-killed the process mid-parse. 1 GiB leaves headroom over
+# the largest legit export (~50k chunks × text + base64 embedding ≈ a few
+# hundred MB) while bounding the resident set a hostile document can force.
+MAX_IMPORT_BYTES = 1 << 30
 NB_MESSAGES_LIMIT = 500  # messages embedded in GET /api/notebooks/{id} (UI history view)
 NB_NOTES_LIMIT = 500  # notes embedded in GET /api/notebooks/{id} (UI notes pane)
+# v0.2.694: sources embed in GET /api/notebooks/{id} had no cap — the only
+# list left unbounded on the detail payload, so every detail fetch grew
+# with the source count (the list doubles as the UI's scope checkboxes, so
+# it gets a more generous bound than notes/messages). Beyond the cap the
+# oldest rows move to GET /api/notebooks/{id}/sources?offset&limit.
+NB_SOURCES_LIMIT = 2000  # newest sources embedded in GET /api/notebooks/{id} (v0.2.694);
+# the list doubles as the UI's scope checkboxes, so it gets a more
+# generous bound than notes/messages. Beyond the cap the oldest rows
+# move to GET /api/notebooks/{id}/sources?offset&limit.
+
+# GET /api/sources/{id}/text previously materialized every chunk — fine for
+# ingest-produced sources (a 10MB file yields ~10MB of text) but import
+# documents bound chunk COUNT, not text length, so a crafted export could
+# put ~1GiB of text behind one source id and every viewer click would fetch
+# all of it (fetchall materializes it, json.dumps doubles it, and up to
+# MAX_IN_FLIGHT_REQUESTS such responses can be in flight). Cap the response
+# at 32MiB of chunk text — ~3x above anything the ingest path can produce
+# (10MB file -> <=~10MB text), far below the hostile ceiling. Anything past
+# the cap stays reachable via ?offset paging (row position, seq order) and
+# is disclosed by `truncated` + `next_offset` (v0.2.695).
+SRC_TEXT_BYTES_MAX = 32 * 1024 * 1024
+
+# v0.2.716: bounds on the PDF-internal amplification — MAX_UPLOAD_BYTES
+# bounds the FILE, not what extraction produces from it. A page object
+# costs ~200 file bytes but one extract_text() call each (a crafted 10MB
+# PDF holds tens of thousands of pages of CPU), and per-page content
+# streams are flate-compressed, so extracted text can run ~100x the
+# file size before chunk() ever sees it.
+MAX_PDF_PAGES = 2000  # page-count bound on PDF text extraction
+MAX_EXTRACT_CHARS = 64 * 1024 * 1024  # total extracted chars (~64MB)
+# Rows fetched per batch while accumulating toward the byte cap — bounds the
+# working set without a SQL-side byte limit.
+SRC_TEXT_BATCH = 512
+
+# v0.2.696: the two remaining unbounded LIST responses — GET /api/notebooks
+# and GET /api/trash returned every row with no cap. Notebook and trash-item
+# counts are accretive (one POST/delete each, not bulk-imported), so the cap
+# is a bound on the worst case, not a restriction on realistic use — every
+# dashboard load and trash-pane open was refetching the full row set.
+# `?offset&limit` (0..i64-1 / 1..LIMIT) pages past it; `total` discloses.
+NB_LIST_LIMIT = 2000  # notebooks per GET /api/notebooks page
+TRASH_LIST_LIMIT = 2000  # trash rows per GET /api/trash page
+
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
+# v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
+# no element cap, so a ~10MB ask/search body could name millions of ids and the
+# per-id get_source loop burned one SELECT each — an unbounded-CPU vector on a
+# request thread. 4096 far exceeds any real notebook's source count while
+# keeping the validation loop (and the json_each scan) trivially cheap.
+MAX_SCOPE_IDS = 4096
 EMBED_MODEL_SETTING_KEY = "embed_model"  # settings key for the stored-vector builder model
 # REQ-004: per-source retrieval weight bound. The weight multiplies a source's
 # fused [0,1] retrieval score — 1.0 is neutral, >1 promotes, <1 demotes, 0 pins

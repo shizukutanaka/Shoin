@@ -29,7 +29,431 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.680
+## Version History: v0.1.37 → v0.2.733
+
+### v0.2.733 — duplicate_notebookのreport chunkポインタをfork先へremap(cross-notebookポインタを閉塞)
+
+短所117: 「reportのid remapは全re-key経路で同じ深さか」の問いで発掘——
+`_remap_report_source_ids`は`chunk_map`をoptional引数として受け、import/
+merge/restore経路は`chunk_id_map`を構築して渡す(v0.2.686)のに、
+`duplicate_notebook`だけが`INSERT INTO chunks ... SELECT`の一括コピーで
+fresh rowidを捕捉できず2引数呼出のまま残存。結果、複製先のmessage/
+studio出力の`source_chunk_ids`が**原本notebookの(存続する)chunk rowid**
+を指したまま永続化——S#クリック解決が別notebookのchunkへ向くverbatimな
+cross-notebookポインタ(削除ではないためv0.2.686の死んだポインタとは別相:
+行は生きたまま、帰属だけが違う)。
+
+- chunkコピーをper-row INSERTへ変更し`chunk_id_map`を構築——import/merge/
+  restoreと同一の再採番捕捉経路で`source_chunk_ids`をfork先へremap
+- 行動ピン1件(test_duplicate_notebook_remaps_report_chunk_ids): dup先の
+  message+studio出力で`source_chunk_ids`がfork chunk集合と一致・原本idを
+  含まず、`source_id_map`もdup sourceを指すことを両tableで検証
+- 却下(記録): upload面(bounded read+cap+cleanup+orphan rollback完備)・
+  questions cache eviction(fp整合が正しい層でevictは最適化のみ)・
+  trash保持(user制御のpurge/empty経路あり)・SSE/health/scope経路
+- 残存(記録): `duplicate_notebook`のper-row INSERT化は大容量forkで僅かに
+  遅くなるが`_insert_tree_rows`と同じper-row経路と同一性能クラス
+
+### v0.2.732 — CLI文書書込みの原子化(--gen/--saveの破損JSON残存を閉塞)
+
+短所116: 「ファイルへの書込みは原子的か」の問いで発掘——`_cmd_eval`の
+`eval --gen FILE`(スケルトンscaffold)と`eval --save FILE`(ベースラインJSON)
+が`Path.write_text`の非原子書込み。中断(Ctrl-C/kill/disk-full)で半書込みの
+破損JSONが残り、ユーザーが「成功した」と信じたベースラインを次回`--diff`
+が`VALIDATION_FIELD_FORMAT_INVALID`の生JSONパースエラーで拒否——読込み側は
+全経路coded化済み(v0.2.690/718)なのに書込み側だけが破損を製造していた。
+
+- `_atomic_write_text(path, text)`新設: 同一ディレクトリのpid suffix付き
+  tempへ書込み→`os.replace`で原子rename——対象は常に完全な新文書か旧文書の
+  どちらか、半文書は存在し得ない。OSErrorは`SYSTEM_IO_ERROR`へ写像(読込み側の
+  `cannot read cases file`契約と同系統)し、stagingファイルはfinallyで必ず除去
+- 適用箇所: `eval --gen FILE`出力・`eval --save FILE`ベースライン(パッケージ
+  全域のwrite_text監査で残存はこの2サイトのみ——server.pyのアップロード
+  tempfileはdelete-managed tempで別契約)
+- 行動ピン1件(test_cli_json_writes_are_atomic): 完結書込み・上書き全体置換・
+  tmp非残留・失敗時SYSTEM_IO_ERROR+debris無し・e2eで`--gen`の隣接staging無し
+- 却下(記録): `backup_to`(宛先照合済み・SQLite backup APIの上書きはbackup
+  semanticsとして設計通り)・shoin export(stdout出力=ファイル書込み無し)・
+  delete_note/update_chunk_text等の残writer(BEGIN IMMEDIATE+probe完備を確認)
+- 残存(記録): ハードkill直前のstale .tmp残存は理論上あり得るが、次回書込みの
+  finally除去で自己治癒するため許容
+
+### v0.2.731 — 子行writerの親probeをwrite lock内へ統一(親rowid再利用によるcross-notebook誤着地を閉塞)
+
+- 短所115: `add_source`/`add_chunks`/`add_note`/`add_studio_output`/`add_message`/`clear_messages`は親行の存在probe(`get_notebook`/`get_source`)をautocommitで実行し、子行のINSERT/DELETEは別の後続commit点に着地——間のdelete+rowid再利用(非AUTOINCREMENT INTEGER PKはmax+1再利用)でFKが**probeの見なかった別親**(再利用後の実在行)を受理し、message/note/studio出力/chunkが無関係notebook・ソースへ静かに着地、clear_messagesが別nbの履歴を全消去するtear。6 writerのprobeを全て`with self.conn:`内の`BEGIN IMMEDIATE`直後へ移動——probeと書込みが同一commit点を見ることを構造化(v0.2.712のmetadata writer族と同契約を子writer族へ拡張)。`add_source`のdedupe SELECTも同lock内へ(友好的probeとINSERTの視点統一・UNIQUE制約はbackstopとして存置)。行動ピン: 6 writerのprobe実行中にforeign `BEGIN IMMEDIATE`が必ず失敗することを検証(第二接続busy_timeout=0)。検証済みで非該当: `merge_notebooks`/`duplicate_notebook`/`_insert_tree_rows`/delete系writerはprobeをlock内で再導出済(v0.2.683/687/708/712)。
+- 設計上の残存: handlerが生成中に対象nb自体がdelete+再採番される窓はcross-call tearのdocumented class(fingerprint/scope guardの許容窓と同一)——writer単位のprobe/write一致は本修正で保証。
+
+
+### v0.2.730 — ファイル源originを絶対パス化(refreshのcwd依存と無言の別ファイル再取込を閉塞)
+
+- 短所114: `extract_file`は`str(p)`でoriginを保存——`shoin add ./doc.txt`の相対パスがcwd依存のままDBへ残り、`refresh_source`の`extract_file(src.origin)`再読が**実行時cwdに解釈を委ねる**。別cwdからのrefresh(`shoin serve`を別ディレクトリで起動するのが典型)で(a)同名ファイル不在→`INGEST_FETCH_FAILED`、(b)同名の別ファイルが在る→**その内容を無言で再取込しチャンクを丸ごと差替**——(b)はdedupe・sha256不整合ガードを全て素通りする静かなcorruption。`Extracted.origin`を`os.path.abspath`化——取込時点の実パスをlocatorとして固定(resolveでなくabspath: ユーザーが渡したsymlinkをre-pointする意図的更新はsymlink側を追跡する方がrefreshの意味に忠実)。行動ピン: 相対パスadd→別cwdでrefresh→元ファイルのbyte-identical no-op確認+origin絶対パス化の両面検証。設計上の残存: v0.2.730以前に取込済みの相対origin(既存DB)はcwd依存のまま——refresh時に記録パスを手動整合させる運用で回避。
+
+### v0.2.729 — ベクトル書込みをtext照合でガード(recycled rowidへの誤格納を閉塞)
+
+- 短所113: `_embed_chunks`は`id_context_text_chunks_for_*`の読取り→LLM embed→batchコミットの3相——読取りと書込みの間に並行`replace_chunks_for_source`/`delete_source`+addが着弾すると、削除されたchunkのrowid(非AUTOINCREMENT INTEGER PK=max+1再利用)が別textの新chunkへ再利用され、`WHERE id=?`のUPDATEが**旧text由来のvectorを別内容の行へ格納**(dim一致のためmismatch guardも発火しない完全に静かなcorruption——retrievalのcosineが外国の内容を記述し続ける)。`set_embedding`/`_set_embedding_pair`に`expected_text`を追加し`UPDATE ... WHERE id=? AND text=?`でガード——不一致は既存deleted-rowと同じCHUNK_NOT_FOUND→batch rollbackに合流。`_embed_chunks`は`expected_texts`を受け全4本番呼出(index/rename/refresh/reindex)がraw textを引き渡し、ASTピンで呼出側省略を静的防止。
+
+### v0.2.728 — 複数フィールドPATCHの部分適用tearを閉塞(400応答で先段が永続化)
+
+- 短所112: PATCH /api/notebooks/{id} `{name,settings}`とPATCH /api/sources/{id} `{weight,meta,title}`はフィールド毎に別writer(=別TX)を直列実行——後段フィールドのstore内検証拒否が先段のコミット後に発火し、400応答なのに先段フィールドは永続化済み(応答/適用不整合: PATCH原子性の破れ)。検証を`validate_notebook_settings`/`validate_source_meta`のstore公開helperへ抽出しwriterは自前検証を保持したままhandlerが初回書込み前に全フィールド検証——全方向の入力拒否で状態不変。残存: 検証は通るがnb/sourceがwriter間に削除されるTOCTOU(NOT_FOUND mid-flight)は従来通りdocumented。
+
+### v0.2.727 — scope所属検証をretrieval snapshot内へ統合(CLI検証欠落も閉塞)
+
+- 短所111: `/ask`・`/search`の`source_ids`所属検証がretrieval snapshot**外**で実行——検証(T1)とscoped read(T2)が別コミット点を読むtear。間にdelete+re-add(id再利用・非AUTOINCREMENT INTEGER PKはmax+1再利用)が着弾するとvalidated sidが他nbの新ソースを指し、scoped readがそのnb chunkを混入(非漏洩契約の破れ)。さらにCLI `_cmd_ask`は検証自体が欠落し`--source <他nb sid>`で他nb接地のまま回答+reportが永続化。`check_source_scope`を共有helper化し3箇所(`qa.ask`・`_h_ask_sse`・`_h_nb_search`)のsnapshot内で実行——CLIもqa.ask経由で同一SOURCE_NOT_FOUND契約を得てparity完結+get_source全呼出snapshot内発火のスパイピン(library+server両面)。
+
+### v0.2.726 — multi-query展開のLLM相をretrieval snapshot外へ分離
+
+- 短所110: `retrieve_for_question`はmulti_query有効時`rewrite_queries`(chat)+per-rewrite `_query_vector`をcallerの`read_snapshot()`内で実行——WAL読取点をLLM往復時間分(タイムアウト級)ピン留めし、並行writerの追加分をcheckpoint不能=WAL肥大化+checkout阻害。`prepare_retrieval`(LLM相・store無接触)+`retrieve_prepared`(k解決+retrieval・store相)へ分解し、snapshot保持caller4箇所(ask/`_h_ask_sse`/`_h_nb_search`/`_h_global_search`)でprepare→snapshot→retrieve_preparedの相順へ再配線。非snapshot caller(cli/eval/compose)は`retrieve_for_question`の組合せ形で互換維持+「全LLM呼出はsnapshot外で発火」のスパイ行動ピン。
+
+### v0.2.725 — 質問fallbackのtitlesを生成snapshot内へ統合
+
+- 短所109: `_title_questions`がfallback時に`sources_for_notebook`をsnapshot**外**で再読——renameが2読取り間に着弾すると新titleを名指す質問が旧corpusを記述するfingerprintのキーでcache(#107族のfallback残存面)。snapshot内の同一`sources`を再利用して第2読取り自体を消去(titlesは生成snapshot由来で自明整合)+`_title_questions`のシグネチャを`(titles, hits, n)`へ縮小(到達不能な`not in titles`ガードも除去)+call-count行動ピン。
+
+### v0.2.724 — SSE askのbudget/contextをretrieve snapshot内へ統合
+
+**短所108**: `_h_ask_sse`はretrieve(snapshot)→add_message→headers→`notebook_settings`+`build_context`(別auto-commit)——headers確定後のcontext組立てがlegsと異コミットを読み、mid-flight replace/deleteでstreamed回答が「hit一覧は旧state・context/titleは新state」の混在を接地(検出不能intra-request tearの最終面)。budget/contextをretrieve snapshot内へ移動——context失敗はSSE error frameでなく`_dispatch`の通常JSON coded envelopeへ自然合流(user turn未永続化でdangling-guard自体が不要化)+行動ピン4件+カタログ3追随。
+### v0.2.723 — questions cacheをgeneration実読取stateでキー化
+
+**短所107**: `_h_questions`はlookup fingerprint(生成前state A)でキャッシュキー化→lookup→generation間にcorpus変更が入ると**state Bから生成されたquestionsがstate Aのキーで格納**——state Aを見る後続要求にAに存在しなかった内容を記述するsuggestionsが返る(キーが内容を記述しない真の不整合)。`suggest_questions_fingerprinted()`が生成snapshot内でfingerprintを計算し`(questions, fp)`を返す設計へ——cache keyは常に生成元corpusを記述+generation-lockピンregex追随+行動ピン。
+### v0.2.722 — ingest失敗時の孤児source行rollback
+
+**短所106**: `index_source`は`add_source`をコミット後`add_chunks`へ進む2段コミット——中間の`add_chunks`/embed失敗で**0-chunkのsource行が永続化**。孤児行は全retrievalから不可視のままsource一覧に残り、同一ファイルのre-addはsha256 dedupeに引っかかり削除しない限り再取込不可能(CLAUDE.md「very unlikely」記録の既知ギャップを閉塞)。except経路で`delete_source`ベストエフォートrollback(失敗時も元例外をmaskしない)+孤児非残存/既存行保全ピン2件。
+### v0.2.721 — studio/questions合成readのsnapshot化(grounding族完結)
+
+- **新規短所105解消(ソクラテス問いで発掘)**: 「永続化されるstudio出力/questionsを組立てるsampling SELECTも同一コミット点か」——`overview_hits`(per-source sizes+rows SELECT群)+`build_context`再読+`questions_fingerprint`の2分割readが全てauto-commit連結。request途中の`replace_chunks_for_source`着弾で**永続化されるstudio出力が異コミット行混入のcorpusを記述**・torn fingerprintが存在しない状態でcache keyを占有——v0.2.720のask/search族のstudio側残存面
+- **`store.read_snapshot()`を3関数へ適用**: `generate()`(probe+hits+context、llm.chat/add_studio_outputは境界外)・`suggest_questions()`(同形)・`questions_fingerprint()`(sources+hits両半を1点へ)
+- **行動ピン3件**: (a)generate: get_notebook中のreplace注入→promptにpre-replace本文のみ (b)suggest_questions: 同形 (c)fingerprint: sources_for_notebook中のreplace注入→hit textsが全てpre-replace
+- **却下した問い(記録)**: handler側fingerprint→generation跨call tear(v0.2.701のexisting[0]==fingerprintガードで最悪caseは無害再生成・eventual consistency設計として記録)・`_title_questions`(hits由来=境界内で整合)
+
+
+### v0.2.720 — grounding corpus viewのsnapshot化(ask/search合成readを1コミット点へ)
+
+- **新規短所104解消(ソクラテス問いで発掘)**: 「grounding集合を組立てる複数SELECTは同一コミット点を読むか」——`retrieve()`の各leg(BM25/vector/text行)+settings+`build_context`のsource再読+search端点のtitle/meta/suggest lookupが全てauto-commit連結。request途中の`replace_chunks_for_source`/`add_chunks`/`delete_source`着弾で**異コミットの行が1つのgrounding集合に混入**——永続化されるanswer+reportが「一度も一貫して存在しなかったnb状態」を記述
+- **`store.read_snapshot()`を4 siteへ適用**: `qa.ask()`(hits+settings+context、historyは会話状態のため境界外・`add_message`はwriteのためsnapshot後)、`_h_ask_sse`(pre-write retrieve legs)、`_h_nb_search`(hits+titles+suggest)、`_h_global_search`(hits+meta+suggest)——`_h_nb_get`(v0.2.707)/`_h_src_text`(v0.2.719)と同型のstandalone-read境界判断
+- **行動ピン3件**: (a)askライブラリ: settings probe中の別接続replace注入→hits全文がpre-replace (b)nb_search: sources_for_notebook中のdelete注入→hitのtitleがpre-delete名を保持 (c)global_search: notebooks_for_sources中のdelete注入→削除済sourceへのhitがmeta欠落でdropされず保持
+- **却下した問い(記録)**: history_messages(会話状態=別state class・snapshot境界外が正しい)・build_contextのget_source title(StoreError fallback済=metadata cosmetic)・`_h_ask_sse`のpost-header context読取り(SSE error契約を壊さず移動不可=title/budgetのmetadata微tearとして記録)・studio/questions合成read(同族候補=次サイクル)
+
+
+### v0.2.719 — src_text応答のintra-request torn閉塞(batch SELECTをsnapshot化)
+
+- **新規短所103解消(ソクラテス問いで発掘)**: 「`rev`/`total`ガードが訴える状態とchunk行は同一コミット点由来か」——`_h_src_text`はbatch loopが1バッチ1 SELECTをauto-commit連結。request途中の並行`replace_chunks_for_source`/`update_chunk_text`着弾で**1応答内に異コミットのchunk行が混在**しつつrev/total(先頭読み)は旧状態を指す——epoch守衛がページ間しか比較しないため**検出不能なintra-page tear**
+- **`store.read_snapshot()`で全read包み**: batch loop・get_source・countを同一WALスナップショットへ——`_h_nb_get`(v0.2.707)と同じstandalone-read境界判断。WALリーダーは書込をブロックしないため64同時要求設計を維持
+- **行動ピン1件**: SRC_TEXT_BATCH=2化+初回batch後に別接続がreplace_chunks_for_source注入→応答が全てpre-replace行+旧rev/total一致を検証(ベースラインではc1,c2+NEW3混在)
+- **却下した問い(記録)**: paged list端点のpage+total(窓ずれ許容設計)・export_notebook(既にsnapshot化済)・backup_to(SQLite backup APIでWAL含む)・`_ALLOWED_HOSTNAMES`(`::1`含む)・Content-Encoding不明系(br/zstd→INGEST_UNSUPPORTED_FORMAT coded)
+
+
+
+### v0.2.718 — deep-JSON RecursionErrorの400分類parity(CLI 3経路)
+
+- **新規短所102解消(ソクラテス問いで発掘)**: 「server側のRecursionError→400分類はCLIも同値か」——v0.2.314はserver `_read_json`のみcoded化したがCLIの3ファイルparse経路(`import` doc・`eval` cases・`eval --diff` baseline)が`RecursionError`をexcept対象に含まずcatch-allへ転落。**~40KBの`[[[[…`1ファイルでSYSTEM_INTERNAL_ERROR(500)へ誤分類**——400-class入力欠陥が500系に見える境界誤判定
+- **3 exceptへ`RecursionError`追加**: `NOTEBOOK_IMPORT_INVALID`/`VALIDATION_FIELD_FORMAT_INVALID`の各coded境界へ合流——server同値分類
+- **行動ピン3件**: 20000深度ファイルで3経路ともrc=1+400系code+`SYSTEM_INTERNAL_ERROR`非含有を検証(深度はserver test同値)
+- **却下した問い(記録)**: stored json.loads(L580/918/2064)のRecursionError——write pathが4KB boundのため深度不可達(foreign DBのみ)・`export --format tree`のdumps(フィールドboundで深度bounded)
+
+
+
+### v0.2.717 — untrusted bytesのターミナルescape網羅(出力sinkの残存面)
+
+- **新規短所101解消(ソクラテス問いで発掘)**: 「`_one_line`適用は全出力経路を覆うか」——既存ヘルパーは多くの行をカバーするが残存面が分散: (a)`stats`の`nb.name`(imported doc由来可) (b)`messages list`の`m['body']` (c)`refresh-all`の`r['title']`行 (d)`search.suggest`の`terms`(ソーステキスト由来トークン) (e)report `sec`(source context=chunk heading由来) (f)LLM出力経路(stream delta/answer/studio/questions——prompt injectionで文書がモデルに制御コードを吐かせうる) (g)check integrity行 (h)`health`のembedモデル名 (i)qa.pyの`embed_model_changed`警告(endpoint/DB由来名)
+- **`one_line`/`safe_text`をlog.pyへ集約**: 出力leafへ置きqa.pyも同契約を共有——cliは`_one_line`/`_safe_text`エイリアスで全呼出無変更
+- **`_ESCAPED_CATEGORIES`にCf追加**: bidi override(U+202E等)はESCと同じTrojan Source系spoofing——既存の全wrap箇所も強化
+- **`safe_text`新設**: multi-line body(LLM回答・message body・Studio出力・suggested questions)は\n/\tを保持し\r+Cf+Cc+Zl/Zpのみescape——レイアウト不変で制御系列のみneutralize
+- **行動ピン4件**: one_line/safe_text単体+`messages list` body(ESC/U+202E混入・\n保持)+`stats` nb名
+- **設計記録(保持のもの)**: `export` printはbyte-exact artifact(stdout==ファイル契約)のため生出力・json.dumpsはself-escaping・pipeline warnは`!r` repr-quoted・error echoはcaller入力のみ
+
+
+
+### v0.2.716 — PDF抽出内部増幅のbound(10MBファイルcapがカバーしない2経路)
+
+- **新規短所100解消(ソクラテス問いで発掘)**: 「`MAX_UPLOAD_BYTES`は抽出産物も制御するか」——ファイルcapは入力bytesを制限するがPDF内部構造の増幅を制御しない: (a)page objectは~200bytes/個で1万〜5万ページの細工ファイルが`extract_text()`を数万回呼ぶCPU burn経路 (b)各ページのcontent streamはflate圧縮のため抽出テキストはファイルの~100倍まで膨張——`pages.append`がGB級strを蓄積しメモリ+chunk()が爆発
+- **`MAX_PDF_PAGES=2000`**: ページ数bound——論文/レポート/書籍の正当上限(~1500頁)に十分な余裕、最悪caseの抽出コストを~秒オーダーへ収束
+- **`MAX_EXTRACT_CHARS=64MB`**: 累積抽出文字数bound——正当10MB PDFの抽出(~30MB)に2倍マージン、解凍bombは早期にcoded拒否
+- **両方とも`INGEST_FILE_TOO_LARGE`**: 「input exceeds ingest limits」の共有coded——新コード追加せずタクソノミー維持。拒否はtruncateでなくreject(部分index黙認よりhonest)
+- **行動ピン1件**: patch上限で4ページ/15文字の両越境→coded拒否+境界内受理
+- **却下した問い(記録)**: html/md/txt抽出(入力≤10MBで天然bounded・PDFのみ解凍増幅)・per-page単発メモリ(vendor内部・修正不能を明記)・CLI vacuum/check lock(busy_timeout→coded済)
+
+
+
+### v0.2.715 — meta/settingsオブジェクトのSOURCE_META_MAX sink bound(verbatim embed増幅の最終面)
+
+- **新規短所99解消(ソクラテス問いで発掘)**: 「文書の非文字列フィールド(dict/数値)も全てboundedか」——v0.2.714はstr fieldを一律boundしたが、dict経路が残存: `s["meta"]`は`_meta_text`で形状検証のみ(size unbound)→~10MB metaがverbatim永続化し`_source_json`の`meta` embedで全detail応答へ増幅。`update_source_meta`の`SOURCE_META_MAX=4096`はPATCHのみでimport/restoreをカバーしていなかった
+- **`_meta_text`内部へbound移設**: 全正規化経路(import・trash-restore・将来呼出)を1ゲートで閉塞——oversizeは`ValueError`としてcallerのcoded境界へfunnel(import→NOTEBOOK_IMPORT_INVALID・restore→SYSTEM_INTERNAL_ERROR)
+- **`_import_settings_text`のper-entry len guard除去(v0.2.714の設計ミス訂正)**: N個の中サイズ未知エントリはper-entry boundを潜って合計で増幅する——全オブジェクトboundの方が正しく強い。`_meta_text`経由でsettings全文も4KB上限に(settingsもdetail応答にrideする)
+- **行動ピン3件**: (1)doc meta oversize拒否(malformed casesへ追加) (2)境界内metaのround-trip生存 (3)settings全文超過は全体拒否+境界内未知キー保持
+- **却下した問い(記録)**: `embedding_norm`/`seq`のinf/nan(`float()`受理→retrieval側`math.isfinite→0.0`でno-signal退化=v0.2.630系統のcorrupt-row設計)・`created_at`書式(表示のみcosmetic)・`c["source_id"]`unhashable(TypeError→coded済)
+
+
+
+### v0.2.714 — 全verbatim-bindフィールドのper-field bound(v0.2.713の残存面を一律閉塞)
+
+- **新規短所98解消(ソクラテス問いで発掘)**: 「body以外の文書フィールドも全てboundedか」——v0.2.713はbodyをboundしたが、同じverbatim-bind族の残存面が分散していた: (a)writer側の`origin`/`sha256`は`_utf8`のみで無制限(API経由~10MB→`_source_json`がdetail応答へverbatim embedで増幅) (b)document側のsource title/origin/sha256・chunk text/context・timestampが`_import_str`通過のみでboundなし(chunk textは**全retrievalで全文ロード**される別増幅経路) (c)embedding `$blob`がb64decode無制限(vector検索でchunk毎ロード) (d)settingsの未知キーがkey/value両方無制限でverbatim保持
+- **`_import_str`一律bound**: 全文書str fieldに`MAX_BODY_LEN`を適用——title/origin/sha256/added_at/chunk text/context/note title/created_at/citation_reportを1ゲートでカバー(v0.2.713の個別5チェックは先着する`_import_str`に畳込み削除)
+- **embedding blob**: b64文字列をdecode**前**にbound——decode自体のメモリ確保を防ぎdecoded blobも制限内に(正規embedding≦~22KB b64)
+- **`_import_settings_text`**: `len(k)`/`len(json.dumps(v))`超過の未知エントリをdrop(既知キーの範囲検査と併合——forward-compat保持を維持)
+- **writer側3面**: `add_source`(origin+sha256)・`update_source_title`(origin)・`update_source_sha256`(sha256)に`VALIDATION_FIELD_FORMAT_INVALID` coded拒否——truncateはrefresh用pathを破損するためreject
+- **行動ピン2件**: (1)writer 8面の拒否/受理境界(origin/sha256系3面追加) (2)doc側6ケース(title/origin/chunk text/context/blob)+settings巨大エントリdrop
+- **却下した問い(記録)**: `add_chunks`のchunk text(ingest由来でchunk budget天然bounded・request非露出)・nb name(truncate済lenient)・seq/embedding_norm(float化で実値8byte・doc cap以下)
+
+
+
+### v0.2.713 — free-text bodyのper-rowバイト上限(GB級detail応答の増幅経路を閉塞)
+
+- **新規短所97解消(ソクラテス問いで発掘)**: 「embed件数capは各行のバイト量も制御するか」——v0.2.250/409/694の`NB_*_LIMIT`群は`GET /api/notebooks/{id}`へ埋め込む行の**件数**を制限したが、各行が運ぶ**バイト量**は無制限のまま。note/message/studioの`body`(とdocument側の`citation_report`)に長さ検証がなく、request側10MB capだけが上限だった——1書込で~10MB行が永続化し、500行のembedで**detail応答が最大~5GB**へ増幅(openNotebook・SSE断回復refetchのたびに再増幅)
+- **`MAX_BODY_LEN=100_000` chars**: note/message/studio body・`update_chunk_text`の4 writerに`VALIDATION_FIELD_FORMAT_INVALID` coded拒否。LLM実体(MAX_TOKENS≈16KB)やメモ利用の~6倍余裕を残しつつ最悪case embedを~50MBへ収束
+- **import文書側にも同bound**: `_insert_tree_rows`がwriter guardをバイパスするため、document検証にnote/studio/message `body`+`citation_report`の5面を追加(`NOTEBOOK_IMPORT_INVALID` coded)——v0.2.693/710と同じ「writer同値の検証をdocument側へ」拡張
+- **行動ピン2件**: (1)4 writerが`MAX_BODY_LEN+1`をcoded拒否+ちょうど上限値は受理 (2)細工exportの5面(body×3+report×2)が`NOTEBOOK_IMPORT_INVALID`で拒否
+- **却下した問い(記録)**: sources embed(title 500字/meta oversize guard済)・chunk textのingest由来本文(chunk budget由来で天然bounded・update経路のみ防御)・restore/duplicate(自DB行コピーのためwriter boundが伝播)・writer側citation_report(内部生成でbounded)
+
+### v0.2.712 — 書込TXプローブをロック内へ移動(メタデータwriterのcross-commit-point経路を閉塞)
+
+- **新規短所96解消(ソクラテス問いで発掘)**: 「write-TX内で使う値は全て同一コミット点由来か」——v0.2.683-709のBEGIN IMMEDIATE族の残存面: メタデータwriter群が`get_source`/JOIN probeを**TX外auto-commitで読み**、その値(`src.notebook_id`・`source_id`・`notebook_id`)を後続の`UPDATE`/`touch_notebook`/cap-probeに流用していた。deferred TX(or lock外probe)のためprobe点Aと書込点Bがずれ、A→B間のsource/nb削除+rowid再利用で**wrong-row UPDATE・wrong-nb touch・wrong-nb cap計算**がコミットされる経路
+- **5面を同一パターンで修正**: `update_chunk_text`(JOIN probe)・`update_source_title`・`update_source_sha256`・`update_source_meta`・`replace_chunks_for_source`——全て`BEGIN IMMEDIATE`+probeをロック内へ移動し、ロック下スナップショットがprobeとwriteの唯一の読取点に
+- **副次簡素化**: `update_source_title`/`update_source_sha256`のin-TX `SELECT title`再読はロック内`src.title`と同一化——冗長SELECT削除(v0.2.87の同名防衛はSQL COALESCE側で保持)
+- **行動ピン2件**: (1)`get_source`スパイでforeign BEGIN IMMEDIATE(busy_timeout=0)試行→4メソッド全てロック下プローブ証明 (2)`_ConnSpy`でJOIN probe時点のforeign BEGIN失敗→update_chunk_textも同契約
+- **却下した問い(記録)**: update_source_weight(単発UPDATE+rowcount・cross-point値なし=identity semantics)・add_source/add_note/add_message(プローブはINPUT id検証のみ・FKがmid-gap deleteをcoded化)・clear_messages/rename_notebook(id入力+単発write=直列化意味論で正)・add_sourceのdup事前チェック(UNIQUE制約がB点で再保証)
+
+### v0.2.711 — pagerのid dedupをrefresh-mergeへ(ページ間のrename/count変化が画面に残る経路を閉塞)
+
+- **新規短所95解消(ソクラテス問いで発掘)**: 「dedupは再遭遇行の可変フィールドも正しく扱うか」——v0.2.697/698/702のpager群(`wireEarlierPager`3面+`nb.more`)はoffset窓ずれ由来の重複を**id照合で全スキップ**していたが、ページ間で行自体が**編集**(source rename・nb name/counts変化)されると新しい読取りが古い行の影に消え、**リロードまで旧表示が残る**。staleness pager族(#83/86/88/90)の第4面: 同一性≠内容不変
+- **refresh型mergeへ**: `seen`を`Set`→`Map(id→index|obj)`へ。再遭遇行はAPPENDせず既存copyへ`Object.assign`で全フィールド更新——新しい読取りが常に勝つ。`nb.more`側は加えて`ul.children[i].replaceWith(mkNbRow())`でDOM行も再構築(name span+counts+live `cur`のactive表現保持)
+- **messages/notesは不変行**——assignはno-opで副作用なし(統一契約として適用)
+- **行動ピン(拡張)**: node実実行で(1)sources pager: `{id:3,title:"old"}`+ページ`{id:3,title:"new"}`→APPENDせずtitle更新 (2)nb.more: id-2重複行が`name:"B-dup"`へ配列+DOM両方refresh・dedup依然1行のみ
+- **サイクル内監査で検証済み却下7件**: kパラメータ(SEARCH_K_MAX)・static literal route(no traversal)・scope_ids両属検証(/ask+/searchとも404化済・/questionsはscope不取込み)・import embedding b64(NOTEBOOK_IMPORT_INVALID化済)・セマフォ解放(finally+REQUEST_SOCKET_SEC bounded)・ORDER BY全PK tie-break・LLM SSE parser全形状
+
+### v0.2.710 — import文書のsettingsにwriter同値の値レベル検証(範囲外top_k・非int値のverbatim格納を閉塞)
+
+- **新規短所94解消(ソクラテス問いで発掘)**: 「import文書のsettingsもwriterと同じ検証を受けるか」——v0.2.693がkind/role/weight語彙を閉塞した同族で、nb `settings`だけ`_meta_text`(形状のみ)を通して**値をverbatim格納**していた残存面。細工文書は`top_k=10**9`(全テーブル走査)・`"huge"`(読取側`int()`がraw ValueError→500)を永続化——v0.2.659の範囲検証がPATCHのみの未カバー入口
+- **`_import_settings_text`フィルタ**: `_meta_text`(形状ゲート)+per-entry検査——既知キーはintかつ`_NB_SETTING_BOUNDS`範囲内のみ保持(非int/bool/範囲外は**削除**しグローバルデフォルトがbind)。未知キーは保持(不活性・新バージョン前方互換)——「createは厳格・importは寛容」のrepo姿勢に整合
+- **boundsのモジュール定数化**: `_NB_SETTING_BOUNDS`を新設し`update_notebook_settings`のローカルboundsと単一ソース化(trash restore経路も同フィルタ適用)
+- **行動ピン(拡張)**: 細工settings `{top_k:10**9, source_text_tokens:"huge", future_key:"kept"}`→既知値のみ消失+未知キー保持・`{top_k:True}`→`{}`(bool排除も検証)
+- **却下した問い(記録)**: settings PATCH/CLIのlast-writer-wins(REPLACE契約として設計済・merge責任はクライアント側)・trash restoreのrowid衝突(v0.2.685/686/689で3段防御済)
+
+### v0.2.709 — chunk上限を書込TX内へ移設(並行ingest/refreshで上限突破するTOCTOUを閉塞)
+
+- **新規短所93解消(ソクラテス問いで発掘)**: 「上限プローブは書込と同一コミット点を読むか」——`MAX_CHUNKS_PER_NOTEBOOK`の検査はpipeline側(`index_source`/`refresh_source`)でwrite TX**前**のauto-commitで読んでいた。並行する2 ingestが同じ sub-cap 件数を読んで両方合格→両方コミットで**上限越えのnbが永続化**——v0.2.672のsink防御と同じTOCTOU面がingest/refresh経路に残存
+- **sink側TX内検査へ移設**: `add_chunks`と`replace_chunks_for_source`を`BEGIN IMMEDIATE`化し、`counts`/`count_chunks_for_source`プローブをロック下で実行——2番目のwriterは1番目の直列化後に**post-commit件数**を見て`INGEST_NOTEBOOK_FULL`でcoded拒否。pipelineの事前チェックはorphan source行防止の早期失敗として維持（補完関係）
+- **行動ピン**: patched MAX=4で(1)capプローブ中に別接続のbusy_timeout=0 BEGIN IMMEDIATEが失敗(ロック保持) (2)2番目のaddがpost-commit件数でcoded拒否+ゼロ書込 (3)refresh側も自source除外式で同契約(4→4合格/4→5拒否+既存chunk保全)
+- **却下した問い(記録)**: merge_notebooks(v0.2.687でBEGIN IMMEDIATE+再プローブ済)・import_notebook(v0.2.672でTX内cap済)
+
+### v0.2.708 — duplicate_notebookをBEGIN IMMEDIATE化(同時deleteで空複製がコミットされる経路を閉塞)
+
+- **新規短所92解消(ソクラテス問いで発掘)**: 「プローブとコピーは同一コミット点を読むか」——`duplicate_notebook`は`with self.conn:`(deferred TX)内でget_notebook→counts→INSERT..SELECT連鎖を実行するが、TXは最初のwriteまで開始されない。nb削除がギャップにコミットされると存在プローブは通過済みなのにSELECT群が0行を読み、**子行ゼロの「複製」がエラーなしでコミット**される永続破損——delete系のBEGIN IMMEDIATE化(v0.2.683/685)と同族TOCTOUの書込側残存面
+- **`BEGIN IMMEDIATE`+プローブ内包**: `src`の取得・name派生・バリデーションを全てTX内へ移動——ロック下でget_notebookが再プローブし、削除済みならNOT_FOUND。name/settingsのドリフトも同スナップショット由来に
+- **行動ピン**: counts内で別接続がbusy_timeout=0のBEGIN IMMEDIATEを試行→書込ロック保持中はOperationalError(ベースラインdeferred beginでは取得成功)
+- **却下した問い(記録)**: SSRFリダイレクト(fetch_urlは全ホップでvalidate_public_url再検証済)・build_contextの削除source(chunksはpre-delete取得のまま一時的表示→次askで自然解消+titleフォールバック済)
+
+### v0.2.707 — nb detail応答を単一WALスナップショットへ(合成読取のtorn閉塞)
+
+- **新規短所91解消(ソクラテス問いで発掘)**: 「複数SELECTで組立てる応答は全て単一スナップショット下か」——export(#84)/export_notebook(#87)をread_snapshot化したが、`GET /api/notebooks/{id}`の`_notebook_json`は約8個のauto-commit SELECT(get_notebook/list_messages_recent/count_messages/list_notes/sources_for_notebook/counts/latest_studio_outputs)を無保護で連結していた残存1面。同時deleteが途中に挟まると**埋込リストと`counts`が不一致**(sources_for_notebook→counts間の削除で「行はあるがtally=0」)、`omitted`開示が負値化
+- **`_h_nb_get`を`store.read_snapshot()`で包む**: standalone-read境界にのみ配置(export_notebookと同じ判断)——merge/trash-restore経路は自TX内で保護済。WALリーダーは書込をブロックしないため同時性は維持
+- **行動ピン**: 2接続で`sources_for_notebook`完了直後に別接続delete注入→snapshot下で埋込行とcountsが一致(ベースラインでは不一致)
+- **却下した問い(記録)**: paged list端点(nb/trash/messages等)のtotal/rows不一致(offset paging自体が窓ずれ許容の設計・detail応答のみがcoherence要求)・`_h_src_text`のcount+page(p.totalガードで検出済)
+
+### v0.2.706 — sources.content_revエポックでsame-count編集を検知(src_text torn完全閉塞)
+
+- **新規短所90解消(ソクラテス問いで発掘)**: 「`total`整合検査は不変条件を全て覆うか」——v0.2.704の`p.total !== total`は件数変化のみ検知。`update_chunk_text`のin-place編集や同件数の`replace_chunks_for_source`は**totalが変わらずページが新旧テキスト混在**する残存面——refreshが同数chunkを生成すれば同一経路。表示内容とDBの乖離は無言
+- **migration 15 `content_rev`列**: chunk本文を変更する全書込が`content_rev+1`——`update_chunk_text`/`replace_chunks_for_source`をTX内でバンプ(`set_embedding`は非表示列のため対象外)。`Source` dataclassへ`tolerant read`(fixture互換)で追加
+- **`_h_src_text`が`rev`を全ページで返却**: ページャーは初回ページの`rev`を捕捉し`p.rev !== rev`で同型トースト+拒否——`total`/`rev`のORで不変条件完全カバー。旧サーバ(rev欠落)はundefined===undefinedで後方互換
+- **行動ピン3層**: store(バンプ/非バンプ/rev=0初期)・server(応答rev+PATCH後+1)・node UI(same total/異rev→toast+splice拒否)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし・i18n非変更
+
+### v0.2.705 — import文書のfile origin無害化をsink側へ移設(CLI import経由LFI閉塞)
+
+- **新規短所89解消(ソクラテス問いで発掘)**: 「`_neutralize_import_origins`は全import経路を覆うか」——HTTP import(`_h_nb_import`)のみ呼出で、CLI `shoin import`(`_cmd_import`)は無害化を素通り。悪意あるexport文書に`origin: /etc/passwd`等を書くとCLI importでverbatim保存→後続の`shoin refresh`/`POST /api/sources/{id}/refresh`(`refresh_source`はfile originを`extract_file`で再読)が**任意ファイルをソース内容として読込**——`_h_src_add`が拒否するconfused-deputy LFIの同一欠陥族が別入口に残存
+- **`import_notebook`内部へ移設**: sink側で防御しCLI・HTTP・将来の呼出を一本化——`_h_nb_import`の前置呼出は削除(二重prefix回避)。非dict payloadでもAttributeErrorを出さないよう`isinstance`ガード+try内呼出でcoded拒否を維持
+- **merge/trash-restoreは対象外**: `_insert_tree_rows`直接呼出でimport_notebookを経由しない——自前アーカイブ行のoriginはユーザ自身のもので正しい境界
+- **行動ピン**: file origin文書をimport→`imported:` prefix確認+`source_is_refreshable` False+`refresh_source`がcoded IngestError、URL originはrefreshable維持
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(server.pyは関数移設のみ)
+
+### v0.2.704 — src_textページャーがtotal整合を検証(refresh中torn表示閉塞)
+
+- **新規短所88解消(ソクラテス問いで発掘)**: 「ページャーは初回スナップショットと後続ページの整合を検証するか」——`wireSrcTextPager`は`sig.aborted`でビュー切断のみ防御し、コンテンツ変更を検査しない。ソース閲覧中にrefresh(`replace_chunks_for_source`)が走るとchunk行が全置換され`total`が変化——以降のページは**新chunkを旧chunk下へsplice**し、旧先頭+新末尾のtorn文書を表示。nb.more(#86)/earlier pager(#83)と同族stalenessの最後の残面
+- **`p.total !== total`で整合検証**: 変化検出時は`src.changed`トースト(ja/en)+splice拒否——途中ページで検出しても以降のページが誤マージされない逐語チェーン
+- **行動ピン(拡張)**: node実実行テストへtotal変化ページを追加——toast発火+chunk非追加+holder除去を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし・i18n ja/en対称維持
+
+### v0.2.703 — JSONツリーエクスポートも単一WALスナップショットで読取(転送経路の破損文書閉塞)
+
+- **新規短所87解消(ソクラテス問いで発掘)**: 「スナップショット化は全export経路を覆ったか」——v0.2.700は`export_markdown`/`export_bibtex`/`export_ris`の3関数のみ。`export_notebook`(JSONツリー文書=ゴミ箱アーカイブ共有envelope)は`_notebook_tree_dict`の複数auto-commit SELECTが**各々別コミット点**を読み続けていた——同時deleteが途中に挟まると「sources列挙済み・chunks/notes/messages消失」の破損文書。人間可読exportより質が悪い: **機械転送envelopeの破損はimport先へ永続化**される
+- **`export_notebook`を`read_snapshot`で包む**: merge/trash-restoreは自TX(`BEGIN IMMEDIATE`)内で`_notebook_tree_dict`を直接呼ぶため、スナップショットはstandalone-read境界(export_notebook)にのみ配置——二重BEGINを回避
+- **行動ピン1件**: 2接続で`get_notebook`直後に別接続delete注入→snapshot下でsources/chunks/notes/messages全保持を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.702 — nb.moreページャーのid重複除外(オフセット窓ずれ二重表示閉塞)
+
+- **新規短所86解消(ソクラテス問いで発掘)**: 「リストページャーはオフセット窓ずれを吸収するか」——`nb.more`ページャーはv0.2.696導入時から`seen`重複除外を持たず、newest-first一覧でページ間のnb増減が窓をずらすと**既表示のnb行が再ページに混入→サイドバーに同一書院が二重表示**。wireEarlierPager(v0.2.697)と同族のdedup契約がこの1面のみ未配線だった
+- **seen Setで吸収**: `notebooks.map(x=>x.id)`のSetで既表示idを照合、重複行をスキップ——`left`再計算は実表示数ベースのまま正確
+- **行動ピン**: node実実行テストの第2ページへid重複行を混入、dedup済み3行+holder除去を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.701 — 質問キャッシュ指紋を実入力へ(編集後stale質問閉塞)
+
+- **新規短所85解消(ソクラテス問いで発掘)**: 「指紋は`suggest_questions`の実入力を全て覆うか」——v0.2.395の内容認識指紋は`(id, sha256, title)`だが、sha256は**起源文書**のハッシュを指す設計(v0.2.682のdedupeが依拠)。`update_chunk_text`(v0.2.647の修正経路)はチャンク本文をin-placeで書き換えてもsha256を動かさないため、編集後も指紋は不変——**編集前テキストから生成した質問が無期限に配信**される(クロスプロセス編集でもin-memory cacheへpopが届かないのは同staleness class)
+- **`questions_fingerprint`をstudio.pyへ新設**: 実入力そのものを鍵化——`(id, sha256, title)`タプル + `overview_hits(per_source=2)`のサンプル行(id/text/context)。生成器が読む範囲のみを覆うため非サンプルchunkの編集は不要な失効を起こさず、コストはO(sources+sampled)で全corpus走査なし
+- **却下案**: `nb.updated_at`を指紋へ追加——`add_message`もtouchするため質問毎にキャッシュ不発のリグレッション
+- **行動ピン1件**: クロスプロセス`update_chunk_text`後の`/questions`がchat_count+1で再生成(既存sha変更テストと同型)
+
+### v0.2.700 — export読取を単一スナップショット化(破損export閉塞)
+
+- **新規短所84解消(ソクラテス問いで発掘)**: 「exportの読取は単一スナップショット下か」——`export_markdown`/`export_bibtex`/`export_ris`は複数getterをauto-commit SELECTで連結。pysqliteはSELECTでTXを開始しないため各SELECTが**別コミット点**を読み、同時deleteが途中に挟まると「sourcesは列挙済み・notes/messagesは消失」の**破損export**が生成される——サーバは最大64同時要求で実行環境的に成立する経路
+- **`Store.read_snapshot`**: `BEGIN`(明示)でWAL読スナップショットを固定——`with self.conn`はpysqlite仕様でSELECTをTX化しないため不十分。WAL読者はwriterをブロックしないため同時書込は従来通り進行。3 export関数を`_`内部関数+snapshotラッパーへ分解(公開名不変・呼出側無変更)
+- **行動ピン1件**: 2接続でexport初読直後に別接続からnb削除を注入——snapshot下でもsources/notes/messages全て出力を検証(修正前は後続読取が空になる破損)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.699 — nb切替中に解決したページ応答を破棄(ページャー競合閉塞)
+
+- **新規短所83解消(ソクラテス問いで発掘)**: 「ページャーのfetchは非同期で安全か」——`wireEarlierPager`/`nb.more`のページfetchは解決時に**live状態へ無条件merge**。nb A(3000ソース)でページャークリック→nb BへopenNotebook→Aの応答がresolveすると、fetchコールバック内の`cur.sources`が**Bの配列**を参照し、Aの行がBのソースリストへ混入+`sources_omitted`カウンタをB由来で上書き——v0.2.249のopenNotebookレスポンス競合と同族だがページャー経路は未防御だった
+- **`cur`同一性ガード**: クリック時のnbオブジェクトを`target`引数経由で捕捉し、resolve時にlive `cur !== target`なら破棄(マージ・カウンタ書込・render全てスキップ)。引数名を`cur`→`target`へ改名——`cur`名のままだと引数がモジュールlive `cur`をshadowしてガード不発の罠を明示
+- **`nb.more`は`!holder.isConnected`ガード**: loadNotebooks再実行で旧holderがdetach済みならmergeスキップ(実DOMでreplaceChildren/detach後に発火したstale onclickを無害化)
+- **`src.more`は既防御**: `sig.aborted`チェックでviewer再オープン時にabort済み——同族3面中最後の1面として記録
+- **行動ピン1件**: node実実行でページ解決前に`cur`を別nbオブジェクトへ差替→旧nb配列・新nb配列・カウンタ全て無変更+render不発、同一nbでは通常マージ(ガード過剰発火なし)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.698 — chat履歴/ノートのcap開示をページャー化+notes開示行の位置修正
+
+- **新規短所82解消(ソクラテス問いで発掘)**: 「capは到達不能なデータを生んでいないか(残面)」——v0.2.697でsourcesを救済した同族欠陥の残存2面: `chat.earlier`(messages_omitted)と`notes.earlier`(notes_omitted)も**開示のみの死文**だった。走査端点`GET /api/notebooks/{id}/messages|notes?offset=`はv0.2.646から存在するのにUIが呼ばず、古い会話履歴・古いノートへ到達不能
+- **副次修正(notes開示行の位置欠陥)**: `notes.earlier`は`out.append`で**最下部**に表示されていたが、`cur.notes`は最古→最新のASC順——省略された「以前の」ノートが表示最新ノートの**下**に位置する誤導配置。ページャーprependで正しい最古側へ修正
+- **`wireEarlierPager`を3面共用化**: v0.2.697のwireSrcListPagerを一般化——`fetch`コールバック(各コールサイトにliteral endpointを保持しrouteピン解決を維持)が`{arr, rows, total}`を返し、DESC行をunshiftでASC順維持・`*_omitted`を`total-len`で再計算・seen Setでoffset窓ずれ重複を吸収
+- **messages埋込へ`id`追加**: detail embedは`{role,body,report}`のみでdedupキーが不在——`id`を追加してsources/notesと同一のdedup契約へ(応答への追加フィールド・後方互換)
+- **行動ピン更新+追加**: v0.2.697ピンを新シグネチャへ更新+chat/notes disclosureピンがpager holder構造を検証するよう更新
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.697 — sources_omittedを開示のみから到達可能なページャーへ(スコープ選択救済)
+
+- **新規短所81解消(ソクラテス問いで発掘)**: 「capは到達不能なデータを生んでいないか」——v0.2.694のdetail cap以降、`src.earlier`行は「以前の{n}件は省略」の**開示のみ**で、走査端点`GET /api/notebooks/{id}/sources`は存在するのにUIが呼ばない設計だった。cap範囲外のsourceは`srcSel`/`knownIds`に入らず、**スコープ指定ask(`source_ids`)がそのsourceへ物理的に到達不能**——cap導入が生んだ機能縮退
+- **`wireSrcListPager`**: 開示行を`src-more`型ボタン(`src.load_earlier` ja/en)へ——`?offset=cur.sources.length`で1ページfetchし、DESCページ行を`unshift`で先頭追記（ASC順維持）してrenderNotebook再描画。追記行は通常行と同一のcheckbox/srcIndex配線を自動獲得——`srcSel`への自動追加（新規source既定checked契約）も一貫
+- **補助設計**: `seen`Setでoffset窓ずれ（ページング中の並行追加）由来の重複行を吸収。`cur.sources_omitted`を`total - cur.sources.length`で再計算し、残余があれば次ページボタンを再描画
+- **renderを引数注入**: `renderNotebook`への直接依存を引数化してnode harnessで副作用なし検証を可能に（副作用は`cur`の配列/カウンタのみ）
+- **行動ピン1件**: node実実行で `sources_omitted>0`→ボタン出現→`?offset=`fetch→DESC行がASC順で先頭追記→omitted再計算→再描画→error時はボタン再有効+toast
+
+### v0.2.696 — /api/notebooksと/api/trashのリスト応答を上限付きページングへ
+
+- **新規短所80解消(ソクラテス問いで発掘)**: 「リスト応答は全て有界か」——detail埋込み(messages/notes/sources)・走査端点・src_textと順に閉塞してきた上限族の残存2面: `GET /api/notebooks`は全nb行+JOIN集計を、`GET /api/trash`は全trash行を無制限返却。acc-retive増殖型(1操作1行・importで一括増殖しない)ゆえ敵性天井は低いが、全ダッシュボード読込と全ゴミ箱表示が行数に比例して永久に重くなる同族経路
+- **`?offset&limit`ページング**: `NB_LIST_LIMIT`/`TRASH_LIST_LIMIT`(各2000)で上界、`{total,offset,limit}`で開示——v0.2.646/694のmessages|notes|sources端点と同一契約(newest-first・offset 0..i64-1・limit 1..cap)。store側は`list_notebooks_with_counts`/`trash_list`にlimit/offset引数+`count_notebooks`/`count_trash`新設——CLIは引数無し呼出で全量維持(応答面のみの上界)
+- **UI**: 一覧末尾に「残り{n}書院を表示」ボタン(`nb.more` ja/en)——クリックで`?offset=`次ページをfetchし行を追記(src-more同型)。`total`欠落の旧応答形状/スタブ環境では「残り無し」扱いでページ行自体を出さない後方互換
+- **行動ピン2件**: サーバ側(patch縮小capで2ページ走査による全行到達+total/offset/limit開示+offset=-1|abc→400)・UI側(node実実行でtotal>rows時にページ行出現→次ページ追記→消滅)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし
+
+### v0.2.695 — /api/sources/{id}/text応答を32MiBで上界(最後の無制限ペイロード)
+
+- **新規短所79解消(ソクラテス問いで発掘)**: 「全ての読取り応答は有界か」——detail埋込みcap(messages/notes/sources)を閉塞しても`GET /api/sources/{id}/text`は全chunk本文をfetchall一括返却のまま残存。ingest由来は10MB上限に従うが**import文書はchunk本文長を制限しない**(v0.2.693は型のみ検査)ため、細工exportが1ソースに~1GiB本文を置き得る——viewerのクリック毎にfetchall実体化+json.dumps二倍化+最大64接続でプロセス枯渇する回復不能経路
+- **バイト上界ページング**: 応答を`SRC_TEXT_BYTES_MAX`(32MiB=正規ingestの~3倍・敵性天井の30分の1)で上界——境界chunkは次ページへ**全体送り**(本文欠落ゼロ)、単一>capchunkのみバイト切詰め(コードポイント途中で割らないdecode-tolerant)。`truncated`+`next_offset`+`total`で開示、`?offset=`で全文走査——行は全て到達可能、到達不可は単一>capchunkの切詰め残部のみ(敵性経路限定・開示済み)
+- **UI**: `appendSourceChunks`抽出(追記可能に)＋「残り{n}チャンクを表示」ボタン(`src.more` ja/en)でページ連結——cited-chunk markingは追記ページにも伝播
+- **行動ピン2件**: サーバ側(patch縮小capで切詰め+next_offset走査による全文到達+境界chunk全体送り+400/404契約)・UI側(node実実行でボタン→?offset=フェッチ→境界separator追記→再配線)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし
+
+### v0.2.694 — detail応答の最後の無制限embedを閉塞(sources上限+走査端点)
+
+- **新規短所78解消(ソクラテス問いで発掘)**: 「詳細応答の埋込みリストは全て有界か」——`GET /api/notebooks/{id}`の`notes`/`messages`はv0.2.250/409でcap済みだが`sources`だけは**無制限埋込みのまま**残存。source数は書込側にも上限がなく(chunk上限は行数であってsource数ではない)、openNotebook・SSE復帰refetch等の全detail取得がsource数に比例して永久に重くなる経路——1ソースあたり~300Bで数万sourceなら応答がMB級
+- **notes/messagesと同型の3層構成**: ①埋込みを最新`NB_SOURCES_LIMIT`(2000)件に制限し`sources_omitted`で非表示数を開示——scope pane用途のためnotes/messagesの500より寛容値、最新側を残すため追加直後のsourceは必ず可視 ②`GET /api/notebooks/{id}/sources?offset&limit`走査端点を新設——capで切られた全量はexportだけでなくAPI経路でも走査可能(v0.2.646のmessages|notes端点と同一契約: newest-first・offset 0..i64-1・limit 1..2000・total開示) ③UIは`src.earlier`行で省略を開示(notes.earlier同型・ja/en対称)
+- **副次整理**: row→Source写像を`_source_of`に集約——sources_for_notebook・新設list_sources_page・get_sourceの3箇所が同一コンストラクタを複製していた(drift予防、動作不変)
+- **行動ピン2件**: cap+omitted+newest保持+counts真値(patch縮小)・/sources端点(newest-first・offset/limit・total・400/404)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし(新端点はdispatch既存機構)
+
+### v0.2.693 — import文書フィールドを書込経路と同一契約で検証(語彙・範囲・utf8)
+
+- **新規短所77解消(ソクラテス問いで発掘)**: 「import文書のフィールドは書込経路と同じ語彙/範囲検証を受けるか」——`import_notebook`の文書検証はキー存在+若干の型検査のみで、`_insert_tree_rows`はフィールドを**verbatim bind**。writer経路(`add_source`/`add_studio_output`/`add_message`/`update_source_weight`)が強制する SOURCE_KINDS/STUDIO_KINDS/role語彙と有限weight範囲・`_utf8`符号化検査を全て迂回——細工exportで語彙外kind/roleがphantom行として永続化(どのcallerも上書き不能)、Infinity weightが格納、NaN weight/dict型フィールド/単独サロゲートがraw IntegrityError・InterfaceError・UnicodeEncodeError(=500)で生死——「異形文書はcoded拒否」契約の未カバー面
+- **入口検証でwriter契約を強制**: sources(kind∈SOURCE_KINDS・weight有限0..SOURCE_WEIGHT_MAX・title/origin/sha256/added_at)、chunks(text/context・seq/embedding_norm数値性)、notes/studio/messages(strフィールド+studio kind∈STUDIO_KINDS+role∈user/assistant)。新ヘルパー`_import_str`が非str→coded・サロゲートは`.encode("utf-8")`のValueError経由で同coded NOTEBOOK_IMPORT_INVALID
+- **行動ピン1件**: malformed-casesに7件追加——語彙外src/studio kind・語彙外role・NaN/Inf weight・サロゲート・非strフィールド(coded拒否+nb数不変)
+- **カタログ追随1件**: raise-inventory store.py +5(_import_str・kind×2・weight・role)
+
+### v0.2.692 — import文書のsource id重複をcoded拒否(誤帰属の閉塞)
+
+- **新規短所76解消(ソクラテス問いで発掘)**: 「export→importで文書の整合性は検証されるか」——`_insert_tree_rows`は`id_map[doc_src_id]=新rowid`でchunkとcitation_report.source_id_mapを新idへ再写像するが、`import_notebook`の文書検証は`src_ids`をsetとして構築するため**同一idを2度持つsource行を重複として検出しない**。細工exportで`sources`に同idの2行を置くとid_mapが後勝ちで潰れ、そのidへ結合する全chunkとreport remapが無言で最後のsource行へ誤帰属(先行のsource行は0チャンクの空殻として残る)——「出典が違う文書の内容」を表示する永続的な誤属性
+- **入口検証で拒否**: 検証ループ先頭で`s["id"] in src_ids`をmembership検査し重複を`NOTEBOOK_IMPORT_INVALID`で拒否——TX未到達で部分importなし。merge/trash_restoreは自前の生存行/アーカイブ由来で一意idが構造保証されるため入口のみの最小変更(信頼境界はimport文書)
+- **行動ピン1件**: `test_import_rejects_malformed_documents`のcasesに「同一source dictを2度列挙した文書」を追加——coded拒否+nb数不変を他casesと同型で検証
+- **カタログ追随1件**: raise-inventory store.py +1(NOTEBOOK_IMPORT_INVALID)
+
+### v0.2.691 — HTTP同時接続数をセマフォで上限化(MAX_IN_FLIGHT_REQUESTS)
+
+- **新規短所75解消(ソクラテス問いで発掘)**: 「寿命が有界でも数が無制限の資源は残っていないか」——`ThreadingHTTPServer`は接続ごとにスレッドを**無制限生成**する。`REQUEST_SOCKET_SEC`(120s)は各接続の寿命を制限するが接続「数」は無制限のまま、ローカルの暴走/敵性プロセスが数千接続を保持するとスレッド枯渇(約8MB/スレッドのスタック→メモリ枯渇またはcan't start new thread)——タイムアウトが効く前に全要求が失敗する回復不能経路
+- **`MAX_IN_FLIGHT_REQUESTS = 64`**: `process_request`でBoundedSemaphoreをaccept loop内acquire——過剩接続はカーネルlisten backlogへ滞留(無制限スレッドではなく有界待機)。スロットは`process_request_thread`のfinallyで確実解放、各保持はREQUEST_SOCKET_SECで有界のためプールは原理的にデッドロック不能
+- **行動ピン1件**: cap=1で第1接続(partial request占有)中に第2接続の完全要求が1秒で応答なし(ゲート滞留)→第1切断後にスロット解放・第2要求が200応答——滞留と解放の両面を実ソケットで検証
+- **カタログ追随1件**: time/threading-call inventory server.py +1(`threading.BoundedSemaphore`——新スレッド源ではなく有界プリミティブ)
+
+### v0.2.690 — evalのcases/--diff baseline文書をMAX_IMPORT_BYTESで上限化
+
+- **新規短所74解消(ソクラテス問いで発掘)**: 「上限の無い全量読込は残っていないか」の残面——681で`shoin import`の文書を閉塞したが、`shoin eval`のcasesファイルと`--diff`ベースラインは依然read_text全量読込+無制限json.loadsだった。同一の「parse到達前のOOM死」欠陥クラスの残存経路(巨大cases/baselineでresident set爆走・codedエラー未到達)
+- **同一定数で3入口を制御**: `MAX_IMPORT_BYTES`(1GiB)は「CLIが一度にメモリへ読込むJSON文書の上限」の意味論へ一般化——cases文書はstat()事前検査+読取再検査の2層、baseline文書も同型(ファイルパス経路のみ・stdin面なし)。拒否は各文書名を名指ししたVALIDATION_FIELD_FORMAT_INVALID
+- **行動ピン1件**: MAX_IMPORT_BYTESをpatchで縮小しcases stat-gate・--diff baseline gateの両拒否(coded VALIDATION_FIELD_FORMAT_INVALID)を検証
+- **カタログ追随1件**: raise-inventory cli.py +4(oversize(ref)x2・base_oversize(ref)x2——coded実体1つずつを複数サイトでref-raise)
+
+### v0.2.689 — source/note restoreの親nb同一性検証(rowid再利用誤帰属の閉塞)
+
+- **新規短所73解消(ソクラテス問いで発掘)**: 「id再利用の影響はprobeの範囲内か」の残面——`_restore_trashed_source`/`_restore_trashed_note`の親nb存在確認は`SELECT 1 FROM notebooks WHERE id=?`の**idのみ**だった。nb削除→`INTEGER PRIMARY KEY`再利用(max+1)で無関係の新規nbが同idを得ると、親確認を素通りして**削除済みnb由来のsource/noteが無関係nbへ誤帰属**——undo-logが間違ったノートブックを汚染する永続的誤り(686のPK衝突と同じrowid再利用族の別面:あちらはprobe範囲外のINSERT衝突、こちらはprobe自体の誤判定)
+- **id+created_at組で同一性検証**: delete時アーカイブに`nb_created_at`を同梱し、restore時`SELECT created_at FROM notebooks WHERE id=?`で照合——再利用rowidはcreated_atが必ず異なる(µs分解能)ため「id一致+created_at不一致=親nb消失」として`NOTEBOOK_NOT_FOUND`拒否。旧形式payload(キー無し)はidのみ検査へフォールバック(undo機能の互換維持)
+- **行動ピン2件**: ①再利用rowidへのsource/note restore→coded NOTEBOOK_NOT_FOUND・無関係nb無変更・アーカイブ温存・真の親restore後は復元成功 ②nb_created_at欠落payload→idのみプローブで復元(back-compat)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.688 — source_idsスコープlistの件数上限化(MAX_SCOPE_IDS)
+
+- **新規短所72解消(ソクラテス問いで発掘)**: 「数で書ける全ての入力に上界はあるか」——`_optional_id_list`は要素型(正整数・非bool・i64範囲)のみ検査で**件数無制限**だった。`_read_json`の10MBボディ内で数百万idを送ると、ask/search両経路がSSEヘッダ前の検証でid毎に`get_source`をループ——要求スレッド上で無制限のSELECT燃焼(per-requestスレッドモデルで繰返し要求はスレッド枯渇へ蓄積)。検証loopを通過した場合も`json_each`が巨大配列を走査する二次面
+- **`MAX_SCOPE_IDS = 4096`**: 実nbのソース数を大きく超過しつつ、検証loop(4096 SELECT≒ms級)とjson_each走査を軽量に制限。超過は`VALIDATION_FIELD_FORMAT_INVALID`(400)——「malformed scope」として一貫した契約
+- **却下案(単一SQL存在検証)記録**: `WHERE id IN json_each`の一括検証化も検討したが、per-id404応答の既存契約とピン群を維持するため上限化の最小修正に留めた
+- **行動ピン1件**: MAX_SCOPE_IDS+1件のscope list→400 coded拒否(ask経路・searchは同一helperで自動カバー)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.687 — mergeを単一TX化(serialize→delete間の零落閉塞)
+
+- **新規短所71解消(ソクラテス問いで発掘)**: 「683/685で塞いだcheck-then-actギャップは書込系の残経路にも無いか」——`merge_notebooks`はsource nbをauto-commitでserialize(`_notebook_tree_dict`)し、copy TXコミット後に`delete_notebook`を2段実行していた。serialize〜delete間に外部writerがsource nbへコミットすると、その行はdelete側のarchiveに入るがcopyには含まれず、mergeの「全内容がtargetへ」契約から零落(手動trash restoreでのみ回復可能・lostでなくmisplacedだが不変条件違反)
+- **単一BEGIN IMMEDIATE化**: serialize→copy→archive→deleteを1TXへ——「コミット間のduplicate許容」より強い原子性(crash時も全rollbackでduplication/loss共にゼロ)。archive payloadは同一serialize結果を流用(ロック下で「消したもの」と「コピーしたもの」が同一であることを保証)
+- **archiveはdelete_notebookと同形**: `INSERT INTO trash_items(notebook_id, name, deleted_at, payload)`を直接実行(ネストしたwith不可のためinline)——`trash_restore`/`trash_list`の挙動は不変、巻戻しでmerge前のsource nbが復元される既存契約を維持
+- **re-probe**: ロック獲得後にtargetの存在を再確認——ロック獲得前のprobe結果は陳腐化し得る(683と同じ防御形)
+- **行動ピン2件**: ①serialize/optimize両シームでin_transaction=True+外部writer 50ms busy_timeout blocked ②copy失敗で全rollback( source nb生存・trash 0件・target不変——crash原子性ピン )
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.686 — nbツリーrestoreの子行をfresh rowid化(rowid再利用によるPK衝突閉塞)
+
+- **新規短所70解消(ソクラテス問いで発掘)**: 「id再利用の影響はprobeの範囲内か」——`_restore_notebook_tree`がsources/chunks/notes/studio_outputs/messagesの全idをアーカイブ値のまま逐字INSERTしていた。`INTEGER PRIMARY KEY`(rowid)は`max(rowid)+1`で再利用されるため、削除後に別nb/別ソースが同じidを取ると、nb idのみをプローブした範囲外でINSERTがraw `IntegrityError`(PK衝突)を起こしcoded拒否契約を迂回——単一ライターの並行問題でなく永続状態由来の決定的衝突
+- **`_insert_tree_rows`へ委譲**: import/mergeで既に採用済みの「fresh id再挿入+id_map経由report書換え」共有ライターへ変更——冗長な5系統INSERT loopを除去し、dedupe・chunk上限不変条件・report remapを継承。nb行自身のみ元id維持(`NOTEBOOK_ALREADY_EXISTS`プローブ契約は既存通り)
+- **`source_chunk_ids`もremap**: 報告JSONは`{S#: [chunk_ids]}`のchunk rowidも保持しており、全再挿入経路(import/merge含む)で死んだまたは無関係な行を指していた——`_remap_report_source_ids`に`chunk_map`を追加し`_insert_tree_rows`が構築する`chunk_id_map`で書換え
+- **`_restore_trashed_source`のchunkもfresh rowid化**: source本体は元id+プローブ契約(既存`SOURCE_ALREADY_EXISTS`)を維持、子chunkのみfresh id——rowid再利用での衝突を同じく閉塞
+- **境界(記録)**: source単体restore後、既存メッセージ報告内の旧chunk id参照は解決不可のまま(削除時点で既に死んでおり、生nbの他行はarchive外で書換対象外)
+- **行動ピン2件**: ①削除→別nb取込でrowid再利用後のrestore成功(旧コードではPK衝突)+counts一致+fresh id非衝突 ②報告の`source_id_map`/`source_chunk_ids`が両方ともlive行へ解決されることの直接検証
+- **既存テスト2件のlookup更新**: chunk行をarchived idでなく(source sha, seq)/(source_id, seq)で引く——「同じ論理chunk」を新idで引く形へ
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.685 — trash系restoreをBEGIN IMMEDIATE化(probe→INSERT間TOCTOU閉塞)
+
+- **新規短所69解消(対称ソクラテス問いで発掘)**: 「v0.2.683で塞いだcheck-then-actギャップはrestore側にも残っていないか」——`_restore_notebook_tree`/`_restore_trashed_source`/`_restore_trashed_note`の存在確認probe(`ALREADY_EXISTS`/`NOTEBOOK_NOT_FOUND`/`SOURCE_ALREADY_EXISTS`)が`with self.conn:`**外**のauto-commit読取だった。probeとINSERTの隙間に別writerがコミットすると:coded拒否の代わりに①nb idを取られたケースはINSERTがPK衝突でraw `IntegrityError`(500系) ②親nb消失はFK違反——「undo-logの復活経路がcoded契約を迂回する」穴
+- **全3経路を`BEGIN IMMEDIATE`開始へ**(683と同一パターン): probe自体がwrite lock下で走り、WAL単一writer制約で外部コミットはTX期間中busy_timeout待ち——probe結果がINSERT時点まで有効。`with`内raiseのためTXロールバックでアーカイブ行は保持(既存「conflict→coded拒否+archive kept」テストで追随確認)
+- **境界(記録)**: restoreを選んだ時点で存在していた親/空きidに対してのみ判定——restore中に届いたcreateはロック解放後にコミットされるが、その時点では行は既にinsert済み(双方が「先に取った方が勝つ」で一貫)
+- **行動ピン1件**: 3種restore(nb/source/note)それぞれのin-TXシームでin_transactionかつ外部writer(50ms busy_timeout)のINSERTがblocked——probe→INSERT間がlock下であることの直接実証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
+
+### v0.2.684 — refreshQuestionsの_llmOnガード除去(オフライン推奨質問の無到達を解消)
+
+- **Devin Review finding修正(#358のbug #3)**: UI `refreshQuestions`が`!window._llmOn`で早期returnしていたため、LLM不通用に実装されたサーバー側`_title_questions`フォールバック(v0.2.660)がUIでは**完全に無到達**だった——オフラインでソースを持つノートブックを開いても推奨質問chipsは常にゼロ(フォールバックが存在する意義そのものが潰れていた)
+- **ガードから`_llmOn`節を除去**: 質問の有無を端点側が判定する設計へ委譲——`GET /api/notebooks/{id}/questions`はLLM到達時は生成質問・不通時はタイトル由来骨格質問を返し、UIは表示のみ担う。`_llmOn`自体は健康バナー表示用として維持(1022-1041のlamp/banner面)
+- **境界(記録)**: オフライン時の端点呼出は`llm.chat`失敗→フォールバック経路でbounded(retry/backoff済み·接続refused系は高速失敗)。「LLMが死んでいる間は質問問欄を畳む」というUX選択肢もあったが、骨格質問を表示する方が「このノートブックで何が聞けるか」を常に示せるため採用
+- **行動ピン更新**: `test_refreshQuestions_chips_guards_and_race`のllm off分岐を「fetchせずchipsゼロ」→「fetch+chips描画」へ反転——フォールバック到達を直接実証
+- **カタログ追随ゼロ**: JS変更のみ(raise/except/lower/find/importsドリフトなし)
+
+### v0.2.683 — trash系deleteをBEGIN IMMEDIATE化(serialize→DELETE間TOCTOU閉塞)
+
+- **Devin Review finding修正(#358のbug #2)**: `delete_notebook`/`delete_source`/`delete_note`はアーカイブpayloadを`with self.conn:`**外**のauto-commit SELECTで読み取り、INSERT..DELETE間だけTX化していた——deferred beginのためpayload読取はwrite lock無しで走り、serializeとDELETEの隙間に別writerがコミットした行(add_source/add_chunks/add_note/add_message/update系)は**アーカイブ無しでcascade削除**され不可逆消失(undo-log契約の破断)
+- **全3経路を`with`ブロック先頭の`BEGIN IMMEDIATE`へ**: payload読取自体がwrite lock下で走り、WAL単一writer制約で外部コミットはTX期間中busy_timeout待ち——payloadが削除対象と必ず同一スナップショットを映す
+- **境界(記録)**: delete開始後に届いた書込はロック解放後に実行されるが、その時点では対象行は既に削除済み——FK ONで未親行はrefuse(従来と同じ拒否経路)
+- **行動ピン1件**: 3経路それぞれのserialize時点でin_transactionかつ外部writer(50ms busy_timeout)のINSERTがblocked——deferred beginでは即コミット成功するためfixの実在を直接実証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(BEGIN IMMEDIATEはSQLリテラル)
+
+### v0.2.682 — dedupeは同一コーパス限り(編集済みchunkの消失を閉塞)
+
+- **Devin Review finding修正(#358への4件レビューのbug #1)**: `update_chunk_text`はchunk本文を編集するが`source.sha256`(取込元のハッシュ)を変更しない——編集済みコピーは**古いラベル**を持つ。v0.2.679のdedupeは「同sha=同本文」前提だったため、編集済みソースを同shaの未編集ソースを持つnbへmergeすると**編集が静かに捨てられた**(実検証で消失を確認)
+- **dedupeにコーパス一致を要求**: 同shaであっても`SELECT seq,text ORDER BY seq`の全量一致でのみ既存行へid_map折返し——「同sha・別コーパス」は文書のshaが自身の内容を記述していないため、文書自身のchunksからsha256を再計算(salt反復で衝突解消)してUNIQUEを満たし**両版を保持**
+- **in-document dupにも同一経路**: pending ownerをdoc dictとして保持し、文書内の「同sha・別本文」も再ラベル(681テストを全コーパス複製に訂正——部分コーパスは別内容として保持が正解)
+- **境界(記録)**: context(パンくず)/embeddingの差分は同一コーパス扱い——dedupeは本文の同一性判定であってメタ差の伝搬ではない(既存行のcontextを保持)。`context`の新しい方への更新はreindexと同じ修復経路で賄う
+- **行動ピン3件**: merge=同sha編集済み→2ソース両テキスト生存+UNIQUE満足+FTS索引・import=文書内同sha別テキスト→再ラベルで3ソース・dedupe経路(679)は全コーパス複製で不変維持
+- **カタログ追随ゼロ**: raise/except/`.lower()`/find/imports(hashlibはcapability watched外)ドリフトなし
+
+### v0.2.681 — `shoin import` の文書サイズ上限(MAX_IMPORT_BYTES)
+
+- **新規短所65解消(ソクラテス監査で発掘)**: 「上限の無い入力経路は残っていないか」の問いで発掘——`POST /api/notebooks/import` は `_read_json` が `MAX_UPLOAD_BYTES`(10MB)で制御済みだが、CLI `shoin import <file>`・`import -`(stdin) は `read_text`+`json.loads` で**文書を無制限に全量読込**。細工・誤生成の巨大export(数百MB〜GB)でプロセスがパース途中OOM死する経路だった——パース失敗前にメモリ自体を要求するので coded エラーにも到達しない
+- **`MAX_IMPORT_BYTES = 1 << 30`(1GiB)**: 最大正規export(50kチャンク×本文+base64 embedding≈数百MB)に十分な余裕を残しつつ、敵性文書が強制し得るresident setを制限。file経路は stat() で事前拒否(extract_fileと同パターン)+成長ファイル用に読取自体も上限再検査、stdinはstat不可のためbounded read(MAX+1)のみ
+- **拒否はcoded**: `NOTEBOOK_IMPORT_INVALID`で文書が巨大なことを明示——部分的なインポートは発生しない(json.loads前の拒否のためTX未到達)
+- **副次修正**: stdin経路が locale decode → 厳密 utf-8 へ(file経路と同一のデコード契約——非UTF-8ロケールでの暗黙mojibake解消)
+- **境界(記録)**: API側10MB上限は据置き——UIから>10MBのexportを再importするにはCLI経路(設計上の分業)。evalのcases/--diffファイルはユーザー自作の診断入力で同一クラスに非ず(記録済み境界)
+- **行動ピン1件**: MAX_IMPORT_BYTESをpatchで縮小し、file stat-gate・stdin流の両拒否(coded+nb数不変)を検証
+- **カタログ追随1件**: raise-inventory cli.py +3(oversize拒否3サイト)
 
 ### v0.2.680 — 非正規ファイルの永久ブロック経路を閉塞(is_file gate)
 

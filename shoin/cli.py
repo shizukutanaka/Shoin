@@ -7,15 +7,16 @@ product is fully usable headless (REQ-103).
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
-import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
     EMBED_MODEL_SETTING_KEY,
+    MAX_IMPORT_BYTES,
     MAX_QUESTION_LEN,
     MAX_TITLE_LEN,
     TOP_K,
@@ -36,6 +37,8 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
+from .log import one_line as _one_line
+from .log import safe_text as _safe_text
 from .pipeline import (
     index_source,
     refresh_all_sources,
@@ -70,29 +73,28 @@ def _port_num(value: str) -> int:
     return n
 
 
-def _one_line(text: str) -> str:
-    """Render an externally-controlled string safe for single-line output.
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: sibling temp file + os.replace.
 
-    Status rows and label fields are emitted one-per-line; a stored title,
-    CLI argument, or env value containing a control character (\n, \r, ESC,
-    U+2028…) would split the row or rewrite earlier terminal output — a forged
-    `✓` line is indistinguishable from a real one. Escaping preserves the row
-    shape and keeps the original bytes readable.
+    A plain write_text that is interrupted mid-write (Ctrl-C, kill,
+    disk-full) leaves a half-written JSON document behind — the next
+    `eval --diff` then dies parsing a corrupt baseline that reads as a
+    save the user believed succeeded. The pid-suffixed temp keeps two
+    concurrent invocations from clobbering each other's staging file.
     """
-    out: list[str] = []
-    for ch in text:
-        if ch == "\n":
-            out.append("\\n")
-        elif ch == "\r":
-            out.append("\\r")
-        elif ch == "\t":
-            out.append("\\t")
-        elif unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
-            cp = ord(ch)
-            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
-        else:
-            out.append(ch)
-    return "".join(out)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StoreError("SYSTEM_IO_ERROR", f"cannot write file: {exc}") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# v0.2.717: the terminal-escape helpers live in log.py (the output leaf)
+# so non-CLI warn paths (qa's embed-model warning) can share them, and the
+# Cf category was added — bidi overrides are the same spoofing class as ESC.
 
 
 _STRINGS: dict[str, dict[str, str]] = {
@@ -570,7 +572,7 @@ def _print_report(report: CitationReport) -> None:
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
         section = section_map.get(f"S{c}", "")
-        sec = f" (§ {section})" if section else ""
+        sec = f" (§ {_one_line(section)})" if section else ""
         bits = [
             f"{_t('cite.found_' + kind)} #{int(v)}"
             if kind != "lex"
@@ -691,7 +693,7 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     print(_t("health.llm_ok", v=_t("health.yes") if avail else _t("health.no")))
     print(_t("health.model", v=_one_line(llm_model())))
     em = embed_model()
-    print(_t("health.embed_model", v=em if em.strip() else _t("health.embed_model_off")))
+    print(_t("health.embed_model", v=_one_line(em) if em.strip() else _t("health.embed_model_off")))
     # v0.2.661 (product-review #17): name the model that built the stored
     # vectors; when it diverges from the configured one, vector search is
     # silently disabled — print the same repair hint ask/search emit.
@@ -735,7 +737,7 @@ def _human_bytes(n: int) -> str:
 def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
     nb = store.get_notebook(int(args.notebook_id))
     s = store.notebook_stats(nb.id)
-    print(_t("stats.name", v=nb.name))
+    print(_t("stats.name", v=_one_line(nb.name)))
     print(_t("stats.sources", n=str(s["sources"])))
     print(_t("stats.chunks", n=str(s["chunks"])))
     print(_t("stats.notes", n=str(s["notes"])))
@@ -785,19 +787,38 @@ def _cmd_import(store: Store, args: argparse.Namespace) -> int:
     export|import pipes work."""
     import json
 
+    oversize = StoreError(
+        "NOTEBOOK_IMPORT_INVALID",
+        f"export document exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+    )
     try:
+        # v0.2.681: bound the document BEFORE json.loads — the file/stdin used
+        # to be read in full with no cap, so a hostile or accidental giant
+        # export OOM-killed the process mid-parse. Stat the file first like
+        # extract_file does, then bound the read itself for a file that grew
+        # (or a stdin stream, which has no stat).
         if str(args.file) == "-":
-            raw_text = sys.stdin.read()
+            raw_bytes = sys.stdin.buffer.read(MAX_IMPORT_BYTES + 1)
+            if len(raw_bytes) > MAX_IMPORT_BYTES:
+                raise oversize
         else:
-            raw_text = Path(str(args.file)).expanduser().read_text(encoding="utf-8")
-        raw = json.loads(raw_text)
+            p = Path(str(args.file)).expanduser()
+            if p.stat().st_size > MAX_IMPORT_BYTES:
+                raise oversize
+            raw_bytes = p.read_bytes()
+            if len(raw_bytes) > MAX_IMPORT_BYTES:
+                raise oversize
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except OSError as exc:
         raise StoreError(
             "SYSTEM_IO_ERROR", f"cannot read export file: {exc}"
         ) from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         # Same classification as _cmd_eval's cases file: a non-UTF-8 or
         # non-JSON file is a 400-class input defect, never a traceback.
+        # v0.2.718: RecursionError too — a deeply nested doc (server.py's
+        # _read_json already codes the same shape) must not fall through to
+        # the catch-all's SYSTEM_INTERNAL_ERROR: input defect, not 500.
         raise StoreError(
             "NOTEBOOK_IMPORT_INVALID", f"export file is not valid JSON: {exc}"
         ) from exc
@@ -828,7 +849,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         if args.gen == "-":
             print(payload, end="")
         else:
-            Path(str(args.gen)).expanduser().write_text(payload, encoding="utf-8")
+            _atomic_write_text(Path(str(args.gen)).expanduser(), payload)
             print(
                 _t(
                     "eval.gen_saved",
@@ -842,15 +863,30 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             "VALIDATION_REQUIRED_FIELD_MISSING",
             "missing cases file (or --gen to scaffold one)",
         )
+    oversize = StoreError(
+        "VALIDATION_FIELD_FORMAT_INVALID",
+        f"cases file exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+    )
     try:
-        raw = json.loads(Path(str(args.cases)).expanduser().read_text(encoding="utf-8"))
+        # v0.2.690: same bound as _cmd_import — the cases file was read in
+        # full with no cap, so a giant file OOM-killed the process before
+        # the coded parse errors below could apply. Stat first, then bound
+        # the read for a file that grew between the two.
+        p = Path(str(args.cases)).expanduser()
+        if p.stat().st_size > MAX_IMPORT_BYTES:
+            raise oversize
+        raw_bytes = p.read_bytes()
+        if len(raw_bytes) > MAX_IMPORT_BYTES:
+            raise oversize
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # UnicodeDecodeError comes from read_text's strict UTF-8 decode — a
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        # UnicodeDecodeError comes from the strict UTF-8 decode — a
         # non-UTF-8 file is definitionally not JSON, and neither it nor
         # JSONDecodeError is an OSError, so without this both escape main()'s
-        # handler chain as a raw traceback.
+        # handler chain as a raw traceback. RecursionError (v0.2.718): a
+        # deeply nested file is the same 400-class defect, not a 500.
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"cases file is not valid JSON: {exc}",
@@ -873,19 +909,31 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     if args.save:
         from .evaluate import report_to_dict
 
-        Path(str(args.save)).expanduser().write_text(
+        _atomic_write_text(
+            Path(str(args.save)).expanduser(),
             json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
-            encoding="utf-8",
         )
         print(_t("eval.saved", f=_one_line(str(args.save))))
     if args.diff:
         from .evaluate import diff_reports, report_from_dict
 
+        base_oversize = StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"baseline file exceeds {MAX_IMPORT_BYTES // (1 << 30)}GB limit",
+        )
         try:
-            base_raw = json.loads(Path(str(args.diff)).expanduser().read_text(encoding="utf-8"))
+            base_p = Path(str(args.diff)).expanduser()
+            if base_p.stat().st_size > MAX_IMPORT_BYTES:
+                raise base_oversize
+            base_bytes = base_p.read_bytes()
+            if len(base_bytes) > MAX_IMPORT_BYTES:
+                raise base_oversize
+            base_raw = json.loads(base_bytes.decode("utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            # RecursionError (v0.2.718): deeply nested baseline = same
+            # 400-class input defect as malformed JSON, not a 500.
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
             ) from exc
@@ -1056,7 +1104,7 @@ def _cmd_check(db: str | None) -> int:
         return 1
     print(_t("check.integrity", v=str(res["integrity"])))
     for line in res["integrity_errors"]:
-        print(f"  {line}")
+        print(f"  {_one_line(line)}")
     print(_t("check.fk", n=str(res["fk_violations"])))
     print(
         _t(
@@ -1101,7 +1149,10 @@ def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
         if not messages:
             print(_t("msg.empty"))
         for m in messages:
-            print(f"[{m['id']}] {m['role']}: {m['body']}")
+            print(
+                f"[{m['id']}] {_one_line(str(m['role']))}:"
+                f" {_safe_text(str(m['body']))}"
+            )
     elif action == "clear":
         store.clear_messages(int(args.notebook_id))
         print(_t("msg.cleared"))
@@ -1155,7 +1206,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     deltas: list[str] = []
 
     def _emit(delta: str) -> None:
-        print(delta, end="", flush=True)
+        print(_safe_text(delta), end="", flush=True)
         deltas.append(delta)
 
     answer = ask(
@@ -1175,7 +1226,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         # mid-answer into the degraded path — the already-emitted partial stays
         # visible and the final answer is printed in full, matching the SSE
         # contract that partial text is real and persisted.
-        print(answer.text)
+        print(_safe_text(answer.text))
     # A non-degraded answer can still legitimately carry an empty report — e.g.
     # the model correctly follows the system prompt's "say so explicitly" rule
     # for a fact not in the sources, which uncited_sentences() deliberately
@@ -1190,7 +1241,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
-    print(result.body)
+    print(_safe_text(result.body))
     if _report_has_output(result.report):
         print("---")
         _print_report(result.report)
@@ -1199,7 +1250,7 @@ def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
 
 def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     for q in suggest_questions(store, llm, int(args.notebook_id)):
-        print(f"- {q}")
+        print(f"- {_safe_text(q)}")
     return 0
 
 
@@ -1227,7 +1278,12 @@ def _cmd_search(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     if not hits:
         suggestions = suggest_corrections(store, None, question)
         if suggestions:
-            print(_t("search.suggest", terms=" ".join(suggestions)))
+            print(
+                _t(
+                    "search.suggest",
+                    terms=" ".join(_one_line(s) for s in suggestions),
+                )
+            )
     for i, h in enumerate(hits):
         nb_id, nb_name, title = meta.get(h.source_id, (0, "", ""))
         print(
@@ -1311,7 +1367,7 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
         for r in results:
             status = str(r["status"])
             tally[status] = tally.get(status, 0) + 1
-            line = f"[{r['id']}] {r['title']}: {status}"
+            line = f"[{r['id']}] {_one_line(str(r['title']))}: {status}"
             if status == "failed":
                 line += f" ({r['code']})"
             print(line)
