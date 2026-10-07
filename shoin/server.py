@@ -83,7 +83,13 @@ from .qa import (
     _t as _qa_t,
 )
 from .search import suggest_corrections
-from .store import Source, Store, StoreError
+from .store import (
+    Source,
+    Store,
+    StoreError,
+    validate_notebook_settings,
+    validate_source_meta,
+)
 from .studio import (
     KINDS,
     generate,
@@ -903,6 +909,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_REQUIRED_FIELD_MISSING",
                 "missing field: name or settings",
             )
+        # v0.2.728 (#112): a multi-field PATCH must validate every field
+        # before the first write — the settings rejection previously ran
+        # inside update_notebook_settings AFTER rename_notebook had already
+        # committed, so the 400 response left the new name persisted.
+        if settings is not None:
+            validate_notebook_settings(settings)
         with Store(self.db) as store:
             nb = store.get_notebook(nb_id)
             if name is not None:
@@ -1137,6 +1149,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "VALIDATION_REQUIRED_FIELD_MISSING",
                 "missing field: title, weight, or meta",
             )
+        # v0.2.728 (#112): a multi-field PATCH must validate every field
+        # before the first write — the meta rejection previously ran after
+        # update_source_weight had already committed, so the 400 still left
+        # the new weight persisted.
+        if meta is not None:
+            validate_source_meta(meta)
         with Store(self.db) as store:
             src = store.get_source(src_id)
             if weight is not None:

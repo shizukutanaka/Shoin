@@ -2604,6 +2604,30 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_src_patch_rejection_leaves_no_field_applied(self) -> None:
+        """v0.2.728 (#112): a multi-field PATCH validates every field before
+        the first write — previously an oversize meta ran AFTER the weight
+        update had already committed, so the 400 left the weight persisted."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "atomic"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        from shoin.store import Store
+
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "m.txt", "mem://m", "sha-m")
+            store.add_chunks(src.id, ["本文"])
+
+        # good weight + bad meta: 400 and weight must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/sources/{src.id}",
+            {"weight": 5.0, "meta": {"k": "x" * 5000}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["sources"][0]["weight"], 1.0)
+        self.assertEqual(detail["sources"][0]["meta"], {})
+
     def test_nb_patch_settings(self) -> None:
         """v0.2.659: PATCH /api/notebooks/{id} accepts {"settings"} — the
         per-notebook retrieval overrides (product-review #20), echoed back
@@ -2667,6 +2691,36 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+
+    def test_nb_patch_rejection_leaves_no_field_applied(self) -> None:
+        """v0.2.728 (#112): a multi-field PATCH validates every field before
+        the first write — previously a settings rejection ran AFTER the
+        rename committed, so the 400 still left the new name persisted.
+        Both directions must leave state untouched."""
+        status, nb = self._json("POST", "/api/notebooks", {"name": "atomic"})
+        nb_id = nb["id"]
+
+        # good name + bad settings: 400 and the name must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "renamed", "settings": {"nope": 1}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "atomic")
+        self.assertEqual(detail["settings"], {})
+
+        # bad name + good settings: 400 and settings must NOT persist.
+        status, err = self._json(
+            "PATCH", f"/api/notebooks/{nb_id}",
+            {"name": "x" * 500, "settings": {"top_k": 4}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+        _, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(detail["name"], "atomic")
+        self.assertEqual(detail["settings"], {})
 
 
 class NonStreamingLLMTest(unittest.TestCase):

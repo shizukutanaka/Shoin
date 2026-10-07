@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.727
+## Version History: v0.1.37 → v0.2.728
+
+### v0.2.728 — 複数フィールドPATCHの部分適用tearを閉塞(400応答で先段が永続化)
+
+- 短所112: PATCH /api/notebooks/{id} `{name,settings}`とPATCH /api/sources/{id} `{weight,meta,title}`はフィールド毎に別writer(=別TX)を直列実行——後段フィールドのstore内検証拒否が先段のコミット後に発火し、400応答なのに先段フィールドは永続化済み(応答/適用不整合: PATCH原子性の破れ)。検証を`validate_notebook_settings`/`validate_source_meta`のstore公開helperへ抽出しwriterは自前検証を保持したままhandlerが初回書込み前に全フィールド検証——全方向の入力拒否で状態不変。残存: 検証は通るがnb/sourceがwriter間に削除されるTOCTOU(NOT_FOUND mid-flight)は従来通りdocumented。
 
 ### v0.2.727 — scope所属検証をretrieval snapshot内へ統合(CLI検証欠落も閉塞)
 

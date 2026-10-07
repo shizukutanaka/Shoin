@@ -251,6 +251,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~109~~ | `_title_questions`がfallback時にsnapshot外で`sources_for_notebook`を再読——2読取り間のrenameで新title名指し質問が旧corpusを記述するfpキーでcache(#107のfallback残存面) | v0.2.725 snapshot内の同一sourcesをtitlesとして再利用(第2読取り消去)+`not in titles`死ガード除去+`sources_for_notebook`呼出1回ピン |
 | ~~110~~ | multi_query有効時、rewrite(chat)+per-rewrite embed LLM呼出がcallerの`read_snapshot()`内で実行——WAL読取点をネットワーク往復時間分ピン留めし並行writer追加分をcheckpoint不能(WAL肥大化) | v0.2.726 `prepare_retrieval`(LLM相・snapshot外)+`retrieve_prepared`(store相・snapshot内)へ分解、snapshot保持4 callerで相分離+全LLM呼出snapshot外発火の行動ピン |
 | ~~111~~ | `source_ids`所属検証がretrieval snapshot外(検証とscoped readが別コミット点のtear——間のdelete+re-addでvalidated idが他nbソースへ再利用され他nb chunk混入)+CLI `ask --source`は検証自体欠落 | v0.2.727 `check_source_scope`をqa.ask/両handlerのsnapshot内へ統合——CLIもqa.ask経由で同一SOURCE_NOT_FOUND契約+get_source全呼出snapshot内発火ピン |
+| ~~112~~ | 複数フィールドPATCH(nb name+settings・src weight+meta)が別TX直列で後段拒否時に先段永続化(400応答で部分適用) | v0.2.728 `validate_notebook_settings`/`validate_source_meta`公開helper化+初回書込み前の全フィールド検証——両directionの行動ピン |
 
 ### 解決済み(記録)
 

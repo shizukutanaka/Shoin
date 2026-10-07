@@ -440,6 +440,61 @@ def _meta_dump(meta: dict[str, Any]) -> str:
     )
 
 
+def validate_source_meta(meta: Any) -> None:
+    """Enforce the source-meta contract: dict, JSON-serializable,
+    serialized form ≤ SOURCE_META_MAX — shared by update_source_meta and
+    request-side pre-validation so a multi-field PATCH rejects before the
+    first write, never after a sibling field already committed (v0.2.728).
+    """
+    if not isinstance(meta, dict):
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"meta must be a JSON object, got {type(meta).__name__}",
+        )
+    try:
+        text = _meta_dump(meta)
+    except (TypeError, ValueError) as e:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            "meta must be JSON-serializable",
+        ) from e
+    if len(text.encode("utf-8")) > SOURCE_META_MAX:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"meta exceeds {SOURCE_META_MAX} bytes",
+        )
+
+
+def validate_notebook_settings(settings: Any) -> None:
+    """Enforce the notebook settings contract: NB_SETTING_KEYS only,
+    bounded non-bool ints (config.py bounds mirror).
+
+    Shared by update_notebook_settings and request-side pre-validation —
+    a multi-field PATCH validates every field before the first write so a
+    rejection never lands after a sibling field already committed
+    (v0.2.728).
+    """
+    if not isinstance(settings, dict):
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"settings must be a JSON object, got {type(settings).__name__}",
+        )
+    unknown = sorted(k for k in settings if k not in NB_SETTING_KEYS)
+    if unknown:
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID",
+            f"unknown settings keys: {', '.join(unknown)} "
+            f"(allowed: {', '.join(NB_SETTING_KEYS)})",
+        )
+    for key, value in settings.items():
+        lo, hi = _NB_SETTING_BOUNDS[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"settings.{key} must be an integer in {lo}..{hi}",
+            )
+
+
 def _meta_text(value: Any) -> str:
     """Normalize a payload's `meta` field to canonical JSON text.
 
@@ -931,25 +986,7 @@ class Store:
         change generated output (retrieval depth / prompt budget), the
         same content-bearing class as rename.
         """
-        if not isinstance(settings, dict):
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"settings must be a JSON object, got {type(settings).__name__}",
-            )
-        unknown = sorted(k for k in settings if k not in NB_SETTING_KEYS)
-        if unknown:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"unknown settings keys: {', '.join(unknown)} "
-                f"(allowed: {', '.join(NB_SETTING_KEYS)})",
-            )
-        for key, value in settings.items():
-            lo, hi = _NB_SETTING_BOUNDS[key]
-            if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
-                raise StoreError(
-                    "VALIDATION_FIELD_FORMAT_INVALID",
-                    f"settings.{key} must be an integer in {lo}..{hi}",
-                )
+        validate_notebook_settings(settings)
         text = _meta_dump(settings)
         with self.conn:
             cur = self.conn.execute(
@@ -2393,23 +2430,8 @@ class Store:
         a rename is. Single-statement UPDATE + rowcount covers both
         never-existed and concurrently-deleted ids as SOURCE_NOT_FOUND.
         """
-        if not isinstance(meta, dict):
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"meta must be a JSON object, got {type(meta).__name__}",
-            )
-        try:
-            text = _meta_dump(meta)
-        except (TypeError, ValueError) as e:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                "meta must be JSON-serializable",
-            ) from e
-        if len(text.encode("utf-8")) > SOURCE_META_MAX:
-            raise StoreError(
-                "VALIDATION_FIELD_FORMAT_INVALID",
-                f"meta exceeds {SOURCE_META_MAX} bytes",
-            )
+        validate_source_meta(meta)
+        text = _meta_dump(meta)
         with self.conn:
             # BEGIN IMMEDIATE + src probe under the lock (v0.2.712): the
             # notebook_id the touch below targets must come from the same
