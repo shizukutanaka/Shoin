@@ -4762,6 +4762,39 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_infinite_numeric_exponent_returns_400(self) -> None:
+        """v0.2.736 (weakness #120): parse_constant never sees numeric
+        exponents — a legal ``1e400`` parses through the JSON float parser
+        to infinity with no hook consulted. The result is the same strict-
+        parser poison as the literal (Devin Review on v0.2.735): a
+        persisted copy re-emits as ``Infinity`` and browser JSON.parse
+        fails on the containing body."""
+        import json as _json
+
+        nb_body = _json.dumps({"name": "exp-meta-test"}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
+        conn.request(
+            "POST", "/api/notebooks", body=nb_body,
+            headers={"Content-Type": "application/json"},
+        )
+        nb_id = _json.loads(conn.getresponse().read())["id"]
+        conn.request(
+            "POST", f"/api/notebooks/{nb_id}/upload",
+            body="指数表記テスト用の文書です。".encode() * 10,
+            headers={"X-Filename": "exp.txt"},
+        )
+        src_id = _json.loads(conn.getresponse().read())["source"]["id"]
+        conn.request(
+            "PATCH", f"/api/sources/{src_id}",
+            body=b'{"meta":{"x":1e400}}',
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        data = _json.loads(resp.read())
+        conn.close()
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 class _OverlapDetectingLLM:
     """Records whether chat_stream() was ever entered while already active.
