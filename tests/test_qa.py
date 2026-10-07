@@ -399,6 +399,55 @@ class TestAsk(unittest.TestCase):
             ask(s, FakeLLM(), nb, "zzz無関係qqq")
             self.assertEqual(len(s.list_messages(nb)), 2)
 
+    def test_ask_corpus_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: hits + settings + build_context describe one commit
+        point — a replace_chunks_for_source landing inside the composition
+        (here, between retrieve_for_question's settings probe and its legs)
+        is invisible to the whole grounding view: no spliced-in post-commit
+        rows, no stale-text context."""
+        import tempfile
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "論文A", "mem://a", "ha")
+                s.add_chunks(
+                    src.id,
+                    ["書院は知の書斎である。", "引用検証が差別化の核。"],
+                )
+            old_texts = {"書院は知の書斎である。", "引用検証が差別化の核。"}
+
+            orig = Store.notebook_settings
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                rows = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    # Commit a full chunk replacement while the composition
+                    # is mid-flight — auto-commit legs would read these new
+                    # rows into the grounding set.
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["全然別の新しい本文。"]
+                        )
+                return rows
+
+            with Store(db) as s:
+                with patch.object(Store, "notebook_settings", inject):
+                    ans = ask(
+                        s,
+                        FakeLLM(reply="書斎の核[S1]。"),
+                        nb.id,
+                        "差別化は何か？",
+                        persist=False,
+                    )
+            self.assertTrue(fired)
+            self.assertTrue(ans.hits)
+            self.assertLessEqual({h.text for h in ans.hits}, old_texts)
+
 
 class TestMultiTurn(unittest.TestCase):
     def test_followup_carries_history(self) -> None:

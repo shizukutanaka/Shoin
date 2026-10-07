@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.719
+## Version History: v0.1.37 → v0.2.720
+
+### v0.2.720 — grounding corpus viewのsnapshot化(ask/search合成readを1コミット点へ)
+
+- **新規短所104解消(ソクラテス問いで発掘)**: 「grounding集合を組立てる複数SELECTは同一コミット点を読むか」——`retrieve()`の各leg(BM25/vector/text行)+settings+`build_context`のsource再読+search端点のtitle/meta/suggest lookupが全てauto-commit連結。request途中の`replace_chunks_for_source`/`add_chunks`/`delete_source`着弾で**異コミットの行が1つのgrounding集合に混入**——永続化されるanswer+reportが「一度も一貫して存在しなかったnb状態」を記述
+- **`store.read_snapshot()`を4 siteへ適用**: `qa.ask()`(hits+settings+context、historyは会話状態のため境界外・`add_message`はwriteのためsnapshot後)、`_h_ask_sse`(pre-write retrieve legs)、`_h_nb_search`(hits+titles+suggest)、`_h_global_search`(hits+meta+suggest)——`_h_nb_get`(v0.2.707)/`_h_src_text`(v0.2.719)と同型のstandalone-read境界判断
+- **行動ピン3件**: (a)askライブラリ: settings probe中の別接続replace注入→hits全文がpre-replace (b)nb_search: sources_for_notebook中のdelete注入→hitのtitleがpre-delete名を保持 (c)global_search: notebooks_for_sources中のdelete注入→削除済sourceへのhitがmeta欠落でdropされず保持
+- **却下した問い(記録)**: history_messages(会話状態=別state class・snapshot境界外が正しい)・build_contextのget_source title(StoreError fallback済=metadata cosmetic)・`_h_ask_sse`のpost-header context読取り(SSE error契約を壊さず移動不可=title/budgetのmetadata微tearとして記録)・studio/questions合成read(同族候補=次サイクル)
+
 
 ### v0.2.719 — src_text応答のintra-request torn閉塞(batch SELECTをsnapshot化)
 

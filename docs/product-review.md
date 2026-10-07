@@ -243,6 +243,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~101~~ | `_one_line`適用が部分的→untrusted bytes(stats nb.name・messages body・refresh title・suggest語・report sec・LLM delta/answer/studio/questions・check行・health embed名)がESC/Cf制御系列をターミナルへ素通し(Trojan Source/OSC注入) | v0.2.717 `one_line`/`safe_text`をlog.py集約+Cf追加+残存9経路へwrap(qa警告含む) |
 | ~~102~~ | server `_read_json`のみdeep-JSON `RecursionError`を400 coded(v0.2.314) → CLI 3ファイルparse経路(`import` doc・`eval` cases・`eval --diff` baseline)はcatch-allへ転落で~40KBファイルがSYSTEM_INTERNAL_ERROR(500)へ誤分類 | v0.2.718 3 exceptへ`RecursionError`追加(400系coded parity)+20000深度の行動ピン3件 |
 | ~~103~~ | `_h_src_text`のbatch loopが1バッチ1 SELECTをauto-commit連結→request途中のchunk rewriteで異コミット行が1応答に混在。rev/total(先頭読み)は旧状態を指しepoch守衛はページ間比較のみ=検出不能なintra-page tear | v0.2.719 `store.read_snapshot()`で全read包み(_h_nb_get同型境界)+別接続replace注入ピン |
+| ~~104~~ | `ask()`/search端点のgrounding集合組立て(retrieve legs+settings+context+title/meta lookup)がauto-commit連結の複数SELECT→request途中のingest/replace/deleteで異コミット行が混入。永続化されるanswer+reportが一貫して存在しなかった状態を記述 | v0.2.720 `read_snapshot()`をqa.ask・_h_ask_sse・_h_nb_search・_h_global_searchへ(history/writeは境界外)+注入ピン3件 |
 
 ### 解決済み(記録)
 

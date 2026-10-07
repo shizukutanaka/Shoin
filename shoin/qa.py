@@ -787,16 +787,21 @@ def ask(
         history = history_messages(store, notebook_id)  # before persisting this turn
         retrieval_q = expand_query(question, history)
         qvec = _query_vector(llm, retrieval_q) if _check_embed_model_ok(store, llm) else None
-        hits = retrieve_for_question(
-            store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
-        )
-        if persist:
-            store.add_message(notebook_id, "user", question, "{}")
-
-        if not hits:
-            no_hit = _t("no_hit")
-            answer = Answer(no_hit, [], make_report(no_hit, []))
-        else:
+        # v0.2.720: the grounding corpus is one commit point. retrieve()
+        # runs several SELECTs across its legs (bm25/vector/text rows) and
+        # build_context re-reads source rows — on auto-commit snapshots a
+        # concurrent replace_chunks_for_source/add_chunks landing mid-flight
+        # splices rows from different commits into the retrieved set and the
+        # context built from it, so the persisted answer+report describe a
+        # notebook state that never coherently existed. One WAL snapshot
+        # covers the whole corpus view (history is conversation state and
+        # stays outside it); the write below must stay outside too — a write
+        # inside the read TX would fail SQLITE_BUSY_SNAPSHOT under a
+        # concurrent writer.
+        with store.read_snapshot():
+            hits = retrieve_for_question(
+                store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
+            )
             try:
                 # settings.source_text_tokens overrides the global
                 # SOURCE_TEXT_TOKENS budget for this notebook (v0.2.659).
@@ -811,6 +816,13 @@ def ask(
                     "SYSTEM_DB_LOCKED",
                     f"database locked during context build: {exc}",
                 ) from exc
+        if persist:
+            store.add_message(notebook_id, "user", question, "{}")
+
+        if not hits:
+            no_hit = _t("no_hit")
+            answer = Answer(no_hit, [], make_report(no_hit, []))
+        else:
             try:
                 messages = build_messages(question, context, history)
                 stream = getattr(llm, "chat_stream", None)

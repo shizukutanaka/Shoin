@@ -749,6 +749,84 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(j["total"], 4)
         self.assertEqual(j["rev"], rev0)
 
+    def test_nb_search_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: POST /api/notebooks/{id}/search composes the hit list
+        and its title map across separate SELECTs — a concurrent
+        delete_source landing between retrieve and sources_for_notebook
+        made a hit point at a source the response could no longer name
+        (title ''). read_snapshot pins hits + provenance to one commit
+        point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "ssearch"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-gs")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.sources_for_notebook
+        fired = []
+
+        def inject(self2: Store, notebook_id: int) -> list[object]:
+            rows = orig(self2, notebook_id)
+            if notebook_id == nb_id and not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "sources_for_notebook", inject):
+            status, j = self._json(
+                "POST",
+                f"/api/notebooks/{nb_id}/search",
+                {"question": "原料"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # Pre-delete snapshot: the hit and its title agree — the source the
+        # hit grounds to is still named.
+        self.assertTrue(j["hits"])
+        self.assertEqual(j["hits"][0]["title"], "doc")
+
+    def test_global_search_reads_under_one_snapshot(self) -> None:
+        """v0.2.720: POST /api/search's provenance lookup read a different
+        commit than the retrieval legs — a concurrent delete_source
+        between them dropped real hits (meta missing the just-deleted
+        source), returning an empty answer despite matching corpus."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "gsearch"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-gg")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.notebooks_for_sources
+        fired = []
+
+        def inject(self2: Store, source_ids: list[int]) -> object:
+            rows = orig(self2, source_ids)
+            if not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "notebooks_for_sources", inject):
+            status, j = self._json(
+                "POST", "/api/search", {"question": "原料"}
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # Pre-delete snapshot: this notebook's hit survives — other
+        # notebooks' hits may rank ahead (global search spans the DB).
+        self.assertTrue(
+            any(h["source_id"] == src.id for h in j["hits"]),
+            f"expected a hit for source {src.id}: {j['hits']!r}",
+        )
+
     def test_nb_list_and_trash_paged_at_limit(self) -> None:
         """v0.2.696: GET /api/notebooks and GET /api/trash were the last
         unbounded LIST responses — every dashboard load refetched every row.

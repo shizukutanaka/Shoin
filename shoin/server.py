@@ -1455,16 +1455,21 @@ class _Handler(BaseHTTPRequestHandler):
                 if _check_embed_model_ok(store, self.llm)
                 else None
             )
-            hits = retrieve_for_question(
-                store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
-            )
-            titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
-            # Zero hits is a dead end (product-review #42): offer the nearest
-            # in-corpus spellings so a typo'd query has somewhere to go. Only
-            # emitted on the empty path — a non-empty list never needs it.
-            suggestions = (
-                suggest_corrections(store, nb_id, question) if not hits else []
-            )
+            # v0.2.720: the retrieval legs and the provenance/suggestion
+            # reads must describe one commit point — on auto-commit
+            # snapshots a concurrent ingest/replace mid-request splices rows
+            # from different commits into the hit list and its titles.
+            with store.read_snapshot():
+                hits = retrieve_for_question(
+                    store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
+                )
+                titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
+                # Zero hits is a dead end (product-review #42): offer the nearest
+                # in-corpus spellings so a typo'd query has somewhere to go. Only
+                # emitted on the empty path — a non-empty list never needs it.
+                suggestions = (
+                    suggest_corrections(store, nb_id, question) if not hits else []
+                )
             self._json(
                 {
                     "question": question,
@@ -1509,17 +1514,19 @@ class _Handler(BaseHTTPRequestHandler):
                 if _check_embed_model_ok(store, self.llm)
                 else None
             )
-            hits = retrieve_for_question(
-                store, self.llm, None, retrieval_q, qvec, k=k
-            )
-            meta = store.notebooks_for_sources([h.source_id for h in hits])
-            # A source deleted by a concurrent request between the search and
-            # this provenance lookup is dropped rather than KeyErroring — the
-            # same toleration nb_search's titles.get() already applies.
-            hits = [h for h in hits if h.source_id in meta]
-            suggestions = (
-                suggest_corrections(store, None, question) if not hits else []
-            )
+            # v0.2.720: same one-snapshot corpus contract as _h_nb_search.
+            with store.read_snapshot():
+                hits = retrieve_for_question(
+                    store, self.llm, None, retrieval_q, qvec, k=k
+                )
+                meta = store.notebooks_for_sources([h.source_id for h in hits])
+                # A source deleted by a concurrent request between the search and
+                # this provenance lookup is dropped rather than KeyErroring — the
+                # same toleration nb_search's titles.get() already applies.
+                hits = [h for h in hits if h.source_id in meta]
+                suggestions = (
+                    suggest_corrections(store, None, question) if not hits else []
+                )
             self._json(
                 {
                     "question": question,
@@ -1578,9 +1585,13 @@ class _Handler(BaseHTTPRequestHandler):
             # it is serialized under generation_lock (spec.md single-generation
             # DoS control) — only the actual answer-generation streaming call
             # below is. See retrieve_for_question()'s own docstring for why.
-            hits = retrieve_for_question(
-                store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
-            )
+            # v0.2.720: the legs run under one WAL snapshot so a concurrent
+            # replace/ingest mid-request can't splice different commits into
+            # the grounding set (history stays outside — conversation state).
+            with store.read_snapshot():
+                hits = retrieve_for_question(
+                    store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
+                )
             store.add_message(nb_id, "user", question, "{}")
 
             try:
