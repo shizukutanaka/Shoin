@@ -29,7 +29,30 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.732
+## Version History: v0.1.37 → v0.2.733
+
+### v0.2.733 — duplicate_notebookのreport chunkポインタをfork先へremap(cross-notebookポインタを閉塞)
+
+短所117: 「reportのid remapは全re-key経路で同じ深さか」の問いで発掘——
+`_remap_report_source_ids`は`chunk_map`をoptional引数として受け、import/
+merge/restore経路は`chunk_id_map`を構築して渡す(v0.2.686)のに、
+`duplicate_notebook`だけが`INSERT INTO chunks ... SELECT`の一括コピーで
+fresh rowidを捕捉できず2引数呼出のまま残存。結果、複製先のmessage/
+studio出力の`source_chunk_ids`が**原本notebookの(存続する)chunk rowid**
+を指したまま永続化——S#クリック解決が別notebookのchunkへ向くverbatimな
+cross-notebookポインタ(削除ではないためv0.2.686の死んだポインタとは別相:
+行は生きたまま、帰属だけが違う)。
+
+- chunkコピーをper-row INSERTへ変更し`chunk_id_map`を構築——import/merge/
+  restoreと同一の再採番捕捉経路で`source_chunk_ids`をfork先へremap
+- 行動ピン1件(test_duplicate_notebook_remaps_report_chunk_ids): dup先の
+  message+studio出力で`source_chunk_ids`がfork chunk集合と一致・原本idを
+  含まず、`source_id_map`もdup sourceを指すことを両tableで検証
+- 却下(記録): upload面(bounded read+cap+cleanup+orphan rollback完備)・
+  questions cache eviction(fp整合が正しい層でevictは最適化のみ)・
+  trash保持(user制御のpurge/empty経路あり)・SSE/health/scope経路
+- 残存(記録): `duplicate_notebook`のper-row INSERT化は大容量forkで僅かに
+  遅くなるが`_insert_tree_rows`と同じper-row経路と同一性能クラス
 
 ### v0.2.732 — CLI文書書込みの原子化(--gen/--saveの破損JSON残存を閉塞)
 

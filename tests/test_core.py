@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.732")
+        self.assertEqual(VERSION, "0.2.733")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -278,6 +278,47 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.duplicate_notebook(nb.id, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_duplicate_notebook_remaps_report_chunk_ids(self) -> None:
+        """v0.2.733: a duplicated report's source_chunk_ids must point at
+        the FORK's fresh chunk rows — duplicate_notebook's INSERT..SELECT
+        built no chunk_id_map, so the 2-arg _remap_report_source_ids left
+        each pointer at the SOURCE notebook's (still-live) chunk rowids:
+        a verbatim cross-notebook pointer that import/merge/restore
+        already remap (v0.2.686)."""
+        import json
+
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            cids = s.add_chunks(src.id, ["一文目。", "二文目。"])
+            report = json.dumps(
+                {
+                    "source_id_map": {"S1": src.id},
+                    "source_chunk_ids": {"S1": cids},
+                },
+                ensure_ascii=False,
+            )
+            s.add_message(nb.id, "assistant", "a [S1]", report)
+            s.add_studio_output(nb.id, "briefing", "b", report)
+
+            dup = s.duplicate_notebook(nb.id)
+            d_src = s.sources_for_notebook(dup.id)[0]
+            d_cids = sorted(c.id for c in s.chunks_for_source(d_src.id))
+            self.assertEqual(len(d_cids), 2)
+
+            for table in ("messages", "studio_outputs"):
+                row = s.conn.execute(
+                    "SELECT citation_report FROM " + table
+                    + " WHERE notebook_id=?",
+                    (dup.id,),
+                ).fetchone()
+                rep = json.loads(row["citation_report"])
+                # every chunk pointer lands on the fork's own rows —
+                # never back on the source notebook's live chunks
+                self.assertEqual(sorted(rep["source_chunk_ids"]["S1"]), d_cids)
+                self.assertNotIn(cids[0], rep["source_chunk_ids"]["S1"])
+                self.assertEqual(rep["source_id_map"], {"S1": d_src.id})
 
     def test_duplicate_notebook_holds_write_lock_across_copy(self) -> None:
         """v0.2.708: the whole copy — probes AND the INSERT..SELECT

@@ -1872,11 +1872,13 @@ class Store:
                     f"name too long (max {MAX_NAME_LEN} chars)",
                 )
             _utf8(name, "name")
-            # v0.2.672: this fork copies the tree via INSERT..SELECT, not
-            # _insert_tree_rows, so it needs its own cap check — a normal
-            # notebook cannot breach it (0 + same count), but duplicating
-            # an already over-limit notebook would replicate the broken
-            # invariant. Inside the transaction like the sibling guard.
+            # v0.2.672: this fork copies the tree itself rather than via
+            # _insert_tree_rows (INSERT..SELECT then, per-row since v0.2.733
+            # so the fresh chunk rowids can be mapped), so it needs its own
+            # cap check — a normal notebook cannot breach it (0 + same
+            # count), but duplicating an already over-limit notebook would
+            # replicate the broken invariant. Inside the transaction like
+            # the sibling guard.
             if self.counts(notebook_id)["chunks"] > MAX_CHUNKS_PER_NOTEBOOK:
                 raise StoreError(
                     "INGEST_NOTEBOOK_FULL",
@@ -1905,14 +1907,30 @@ class Store:
                      row["meta"]),
                 )
                 id_map[int(row["id"])] = int(cur.lastrowid or 0)
-            for old_src, new_src in id_map.items():
-                self.conn.execute(
+            chunk_id_map: dict[int, int] = {}
+            for row in self.conn.execute(
+                "SELECT c.id, c.source_id, c.seq, c.text, c.context,"
+                " c.embedding, c.embedding_norm FROM chunks c"
+                " JOIN sources s ON s.id=c.source_id WHERE s.notebook_id=?"
+                " ORDER BY c.source_id, c.seq",
+                (notebook_id,),
+            ).fetchall():
+                cur = self.conn.execute(
                     "INSERT INTO chunks(source_id, seq, text, context,"
-                    " embedding, embedding_norm)"
-                    " SELECT ?, seq, text, context, embedding, embedding_norm"
-                    " FROM chunks WHERE source_id=? ORDER BY seq",
-                    (new_src, old_src),
+                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                    (
+                        id_map[int(row["source_id"])], row["seq"], row["text"],
+                        row["context"], row["embedding"], row["embedding_norm"],
+                    ),
                 )
+                # v0.2.733: the per-row insert replaces INSERT..SELECT so the
+                # fresh chunk rowid lands in chunk_id_map — the report remap
+                # below rewrites source_chunk_ids through it. Without it a
+                # duplicated report kept pointing at the SOURCE notebook's
+                # chunks (live rows under a different notebook — a verbatim
+                # cross-notebook pointer, the exact tear v0.2.686 closed on
+                # the import/merge/restore paths).
+                chunk_id_map[int(row["id"])] = int(cur.lastrowid or 0)
             self.conn.execute(
                 "INSERT INTO notes(notebook_id, title, body, created_at)"
                 " SELECT ?, title, body, created_at FROM notes WHERE notebook_id=?",
@@ -1928,7 +1946,9 @@ class Store:
                     " citation_report, created_at) VALUES(?,?,?,?,?)",
                     (
                         new_id, row["kind"], row["body"],
-                        _remap_report_source_ids(row["citation_report"], id_map),
+                        _remap_report_source_ids(
+                            row["citation_report"], id_map, chunk_id_map
+                        ),
                         row["created_at"],
                     ),
                 )
@@ -1942,7 +1962,9 @@ class Store:
                     " citation_report, created_at) VALUES(?,?,?,?,?)",
                     (
                         new_id, row["role"], row["body"],
-                        _remap_report_source_ids(row["citation_report"], id_map),
+                        _remap_report_source_ids(
+                            row["citation_report"], id_map, chunk_id_map
+                        ),
                         row["created_at"],
                     ),
                 )

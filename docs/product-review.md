@@ -256,6 +256,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~114~~ | ファイル源originが`str(p)`相対パス保存——refreshが実行時cwdで再解釈し、別cwdで失敗 or 同名の別ファイルを無言で再取込(内容の静かな差替) | v0.2.730 `extract_file`が`os.path.abspath`化した絶対origin保存——取込時点の実パスをlocatorとして固定(行動ピン: 相対add→別cwd refresh→byte-identical no-op) |
 | ~~115~~ | 子行writer(add_source/add_chunks/add_note/add_studio_output/add_message/clear_messages)の親probeがautocommit実行——probe→write間の親delete+rowid再利用でFKが別親を受理し子行がprobeの見なかった親へ着地(cross-notebook汚染) | v0.2.731 全6 writerのprobeを`BEGIN IMMEDIATE`内へ統一(probeとwriteが同一commit点・第二接続のforeign BEGIN失敗を行動ピン) |
 | ~~116~~ | eval CLI文書書込み(`--gen`/`--save`)が`write_text`非原子——中断で半書込みJSONが残り次回`--diff`/`--gen`消費時に生JSONエラー(「成功した保存」が文書でなかった) | v0.2.732 `_atomic_write_text`新設: sibling temp+os.replace原子rename・OSError→`SYSTEM_IO_ERROR`・stagingはfinally除去(行動ピン: 完結書込/上書き/debris無し/coded) |
+| ~~117~~ | `duplicate_notebook`の`_remap_report_source_ids`が2引数(chunk_map無し)——fork先のmessage/studio reportの`source_chunk_ids`が原本notebookの存続chunkを指したまま残存(S#解決が別nb chunkへ向くcross-notebookポインタ) | v0.2.733 chunkコピーをper-row INSERT化して`chunk_id_map`構築→3引数remapでimport/merge/restore(v0.2.686)と同一契約へ統一(行動ピン: 両tableでfork chunk集合一致) |
 
 ### 解決済み(記録)
 
