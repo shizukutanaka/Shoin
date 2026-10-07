@@ -946,12 +946,32 @@ class Store:
             )
             self.conn.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
 
-    def trash_list(self) -> list[TrashItem]:
-        """Newest-first trash index — columns only, payload never parsed."""
-        rows = self.conn.execute(
-            "SELECT id, notebook_id, name, deleted_at, kind"
-            " FROM trash_items ORDER BY deleted_at DESC, id DESC"
-        ).fetchall()
+    def count_notebooks(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM notebooks"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def trash_list(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TrashItem]:
+        """Newest-first trash index — columns only, payload never parsed.
+
+        limit/offset page the result (GET /api/trash, v0.2.696) — the CLI
+        keeps passing no limit and still gets the full list.
+        """
+        if limit is not None:
+            rows = self.conn.execute(
+                "SELECT id, notebook_id, name, deleted_at, kind"
+                " FROM trash_items ORDER BY deleted_at DESC, id DESC"
+                " LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT id, notebook_id, name, deleted_at, kind"
+                " FROM trash_items ORDER BY deleted_at DESC, id DESC"
+            ).fetchall()
         return [
             TrashItem(
                 id=int(r["id"]),
@@ -962,6 +982,12 @@ class Store:
             )
             for r in rows
         ]
+
+    def count_trash(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM trash_items"
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     def trash_restore(self, trash_id: int) -> dict[str, Any]:
         """Re-insert a trashed entity in one TX, dispatching on payload kind.
@@ -2783,18 +2809,38 @@ class Store:
             "unembedded": int(chunk_row["miss"] or 0),
         }
 
-    def list_notebooks_with_counts(self) -> list[NotebookWithCounts]:
-        """Return all notebooks with source/chunk counts in a single query (avoids N+1)."""
-        rows = self.conn.execute(
-            "SELECT n.id, n.name,"
-            " COUNT(DISTINCT s.id) AS sources,"
-            " COUNT(DISTINCT c.id) AS chunks"
-            " FROM notebooks n"
-            " LEFT JOIN sources s ON s.notebook_id = n.id"
-            " LEFT JOIN chunks c ON c.source_id = s.id"
-            " GROUP BY n.id"
-            " ORDER BY n.updated_at DESC, n.id DESC"
-        ).fetchall()
+    def list_notebooks_with_counts(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[NotebookWithCounts]:
+        """Return all notebooks with source/chunk counts in a single query (avoids N+1).
+
+        limit/offset page the result (GET /api/notebooks, v0.2.696) — the
+        CLI keeps passing no limit and still gets the full list.
+        """
+        if limit is not None:
+            rows = self.conn.execute(
+                "SELECT n.id, n.name,"
+                " COUNT(DISTINCT s.id) AS sources,"
+                " COUNT(DISTINCT c.id) AS chunks"
+                " FROM notebooks n"
+                " LEFT JOIN sources s ON s.notebook_id = n.id"
+                " LEFT JOIN chunks c ON c.source_id = s.id"
+                " GROUP BY n.id"
+                " ORDER BY n.updated_at DESC, n.id DESC"
+                " LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT n.id, n.name,"
+                " COUNT(DISTINCT s.id) AS sources,"
+                " COUNT(DISTINCT c.id) AS chunks"
+                " FROM notebooks n"
+                " LEFT JOIN sources s ON s.notebook_id = n.id"
+                " LEFT JOIN chunks c ON c.source_id = s.id"
+                " GROUP BY n.id"
+                " ORDER BY n.updated_at DESC, n.id DESC"
+            ).fetchall()
         return [
             {
                 "id": int(r["id"]),

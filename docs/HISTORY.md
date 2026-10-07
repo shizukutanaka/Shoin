@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.695
+## Version History: v0.1.37 → v0.2.696
+
+### v0.2.696 — /api/notebooksと/api/trashのリスト応答を上限付きページングへ
+
+- **新規短所80解消(ソクラテス問いで発掘)**: 「リスト応答は全て有界か」——detail埋込み(messages/notes/sources)・走査端点・src_textと順に閉塞してきた上限族の残存2面: `GET /api/notebooks`は全nb行+JOIN集計を、`GET /api/trash`は全trash行を無制限返却。acc-retive増殖型(1操作1行・importで一括増殖しない)ゆえ敵性天井は低いが、全ダッシュボード読込と全ゴミ箱表示が行数に比例して永久に重くなる同族経路
+- **`?offset&limit`ページング**: `NB_LIST_LIMIT`/`TRASH_LIST_LIMIT`(各2000)で上界、`{total,offset,limit}`で開示——v0.2.646/694のmessages|notes|sources端点と同一契約(newest-first・offset 0..i64-1・limit 1..cap)。store側は`list_notebooks_with_counts`/`trash_list`にlimit/offset引数+`count_notebooks`/`count_trash`新設——CLIは引数無し呼出で全量維持(応答面のみの上界)
+- **UI**: 一覧末尾に「残り{n}書院を表示」ボタン(`nb.more` ja/en)——クリックで`?offset=`次ページをfetchし行を追記(src-more同型)。`total`欠落の旧応答形状/スタブ環境では「残り無し」扱いでページ行自体を出さない後方互換
+- **行動ピン2件**: サーバ側(patch縮小capで2ページ走査による全行到達+total/offset/limit開示+offset=-1|abc→400)・UI側(node実実行でtotal>rows時にページ行出現→次ページ追記→消滅)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし
 
 ### v0.2.695 — /api/sources/{id}/text応答を32MiBで上界(最後の無制限ペイロード)
 

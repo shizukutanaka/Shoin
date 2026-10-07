@@ -219,6 +219,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~77~~ | ~~**import文書フィールドが書込経路の語彙/範囲/utf8検証を迂回——phantom行の永続化かraw sqlite error(500)**~~ → **解消済み(v0.2.693)** | 「import文書はwriterと同じ検証を受けるか」の問いで発掘: `_insert_tree_rows`のverbatim bindがSOURCE_KINDS/STUDIO_KINDS/role語彙・有限weight・_utf8を迂回——語彙外kind/roleが永続phantom行・Infinity格納・NaN/非str/サロゲートがraw error化。入口検証をwriter契約へ揃え同codedで拒否(_import_str新設) |
 | ~~78~~ | ~~**`GET /api/notebooks/{id}`の`sources`埋込みが無制限——detail応答がsource数に比例して永久に重くなる**~~ → **解消済み(v0.2.694)** | 「詳細応答の埋込みリストは全て有界か」の問いで発掘: notes/messagesはv0.2.250/409でcap済みだが`sources`だけ無制限残存——chunk上限は行数を制限するがsource数は制限しない。openNotebook・SSE復帰refetchの全detail取得が蓄積に比例増大。`NB_SOURCES_LIMIT`=2000(scope pane用途で寛容値)+`sources_omitted`開示+`GET /api/notebooks/{id}/sources?offset&limit`走査端点(v0.2.646同型)+UI`src.earlier`行 |
 | ~~79~~ | ~~**`GET /api/sources/{id}/text`が全chunk本文を無制限返却——import由来ソースが~1GiB応答を生成可能**~~ → **解消済み(v0.2.695)** | 「全ての読取り応答は有界か」の問いで発掘: detail埋込み(messages/notes/sources)はcap済みだが`/text`はfetchall一括返却のまま残存——import文書はchunk本文長を制限しないため細工exportが1ソースに~1GiB本文を置き得る(viewerクリック毎に二重実体化+64接続でプロセス枯渇)。`SRC_TEXT_BYTES_MAX`(32MiB)上界+境界chunk全体送り+`truncated`/`next_offset`/`total`開示+`?offset=`走査+UI「残り{n}チャンクを表示」導線 |
+| ~~80~~ | `GET /api/notebooks`/`GET /api/trash`のリスト応答が行数無制限(同族・アクレッティブ増殖) | v0.2.696 `?offset&limit`ページング+total開示、UIにnb.moreページャー |
 
 ### 解決済み(記録)
 

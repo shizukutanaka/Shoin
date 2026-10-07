@@ -654,6 +654,79 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
 
+    def test_nb_list_and_trash_paged_at_limit(self) -> None:
+        """v0.2.696: GET /api/notebooks and GET /api/trash were the last
+        unbounded LIST responses — every dashboard load refetched every row.
+        Now paged ?offset&limit with total disclosed, same contract as the
+        messages|notes|sources endpoints (newest-first, offset 0..i64-1,
+        limit 1..cap). The CLI still gets the full list (store-level)."""
+        import shoin.server as srv
+
+        # Class fixture DB is shared — measure totals relative to baseline.
+        status, base = self._json("GET", "/api/notebooks?limit=1")
+        base_nbs = base["total"]
+        status, base = self._json("GET", "/api/trash?limit=1")
+        base_trash = base["total"]
+
+        ids = []
+        for i in range(5):
+            status, nb = self._json("POST", "/api/notebooks", {"name": f"nb{i}"})
+            self.assertEqual(status, 201)
+            ids.append(nb["id"])
+        # One trash row: deleting nb4 archives it.
+        status, _ = self._json("DELETE", f"/api/notebooks/{ids[4]}")
+        self.assertEqual(status, 200)
+
+        with patch.object(srv, "NB_LIST_LIMIT", 2), patch.object(
+            srv, "TRASH_LIST_LIMIT", 1
+        ):
+            status, j = self._json("GET", "/api/notebooks")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["total"], base_nbs + 4)
+            self.assertEqual(len(j["notebooks"]), 2)
+            self.assertEqual(j["offset"], 0)
+            self.assertEqual(j["limit"], 2)
+            # Newest-first: the page-0 rows are the just-created notebooks.
+            self.assertEqual(
+                [r["id"] for r in j["notebooks"]], [ids[3], ids[2]]
+            )
+            status, p2 = self._json(
+                "GET", "/api/notebooks?offset=2&limit=2"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                [r["id"] for r in p2["notebooks"]], [ids[1], ids[0]]
+            )
+            self.assertEqual(p2["total"], base_nbs + 4)
+            status, p3 = self._json("GET", "/api/notebooks?offset=9999")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(p3["notebooks"]), 0)
+            self.assertEqual(p3["total"], base_nbs + 4)
+
+            status, tr = self._json("GET", "/api/trash")
+            self.assertEqual(status, 200)
+            self.assertEqual(tr["total"], base_trash + 1)
+            self.assertEqual(len(tr["trash"]), 1)
+            status, tr2 = self._json("GET", "/api/trash?offset=9999")
+            self.assertEqual(status, 200)
+            self.assertEqual(tr2["total"], base_trash + 1)
+            self.assertEqual(len(tr2["trash"]), 0)
+
+            for bad in ("offset=-1", "offset=abc", "limit=0", "limit=x"):
+                status, err = self._json("GET", f"/api/notebooks?{bad}")
+                self.assertEqual(status, 400, bad)
+                self.assertEqual(
+                    err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+                )
+                status, err = self._json("GET", f"/api/trash?{bad}")
+                self.assertEqual(status, 400, bad)
+
+        # Without params and within the cap the response is unchanged-shape.
+        status, j = self._json("GET", "/api/notebooks")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(j["notebooks"]), 4)
+        self.assertEqual(j["total"], len(j["notebooks"]))
+
     def test_nb_messages_and_notes_pagination(self) -> None:
         """v0.2.646: GET .../messages and .../notes page the full record the
         detail cap can't reach — newest-first, offset/limit bounded, total

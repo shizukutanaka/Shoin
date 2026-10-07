@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.695"
+VERSION = "0.2.696"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -70,6 +70,16 @@ SRC_TEXT_BYTES_MAX = 32 * 1024 * 1024
 # Rows fetched per batch while accumulating toward the byte cap — bounds the
 # working set without a SQL-side byte limit.
 SRC_TEXT_BATCH = 512
+
+# v0.2.696: the two remaining unbounded LIST responses — GET /api/notebooks
+# and GET /api/trash returned every row with no cap. Notebook and trash-item
+# counts are accretive (one POST/delete each, not bulk-imported), so the cap
+# is a bound on the worst case, not a restriction on realistic use — every
+# dashboard load and trash-pane open was refetching the full row set.
+# `?offset&limit` (0..i64-1 / 1..LIMIT) pages past it; `total` discloses.
+NB_LIST_LIMIT = 2000  # notebooks per GET /api/notebooks page
+TRASH_LIST_LIMIT = 2000  # trash rows per GET /api/trash page
+
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
 # v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
 # no element cap, so a ~10MB ask/search body could name millions of ids and the

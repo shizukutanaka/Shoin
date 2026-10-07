@@ -3283,6 +3283,86 @@ const sig = {aborted: false};
         self.assertEqual(rc, 0, out)
         self.assertIn("ok", out)
 
+    def test_nb_list_pager_fetches_next_page(self) -> None:
+        """v0.2.696: GET /api/notebooks is paged (total/offset/limit). When
+        total exceeds the first page, loadNotebooks renders a 'nb.more' row
+        that fetches ?offset=<seen>, appends the new rows in place, relabels
+        itself with the remaining count, and disappears on the last page.
+        Executes the real loadNotebooks under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = _js_block(src, "async function loadNotebooks")
+        harness = """\
+const calls = {fetches: [], toasts: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, type: "", className: "", tag: "", title: "",
+    onclick: null, onkeydown: null, tabIndex: 0,
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ xs.forEach(x => { x._parent = n; });
+      n.children.push(...xs); n.kids.push(...xs); },
+    insertBefore(x, ref){ x._parent = n;
+      const i = n.kids.indexOf(ref);
+      if (i < 0) { n.children.push(x); n.kids.push(x); }
+      else { n.children.splice(i, 0, x); n.kids.splice(i, 0, x); } },
+    remove(){ const c = n._parent; if (c){
+      c.kids = c.kids.filter(k => k !== n);
+      c.children = c.children.filter(k => k !== n); } },
+    setAttribute(){}, focus(){}, addEventListener(){},
+  };
+  return n;
+};
+const reg = {};
+const $ = sel => { if (!reg[sel]) reg[sel] = mk(); return reg[sel]; };
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag;
+  n.className = cls; if (txt != null) n.textContent = txt; n.text = txt;
+  return n; };
+const t = k => k === "nb.more" ? "more {n}" : k;
+const toast = m => calls.toasts.push(m);
+const renderNotebook = () => {};
+let notebooks = [], cur = null;
+const openNotebook = () => {};
+const pages = {
+  "/api/notebooks": {notebooks: [
+    {id: 1, name: "A", counts: {sources: 0}},
+    {id: 2, name: "B", counts: {sources: 0}}], total: 3, offset: 0, limit: 2},
+  "/api/notebooks?offset=2": {notebooks: [
+    {id: 3, name: "C", counts: {sources: 0}}], total: 3, offset: 2, limit: 2},
+};
+const api = p => { calls.fetches.push(p);
+  return Promise.resolve({json: async () => pages[p]}); };
+""" + fn + """
+(async () => {
+  await loadNotebooks();
+  const ul = $("#nbList");
+  // 2 rows + 1 pager row
+  const rows = ul.kids;
+  if (rows.length !== 3) { console.error("row count " + rows.length); process.exit(1) }
+  const holder = rows[2];
+  if (holder.className !== "src-more")
+    { console.error("pager holder class: " + holder.className); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.textContent !== "more 1")
+    { console.error("label: " + btn.textContent); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join("|") !== "/api/notebooks|/api/notebooks?offset=2")
+    { console.error("fetches: " + calls.fetches.join("|")); process.exit(1) }
+  // last page appended the third row in place and removed the holder
+  if (ul.kids.length !== 3 || ul.kids.some(k => k.className === "src-more"))
+    { console.error("post-page rows: " + ul.kids.map(k=>k.className).join(",")); process.exit(1) }
+  if (notebooks.length !== 3 || notebooks[2].id !== 3)
+    { console.error("notebooks not appended"); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
     def test_lazy_details_retries_after_failure(self) -> None:
         """v0.2.489: a failed lazy full-source fetch must clear
         `dataset.loaded` so the collapse→reopen gesture retries — before

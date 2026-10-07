@@ -32,6 +32,7 @@ from .config import (
     MAX_SCOPE_IDS,
     MAX_TITLE_LEN,
     MAX_UPLOAD_BYTES,
+    NB_LIST_LIMIT,
     NB_MESSAGES_LIMIT,
     NB_NOTES_LIMIT,
     NB_SOURCES_LIMIT,
@@ -41,6 +42,7 @@ from .config import (
     SRC_TEXT_BATCH,
     SRC_TEXT_BYTES_MAX,
     TOP_K,
+    TRASH_LIST_LIMIT,
     VERSION,
     db_path,
     endpoint_is_external,
@@ -832,8 +834,18 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
     def _h_trash_list(self) -> None:
+        # v0.2.696: last unbounded list responses — page like nb_messages.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, TRASH_LIST_LIMIT, TRASH_LIST_LIMIT)
         with Store(self.db) as store:
-            self._json({"trash": store.trash_list()})
+            self._json(
+                {
+                    "trash": store.trash_list(limit=limit, offset=offset),
+                    "total": store.count_trash(),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_trash_restore(self, item_id: int) -> None:
         with Store(self.db) as store:
@@ -856,8 +868,21 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(res)
 
     def _h_nb_list(self) -> None:
+        # v0.2.696: bound the list response — every dashboard load refetched
+        # all notebooks; {total,offset,limit} discloses and pages the rest.
+        offset = self._q_int("offset", 0, 2**63 - 1, 0)
+        limit = self._q_int("limit", 1, NB_LIST_LIMIT, NB_LIST_LIMIT)
         with Store(self.db) as store:
-            self._json({"notebooks": store.list_notebooks_with_counts()})
+            self._json(
+                {
+                    "notebooks": store.list_notebooks_with_counts(
+                        limit=limit, offset=offset
+                    ),
+                    "total": store.count_notebooks(),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
 
     def _h_nb_create(self) -> None:
         name = self._require(self._read_json(), "name")
