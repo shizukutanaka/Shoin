@@ -176,29 +176,35 @@ def generate(
     """Generate one Studio output. Raises LLMError when the endpoint is down."""
     if kind not in KINDS:
         raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
-    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    hits = overview_hits(store, notebook_id)
-    if not hits:
-        raise StoreError("NOTEBOOK_EMPTY", "notebook has no sources to ground on")
-    # Mirrors qa.ask()'s identical guard (v0.2.44) around the same build_context()
-    # call: a bare sqlite3.OperationalError from a WAL busy_timeout would otherwise
-    # propagate to server.py's catch-all, which returns HTTP 500 with only
-    # type(exc).__name__ as the message (the real "database is locked" text is
-    # dropped) instead of ask()'s clean HTTP 400 SYSTEM_DB_LOCKED with the actual
-    # lock message.
-    try:
-        # rank_weighted=False (v0.2.552): overview hits carry no relevance
-        # ranking — every sampled chunk scores 1.0 in source-id order — so the
-        # harmonic decay would arbitrarily hand source #1 ~6x source #10's
-        # excerpt in outputs documented to cover all sources equally.
-        context = build_context(
-            store, hits, budget_tokens=STUDIO_BUDGET_TOKENS, rank_weighted=False
-        )
-    except sqlite3.OperationalError as exc:
-        raise StoreError(
-            "SYSTEM_DB_LOCKED",
-            f"database locked during context build: {exc}",
-        ) from exc
+    # v0.2.721: the sampling SELECTs (per-source sizes, then rows), the
+    # notebook probe and build_context's source re-reads all run under one
+    # WAL snapshot — on auto-commit reads a concurrent
+    # replace_chunks_for_source/delete landing mid-flight splices chunks
+    # from different commits into the one output this call persists.
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+        hits = overview_hits(store, notebook_id)
+        if not hits:
+            raise StoreError("NOTEBOOK_EMPTY", "notebook has no sources to ground on")
+        # Mirrors qa.ask()'s identical guard (v0.2.44) around the same
+        # build_context() call: a bare sqlite3.OperationalError from a WAL
+        # busy_timeout would otherwise propagate to server.py's catch-all,
+        # which returns HTTP 500 with only type(exc).__name__ as the message
+        # (the real "database is locked" text is dropped) instead of ask()'s
+        # clean HTTP 400 SYSTEM_DB_LOCKED with the actual lock message.
+        try:
+            # rank_weighted=False (v0.2.552): overview hits carry no relevance
+            # ranking — every sampled chunk scores 1.0 in source-id order — so the
+            # harmonic decay would arbitrarily hand source #1 ~6x source #10's
+            # excerpt in outputs documented to cover all sources equally.
+            context = build_context(
+                store, hits, budget_tokens=STUDIO_BUDGET_TOKENS, rank_weighted=False
+            )
+        except sqlite3.OperationalError as exc:
+            raise StoreError(
+                "SYSTEM_DB_LOCKED",
+                f"database locked during context build: {exc}",
+            ) from exc
     sh = _t("sources_header")
     ih = _t("instructions_header")
     cn = _t("citation_note")
@@ -238,39 +244,47 @@ def questions_fingerprint(store: Store, notebook_id: int) -> tuple[object, ...]:
     add/delete/refresh/rename AND in-place edits. Sampling keeps the check
     cheap too: O(sources + per_source×source_count), never the corpus.
     """
-    return (
-        tuple(
-            (s.id, s.sha256, s.title) for s in store.sources_for_notebook(notebook_id)
-        ),
-        # per_source must match suggest_questions()'s sample width below.
-        tuple(
-            (h.chunk_id, h.source_id, h.text, h.context)
-            for h in overview_hits(store, notebook_id, per_source=2)
-        ),
-    )
+    # v0.2.721: both halves under one snapshot — a torn fingerprint
+    # (sources@commitA + sampled hits@commitB) would label cached questions
+    # with a corpus state that never coherently existed.
+    with store.read_snapshot():
+        return (
+            tuple(
+                (s.id, s.sha256, s.title) for s in store.sources_for_notebook(notebook_id)
+            ),
+            # per_source must match suggest_questions()'s sample width below.
+            tuple(
+                (h.chunk_id, h.source_id, h.text, h.context)
+                for h in overview_hits(store, notebook_id, per_source=2)
+            ),
+        )
 
 
 def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int = 4) -> list[str]:
     """Suggested questions for a notebook (REQ-102). Best-effort parsing."""
-    store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
-    hits = overview_hits(store, notebook_id, per_source=2)
-    if not hits:
-        return []
-    # Same guard as generate() above and qa.ask() (v0.2.44) around the identical
-    # build_context() call. A DB lock is a different failure class from the
-    # LLMError this function already swallows into [] below (that's specifically
-    # for "LLM unreachable", a best-effort degradation) — raise so the caller gets
-    # a diagnosable SYSTEM_DB_LOCKED error instead of a silent, misleading "no
-    # suggestions" result indistinguishable from "no sources".
-    try:
-        context = build_context(
-            store, hits, budget_tokens=1600, rank_weighted=False
-        )
-    except sqlite3.OperationalError as exc:
-        raise StoreError(
-            "SYSTEM_DB_LOCKED",
-            f"database locked during context build: {exc}",
-        ) from exc
+    # v0.2.721: probe + sampling SELECTs + build_context under one snapshot —
+    # same one-commit corpus contract as generate() and qa.ask() (v0.2.720).
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
+        hits = overview_hits(store, notebook_id, per_source=2)
+        if not hits:
+            return []
+        # Same guard as generate() above and qa.ask() (v0.2.44) around the
+        # identical build_context() call. A DB lock is a different failure class
+        # from the LLMError this function already swallows into [] below (that's
+        # specifically for "LLM unreachable", a best-effort degradation) — raise
+        # so the caller gets a diagnosable SYSTEM_DB_LOCKED error instead of a
+        # silent, misleading "no suggestions" result indistinguishable from "no
+        # sources".
+        try:
+            context = build_context(
+                store, hits, budget_tokens=1600, rank_weighted=False
+            )
+        except sqlite3.OperationalError as exc:
+            raise StoreError(
+                "SYSTEM_DB_LOCKED",
+                f"database locked during context build: {exc}",
+            ) from exc
     sh = _t("sources_header")
     prompt = _t("question_prompt").format(n=n)
     user = f"## {sh}\n{context.block}\n\n{prompt}"

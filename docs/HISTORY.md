@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.720
+## Version History: v0.1.37 → v0.2.721
+
+### v0.2.721 — studio/questions合成readのsnapshot化(grounding族完結)
+
+- **新規短所105解消(ソクラテス問いで発掘)**: 「永続化されるstudio出力/questionsを組立てるsampling SELECTも同一コミット点か」——`overview_hits`(per-source sizes+rows SELECT群)+`build_context`再読+`questions_fingerprint`の2分割readが全てauto-commit連結。request途中の`replace_chunks_for_source`着弾で**永続化されるstudio出力が異コミット行混入のcorpusを記述**・torn fingerprintが存在しない状態でcache keyを占有——v0.2.720のask/search族のstudio側残存面
+- **`store.read_snapshot()`を3関数へ適用**: `generate()`(probe+hits+context、llm.chat/add_studio_outputは境界外)・`suggest_questions()`(同形)・`questions_fingerprint()`(sources+hits両半を1点へ)
+- **行動ピン3件**: (a)generate: get_notebook中のreplace注入→promptにpre-replace本文のみ (b)suggest_questions: 同形 (c)fingerprint: sources_for_notebook中のreplace注入→hit textsが全てpre-replace
+- **却下した問い(記録)**: handler側fingerprint→generation跨call tear(v0.2.701のexisting[0]==fingerprintガードで最悪caseは無害再生成・eventual consistency設計として記録)・`_title_questions`(hits由来=境界内で整合)
+
 
 ### v0.2.720 — grounding corpus viewのsnapshot化(ask/search合成readを1コミット点へ)
 

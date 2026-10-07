@@ -150,6 +150,110 @@ class StudioTest(unittest.TestCase):
             generate(self.store, FakeLLM(), empty.id, "briefing")
         self.assertEqual(ctx.exception.code, "NOTEBOOK_EMPTY")
 
+    def test_generate_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: the sampling SELECTs and build_context describe one
+        commit point — a replace_chunks_for_source landing mid-composition
+        must not splice post-commit rows into the persisted output."""
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.get_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                row = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return row
+
+            with Store(db) as s:
+                llm = FakeLLM(reply="要点 [S1]。")
+                with patch.object(Store, "get_notebook", inject):
+                    generate(s, llm, nb.id, "briefing", persist=False)
+            self.assertTrue(fired)
+            prompt = llm.chat_prompts[-1]
+            self.assertIn("ALPHA旧テキスト", prompt)
+            self.assertNotIn("NEWx", prompt)
+
+    def test_suggest_questions_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: same one-commit corpus contract for suggested
+        questions — the prompt must carry only pre-replace rows."""
+        from typing import Any
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.get_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                row = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return row
+
+            with Store(db) as s:
+                llm = FakeLLM(reply="1. 目的は何か？")
+                with patch.object(Store, "get_notebook", inject):
+                    suggest_questions(s, llm, nb.id)
+            self.assertTrue(fired)
+            prompt = llm.chat_prompts[-1]
+            self.assertIn("ALPHA旧テキスト", prompt)
+            self.assertNotIn("NEWx", prompt)
+
+    def test_questions_fingerprint_reads_under_one_snapshot(self) -> None:
+        """v0.2.721: a torn fingerprint (sources@commitA + hits@commitB)
+        would label cached questions with a state that never existed —
+        both halves read under one snapshot."""
+        from typing import Any
+
+        from shoin.studio import questions_fingerprint
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.db")
+            with Store(db) as s:
+                nb = s.create_notebook("研究")
+                src = s.add_source(nb.id, "txt", "資料", "/t", "h0")
+                s.add_chunks(src.id, ["ALPHA旧テキスト。"])
+
+            orig = Store.sources_for_notebook
+            fired = []
+
+            def inject(self2: Store, *a: Any, **kw: Any) -> Any:
+                rows = orig(self2, *a, **kw)
+                if not fired:
+                    fired.append(True)
+                    with Store(db) as other:
+                        other.replace_chunks_for_source(
+                            src.id, ["NEWx新テキスト。"]
+                        )
+                return rows
+
+            with Store(db) as s:
+                with patch.object(Store, "sources_for_notebook", inject):
+                    fp = questions_fingerprint(s, nb.id)
+            self.assertTrue(fired)
+            hit_texts = {h[2] for h in fp[1]}
+            self.assertEqual(hit_texts, {"ALPHA旧テキスト。"})
+
     def test_all_kinds_have_instructions(self) -> None:
         llm = FakeLLM(reply="本文 [S1]。")
         for kind in KINDS:
