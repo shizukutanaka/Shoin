@@ -239,12 +239,20 @@ async function loadNotebooks(){
         if (!holder.isConnected) return;  // a newer loadNotebooks rebuilt the list
         // The list is newest-first: a notebook created or deleted between
         // page fetches shifts the offset window, so a row already rendered
-        // can arrive inside the next page. Same seen-set dedupe as
-        // wireEarlierPager's offset-window guard (v0.2.702).
-        const seen = new Set(notebooks.map(x=>x.id));
+        // can arrive inside the next page. Same dedupe-with-refresh merge
+        // as wireEarlierPager's offset-window guard (v0.2.702/711): the id
+        // still dedupes, but the newer read overwrites the cached row AND
+        // its DOM element, or a rename/count drift between pages stays on
+        // screen until the next full reload.
+        const seen = new Map(notebooks.map((x,i)=>[x.id, i]));
         for (const nb2 of (pj.notebooks || [])){
-          if (seen.has(nb2.id)) continue;
-          seen.add(nb2.id);
+          const at = seen.get(nb2.id);
+          if (at !== undefined){
+            notebooks[at] = nb2;
+            ul.children[at].replaceWith(mkNbRow(nb2));
+            continue;
+          }
+          seen.set(nb2.id, notebooks.length);
           notebooks.push(nb2); ul.insertBefore(mkNbRow(nb2), holder);
         }
         const left = (typeof pj.total === "number" ? pj.total : notebooks.length)
@@ -882,11 +890,18 @@ function wireEarlierPager(list, target, omitKey, i18nKey, render, fetch){
       // points at a different object, so merging would inject this nb's
       // rows into that nb's array and rewrite its omitted counter.
       if (cur !== nb) return;
-      // unshift each DESC page row -> the list stays oldest-first, and the
-      // id guard absorbs a concurrent add shifting the offset window.
-      const seen = new Set(r.arr.map(x=>x.id));
-      for (const row of r.rows)
-        if (!seen.has(row.id)){ seen.add(row.id); r.arr.unshift(row); }
+      // unshift each DESC page row -> the list stays oldest-first. The id
+      // map absorbs a concurrent add shifting the offset window, and a
+      // re-encountered row REFRESHES the cached copy's fields rather than
+      // being skipped whole: a rename (sources) or any mutable field edit
+      // between pages must not leave the stale value on screen until the
+      // next full reload (v0.2.711, product-review #95).
+      const seen = new Map(r.arr.map(x=>[x.id, x]));
+      for (const row of r.rows){
+        const prev = seen.get(row.id);
+        if (prev !== undefined){ Object.assign(prev, row); continue; }
+        seen.set(row.id, row); r.arr.unshift(row);
+      }
       nb[omitKey] = Math.max(0,
         (typeof r.total === "number" ? r.total : r.arr.length)
         - r.arr.length);

@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.710
+## Version History: v0.1.37 → v0.2.711
+
+### v0.2.711 — pagerのid dedupをrefresh-mergeへ(ページ間のrename/count変化が画面に残る経路を閉塞)
+
+- **新規短所95解消(ソクラテス問いで発掘)**: 「dedupは再遭遇行の可変フィールドも正しく扱うか」——v0.2.697/698/702のpager群(`wireEarlierPager`3面+`nb.more`)はoffset窓ずれ由来の重複を**id照合で全スキップ**していたが、ページ間で行自体が**編集**(source rename・nb name/counts変化)されると新しい読取りが古い行の影に消え、**リロードまで旧表示が残る**。staleness pager族(#83/86/88/90)の第4面: 同一性≠内容不変
+- **refresh型mergeへ**: `seen`を`Set`→`Map(id→index|obj)`へ。再遭遇行はAPPENDせず既存copyへ`Object.assign`で全フィールド更新——新しい読取りが常に勝つ。`nb.more`側は加えて`ul.children[i].replaceWith(mkNbRow())`でDOM行も再構築(name span+counts+live `cur`のactive表現保持)
+- **messages/notesは不変行**——assignはno-opで副作用なし(統一契約として適用)
+- **行動ピン(拡張)**: node実実行で(1)sources pager: `{id:3,title:"old"}`+ページ`{id:3,title:"new"}`→APPENDせずtitle更新 (2)nb.more: id-2重複行が`name:"B-dup"`へ配列+DOM両方refresh・dedup依然1行のみ
+- **サイクル内監査で検証済み却下7件**: kパラメータ(SEARCH_K_MAX)・static literal route(no traversal)・scope_ids両属検証(/ask+/searchとも404化済・/questionsはscope不取込み)・import embedding b64(NOTEBOOK_IMPORT_INVALID化済)・セマフォ解放(finally+REQUEST_SOCKET_SEC bounded)・ORDER BY全PK tie-break・LLM SSE parser全形状
 
 ### v0.2.710 — import文書のsettingsにwriter同値の値レベル検証(範囲外top_k・非int値のverbatim格納を閉塞)
 

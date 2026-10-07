@@ -3382,9 +3382,12 @@ const render = () => { calls.renders++; };
   wireEarlierPager(list2, cur, "sources_omitted", "src.load_earlier", render,
     async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
   if (list2.kids.length) { console.error("holder on zero omitted"); process.exit(1) }
-  // duplicate guard: a page replaying an already-listed id is skipped
-  cur = {id: 9, sources: [{id: 3}], sources_omitted: 1};
-  page = {sources: [{id: 3}, {id: 2}], total: 3, offset: 1, limit: 2};
+  // duplicate guard: a page replaying an already-listed id skips the
+  // append but REFRESHES the cached row's fields (v0.2.711) — a rename
+  // between pages must not leave the stale title on screen
+  cur = {id: 9, sources: [{id: 3, title: "old"}], sources_omitted: 1};
+  page = {sources: [{id: 3, title: "new"}, {id: 2, title: "two"}],
+    total: 3, offset: 1, limit: 2};
   const list3 = mk();
   wireEarlierPager(list3, cur, "sources_omitted", "src.load_earlier", render,
     async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
@@ -3392,6 +3395,8 @@ const render = () => { calls.renders++; };
   await new Promise(r => setTimeout(r, 0));
   const ids3 = cur.sources.map(s => s.id).join(",");
   if (ids3 !== "2,3") { console.error("dedup: " + ids3); process.exit(1) }
+  if (cur.sources[1].title !== "new" || cur.sources[0].title !== "two")
+    { console.error("refresh: " + JSON.stringify(cur.sources)); process.exit(1) }
   if (calls.toasts.length)
     { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
   console.log("ok");
@@ -3409,8 +3414,11 @@ const render = () => { calls.renders++; };
         v0.2.702: the second page below deliberately repeats id 2 — a
         concurrent add/delete shifts the newest-first offset window — and
         the pager must drop the already-rendered row instead of showing a
-        duplicate notebook in the sidebar. Executes the real loadNotebooks
-        under node."""
+        duplicate notebook in the sidebar. v0.2.711: the re-encountered id
+        REFRESHES the cached row and its DOM element (name/counts can drift
+        between pages — a rename in another tab must not stay stale until
+        the next full reload), it is only the duplicate APPEND that is
+        skipped. Executes the real loadNotebooks under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -3432,6 +3440,10 @@ const mk = () => {
       c.kids = c.kids.filter(k => k !== n);
       c.children = c.children.filter(k => k !== n); }
       n.isConnected = false; },
+    replaceWith(x){ const c = n._parent; if (!c) return;
+      const i = c.kids.indexOf(n); if (i >= 0) c.kids[i] = x;
+      const j = c.children.indexOf(n); if (j >= 0) c.children[j] = x;
+      x._parent = c; n._parent = null; },
     setAttribute(){}, focus(){}, addEventListener(){},
   };
   return n;
@@ -3473,15 +3485,19 @@ const api = p => { calls.fetches.push(p);
   await new Promise(r => setTimeout(r, 0));
   if (calls.fetches.join("|") !== "/api/notebooks|/api/notebooks?offset=2")
     { console.error("fetches: " + calls.fetches.join("|")); process.exit(1) }
-  // last page appended the third row in place, dropped the duplicate id-2
-  // row, and removed the holder
+  // last page appended the third row in place, refreshed the duplicate
+  // id-2 row IN PLACE (newer fields win), and removed the holder
   if (ul.kids.length !== 3 || ul.kids.some(k => k.className === "src-more"))
     { console.error("post-page rows: " + ul.kids.map(k=>k.className).join(",")); process.exit(1) }
   if (notebooks.length !== 3 || notebooks[2].id !== 3
       || notebooks.filter(x => x.id === 2).length !== 1
-      || notebooks[1].name !== "B")
-    { console.error("notebooks not appended/deduped: "
+      || notebooks[1].name !== "B-dup")
+    { console.error("notebooks not appended/refreshed: "
         + JSON.stringify(notebooks)); process.exit(1) }
+  // the rendered row was rebuilt too — its name span shows the fresh name
+  if (ul.kids[1].kids[0].textContent !== "B-dup")
+    { console.error("row not re-rendered: "
+        + ul.kids[1].kids[0].textContent); process.exit(1) }
   if (calls.toasts.length)
     { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
   console.log("ok");
