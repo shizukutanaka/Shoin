@@ -606,6 +606,9 @@ class ServerTest(unittest.TestCase):
             status, j = self._json("GET", f"/api/sources/{src.id}/text")
             self.assertEqual(status, 200)
             self.assertEqual(j["total"], 20)
+            # v0.2.706: the content epoch rides every page — a same-count
+            # chunk edit bumps it so the pager refuses a stale splice.
+            self.assertEqual(j["rev"], 0)
             self.assertTrue(j["truncated"])
             self.assertEqual(j["offset"], 0)
             self.assertLess(j["next_offset"], 20)
@@ -627,6 +630,13 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(len(got), 20)
             self.assertEqual(got[0], "t0" * 64)
             self.assertEqual(got[-1], "t19" * 64)
+            # Same-count text edit (PATCH equivalent) advances the epoch.
+            with Store(str(Path(self.tmp.name) / "s.db")) as store:
+                cid = store.chunks_for_source(src.id)[0].id
+                store.update_chunk_text(cid, "edited in place")
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["rev"], 1)
 
             # A single chunk larger than the cap is sliced by bytes, not
             # dropped — and the remainder is disclosed by the same flag.

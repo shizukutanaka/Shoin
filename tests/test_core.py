@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.705")
+        self.assertEqual(VERSION, "0.2.706")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -962,6 +962,28 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.update_chunk_text(cid, "   ")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_chunk_text_mutations_bump_content_rev(self) -> None:
+        """v0.2.706 (migration 15): the src_text pager's `total` frame
+        cannot see a same-count text change, so chunk-text mutators bump
+        sources.content_rev — update_chunk_text and
+        replace_chunks_for_source advance it; set_embedding does not
+        (the displayed text never moved)."""
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "doc", "mem://d", "sha1")
+            s.add_chunks(src.id, ["a", "b"])
+            self.assertEqual(s.get_source(src.id).content_rev, 0)
+
+            cid = s.chunks_for_source(src.id)[0].id
+            s.set_embedding(cid, [0.1, 0.2])
+            self.assertEqual(s.get_source(src.id).content_rev, 0)
+
+            s.update_chunk_text(cid, "edited")
+            self.assertEqual(s.get_source(src.id).content_rev, 1)
+
+            s.replace_chunks_for_source(src.id, ["x", "y"])
+            self.assertEqual(s.get_source(src.id).content_rev, 2)
 
     def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
         """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
@@ -20070,7 +20092,9 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 87,  # +5: import field-guard parity (v0.2.693)
+            ] + ["StoreError"] * 88,  # +1: update_chunk_text's content_rev
+                                      #     bump deleted-source guard (v0.2.706)
+                                      # +5: import field-guard parity (v0.2.693)
                                       # +1: import_notebook's duplicate
                                       #     source-id rejection (v0.2.692)
                                       # +2: _insert_tree_rows / duplicate_notebook

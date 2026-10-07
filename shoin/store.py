@@ -408,6 +408,18 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE trash_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'notebook';
         """,
     ),
+    (
+        15,
+        # Content epoch for the src_text pager (v0.2.706): a chunk-text
+        # mutation that keeps the count constant (update_chunk_text, or a
+        # refresh whose re-chunk lands the same count) moves no row the
+        # pager's `total` frame can see — splicing post-change rows under
+        # pre-change ones tears the displayed document. The mutators bump
+        # this counter so every page fetch can detect any content change.
+        """
+        ALTER TABLE sources ADD COLUMN content_rev INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]
 
 
@@ -595,6 +607,11 @@ class Source:
     # Freeform JSON object of descriptive metadata (author/year/…), parsed
     # from the meta column on read — never a raw TEXT leak to callers.
     meta: dict[str, Any] = field(default_factory=dict)
+    # Chunk-content epoch (v0.2.706, migration 15): bumped by every
+    # mutation of the source's chunk text so the src_text pager can reject
+    # a page that crosses a mid-read edit — the `total` count cannot see
+    # same-count replacements.
+    content_rev: int = 0
 
 
 @dataclass(frozen=True)
@@ -1957,6 +1974,7 @@ class Store:
             row["added_at"],
             float(row["weight"]),
             json.loads(row["meta"]),
+            int(row["content_rev"]) if "content_rev" in row.keys() else 0,
         )
 
     def sources_for_notebook(self, notebook_id: int) -> list[Source]:
@@ -2121,6 +2139,14 @@ class Store:
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
+                # Bump the content epoch (v0.2.706): a same-count
+                # replacement changes every chunk's text while `total`
+                # stays put — the src_text pager needs this flag to
+                # refuse splicing post-change pages under pre-change ones.
+                self.conn.execute(
+                    "UPDATE sources SET content_rev=content_rev+1 WHERE id=?",
+                    (source_id,),
+                )
                 if sha256 is not None:
                     # COALESCE(?, title), not a Python-side `title or src.title` fallback:
                     # src.title was read by get_source() BEFORE this transaction began, so
@@ -2456,7 +2482,7 @@ class Store:
             )
         _utf8(text, "text")
         row = self.conn.execute(
-            "SELECT c.id, s.notebook_id FROM chunks c"
+            "SELECT c.id, c.source_id, s.notebook_id FROM chunks c"
             " JOIN sources s ON s.id=c.source_id WHERE c.id=?",
             (chunk_id,),
         ).fetchone()
@@ -2469,6 +2495,17 @@ class Store:
                 (text, chunk_id),
             )
             if cur.rowcount == 0:
+                raise StoreError(
+                    "CHUNK_NOT_FOUND", f"chunk {chunk_id} was concurrently deleted"
+                )
+            # Bump the source's content epoch (v0.2.706): a src_text page
+            # fetched after this commits must not splice under the
+            # pre-edit page — the row count did not move.
+            rev_cur = self.conn.execute(
+                "UPDATE sources SET content_rev=content_rev+1 WHERE id=?",
+                (int(row["source_id"]),),
+            )
+            if rev_cur.rowcount == 0:
                 raise StoreError(
                     "CHUNK_NOT_FOUND", f"chunk {chunk_id} was concurrently deleted"
                 )

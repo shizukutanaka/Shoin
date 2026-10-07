@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.705
+## Version History: v0.1.37 → v0.2.706
+
+### v0.2.706 — sources.content_revエポックでsame-count編集を検知(src_text torn完全閉塞)
+
+- **新規短所90解消(ソクラテス問いで発掘)**: 「`total`整合検査は不変条件を全て覆うか」——v0.2.704の`p.total !== total`は件数変化のみ検知。`update_chunk_text`のin-place編集や同件数の`replace_chunks_for_source`は**totalが変わらずページが新旧テキスト混在**する残存面——refreshが同数chunkを生成すれば同一経路。表示内容とDBの乖離は無言
+- **migration 15 `content_rev`列**: chunk本文を変更する全書込が`content_rev+1`——`update_chunk_text`/`replace_chunks_for_source`をTX内でバンプ(`set_embedding`は非表示列のため対象外)。`Source` dataclassへ`tolerant read`(fixture互換)で追加
+- **`_h_src_text`が`rev`を全ページで返却**: ページャーは初回ページの`rev`を捕捉し`p.rev !== rev`で同型トースト+拒否——`total`/`rev`のORで不変条件完全カバー。旧サーバ(rev欠落)はundefined===undefinedで後方互換
+- **行動ピン3層**: store(バンプ/非バンプ/rev=0初期)・server(応答rev+PATCH後+1)・node UI(same total/異rev→toast+splice拒否)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし・i18n非変更
 
 ### v0.2.705 — import文書のfile origin無害化をsink側へ移設(CLI import経由LFI閉塞)
 

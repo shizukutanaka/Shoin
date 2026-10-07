@@ -3243,6 +3243,10 @@ const pages = {
   // pre-change ones.
   9: {chunks: [{id: 91, seq: 0, text: "NEW"}], total: 2, offset: 9,
       truncated: false, next_offset: 10, bytes_cap: 1000},
+  // v0.2.706: an in-place edit changed the text but not the count —
+  // only the rev epoch diverges from the wiring page's.
+  10: {chunks: [{id: 92, seq: 0, text: "EDITED"}], total: 5, offset: 10,
+      truncated: false, next_offset: 11, bytes_cap: 1000, rev: 6},
 };
 const api = (p, opts) => {
   const off = Number(p.split("offset=")[1]);
@@ -3303,6 +3307,21 @@ const sig = {aborted: false};
   if (c2.kids.some(k => k.className === "src-chunk"))
     { console.error("torn rows spliced: "
         + c2.kids.map(k=>k.textContent).join("|")); process.exit(1) }
+  // v0.2.706: same total, divergent rev — an in-place edit moved only
+  // the epoch, and the pager must still refuse the splice.
+  const c3 = mk();
+  wireSrcTextPager(c3, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 10, bytes_cap: 1000, rev: 5},
+    [], null, sig);
+  const h4 = c3.kids.find(k => k.className === "src-more");
+  if (!h4) { console.error("rev pager holder missing"); process.exit(1) }
+  await h4.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.toasts.length !== 2)
+    { console.error("no rev-change toast: " + calls.toasts); process.exit(1) }
+  if (c3.kids.some(k => k.className === "src-chunk"))
+    { console.error("edited rows spliced: "
+        + c3.kids.map(k=>k.textContent).join("|")); process.exit(1) }
   console.log("ok");
 })();
 """

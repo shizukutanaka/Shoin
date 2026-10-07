@@ -1213,7 +1213,7 @@ class _Handler(BaseHTTPRequestHandler):
         # `truncated`+`next_offset` disclose and continue the cut.
         offset = self._q_int("offset", 0, 2**63 - 1, 0)
         with Store(self.db) as store:
-            store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
+            src = store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
             total = store.count_chunks_for_source(src_id)
             out: list[Json] = []
             used = 0
@@ -1262,6 +1262,10 @@ class _Handler(BaseHTTPRequestHandler):
                     "truncated": pos < total,
                     "next_offset": pos,
                     "bytes_cap": SRC_TEXT_BYTES_MAX,
+                    # Content epoch (v0.2.706): bumped on every chunk-text
+                    # mutation so the pager can reject a page crossing a
+                    # mid-read edit `total` cannot see.
+                    "rev": src.content_rev,
                 }
             )
 

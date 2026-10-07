@@ -229,6 +229,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~87~~ | `export_notebook`(JSONツリー)がread_snapshot未適用→同時deleteで破損envelopeがimport先へ永続化 | v0.2.703 export_notebookをread_snapshotで包む |
 | ~~88~~ | `src_text`ページャーがtotal整合を検証せず→refresh並行で旧先頭+新末尾のtorn表示 | v0.2.704 `p.total !== total`で`src.changed`トースト+splice拒否 |
 | ~~89~~ | origin無害化が`_h_nb_import`限定→CLI importでfile origin文書がverbatim保存→refresh経由で任意ファイル読込(LFI) | v0.2.705 `import_notebook`内部へ移設し全入口をsink側防御 |
+| ~~90~~ | `src_text`ページャーが`total`のみ検査→in-place編集/同件数replaceでtotal不変のまま新旧テキスト混在(torn残存面) | v0.2.706 migration 15 `content_rev`エポック+`p.rev`比較で不変条件完全カバー |
 
 ### 解決済み(記録)
 

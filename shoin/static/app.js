@@ -625,6 +625,7 @@ function renderFullSource(container, chunks, citedIds, excerpt){
 // (every row stays reachable; the disclosure count is honest via `total`).
 function wireSrcTextPager(container, id, j, citedIds, excerpt, sig){
   let next = j.next_offset, total = j.total, left = j.truncated;
+  const rev = j.rev;
   if (!left) return;
   const holder = el("div","src-more");
   const btn = el("button","btn", t("src.more").replace("{n}", total - next));
@@ -638,9 +639,10 @@ function wireSrcTextPager(container, id, j, citedIds, excerpt, sig){
       if (sig.aborted) return;
       holder.remove();
       // The pager's frame is the first page's snapshot: a refresh replacing
-      // chunks mid-read shifts `total`, and splicing post-change rows under
-      // pre-change ones silently tears the displayed document (v0.2.704).
-      if (p.total !== total){ toast(t("src.changed")); return; }
+      // chunks mid-read shifts `total`, and a same-count edit shifts only
+      // `rev` — either way splicing post-change rows under pre-change ones
+      // silently tears the displayed document (v0.2.704, v0.2.706).
+      if (p.total !== total || p.rev !== rev){ toast(t("src.changed")); return; }
       appendSourceChunks(container, p.chunks, citedIds, excerpt, true);
       wireSrcTextPager(container, id, p, citedIds, excerpt, sig);
     }catch(e){
