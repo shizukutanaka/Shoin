@@ -290,9 +290,14 @@ def suggest_questions_fingerprinted(
     with store.read_snapshot():
         store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         hits = overview_hits(store, notebook_id, per_source=2)
-        fingerprint = _questions_fingerprint_rows(
-            store.sources_for_notebook(notebook_id), hits
-        )
+        sources = store.sources_for_notebook(notebook_id)
+        fingerprint = _questions_fingerprint_rows(sources, hits)
+        # v0.2.725: the title fallback's titles must come from THIS
+        # snapshot, not a second sources_for_notebook() after it — a
+        # rename landing between the two reads cached a question naming
+        # the new title under a fingerprint describing the old one (the
+        # same key/content mismatch v0.2.723 closed on the primary path).
+        titles = {s.id: s.title for s in sources}
         if not hits:
             return [], fingerprint
         # Same guard as generate() above and qa.ask() (v0.2.44) around the
@@ -325,7 +330,7 @@ def suggest_questions_fingerprinted(
         # Model unreachable must not read as "this notebook has nothing
         # worth asking" — fall back to title-derived skeleton questions
         # (v0.2.660, product-review #43).
-        return _title_questions(store, notebook_id, hits, n), fingerprint
+        return _title_questions(titles, hits, n), fingerprint
     # Question detection is shared with citation.py's uncited_sentences() via
     # looks_like_question() — see that function's docstring for why this used to
     # be two independently-drifting copies of the same heuristic.
@@ -361,7 +366,7 @@ _FALLBACK_TITLE_MAX = 60
 
 
 def _title_questions(
-    store: Store, notebook_id: int, hits: list[Hit], n: int
+    titles: dict[int, str], hits: list[Hit], n: int
 ) -> list[str]:
     """Deterministic question seeds derived from source titles (v0.2.660).
 
@@ -371,15 +376,15 @@ def _title_questions(
     is not. Title questions are answerable by construction (their source is
     in the notebook) but deliberately shallow — they name a source, not a
     theme inside it, mirroring the eval --gen skeleton. URL-lookalike,
-    oversized, and duplicate-folded titles are skipped; a hit whose source
-    disappeared between the two reads is simply absent from the map.
+    oversized, and duplicate-folded titles are skipped. The caller hands in
+    the titles map read inside the generation snapshot (v0.2.725), so a
+    hit's source is always present in the map.
     """
-    titles = {s.id: s.title for s in store.sources_for_notebook(notebook_id)}
     out: list[str] = []
     seen: set[str] = set()
     done: set[int] = set()
     for h in hits:
-        if h.source_id in done or h.source_id not in titles:
+        if h.source_id in done:
             continue
         done.add(h.source_id)
         title = unicodedata.normalize("NFKC", titles[h.source_id]).strip()

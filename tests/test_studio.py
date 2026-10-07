@@ -286,6 +286,31 @@ class StudioTest(unittest.TestCase):
         self.assertNotEqual(gen_fp, stale_fp)
         self.assertEqual(gen_fp, questions_fingerprint(self.store, self.nb))
 
+    def test_suggest_questions_fallback_titles_share_the_snapshot(self) -> None:
+        """v0.2.725 (product-review #109): the title fallback must reuse
+        the titles read inside the generation snapshot, not re-read
+        sources_for_notebook after it — a rename landing between the two
+        reads cached a question naming the NEW title under a fingerprint
+        describing the OLD one (the key/content mismatch v0.2.723 closed
+        on the primary path). The call-count pin is what keeps the second
+        read from silently re-opening the tear."""
+        from typing import Any
+
+        calls = 0
+        orig = Store.sources_for_notebook
+
+        def spy(self2: Store, *a: Any, **kw: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            return orig(self2, *a, **kw)
+
+        with patch.object(Store, "sources_for_notebook", spy):
+            qs = suggest_questions(
+                self.store, FakeLLM(chat_error=True), self.nb
+            )
+        self.assertEqual(calls, 1)
+        self.assertEqual(qs, ["「資料1」とは何ですか", "「資料2」とは何ですか"])
+
     def test_all_kinds_have_instructions(self) -> None:
         llm = FakeLLM(reply="本文 [S1]。")
         for kind in KINDS:

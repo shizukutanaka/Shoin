@@ -248,6 +248,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~106~~ | `index_source`の`add_source`コミット→`add_chunks`間失敗で0-chunk孤児source行が永続化——全retrieval不可視のままsource一覧に残り、re-addはsha256 dedupeに衝突し削除しない限り再取込不可(CLAUDE.md記録の既知ギャップ) | v0.2.722 except経路で`delete_source`ベストエフォートrollback+孤児非残存/既存行保全ピン2件 |
 | ~~107~~ | `_h_questions`がlookup fingerprint(state A)でcache key化→lookup→generation間のcorpus変更でstate B生成questionsをAのキーへ格納——キーが内容を記述せずstate A閲覧者へAに無い内容のsuggestionsが返る | v0.2.723 `suggest_questions_fingerprinted`が生成snapshot内fingerprintを返却しgen stateでキー化+lockピンregex追随+行動ピン |
 | ~~108~~ | `_h_ask_sse`のbudget/context組立てがheaders後の別auto-commitで動作——mid-flight replace/deleteでstreamed回答が旧hits+新context/titleの混在を接地(intra-request tear最終面) | v0.2.724 budget/contextをretrieve snapshot内へ統合——context失敗は_dispatch JSON envelopeへ合流(dangling-guard不要化)+行動ピン4件+カタログ3追随 |
+| ~~109~~ | `_title_questions`がfallback時にsnapshot外で`sources_for_notebook`を再読——2読取り間のrenameで新title名指し質問が旧corpusを記述するfpキーでcache(#107のfallback残存面) | v0.2.725 snapshot内の同一sourcesをtitlesとして再利用(第2読取り消去)+`not in titles`死ガード除去+`sources_for_notebook`呼出1回ピン |
 
 ### 解決済み(記録)
 

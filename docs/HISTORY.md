@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.724
+## Version History: v0.1.37 → v0.2.725
+
+### v0.2.725 — 質問fallbackのtitlesを生成snapshot内へ統合
+
+- 短所109: `_title_questions`がfallback時に`sources_for_notebook`をsnapshot**外**で再読——renameが2読取り間に着弾すると新titleを名指す質問が旧corpusを記述するfingerprintのキーでcache(#107族のfallback残存面)。snapshot内の同一`sources`を再利用して第2読取り自体を消去(titlesは生成snapshot由来で自明整合)+`_title_questions`のシグネチャを`(titles, hits, n)`へ縮小(到達不能な`not in titles`ガードも除去)+call-count行動ピン。
 
 ### v0.2.724 — SSE askのbudget/contextをretrieve snapshot内へ統合
 
