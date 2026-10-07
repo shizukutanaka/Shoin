@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.703
+## Version History: v0.1.37 → v0.2.704
+
+### v0.2.704 — src_textページャーがtotal整合を検証(refresh中torn表示閉塞)
+
+- **新規短所88解消(ソクラテス問いで発掘)**: 「ページャーは初回スナップショットと後続ページの整合を検証するか」——`wireSrcTextPager`は`sig.aborted`でビュー切断のみ防御し、コンテンツ変更を検査しない。ソース閲覧中にrefresh(`replace_chunks_for_source`)が走るとchunk行が全置換され`total`が変化——以降のページは**新chunkを旧chunk下へsplice**し、旧先頭+新末尾のtorn文書を表示。nb.more(#86)/earlier pager(#83)と同族stalenessの最後の残面
+- **`p.total !== total`で整合検証**: 変化検出時は`src.changed`トースト(ja/en)+splice拒否——途中ページで検出しても以降のページが誤マージされない逐語チェーン
+- **行動ピン(拡張)**: node実実行テストへtotal変化ページを追加——toast発火+chunk非追加+holder除去を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし・i18n ja/en対称維持
 
 ### v0.2.703 — JSONツリーエクスポートも単一WALスナップショットで読取(転送経路の破損文書閉塞)
 

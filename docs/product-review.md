@@ -227,6 +227,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~85~~ | `update_chunk_text`がsha256を動かさず質問キャッシュ指紋不変→編集前テキストのstale質問が無期限配信 | v0.2.701 `questions_fingerprint`がsources行+overview_hits実入力を鍵化 |
 | ~~86~~ | `nb.more`ページャーにseen dedup無し→newest-first窓ずれで既表示nbが二重表示 | v0.2.702 seen Set吸収(wireEarlierPager同型) |
 | ~~87~~ | `export_notebook`(JSONツリー)がread_snapshot未適用→同時deleteで破損envelopeがimport先へ永続化 | v0.2.703 export_notebookをread_snapshotで包む |
+| ~~88~~ | `src_text`ページャーがtotal整合を検証せず→refresh並行で旧先頭+新末尾のtorn表示 | v0.2.704 `p.total !== total`で`src.changed`トースト+splice拒否 |
 
 ### 解決済み(記録)
 

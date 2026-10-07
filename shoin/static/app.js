@@ -31,6 +31,7 @@ const I18N = {
     "chat.load_earlier":"以前の {n} 件を表示",
     "notes.load_earlier":"以前の {n} 件を表示",
     "src.more":"残り {n} チャンクを表示",
+    "src.changed":"ソースが更新されました——開き直してください",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
@@ -76,6 +77,7 @@ const I18N = {
     "chat.load_earlier":"Show {n} earlier messages",
     "notes.load_earlier":"Show {n} earlier notes",
     "src.more":"Show {n} more chunks",
+    "src.changed":"Source changed — reopen it",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
@@ -635,6 +637,10 @@ function wireSrcTextPager(container, id, j, citedIds, excerpt, sig){
       const p = await (await api(`/api/sources/${id}/text?offset=${next}`, {signal:sig})).json();
       if (sig.aborted) return;
       holder.remove();
+      // The pager's frame is the first page's snapshot: a refresh replacing
+      // chunks mid-read shifts `total`, and splicing post-change rows under
+      // pre-change ones silently tears the displayed document (v0.2.704).
+      if (p.total !== total){ toast(t("src.changed")); return; }
       appendSourceChunks(container, p.chunks, citedIds, excerpt, true);
       wireSrcTextPager(container, id, p, citedIds, excerpt, sig);
     }catch(e){

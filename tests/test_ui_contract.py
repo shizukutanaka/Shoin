@@ -3200,7 +3200,10 @@ const closeViewer = () => {};
         page via ?offset=next_offset, removes the holder, appends the page's
         chunks (a separator spans the page boundary), and re-wires itself —
         so the whole document stays reachable without one giant response.
-        Executes the real wireSrcTextPager + appendSourceChunks under node."""
+        v0.2.704: a page whose `total` moved since the wiring page means a
+        refresh rewrote the chunks mid-read — the pager must toast
+        src.changed and splice nothing. Executes the real wireSrcTextPager
+        + appendSourceChunks under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -3235,6 +3238,11 @@ const pages = {
       truncated: true, next_offset: 3, bytes_cap: 1000},
   3: {chunks: [{id: 5, seq: 5, text: "E"}], total: 5, offset: 3,
       truncated: false, next_offset: 5, bytes_cap: 1000},
+  // v0.2.704: a refresh replaced the chunks between pages — the count
+  // moved, so the pager must refuse to splice post-change rows under
+  // pre-change ones.
+  9: {chunks: [{id: 91, seq: 0, text: "NEW"}], total: 2, offset: 9,
+      truncated: false, next_offset: 10, bytes_cap: 1000},
 };
 const api = (p, opts) => {
   const off = Number(p.split("offset=")[1]);
@@ -3281,6 +3289,20 @@ const sig = {aborted: false};
     { console.error("holder left after last page"); process.exit(1) }
   if (calls.toasts.length)
     { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  // v0.2.704: wire a fresh pager whose next page reports a different total
+  // (refresh mid-read) — it must toast and append nothing.
+  const c2 = mk();
+  wireSrcTextPager(c2, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 9, bytes_cap: 1000}, [], null, sig);
+  const h3 = c2.kids.find(k => k.className === "src-more");
+  if (!h3) { console.error("stale pager holder missing"); process.exit(1) }
+  await h3.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.toasts.length !== 1)
+    { console.error("no change toast: " + calls.toasts); process.exit(1) }
+  if (c2.kids.some(k => k.className === "src-chunk"))
+    { console.error("torn rows spliced: "
+        + c2.kids.map(k=>k.textContent).join("|")); process.exit(1) }
   console.log("ok");
 })();
 """

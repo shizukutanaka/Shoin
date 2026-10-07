@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.703")
+        self.assertEqual(VERSION, "0.2.704")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
