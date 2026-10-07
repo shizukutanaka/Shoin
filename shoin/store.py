@@ -1983,16 +1983,6 @@ class Store:
         _utf8(title, "title")
         _utf8(origin, "origin")
         _utf8(sha256, "sha256")
-        self.get_notebook(notebook_id)
-        dup = self.conn.execute(
-            "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
-            (notebook_id, sha256),
-        ).fetchone()
-        if dup is not None:
-            raise StoreError(
-                "SOURCE_ALREADY_EXISTS",
-                f"identical source already in notebook (source id {dup['id']})",
-            )
         ts = _now()
         try:
             # `with self.conn:` commits INSERT+touch atomically and rolls both
@@ -2001,6 +1991,22 @@ class Store:
             # caller sees an error yet the source appears). Same leak class
             # as the v0.2.417-418 add_studio_output fixes.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe AND the dedupe
+                # probe must see the same commit point the INSERT lands on —
+                # run at autocommit, they could see a notebook rowid later
+                # deleted and reused, inserting the source under a notebook
+                # the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)
+                dup = self.conn.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? AND sha256=?",
+                    (notebook_id, sha256),
+                ).fetchone()
+                if dup is not None:
+                    raise StoreError(
+                        "SOURCE_ALREADY_EXISTS",
+                        f"identical source already in notebook (source id {dup['id']})",
+                    )
                 cur = self.conn.execute(
                     "INSERT INTO sources(notebook_id, kind, title, origin, sha256, added_at)"
                     " VALUES (?,?,?,?,?,?)",
@@ -2464,7 +2470,6 @@ class Store:
         if contexts is not None:
             for ctx in contexts:
                 _utf8(ctx, "chunk context")
-        src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
         ids: list[int] = []
         try:
             with self.conn:
@@ -2473,7 +2478,13 @@ class Store:
                 # pre-check read an unlocked count, so two concurrent
                 # ingests could each pass and both commit, breaching
                 # MAX_CHUNKS_PER_NOTEBOOK. The probe moves to the sink.
+                # v0.2.731: the parent-source probe moves under the same
+                # lock — at autocommit it could see a source rowid later
+                # deleted and reused, steering the cap count and the
+                # touch at a notebook the probe never saw while the
+                # INSERT lands on the recycled row.
                 self.conn.execute("BEGIN IMMEDIATE")
+                src = self.get_source(source_id)  # raises SOURCE_NOT_FOUND if missing
                 existing = self.counts(src.notebook_id)["chunks"]
                 if existing + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
                     raise StoreError(
@@ -2749,11 +2760,16 @@ class Store:
             )
         _utf8(title, "title")
         _utf8(body, "body")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
             # (v0.2.419): a failed touch must not leave the new note pending.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the note under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
                     (notebook_id, title, body, _now()),
@@ -2852,7 +2868,6 @@ class Store:
             )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # `with self.conn:` commits INSERT+DELETE atomically and rolls
             # both back on failure — a failed prune must not leave the
@@ -2861,6 +2876,12 @@ class Store:
             # displace the good output). Insert-then-delete also scopes the
             # prune to `id < lastrowid`, preserving a newer concurrent row.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the output under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
                     " created_at) VALUES (?,?,?,?,?)",
@@ -2914,11 +2935,16 @@ class Store:
             )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
-        self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
         try:
             # Atomic INSERT+touch — same pending-leak guard as add_source
             # (v0.2.419): a failed touch must not leave the new message pending.
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the
+                # same commit point the INSERT lands on — at autocommit it
+                # could see a notebook rowid later deleted and reused,
+                # persisting the turn under a notebook the probe never saw.
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
                     "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
                     " VALUES (?,?,?,?,?)",
@@ -2974,8 +3000,13 @@ class Store:
         return list(reversed(rows))
 
     def clear_messages(self, notebook_id: int) -> None:
-        self.get_notebook(notebook_id)
         with self.conn:
+            # BEGIN IMMEDIATE (v0.2.731): the parent probe must see the same
+            # commit point the DELETE lands on — at autocommit it could see a
+            # notebook rowid later deleted and reused, wiping the messages of
+            # a notebook the probe never saw.
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.get_notebook(notebook_id)
             self.conn.execute("DELETE FROM messages WHERE notebook_id=?", (notebook_id,))
             self.touch_notebook(notebook_id)
 

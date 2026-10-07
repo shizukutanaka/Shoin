@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.730")
+        self.assertEqual(VERSION, "0.2.731")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -388,6 +388,51 @@ class TestStore(unittest.TestCase):
             s.conn = real_conn
 
         self.assertEqual(locked, [True])
+
+    def test_child_writes_probe_parent_under_the_write_lock(self) -> None:
+        """v0.2.731: add_source / add_chunks / add_note / add_studio_output /
+        add_message / clear_messages probed the parent row at autocommit and
+        wrote the child at a later commit point — a delete+rowid-reuse in the
+        gap steered the write at a parent the probe never saw (the FK accepts
+        any live rowid). Probes now run under BEGIN IMMEDIATE: a foreign
+        writer cannot BEGIN while a probe executes."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "d", "o", "h")
+            s.add_chunks(src.id, ["c0"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig_nb, orig_src = s.get_notebook, s.get_source
+
+            def _try_foreign_begin() -> None:
+                try:
+                    s2.conn.execute("BEGIN IMMEDIATE")
+                    locked.append(False)
+                    s2.conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    locked.append(True)
+
+            def nb_probe(row_id: int):
+                got = orig_nb(row_id)
+                _try_foreign_begin()
+                return got
+
+            def src_probe(row_id: int):
+                got = orig_src(row_id)
+                _try_foreign_begin()
+                return got
+
+            s.get_notebook = nb_probe  # type: ignore[method-assign]
+            s.get_source = src_probe  # type: ignore[method-assign]
+            s.add_source(nb.id, "txt", "d2", "o2", "h2")
+            s.add_chunks(src.id, ["c1"])
+            s.add_note(nb.id, "n", "b")
+            s.add_studio_output(nb.id, "briefing", "body", "{}")
+            s.add_message(nb.id, "user", "hi")
+            s.clear_messages(nb.id)
+
+        self.assertEqual(locked, [True] * 6)
 
     def test_rename_notebook_empty_name_rejected(self) -> None:
         with make_store() as s:

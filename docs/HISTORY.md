@@ -29,7 +29,13 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.730
+## Version History: v0.1.37 → v0.2.731
+
+### v0.2.731 — 子行writerの親probeをwrite lock内へ統一(親rowid再利用によるcross-notebook誤着地を閉塞)
+
+- 短所115: `add_source`/`add_chunks`/`add_note`/`add_studio_output`/`add_message`/`clear_messages`は親行の存在probe(`get_notebook`/`get_source`)をautocommitで実行し、子行のINSERT/DELETEは別の後続commit点に着地——間のdelete+rowid再利用(非AUTOINCREMENT INTEGER PKはmax+1再利用)でFKが**probeの見なかった別親**(再利用後の実在行)を受理し、message/note/studio出力/chunkが無関係notebook・ソースへ静かに着地、clear_messagesが別nbの履歴を全消去するtear。6 writerのprobeを全て`with self.conn:`内の`BEGIN IMMEDIATE`直後へ移動——probeと書込みが同一commit点を見ることを構造化(v0.2.712のmetadata writer族と同契約を子writer族へ拡張)。`add_source`のdedupe SELECTも同lock内へ(友好的probeとINSERTの視点統一・UNIQUE制約はbackstopとして存置)。行動ピン: 6 writerのprobe実行中にforeign `BEGIN IMMEDIATE`が必ず失敗することを検証(第二接続busy_timeout=0)。検証済みで非該当: `merge_notebooks`/`duplicate_notebook`/`_insert_tree_rows`/delete系writerはprobeをlock内で再導出済(v0.2.683/687/708/712)。
+- 設計上の残存: handlerが生成中に対象nb自体がdelete+再採番される窓はcross-call tearのdocumented class(fingerprint/scope guardの許容窓と同一)——writer単位のprobe/write一致は本修正で保証。
+
 
 ### v0.2.730 — ファイル源originを絶対パス化(refreshのcwd依存と無言の別ファイル再取込を閉塞)
 
