@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.699")
+        self.assertEqual(VERSION, "0.2.700")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -11226,6 +11226,49 @@ class TestExport(unittest.TestCase):
         # The answer's own legend still maps S1 -> 第二の資料 (retrieval rank).
         self.assertIn("S1=第二の資料", md)
 
+    def test_export_markdown_consistent_snapshot_under_concurrent_delete(self) -> None:
+        """v0.2.700: export must read one snapshot, not N auto-commit reads.
+
+        Each getter used to see its own commit point, so a concurrent
+        delete landing between them tore the document: sources listed
+        (first read) while their notes/messages were already gone (later
+        reads). export_* wraps every read in Store.read_snapshot (explicit
+        BEGIN — `with conn` never snapshots SELECTs), so the whole file
+        reflects the state at export start.
+        """
+        import json
+        import tempfile
+
+        from shoin.export import export_markdown
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "資料", "o", "sha")
+            s.add_chunks(src.id, ["本文。"])
+            s.add_note(nb.id, "メモ", "中身")
+            s.add_message(nb.id, "assistant", "回答[S1]。",
+                          json.dumps({"cited": [1], "invalid": []}))
+            torn = {"done": False}
+            orig = s.sources_for_notebook
+
+            def read_then_delete(nb_id: int) -> list:
+                rows = orig(nb_id)
+                if not torn["done"]:
+                    torn["done"] = True
+                    # A concurrent writer deletes the whole notebook between
+                    # the first and second reads of the export.
+                    s2.delete_notebook(nb_id)
+                return rows
+
+            s.sources_for_notebook = read_then_delete  # type: ignore[method-assign]
+            md = export_markdown(s, nb.id)
+
+        self.assertTrue(torn["done"])
+        self.assertIn("1. 資料 (txt) — o", md)
+        self.assertIn("メモ", md)
+        self.assertIn("回答[S1]。", md)
+
     def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
         """Embedded newline in note title must not break the Markdown heading."""
         from shoin.export import export_markdown
@@ -20067,7 +20110,11 @@ class TestResidualGuards(unittest.TestCase):
         with a rationale."""
         import ast
 
-        allowed = {"staticmethod", "classmethod", "property", "wraps"}
+        # contextlib.contextmanager wraps Store.read_snapshot's BEGIN/
+        # ROLLBACK pair — a reader-side TX the caller invokes via `with`;
+        # no exception swallowing (the generator re-raises to the caller).
+        allowed = {"staticmethod", "classmethod", "property", "wraps",
+                   "contextlib.contextmanager"}
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         problems: list[str] = []
         n_seen = 0

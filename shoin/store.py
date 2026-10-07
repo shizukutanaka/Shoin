@@ -16,7 +16,7 @@ import operator
 import os
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -644,6 +644,27 @@ class Store:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Hold one consistent read view across several SELECTs.
+
+        pysqlite never begins a transaction for SELECT, so `with self.conn`
+        leaves every statement on its own auto-commit snapshot — a concurrent
+        writer's commit lands between two of them and the caller assembles
+        state that never existed together (an export with sources listed but
+        their chunks already deleted). An explicit BEGIN pins the WAL read
+        snapshot for the whole block; writers on other connections proceed
+        unblocked (WAL readers don't serialize against writers).
+        """
+        self.conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            # Reads never mutate, so ROLLBACK is unconditional: it ends the
+            # snapshot on the success path AND on exceptions alike — and is a
+            # no-op should the body somehow have ended the TX already.
+            self.conn.rollback()
 
     # --- migrations ---
 

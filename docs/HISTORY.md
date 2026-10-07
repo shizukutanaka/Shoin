@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.699
+## Version History: v0.1.37 → v0.2.700
+
+### v0.2.700 — export読取を単一スナップショット化(破破損export閉塞)
+
+- **新規短所84解消(ソクラテス問いで発掘)**: 「exportの読取は単一スナップショット下か」——`export_markdown`/`export_bibtex`/`export_ris`は複数getterをauto-commit SELECTで連結。pysqliteはSELECTでTXを開始しないため各SELECTが**別コミット点**を読み、同時deleteが途中に挟まると「sourcesは列挙済み・notes/messagesは消失」の**破損export**が生成される——サーバは最大64同時要求で実行環境的に成立する経路
+- **`Store.read_snapshot`**: `BEGIN`(明示)でWAL読スナップショットを固定——`with self.conn`はpysqlite仕様でSELECTをTX化しないため不十分。WAL読者はwriterをブロックしないため同時書込は従来通り進行。3 export関数を`_`内部関数+snapshotラッパーへ分解(公開名不変・呼出側無変更)
+- **行動ピン1件**: 2接続でexport初読直後に別接続からnb削除を注入——snapshot下でもsources/notes/messages全て出力を検証(修正前は後続読取が空になる破損)
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.699 — nb切替中に解決したページ応答を破棄(ページャー競合閉塞)
 

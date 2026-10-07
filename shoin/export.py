@@ -197,6 +197,15 @@ def _legend(report: dict[str, object]) -> str:
 
 
 def export_markdown(store: Store, notebook_id: int) -> str:
+    # One consistent snapshot for the whole document: each getter
+    # would otherwise read its own commit point, and a concurrent
+    # delete/write could tear the export (source listed, chunks
+    # already gone).
+    with store.read_snapshot():
+        return _export_markdown(store, notebook_id)
+
+
+def _export_markdown(store: Store, notebook_id: int) -> str:
     nb = store.get_notebook(notebook_id)
     parts: list[str] = [f"# {_md_line(nb.name)}", ""]
 
@@ -313,6 +322,15 @@ def _meta_year(src: Source) -> str:
 
 
 def export_bibtex(store: Store, notebook_id: int) -> str:
+    # One consistent snapshot for the whole document: each getter
+    # would otherwise read its own commit point, and a concurrent
+    # delete/write could tear the export (source listed, chunks
+    # already gone).
+    with store.read_snapshot():
+        return _export_bibtex(store, notebook_id)
+
+
+def _export_bibtex(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
@@ -356,6 +374,15 @@ _RIS_TYPE = {"url": "ELEC", "html": "ELEC"}
 
 
 def export_ris(store: Store, notebook_id: int) -> str:
+    # One consistent snapshot for the whole document: each getter
+    # would otherwise read its own commit point, and a concurrent
+    # delete/write could tear the export (source listed, chunks
+    # already gone).
+    with store.read_snapshot():
+        return _export_ris(store, notebook_id)
+
+
+def _export_ris(store: Store, notebook_id: int) -> str:
     store.get_notebook(notebook_id)
     entries: list[str] = []
     for src in store.sources_for_notebook(notebook_id):
