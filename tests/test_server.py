@@ -664,6 +664,45 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
 
+    def test_nb_detail_reads_under_one_snapshot(self) -> None:
+        """v0.2.707: GET /api/notebooks/{id} composes ~8 auto-commit
+        SELECTs (row, counts, capped messages/notes/sources, studio
+        outputs). Without one WAL snapshot a concurrent mutation lands
+        mid-build — here: a source deleted between `sources_for_notebook`
+        and `counts` would report a source the tally denies. read_snapshot
+        pins the whole response to one commit point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "snap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-snap")
+            store.add_chunks(src.id, ["c"])
+
+        orig = Store.sources_for_notebook
+        fired = []
+
+        def inject(self2: Store, notebook_id: int) -> list[object]:
+            rows = orig(self2, notebook_id)
+            if notebook_id == nb_id and not fired:
+                fired.append(True)
+                # Commit a concurrent delete between this SELECT and the
+                # counts SELECT — torn without a pinned snapshot.
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "sources_for_notebook", inject):
+            status, j = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # The snapshot answers entirely pre-delete: the embedded row and
+        # the tally agree.
+        self.assertEqual(j["counts"]["sources"], 1)
+        self.assertEqual(len(j["sources"]), 1)
+        self.assertEqual(j["sources"][0]["id"], src.id)
+
     def test_nb_list_and_trash_paged_at_limit(self) -> None:
         """v0.2.696: GET /api/notebooks and GET /api/trash were the last
         unbounded LIST responses — every dashboard load refetched every row.

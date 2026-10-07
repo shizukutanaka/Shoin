@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.706
+## Version History: v0.1.37 → v0.2.707
+
+### v0.2.707 — nb detail応答を単一WALスナップショットへ(合成読取のtorn閉塞)
+
+- **新規短所91解消(ソクラテス問いで発掘)**: 「複数SELECTで組立てる応答は全て単一スナップショット下か」——export(#84)/export_notebook(#87)をread_snapshot化したが、`GET /api/notebooks/{id}`の`_notebook_json`は約8個のauto-commit SELECT(get_notebook/list_messages_recent/count_messages/list_notes/sources_for_notebook/counts/latest_studio_outputs)を無保護で連結していた残存1面。同時deleteが途中に挟まると**埋込リストと`counts`が不一致**(sources_for_notebook→counts間の削除で「行はあるがtally=0」)、`omitted`開示が負値化
+- **`_h_nb_get`を`store.read_snapshot()`で包む**: standalone-read境界にのみ配置(export_notebookと同じ判断)——merge/trash-restore経路は自TX内で保護済。WALリーダーは書込をブロックしないため同時性は維持
+- **行動ピン**: 2接続で`sources_for_notebook`完了直後に別接続delete注入→snapshot下で埋込行とcountsが一致(ベースラインでは不一致)
+- **却下した問い(記録)**: paged list端点(nb/trash/messages等)のtotal/rows不一致(offset paging自体が窓ずれ許容の設計・detail応答のみがcoherence要求)・`_h_src_text`のcount+page(p.totalガードで検出済)
 
 ### v0.2.706 — sources.content_revエポックでsame-count編集を検知(src_text torn完全閉塞)
 

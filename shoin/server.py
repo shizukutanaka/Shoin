@@ -876,7 +876,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _h_nb_get(self, nb_id: int) -> None:
         with Store(self.db) as store:
-            self._json(_notebook_json(store, nb_id))
+            # _notebook_json composes ~8 auto-commit SELECTs (row, counts,
+            # capped messages/notes/sources, studio outputs) — each reads
+            # its own commit point, so a concurrent mutation lands
+            # mid-build: embedded lists disagree with `counts`, and the
+            # `omitted` disclosures can go negative (v0.2.707). One WAL
+            # snapshot frames the whole composition.
+            with store.read_snapshot():
+                self._json(_notebook_json(store, nb_id))
 
     def _h_nb_rename(self, nb_id: int) -> None:
         # PATCH accepts {name} and/or {settings} (v0.2.659) — either field
