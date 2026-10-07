@@ -31,7 +31,7 @@ from .config import (
     ui_lang,
 )
 from .llm import LLMError, Message
-from .log import emit
+from .log import emit, one_line
 from .search import Hit, retrieve, retrieve_multi
 from .store import Store, StoreError
 
@@ -592,8 +592,12 @@ def _check_embed_model_ok(store: Store, llm: ChatBackend) -> bool:
     if not _embed_model_stale(store, current):
         return True
     stored = (store.get_setting(EMBED_MODEL_SETTING_KEY) or "").strip()
+    # v0.2.717: model names are endpoint/DB-derived — escape control
+    # characters before they reach the terminal (same contract as the CLI).
     print(
-        _t("embed_model_changed").format(old=stored, new=current),
+        _t("embed_model_changed").format(
+            old=one_line(stored), new=one_line(current)
+        ),
         file=sys.stderr,
     )
     return False

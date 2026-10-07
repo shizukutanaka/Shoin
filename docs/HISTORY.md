@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.716
+## Version History: v0.1.37 → v0.2.717
+
+### v0.2.717 — untrusted bytesのターミナルescape網羅(出力sinkの残存面)
+
+- **新規短所101解消(ソクラテス問いで発掘)**: 「`_one_line`適用は全出力経路を覆うか」——既存ヘルパーは多くの行をカバーするが残存面が分散: (a)`stats`の`nb.name`(imported doc由来可) (b)`messages list`の`m['body']` (c)`refresh-all`の`r['title']`行 (d)`search.suggest`の`terms`(ソーステキスト由来トークン) (e)report `sec`(source context=chunk heading由来) (f)LLM出力経路(stream delta/answer/studio/questions——prompt injectionで文書がモデルに制御コードを吐かせうる) (g)check integrity行 (h)`health`のembedモデル名 (i)qa.pyの`embed_model_changed`警告(endpoint/DB由来名)
+- **`one_line`/`safe_text`をlog.pyへ集約**: 出力leafへ置きqa.pyも同契約を共有——cliは`_one_line`/`_safe_text`エイリアスで全呼出無変更
+- **`_ESCAPED_CATEGORIES`にCf追加**: bidi override(U+202E等)はESCと同じTrojan Source系spoofing——既存の全wrap箇所も強化
+- **`safe_text`新設**: multi-line body(LLM回答・message body・Studio出力・suggested questions)は\n/\tを保持し\r+Cf+Cc+Zl/Zpのみescape——レイアウト不変で制御系列のみneutralize
+- **行動ピン4件**: one_line/safe_text単体+`messages list` body(ESC/U+202E混入・\n保持)+`stats` nb名
+- **設計記録(保持のもの)**: `export` printはbyte-exact artifact(stdout==ファイル契約)のため生出力・json.dumpsはself-escaping・pipeline warnは`!r` repr-quoted・error echoはcaller入力のみ
+
+
 
 ### v0.2.716 — PDF抽出内部増幅のbound(10MBファイルcapがカバーしない2経路)
 

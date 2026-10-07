@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.716")
+        self.assertEqual(VERSION, "0.2.717")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -14735,6 +14735,97 @@ class TestCLINoteSourceParity(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("refreshed", out.getvalue())
             self.assertIn("3 chunks", out.getvalue())
+        finally:
+            os.unlink(db_file)
+
+
+class TestTerminalEscape(unittest.TestCase):
+    """v0.2.717: untrusted bytes must not reach the terminal raw. Stored
+    fields (titles, imported notebook names, message bodies, section
+    breadcrumbs, suggestion terms) are attacker-controlled — a crafted
+    export document or hostile local-LLM endpoint can smuggle ESC
+    sequences or Cf bidi overrides the terminal would interpret.
+    """
+
+    def test_one_line_escapes_cc_cf_zl_zp(self) -> None:
+        from shoin.log import one_line
+
+        out = one_line("a\x1b[2Jb\u202e.c\r\n\t z\u2028w")
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        self.assertNotIn("\u2028", out)
+        self.assertIn("\\x1b", out)
+        self.assertIn("\\u202e", out)
+        self.assertIn("\\r", out)
+        self.assertIn("\\n", out)
+        self.assertIn("\\t", out)
+
+    def test_safe_text_keeps_newlines_escapes_controls(self) -> None:
+        from shoin.log import safe_text
+
+        out = safe_text("line1\nline2\x1b]52;;Rm9v\a\rhide")
+        self.assertIn("\n", out)  # layout newlines survive
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\a", out)
+        self.assertNotIn("\r", out)
+        self.assertIn("\\x1b", out)
+        self.assertIn("\\r", out)
+
+    def test_cli_messages_list_escapes_body_controls(self) -> None:
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("esc-test").id
+                s.add_message(
+                    nb_id,
+                    "user",
+                    "first\nsecond \x1b[2Jcleared \u202e spoofy",
+                    "{}",
+                )
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "messages", "list", str(nb_id)])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("\u202e", text)
+            self.assertIn("\\x1b", text)
+            self.assertIn("\\u202e", text)
+            self.assertIn("first\nsecond", text)  # body layout survives
+        finally:
+            os.unlink(db_file)
+
+    def test_cli_stats_escapes_notebook_name(self) -> None:
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from shoin.cli import main
+        from shoin.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
+            db_file = f.name
+        try:
+            with Store(db_file) as s:
+                nb_id = s.create_notebook("evil\x1b[1m-name").id
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                rc = main(["--db", db_file, "stats", str(nb_id)])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn("\x1b", text)
+            self.assertIn("\\x1b", text)
         finally:
             os.unlink(db_file)
 

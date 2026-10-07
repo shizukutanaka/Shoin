@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -37,6 +36,8 @@ from .config import (
 from .export import FORMATS, export
 from .ingest import IngestError
 from .llm import LLMClient, LLMError
+from .log import one_line as _one_line
+from .log import safe_text as _safe_text
 from .pipeline import (
     index_source,
     refresh_all_sources,
@@ -71,29 +72,9 @@ def _port_num(value: str) -> int:
     return n
 
 
-def _one_line(text: str) -> str:
-    """Render an externally-controlled string safe for single-line output.
-
-    Status rows and label fields are emitted one-per-line; a stored title,
-    CLI argument, or env value containing a control character (\n, \r, ESC,
-    U+2028…) would split the row or rewrite earlier terminal output — a forged
-    `✓` line is indistinguishable from a real one. Escaping preserves the row
-    shape and keeps the original bytes readable.
-    """
-    out: list[str] = []
-    for ch in text:
-        if ch == "\n":
-            out.append("\\n")
-        elif ch == "\r":
-            out.append("\\r")
-        elif ch == "\t":
-            out.append("\\t")
-        elif unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
-            cp = ord(ch)
-            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
-        else:
-            out.append(ch)
-    return "".join(out)
+# v0.2.717: the terminal-escape helpers live in log.py (the output leaf)
+# so non-CLI warn paths (qa's embed-model warning) can share them, and the
+# Cf category was added — bidi overrides are the same spoofing class as ESC.
 
 
 _STRINGS: dict[str, dict[str, str]] = {
@@ -571,7 +552,7 @@ def _print_report(report: CitationReport) -> None:
     for c in report["cited"]:
         title = report["source_map"].get(f"S{c}", "")
         section = section_map.get(f"S{c}", "")
-        sec = f" (§ {section})" if section else ""
+        sec = f" (§ {_one_line(section)})" if section else ""
         bits = [
             f"{_t('cite.found_' + kind)} #{int(v)}"
             if kind != "lex"
@@ -692,7 +673,7 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     print(_t("health.llm_ok", v=_t("health.yes") if avail else _t("health.no")))
     print(_t("health.model", v=_one_line(llm_model())))
     em = embed_model()
-    print(_t("health.embed_model", v=em if em.strip() else _t("health.embed_model_off")))
+    print(_t("health.embed_model", v=_one_line(em) if em.strip() else _t("health.embed_model_off")))
     # v0.2.661 (product-review #17): name the model that built the stored
     # vectors; when it diverges from the configured one, vector search is
     # silently disabled — print the same repair hint ask/search emit.
@@ -736,7 +717,7 @@ def _human_bytes(n: int) -> str:
 def _cmd_stats(store: Store, args: argparse.Namespace) -> int:
     nb = store.get_notebook(int(args.notebook_id))
     s = store.notebook_stats(nb.id)
-    print(_t("stats.name", v=nb.name))
+    print(_t("stats.name", v=_one_line(nb.name)))
     print(_t("stats.sources", n=str(s["sources"])))
     print(_t("stats.chunks", n=str(s["chunks"])))
     print(_t("stats.notes", n=str(s["notes"])))
@@ -1097,7 +1078,7 @@ def _cmd_check(db: str | None) -> int:
         return 1
     print(_t("check.integrity", v=str(res["integrity"])))
     for line in res["integrity_errors"]:
-        print(f"  {line}")
+        print(f"  {_one_line(line)}")
     print(_t("check.fk", n=str(res["fk_violations"])))
     print(
         _t(
@@ -1142,7 +1123,10 @@ def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
         if not messages:
             print(_t("msg.empty"))
         for m in messages:
-            print(f"[{m['id']}] {m['role']}: {m['body']}")
+            print(
+                f"[{m['id']}] {_one_line(str(m['role']))}:"
+                f" {_safe_text(str(m['body']))}"
+            )
     elif action == "clear":
         store.clear_messages(int(args.notebook_id))
         print(_t("msg.cleared"))
@@ -1196,7 +1180,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     deltas: list[str] = []
 
     def _emit(delta: str) -> None:
-        print(delta, end="", flush=True)
+        print(_safe_text(delta), end="", flush=True)
         deltas.append(delta)
 
     answer = ask(
@@ -1216,7 +1200,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         # mid-answer into the degraded path — the already-emitted partial stays
         # visible and the final answer is printed in full, matching the SSE
         # contract that partial text is real and persisted.
-        print(answer.text)
+        print(_safe_text(answer.text))
     # A non-degraded answer can still legitimately carry an empty report — e.g.
     # the model correctly follows the system prompt's "say so explicitly" rule
     # for a fact not in the sources, which uncited_sentences() deliberately
@@ -1231,7 +1215,7 @@ def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
 
 def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     result = generate(store, llm, int(args.notebook_id), str(args.kind))
-    print(result.body)
+    print(_safe_text(result.body))
     if _report_has_output(result.report):
         print("---")
         _print_report(result.report)
@@ -1240,7 +1224,7 @@ def _cmd_studio(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
 
 def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     for q in suggest_questions(store, llm, int(args.notebook_id)):
-        print(f"- {q}")
+        print(f"- {_safe_text(q)}")
     return 0
 
 
@@ -1268,7 +1252,12 @@ def _cmd_search(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
     if not hits:
         suggestions = suggest_corrections(store, None, question)
         if suggestions:
-            print(_t("search.suggest", terms=" ".join(suggestions)))
+            print(
+                _t(
+                    "search.suggest",
+                    terms=" ".join(_one_line(s) for s in suggestions),
+                )
+            )
     for i, h in enumerate(hits):
         nb_id, nb_name, title = meta.get(h.source_id, (0, "", ""))
         print(
@@ -1352,7 +1341,7 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
         for r in results:
             status = str(r["status"])
             tally[status] = tally.get(status, 0) + 1
-            line = f"[{r['id']}] {r['title']}: {status}"
+            line = f"[{r['id']}] {_one_line(str(r['title']))}: {status}"
             if status == "failed":
                 line += f" ({r['code']})"
             print(line)
