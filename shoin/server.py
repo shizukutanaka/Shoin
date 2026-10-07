@@ -1603,6 +1603,18 @@ class _Handler(BaseHTTPRequestHandler):
                 hits = retrieve_for_question(
                     store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
                 )
+                # v0.2.724: the per-notebook budget read and the context
+                # build join the retrieval snapshot — they used to run after
+                # the SSE headers on their own auto-commit snapshots, so a
+                # mid-flight replace/ingest could splice titles and chunk
+                # text from a newer commit into an answer the hit list came
+                # from an older one.
+                nb_budget = int(
+                    store.notebook_settings(nb_id).get(
+                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
+                    )
+                )
+                context = build_context(store, hits, budget_tokens=nb_budget)
             store.add_message(nb_id, "user", question, "{}")
 
             try:
@@ -1631,44 +1643,6 @@ class _Handler(BaseHTTPRequestHandler):
                     store.add_message(nb_id, "assistant", no_hit, json.dumps(report))
                 except Exception:
                     pass  # post-SSE persist: notebook deleted or DB error; stream already clean
-                return
-
-            try:
-                # Per-notebook retrieval budget override (v0.2.659) — the
-                # same knob qa.ask() applies on its own build_context call.
-                nb_budget = int(
-                    store.notebook_settings(nb_id).get(
-                        "source_text_tokens", _QA_SOURCE_TEXT_TOKENS
-                    )
-                )
-                context = build_context(store, hits, budget_tokens=nb_budget)
-            except Exception as exc:
-                # Headers already committed; must not let this propagate to _dispatch
-                # (it would write a new HTTP status line into the SSE body stream).
-                # Message policy mirrors _dispatch: coded errors carry their
-                # curated (code, message); anything else leaks only the type
-                # name — str(exc) can carry internals (SQL text, paths).
-                # Full detail still goes to stderr.
-                print(
-                    f"build_context failed mid-SSE: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                try:
-                    if isinstance(exc, (StoreError, IngestError, LLMError)):
-                        self._sse("error", {"code": exc.code, "message": str(exc)})
-                    else:
-                        self._sse(
-                            "error",
-                            {"code": "SYSTEM_INTERNAL_ERROR", "message": type(exc).__name__},
-                        )
-                except ConnectionError:
-                    pass
-                # Prevent dangling user turn: save an empty assistant message so
-                # history_messages() sees a complete pair instead of an orphaned user turn.
-                try:
-                    store.add_message(nb_id, "assistant", "", json.dumps(make_report("", [])))
-                except Exception:
-                    pass
                 return
 
             try:

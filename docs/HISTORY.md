@@ -29,8 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.723
+## Version History: v0.1.37 → v0.2.724
 
+### v0.2.724 — SSE askのbudget/contextをretrieve snapshot内へ統合
+
+**短所108**: `_h_ask_sse`はretrieve(snapshot)→add_message→headers→`notebook_settings`+`build_context`(別auto-commit)——headers確定後のcontext組立てがlegsと異コミットを読み、mid-flight replace/deleteでstreamed回答が「hit一覧は旧state・context/titleは新state」の混在を接地(検出不能intra-request tearの最終面)。budget/contextをretrieve snapshot内へ移動——context失敗はSSE error frameでなく`_dispatch`の通常JSON coded envelopeへ自然合流(user turn未永続化でdangling-guard自体が不要化)+行動ピン4件+カタログ3追随。
 ### v0.2.723 — questions cacheをgeneration実読取stateでキー化
 
 **短所107**: `_h_questions`はlookup fingerprint(生成前state A)でキャッシュキー化→lookup→generation間にcorpus変更が入ると**state Bから生成されたquestionsがstate Aのキーで格納**——state Aを見る後続要求にAに存在しなかった内容を記述するsuggestionsが返る(キーが内容を記述しない真の不整合)。`suggest_questions_fingerprinted()`が生成snapshot内でfingerprintを計算し`(questions, fp)`を返す設計へ——cache keyは常に生成元corpusを記述+generation-lockピンregex追随+行動ピン。

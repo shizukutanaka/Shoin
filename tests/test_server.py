@@ -827,6 +827,52 @@ class ServerTest(unittest.TestCase):
             f"expected a hit for source {src.id}: {j['hits']!r}",
         )
 
+    def test_ask_sse_grounding_reads_under_one_snapshot(self) -> None:
+        """v0.2.724: the SSE ask's budget read and context build used to run
+        after the headers on their own auto-commit snapshots — a concurrent
+        delete_source landing between the retrieval legs and the context
+        build could splice a newer commit into the streamed answer (missing
+        title row, or a source the meta no longer lists). read_snapshot
+        pins hits + settings + context to one commit."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "sse-snap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "論文A", "o", "h-sse")
+            store.add_chunks(src.id, ["原料は水と塩である。"])
+
+        orig = Store.notebook_settings
+        fired = []
+
+        def inject(self2: Store, *a: object, **kw: object) -> dict[str, object]:
+            rows = orig(self2, *a, **kw)
+            if not fired:
+                fired.append(True)
+                with Store(db) as other:
+                    other.delete_source(src.id)
+            return rows
+
+        with patch.object(Store, "notebook_settings", inject):
+            status, _, raw = self._req(
+                "POST",
+                f"/api/notebooks/{nb_id}/ask",
+                json.dumps({"question": "原料は何か？"}).encode(),
+                {"Content-Type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        events = parse_sse(raw.decode())
+        kinds = [e for e, _ in events]
+        self.assertIn("meta", kinds)
+        self.assertIn("done", kinds)
+        meta = [d for e, d in events if e == "meta"][0]
+        # Pre-delete snapshot: the deleted source's hit still streams with
+        # its real title — a post-headers context build would have seen the
+        # row vanish under it.
+        self.assertEqual(meta["sources"][0]["title"], "論文A")
+
     def test_nb_list_and_trash_paged_at_limit(self) -> None:
         """v0.2.696: GET /api/notebooks and GET /api/trash were the last
         unbounded LIST responses — every dashboard load refetched every row.
@@ -3139,15 +3185,15 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
 
-    def test_context_failure_on_dead_socket_swallows_both_writes(self) -> None:
-        """build_context raising after SSE headers commits the status line, so
-        the error frame is best-effort: when that frame hits a dead socket AND
-        the repair persist also fails, both must be swallowed quietly."""
+    def test_context_failure_before_headers_logs_and_500s(self) -> None:
+        """v0.2.724: build_context lives inside the pre-headers snapshot, so
+        a failure can no longer strand mid-stream — _dispatch catches it,
+        logs the internal detail to stderr, and answers a JSON 500. The
+        SSE path stays untouched (no frame ever opened)."""
         import io
         from unittest.mock import patch
 
         import shoin.server as srv_mod
-        from shoin.store import Store, StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-dead"})
         nb_id = nb["id"]
@@ -3160,26 +3206,18 @@ class PostStreamStoreErrorTest(unittest.TestCase):
         with urllib.request.urlopen(req):
             pass
 
-        original = Store.add_message
-
-        def failing(self_s, nb_id_arg, role, body, meta):
-            if role == "assistant":
-                raise StoreError("NOTEBOOK_NOT_FOUND", "deleted mid-request")
-            return original(self_s, nb_id_arg, role, body, meta)
-
         err = io.StringIO()
         with (
             patch.object(srv_mod, "build_context", side_effect=RuntimeError("ctx boom")),
-            patch.object(srv_mod._Handler, "_sse", side_effect=ConnectionError("gone")),
-            patch.object(Store, "add_message", failing),
             patch("sys.stderr", err),
         ):
-            status, raw = self._sse(
-                f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
+            status, j = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "原料は？"}
             )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(raw, "")
+        self.assertEqual(status, 500)
+        self.assertEqual(j["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertIn("RuntimeError: ctx boom", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
         health_status, _ = self._json("GET", "/api/health")
         self.assertEqual(health_status, 200)
@@ -4116,10 +4154,10 @@ class SSEConnectionErrorTest(unittest.TestCase):
     def test_headers_write_connection_error_does_not_orphan_user_turn(self) -> None:
         """ConnectionError while writing the initial SSE headers (self._headers(),
         server.py, before any _sse() event is ever attempted) must not leave the
-        just-persisted user turn dangling with no assistant reply. The three
-        sibling ConnectionError/exception guards in _h_ask_sse() (build_context
-        exceptions v0.2.39, meta-send v0.2.49, zero-token replies v0.2.55) all
-        compensate by persisting an empty assistant message — this path, one
+        just-persisted user turn dangling with no assistant reply. The
+        sibling ConnectionError guards in _h_ask_sse() (meta-send v0.2.49,
+        zero-token replies v0.2.55) all compensate by persisting an empty
+        assistant message — this path, one
         statement earlier in the same function, previously had no guard at all
         and let the raw ConnectionError propagate to _dispatch()'s generic
         exception handler instead.
@@ -4323,11 +4361,11 @@ class SSEConnectionErrorTest(unittest.TestCase):
             done[0]["report"].get("self_contradiction"), ["治療の効果はない。"]
         )
 
-    def test_build_context_error_frame_and_no_dangling_turn(self) -> None:
-        """build_context raising after hits are found (e.g. WAL busy_timeout)
-        must emit an SSE error frame — headers already committed, so no HTTP
-        status can be sent — and persist an EMPTY assistant message so the
-        orphaned user turn can't corrupt history_messages pairing."""
+    def test_build_context_failure_returns_500_before_headers(self) -> None:
+        """build_context runs inside the pre-headers snapshot (v0.2.724), so
+        a failure is a plain _dispatch envelope — JSON 500, type-name-only
+        message — and no user turn is persisted (add_message runs only
+        after the whole grounding view is built)."""
         from shoin.store import Store
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-err"})
@@ -4342,28 +4380,25 @@ class SSEConnectionErrorTest(unittest.TestCase):
             pass
 
         with patch("shoin.server.build_context", side_effect=RuntimeError("ctx boom")):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        events = parse_sse(raw.decode())
-        kinds = [e for e, _ in events]
-        self.assertIn("error", kinds)
-        self.assertNotIn("done", kinds)
-        err_payload = [d for e, d in events if e == "error"][0]
-        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
-        # v0.2.508: the client sees only the exception type name — the raw
-        # str(exc) ("ctx boom" here, but DB paths/LLM internals in general)
-        # stays on stderr, matching the _dispatch 500 path's policy.
-        self.assertEqual(err_payload["message"], "RuntimeError")
-        # The dangling-turn guard: an empty assistant turn was persisted.
-        with Store(str(Path(self.tmp.name) / "sse_ce.db")) as store:
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask",
+                {"question": "テスト文書の内容は？"},
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        # v0.2.508 policy, unchanged by the move: only the exception type
+        # name leaks — the raw str(exc) stays on stderr.
+        self.assertEqual(err["error"]["message"], "RuntimeError")
+        # No user turn persisted — the ask left zero messages behind.
+        with Store(str(Path(self.tmp.name) / "s.db")) as store:
             msgs = store.list_messages(nb_id)
-        self.assertEqual(msgs[-1]["role"], "assistant")
-        self.assertEqual(msgs[-1]["body"], "")
+        self.assertEqual(msgs, [])
 
-    def test_build_context_error_frame_leaks_type_name_only(self) -> None:
-        """An unhandled build_context failure must mirror _dispatch's
-        catch-all: the SSE error frame carries only type(exc).__name__,
-        never str(exc) — raw messages can contain internals (SQL text,
-        filesystem paths) that must not reach the client."""
+    def test_build_context_error_leaks_type_name_only(self) -> None:
+        """An unhandled build_context failure now rides _dispatch's
+        catch-all directly: the JSON error carries only
+        type(exc).__name__, never str(exc) — raw messages can contain
+        internals (SQL text, filesystem paths)."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-leak"})
         nb_id = nb["id"]
         req = urllib.request.Request(
@@ -4379,16 +4414,18 @@ class SSEConnectionErrorTest(unittest.TestCase):
             "shoin.server.build_context",
             side_effect=RuntimeError("secret path /Users/x/internal.db"),
         ):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
-        self.assertEqual(err_payload["code"], "SYSTEM_INTERNAL_ERROR")
-        self.assertEqual(err_payload["message"], "RuntimeError")
-        self.assertNotIn("secret", err_payload["message"])
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "内容は？"}
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(err["error"]["code"], "SYSTEM_INTERNAL_ERROR")
+        self.assertEqual(err["error"]["message"], "RuntimeError")
+        self.assertNotIn("secret", err["error"]["message"])
 
-    def test_build_context_error_frame_passes_coded_errors(self) -> None:
+    def test_build_context_error_passes_coded_errors(self) -> None:
         """A coded error (StoreError/IngestError/LLMError) carries its
-        curated (code, message) into the SSE error frame — mirroring the
-        _dispatch envelope mapping rather than flattening to 500."""
+        curated (code, message) through the _dispatch envelope — same
+        mapping POST /ask applies, no SSE-specific flattening."""
         from shoin.store import StoreError
 
         _, nb = self._json("POST", "/api/notebooks", {"name": "ctx-coded"})
@@ -4406,10 +4443,12 @@ class SSEConnectionErrorTest(unittest.TestCase):
             "shoin.server.build_context",
             side_effect=StoreError("NOTEBOOK_NOT_FOUND", "notebook 7 not found"),
         ):
-            raw = self._ask_raw(nb_id, "テスト文書の内容は？")
-        err_payload = [d for e, d in parse_sse(raw.decode()) if e == "error"][0]
-        self.assertEqual(err_payload["code"], "NOTEBOOK_NOT_FOUND")
-        self.assertEqual(err_payload["message"], "notebook 7 not found")
+            status, err = self._json(
+                "POST", f"/api/notebooks/{nb_id}/ask", {"question": "内容は？"}
+            )
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
+        self.assertEqual(err["error"]["message"], "notebook 7 not found")
 
 
 class HostnameOfTest(unittest.TestCase):

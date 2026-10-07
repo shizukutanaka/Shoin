@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.723")
+        self.assertEqual(VERSION, "0.2.724")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -16447,7 +16447,10 @@ class TestCitationCoverageTail(unittest.TestCase):
 # test_doc_catalog_counts_match_spec to compare without duplicating them.
 _EXCEPT_CATALOG = {
     "ingest.py": 4,
-    "server.py": 9,
+    # v0.2.724: -2 — _h_ask_sse's build_context guard and its repair-persist
+    # swallow folded into the pre-headers snapshot; failures now ride
+    # _dispatch's JSON envelope like every other handler.
+    "server.py": 7,
     "cli.py": 2,
     # +1: index_source's metrics wrapper — every escaping failure counts once
     # as index.fail, then the original exception propagates (v0.2.653).
@@ -20224,15 +20227,18 @@ class TestResidualGuards(unittest.TestCase):
                 "(ValueError,json.JSONDecodeError)",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
-                "ConnectionError",
                 # v0.2.665: per-delta write guard inside the generation loop —
                 # a dead client must not abort the paid-for stream; the
                 # handler finishes generating so the persisted row is the
                 # COMPLETE answer (resume via re-fetch, product-review #48).
                 "ConnectionError",
+                # v0.2.724: -1 ConnectionError / -2 Exception — the
+                # build_context error-frame path and its empty-assistant
+                # repair persist are gone (context now builds inside the
+                # pre-headers snapshot, so a failure is a plain _dispatch
+                # envelope, never a mid-stream frame).
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
-                "Exception", "Exception",
                 "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
                 "UnicodeEncodeError",
@@ -20332,7 +20338,10 @@ class TestResidualGuards(unittest.TestCase):
             # server.py +1: _h_health's best-effort staleness read (v0.2.661).
             # pipeline.py +1: the orphan-source rollback delete is
             # best-effort — it must not mask the original error (v0.2.722).
-            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 12,
+            # server.py -2: the build_context error-frame send guard and
+            # the repair-persist swallow folded into the pre-headers
+            # snapshot (v0.2.724).
+            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 10,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).
