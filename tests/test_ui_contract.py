@@ -548,6 +548,9 @@ console.log("ok");
         )
         sent_params = set(re.findall(r"/api/[^`\"?\s]*\?(\w+)=", script))
         read_params = set(re.findall(r'self\._query\.get\("([^"]+)"', server))
+        # Typed accessors (_q_int et al) resolve the same _query dict — a
+        # literal-key scan alone would miss every param read through them.
+        read_params |= set(re.findall(r'self\._q_int\("([^"]+)"', server))
         self.assertEqual(
             sent_params - read_params, set(),
             f"?params the UI sends but the server never reads: "
@@ -1874,17 +1877,9 @@ console.log("ok");
         if not node:
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        start = src.index("function renderFullSource")
-        depth, end = 0, start
-        for i in range(start, len(src)):
-            if src[i] == "{":
-                depth += 1
-            elif src[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        fn = src[start:end]
+        fn = _js_block(src, "function appendSourceChunks") + "\n" + _js_block(
+            src, "function renderFullSource"
+        )
         harness = """\
 let appended = [];
 function el(tag, cls, text){ return {tag, cls, text, children: [],
@@ -3138,6 +3133,7 @@ const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec);
   return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = m => calls.toasts.push(m);
 const closeViewer = () => {};
 """
@@ -3192,6 +3188,101 @@ const closeViewer = () => {};
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_src_text_pager_fetches_next_page(self) -> None:
+        """v0.2.695: when GET /api/sources/{id}/text answers truncated:true,
+        wireSrcTextPager renders a 'src.more' button that fetches the next
+        page via ?offset=next_offset, removes the holder, appends the page's
+        chunks (a separator spans the page boundary), and re-wires itself —
+        so the whole document stays reachable without one giant response.
+        Executes the real wireSrcTextPager + appendSourceChunks under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        fn = (
+            _js_block(src, "function appendSourceChunks")
+            + "\n"
+            + _js_block(src, "function wireSrcTextPager")
+        )
+        harness = (
+            """\
+const calls = {fetches: [], toasts: []};
+const mk = () => {
+  const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
+    disabled: false, type: "", className: "", tag: "", onclick: null,
+    replaceChildren(){ n.children = []; n.kids = []; },
+    append(...xs){ xs.forEach(x => { x._parent = n; });
+      n.children.push(...xs); n.kids.push(...xs); },
+    prepend(x){ x._parent = n; n.children.unshift(x); n.kids.unshift(x); },
+    classList: {add(){}, remove(){}, contains: () => false},
+    remove(){ const c = n._parent; if (c){
+      c.kids = c.kids.filter(k => k !== n); c.children = c.children.filter(k => k !== n); } },
+    focus(){}, addEventListener(){}, setAttribute(){}, scrollIntoView(){},
+  };
+  return n;
+};
+const el = (tag, cls, txt) => { const n = mk(); n.tag = tag; n.className = cls;
+  n.textContent = txt || ""; return n; };
+const t = k => k;
+const toast = m => calls.toasts.push(m);
+const pages = {
+  2: {chunks: [{id: 4, seq: 4, text: "D"}], total: 5, offset: 2,
+      truncated: true, next_offset: 3, bytes_cap: 1000},
+  3: {chunks: [{id: 5, seq: 5, text: "E"}], total: 5, offset: 3,
+      truncated: false, next_offset: 5, bytes_cap: 1000},
+};
+const api = (p, opts) => {
+  const off = Number(p.split("offset=")[1]);
+  calls.fetches.push(off);
+  return Promise.resolve({json: async () => pages[off]});
+};
+const container = mk();
+const sig = {aborted: false};
+"""
+            + fn
+            + """
+(async () => {
+  // Page 1 already rendered 2 chunks (boundary test: separator must appear
+  // before the first chunk of page 2).
+  container.append(el("div","src-chunk","C"));
+  wireSrcTextPager(container, 7, {chunks: [], total: 5, offset: 0,
+    truncated: true, next_offset: 2, bytes_cap: 1000}, [4], null, sig);
+  const holder = container.kids.find(k => k.className === "src-more");
+  if (!holder) { console.error("pager holder missing"); process.exit(1) }
+  const btn = holder.kids[0];
+  if (btn.disabled) { console.error("button pre-disabled"); process.exit(1) }
+  await btn.onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join() !== "2")
+    { console.error("fetch offset wrong: " + calls.fetches); process.exit(1) }
+  if (container.kids.includes(holder))
+    { console.error("holder not removed after page"); process.exit(1) }
+  const texts = container.kids.map(k => k.className + ":" + k.textContent);
+  // page-2 chunk appended with a leading separator across the boundary
+  const sepIdx = texts.findIndex(x => x === "chunk-sep:⋯");
+  if (sepIdx < 0 || !texts[sepIdx + 1].startsWith("src-chunk"))
+    { console.error("boundary order wrong: " + texts.join("|")); process.exit(1) }
+  // cited id 4 → marked chunk (excerpt null → id-only provable path)
+  if (!texts.includes("src-chunk cited-chunk:D"))
+    { console.error("cited mark lost on paged chunk: " + texts.join("|")); process.exit(1) }
+  // still truncated → re-wired with the remaining count
+  const holder2 = container.kids.find(k => k.className === "src-more");
+  if (!holder2) { console.error("pager not re-wired"); process.exit(1) }
+  await holder2.kids[0].onclick();
+  await new Promise(r => setTimeout(r, 0));
+  if (calls.fetches.join(",") !== "2,3")
+    { console.error("second fetch wrong: " + calls.fetches); process.exit(1) }
+  if (container.kids.some(k => k.className === "src-more"))
+    { console.error("holder left after last page"); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
     def test_lazy_details_retries_after_failure(self) -> None:
         """v0.2.489: a failed lazy full-source fetch must clear
         `dataset.loaded` so the collapse→reopen gesture retries — before
@@ -3232,6 +3323,7 @@ const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec);
   return new Promise((res, rej) => { rec.res = res; rec.rej = rej; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = () => {};
 const closeViewer = () => {};
 """
@@ -3567,10 +3659,16 @@ console.log("ok");
         self.assertIn("(j.questions || []).forEach", src)
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
-        fn = _js_block(src, "function renderFullSource")
+        fn = _js_block(src, "function appendSourceChunks") + "\n" + _js_block(
+            src, "function renderFullSource"
+        )
         harness = (
             "let replaced = 0;\n"
-            "const container = { replaceChildren(){replaced++}, append(){} };\n"
+            "const container = { replaceChildren(){replaced++}, append(){},\n"
+            "  querySelector(){return null} };\n"
+            "function el(tag, cls, text){ return {tag, cls, text, prepend(){},\n"
+            "  append(){}, scrollIntoView(){}} }\n"
+            "function t(k){ return k }\n"
             + fn
             + """
 renderFullSource(container);            // chunks entirely absent
@@ -3956,6 +4054,7 @@ const deferred = [];
 const api = (p, opts) => { const rec = {path: p, sig: opts && opts.signal};
   deferred.push(rec); return new Promise(res => { rec.res = res; }); };
 const renderFullSource = (c, chunks) => calls.renders.push(chunks);
+const wireSrcTextPager = () => {};
 const toast = m => calls.toasts.push(m);
 const closeViewer = () => calls.closed++;
 """

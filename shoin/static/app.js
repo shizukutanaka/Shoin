@@ -26,6 +26,7 @@ const I18N = {
     "notes.empty.title":"ノートがありません","notes.empty.body":"下のフォームでノートを追加する。",
     "notes.earlier":"— 以前の {n} 件は省略 —",
     "src.earlier":"— 以前の {n} 件は省略 —",
+    "src.more":"残り {n} チャンクを表示",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
     "reindex.hint":"埋め込みモデル変更後に再構築する",
@@ -66,6 +67,7 @@ const I18N = {
     "notes.empty.title":"No notes yet","notes.empty.body":"Add a note using the form below.",
     "notes.earlier":"— {n} earlier notes not shown —",
     "src.earlier":"— {n} earlier sources not shown —",
+    "src.more":"Show {n} more chunks",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
     "reindex.hint":"Rebuild after changing the embedding model",
@@ -531,8 +533,7 @@ function closeViewer(){
 // to the first one. This is the last mile of "verifiable citation": the reader
 // sees the cited wording in its original position, not just a detached excerpt.
 // citedIds absent (old persisted report / Studio output) → plain text, unmarked.
-function renderFullSource(container, chunks, citedIds, excerpt){
-  container.replaceChildren();
+function appendSourceChunks(container, chunks, citedIds, excerpt, continuing){
   const marked = new Set(citedIds || []);
   // chunks.id is a plain rowid (no AUTOINCREMENT) — a refreshed source's new
   // chunks can REUSE the ids an old report stored, so an id match alone can
@@ -543,7 +544,10 @@ function renderFullSource(container, chunks, citedIds, excerpt){
   const provable = typeof excerpt === "string" && excerpt.length > 0;
   let first = null;
   (chunks || []).forEach((c, i) => {
-    if (i) container.append(el("div","chunk-sep","⋯"));
+    // Separator between every pair — including the page boundary when this
+    // call appends a fetched page onto an already-rendered window
+    // (continuing=true from the pager, v0.2.695).
+    if (i || continuing) container.append(el("div","chunk-sep","⋯"));
     const isCited = marked.has(c.id) &&
       (!provable || excerpt.includes(String(c.text).slice(0, 24)));
     const block = el("div", isCited ? "src-chunk cited-chunk" : "src-chunk", c.text);
@@ -553,9 +557,38 @@ function renderFullSource(container, chunks, citedIds, excerpt){
     }
     container.append(block);
   });
+  return first;
+}
+function renderFullSource(container, chunks, citedIds, excerpt){
+  container.replaceChildren();
+  const first = appendSourceChunks(container, chunks, citedIds, excerpt);
   // Bring the first cited passage into view so a long document doesn't require
   // manual scanning. Guarded: no cited chunks (or an old report) → no scroll.
   if (first) first.scrollIntoView({block:"nearest"});
+}
+// v0.2.695: the text endpoint caps one response at SRC_TEXT_BYTES_MAX — when
+// `truncated` is set, offer the next page on demand instead of dropping it
+// (every row stays reachable; the disclosure count is honest via `total`).
+function wireSrcTextPager(container, id, j, citedIds, excerpt, sig){
+  let next = j.next_offset, total = j.total, left = j.truncated;
+  if (!left) return;
+  const holder = el("div","src-more");
+  const btn = el("button","btn", t("src.more").replace("{n}", total - next));
+  btn.type = "button";
+  holder.append(btn);
+  container.append(holder);
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try{
+      const p = await (await api(`/api/sources/${id}/text?offset=${next}`, {signal:sig})).json();
+      if (sig.aborted) return;
+      holder.remove();
+      appendSourceChunks(container, p.chunks, citedIds, excerpt, true);
+      wireSrcTextPager(container, id, p, citedIds, excerpt, sig);
+    }catch(e){
+      if (!sig.aborted){ btn.disabled = false; toast(e.message); }
+    }
+  };
 }
 async function showSource(id, title, excerpt, section, citedIds, detail){
   if (_srcAbort) _srcAbort.abort();
@@ -603,6 +636,7 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
         const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
         if (sig.aborted) return;
         renderFullSource(body, j.chunks, citedIds, excerpt);
+        wireSrcTextPager(body, id, j, citedIds, excerpt, sig);
       }catch(e){
         // Failure must clear `loaded` — collapse→reopen is the retry gesture,
         // and keeping the flag set would pin the error text on permanently.
@@ -618,6 +652,7 @@ async function showSource(id, title, excerpt, section, citedIds, detail){
       const j = await (await api(`/api/sources/${id}/text`, {signal:sig})).json();
       if (sig.aborted) return;
       renderFullSource(vt, j.chunks, citedIds);
+      wireSrcTextPager(vt, id, j, citedIds, null, sig);
       $("#viewer").classList.add("open");
       $("#viewerClose").focus();
     }catch(e){ if (!sig.aborted) toast(e.message); }

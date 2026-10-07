@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.694"
+VERSION = "0.2.695"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -51,7 +51,25 @@ NB_NOTES_LIMIT = 500  # notes embedded in GET /api/notebooks/{id} (UI notes pane
 # with the source count (the list doubles as the UI's scope checkboxes, so
 # it gets a more generous bound than notes/messages). Beyond the cap the
 # oldest rows move to GET /api/notebooks/{id}/sources?offset&limit.
-NB_SOURCES_LIMIT = 2000  # sources embedded in GET /api/notebooks/{id} (UI scope pane)
+NB_SOURCES_LIMIT = 2000  # newest sources embedded in GET /api/notebooks/{id} (v0.2.694);
+# the list doubles as the UI's scope checkboxes, so it gets a more
+# generous bound than notes/messages. Beyond the cap the oldest rows
+# move to GET /api/notebooks/{id}/sources?offset&limit.
+
+# GET /api/sources/{id}/text previously materialized every chunk — fine for
+# ingest-produced sources (a 10MB file yields ~10MB of text) but import
+# documents bound chunk COUNT, not text length, so a crafted export could
+# put ~1GiB of text behind one source id and every viewer click would fetch
+# all of it (fetchall materializes it, json.dumps doubles it, and up to
+# MAX_IN_FLIGHT_REQUESTS such responses can be in flight). Cap the response
+# at 32MiB of chunk text — ~3x above anything the ingest path can produce
+# (10MB file -> <=~10MB text), far below the hostile ceiling. Anything past
+# the cap stays reachable via ?offset paging (row position, seq order) and
+# is disclosed by `truncated` + `next_offset` (v0.2.695).
+SRC_TEXT_BYTES_MAX = 32 * 1024 * 1024
+# Rows fetched per batch while accumulating toward the byte cap — bounds the
+# working set without a SQL-side byte limit.
+SRC_TEXT_BATCH = 512
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
 # v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
 # no element cap, so a ~10MB ask/search body could name millions of ids and the

@@ -160,6 +160,7 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .section-label{font-size:12px;color:var(--seiji-ink);font-family:var(--serif);margin-bottom:8px;
   word-break:break-word}
 .src-chunk{white-space:pre-wrap;word-break:break-word}
+.src-more{text-align:center;margin:10px 0}
 .cited-chunk{background:var(--washi);border-left:3px solid var(--seiji);padding:6px 10px;
   margin:2px 0}
 .cited-label{font-size:10.5px;letter-spacing:.08em;color:var(--seiji-ink);margin-bottom:4px}

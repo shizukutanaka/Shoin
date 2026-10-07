@@ -2322,18 +2322,33 @@ class Store:
         ).fetchall()
         return [(int(r["id"]), str(r["text"])) for r in rows]
 
-    def id_seq_text_chunks_for_source(self, source_id: int) -> list[tuple[int, int, str]]:
+    def id_seq_text_chunks_for_source(
+        self, source_id: int, *, limit: int | None = None, offset: int = 0
+    ) -> list[tuple[int, int, str]]:
         """Return (chunk_id, seq, text) triples for a source, ordered by seq.
 
         The chunk id lets the source viewer mark exactly which passages an
         answer was grounded in (citation_report's source_chunk_ids). The older
         text_chunks_for_source() returns only (seq, text) and is kept as-is
         because other callers depend on that shape.
+
+        limit/offset page the seq ordering (v0.2.695) — the text endpoint
+        batches row fetches so an oversized source can't materialize its
+        whole text in one shot.
         """
-        rows = self.conn.execute(
-            "SELECT id, seq, text FROM chunks WHERE source_id=? ORDER BY seq", (source_id,)
-        ).fetchall()
+        sql = "SELECT id, seq, text FROM chunks WHERE source_id=? ORDER BY seq"
+        args: tuple[int, ...] = (source_id,)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args = (source_id, limit, offset)
+        rows = self.conn.execute(sql, args).fetchall()
         return [(int(r["id"]), int(r["seq"]), str(r["text"])) for r in rows]
+
+    def count_chunks_for_source(self, source_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()
+        return int(row["n"])
 
     def update_chunk_text(self, chunk_id: int, text: str) -> Chunk:
         """Replace one chunk's text (v0.2.647 — the fix path for extraction

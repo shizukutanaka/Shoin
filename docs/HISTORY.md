@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.694
+## Version History: v0.1.37 → v0.2.695
+
+### v0.2.695 — /api/sources/{id}/text応答を32MiBで上界(最後の無制限ペイロード)
+
+- **新規短所79解消(ソクラテス問いで発掘)**: 「全ての読取り応答は有界か」——detail埋込みcap(messages/notes/sources)を閉塞しても`GET /api/sources/{id}/text`は全chunk本文をfetchall一括返却のまま残存。ingest由来は10MB上限に従うが**import文書はchunk本文長を制限しない**(v0.2.693は型のみ検査)ため、細工exportが1ソースに~1GiB本文を置き得る——viewerのクリック毎にfetchall実体化+json.dumps二倍化+最大64接続でプロセス枯渇する回復不能経路
+- **バイト上界ページング**: 応答を`SRC_TEXT_BYTES_MAX`(32MiB=正規ingestの~3倍・敵性天井の30分の1)で上界——境界chunkは次ページへ**全体送り**(本文欠落ゼロ)、単一>capchunkのみバイト切詰め(コードポイント途中で割らないdecode-tolerant)。`truncated`+`next_offset`+`total`で開示、`?offset=`で全文走査——行は全て到達可能、到達不可は単一>capchunkの切詰め残部のみ(敵性経路限定・開示済み)
+- **UI**: `appendSourceChunks`抽出(追記可能に)＋「残り{n}チャンクを表示」ボタン(`src.more` ja/en)でページ連結——cited-chunk markingは追記ページにも伝播
+- **行動ピン2件**: サーバ側(patch縮小capで切詰め+next_offset走査による全文到達+境界chunk全体送り+400/404契約)・UI側(node実実行でボタン→?offset=フェッチ→境界separator追記→再配線)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/imports/time-threadドリフトなし
 
 ### v0.2.694 — detail応答の最後の無制限embedを閉塞(sources上限+走査端点)
 

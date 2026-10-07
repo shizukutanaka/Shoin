@@ -581,6 +581,79 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_src_text_paged_at_bytes_cap(self) -> None:
+        """v0.2.695: GET /api/sources/{id}/text bounds one response at
+        SRC_TEXT_BYTES_MAX — the last unbounded payload on the API (import
+        documents bound chunk COUNT, not text length, so a crafted export
+        can put ~1GiB behind one source id and fetchall+dumps materializes
+        it twice). Pages carry truncated/next_offset/total; ?offset continues
+        the cut; a single >cap chunk is itself sliced by bytes."""
+        import shoin.server as srv
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "txt"})
+        nb_id = nb["id"]
+        with Store(str(Path(self.tmp.name) / "s.db")) as store:
+            src = store.add_source(nb_id, "txt", "big", "o", "h")
+            # 20 chunks of ~256B each; cap 1000B pages them ~7 deep.
+            store.add_chunks(src.id, [f"t{i}" * 64 for i in range(20)])
+            src2 = store.add_source(nb_id, "txt", "huge", "o", "h2")
+            store.add_chunks(src2.id, ["x" * 2000, "tail"])
+
+        with patch.object(srv, "SRC_TEXT_BYTES_MAX", 1000), patch.object(
+            srv, "SRC_TEXT_BATCH", 4
+        ):
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+            self.assertEqual(status, 200)
+            self.assertEqual(j["total"], 20)
+            self.assertTrue(j["truncated"])
+            self.assertEqual(j["offset"], 0)
+            self.assertLess(j["next_offset"], 20)
+            self.assertGreater(j["next_offset"], 0)
+            self.assertEqual(len(j["chunks"]), j["next_offset"])
+            # Every row stays reachable: walking next_offset pages the rest.
+            got = [c["text"] for c in j["chunks"]]
+            off = j["next_offset"]
+            while True:
+                status, p = self._json(
+                    "GET", f"/api/sources/{src.id}/text?offset={off}"
+                )
+                self.assertEqual(status, 200)
+                got += [c["text"] for c in p["chunks"]]
+                off = p["next_offset"]
+                if not p["truncated"]:
+                    break
+            self.assertEqual(off, 20)
+            self.assertEqual(len(got), 20)
+            self.assertEqual(got[0], "t0" * 64)
+            self.assertEqual(got[-1], "t19" * 64)
+
+            # A single chunk larger than the cap is sliced by bytes, not
+            # dropped — and the remainder is disclosed by the same flag.
+            status, j = self._json("GET", f"/api/sources/{src2.id}/text")
+            self.assertEqual(status, 200)
+            self.assertTrue(j["truncated"])
+            self.assertEqual(len(j["chunks"]), 1)
+            self.assertEqual(len(j["chunks"][0]["text"]), 1000)
+            self.assertEqual(j["total"], 2)
+
+        # Under the cap the flag is honestly false and no offset is needed.
+        status, j = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertFalse(j["truncated"])
+        self.assertEqual(len(j["chunks"]), 20)
+
+        for bad in ("offset=-1", "offset=abc"):
+            status, err = self._json(
+                "GET", f"/api/sources/{src.id}/text?{bad}"
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(
+                err["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID", bad
+            )
+        status, err = self._json("GET", "/api/sources/999999/text")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "SOURCE_NOT_FOUND")
+
     def test_nb_messages_and_notes_pagination(self) -> None:
         """v0.2.646: GET .../messages and .../notes page the full record the
         detail cap can't reach — newest-first, offset/limit bounded, total
