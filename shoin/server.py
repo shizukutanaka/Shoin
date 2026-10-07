@@ -1220,47 +1220,56 @@ class _Handler(BaseHTTPRequestHandler):
         # `truncated`+`next_offset` disclose and continue the cut.
         offset = self._q_int("offset", 0, 2**63 - 1, 0)
         with Store(self.db) as store:
-            src = store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
-            total = store.count_chunks_for_source(src_id)
-            out: list[Json] = []
-            used = 0
-            pos = offset
-            done = False
-            # `id` lets the viewer mark which chunks an answer actually cited
-            # (citation_report.source_chunk_ids, v0.2.139). Additive field.
-            while not done:
-                batch = store.id_seq_text_chunks_for_source(
-                    src_id, limit=SRC_TEXT_BATCH, offset=pos
-                )
-                if not batch:
-                    break
-                for cid, seq, text in batch:
-                    n = len(text.encode("utf-8"))
-                    if used + n > SRC_TEXT_BYTES_MAX:
-                        if out:
-                            # Boundary chunk, not an oversized one: leave it
-                            # whole for the next page so no text is lost.
+            # v0.2.719: the batched loop issues one SELECT per batch on
+            # auto-commit snapshots — a concurrent replace_chunks_for_source
+            # or update_chunk_text landing mid-request splices rows from
+            # different commits into one response while `rev`/`total` (read
+            # once, up front) still vouch for the old state: an intra-page
+            # tear the client's epoch check cannot see (it compares pages,
+            # not the rows inside one). One WAL snapshot frames the whole
+            # page build, same boundary as _h_nb_get (v0.2.707).
+            with store.read_snapshot():
+                src = store.get_source(src_id)  # raises SOURCE_NOT_FOUND → 404 if missing
+                total = store.count_chunks_for_source(src_id)
+                out: list[Json] = []
+                used = 0
+                pos = offset
+                done = False
+                # `id` lets the viewer mark which chunks an answer actually cited
+                # (citation_report.source_chunk_ids, v0.2.139). Additive field.
+                while not done:
+                    batch = store.id_seq_text_chunks_for_source(
+                        src_id, limit=SRC_TEXT_BATCH, offset=pos
+                    )
+                    if not batch:
+                        break
+                    for cid, seq, text in batch:
+                        n = len(text.encode("utf-8"))
+                        if used + n > SRC_TEXT_BYTES_MAX:
+                            if out:
+                                # Boundary chunk, not an oversized one: leave it
+                                # whole for the next page so no text is lost.
+                                done = True
+                                break
+                            # A single chunk larger than the cap can't ever be
+                            # returned whole — slice it by bytes (decode-tolerant,
+                            # never mid-codepoint) and count it consumed; its
+                            # tail is the one unreachable region (hostile import
+                            # only — a legit chunk is ~2KB / ≤10MB of PATCH).
+                            cut = (
+                                text.encode("utf-8")[:SRC_TEXT_BYTES_MAX]
+                                .decode("utf-8", "ignore")
+                            )
+                            if cut:
+                                out.append({"id": cid, "seq": seq, "text": cut})
+                            pos += 1
                             done = True
                             break
-                        # A single chunk larger than the cap can't ever be
-                        # returned whole — slice it by bytes (decode-tolerant,
-                        # never mid-codepoint) and count it consumed; its
-                        # tail is the one unreachable region (hostile import
-                        # only — a legit chunk is ~2KB / ≤10MB of PATCH).
-                        cut = (
-                            text.encode("utf-8")[:SRC_TEXT_BYTES_MAX]
-                            .decode("utf-8", "ignore")
-                        )
-                        if cut:
-                            out.append({"id": cid, "seq": seq, "text": cut})
+                        out.append({"id": cid, "seq": seq, "text": text})
+                        used += n
                         pos += 1
-                        done = True
-                        break
-                    out.append({"id": cid, "seq": seq, "text": text})
-                    used += n
-                    pos += 1
-                else:
-                    continue
+                    else:
+                        continue
             self._json(
                 {
                     "chunks": out,

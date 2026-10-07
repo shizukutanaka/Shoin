@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.718
+## Version History: v0.1.37 → v0.2.719
+
+### v0.2.719 — src_text応答のintra-request torn閉塞(batch SELECTをsnapshot化)
+
+- **新規短所103解消(ソクラテス問いで発掘)**: 「`rev`/`total`ガードが訴える状態とchunk行は同一コミット点由来か」——`_h_src_text`はbatch loopが1バッチ1 SELECTをauto-commit連結。request途中の並行`replace_chunks_for_source`/`update_chunk_text`着弾で**1応答内に異コミットのchunk行が混在**しつつrev/total(先頭読み)は旧状態を指す——epoch守衛がページ間しか比較しないため**検出不能なintra-page tear**
+- **`store.read_snapshot()`で全read包み**: batch loop・get_source・countを同一WALスナップショットへ——`_h_nb_get`(v0.2.707)と同じstandalone-read境界判断。WALリーダーは書込をブロックしないため64同時要求設計を維持
+- **行動ピン1件**: SRC_TEXT_BATCH=2化+初回batch後に別接続がreplace_chunks_for_source注入→応答が全てpre-replace行+旧rev/total一致を検証(ベースラインではc1,c2+NEW3混在)
+- **却下した問い(記録)**: paged list端点のpage+total(窓ずれ許容設計)・export_notebook(既にsnapshot化済)・backup_to(SQLite backup APIでWAL含む)・`_ALLOWED_HOSTNAMES`(`::1`含む)・Content-Encoding不明系(br/zstd→INGEST_UNSUPPORTED_FORMAT coded)
+
+
 
 ### v0.2.718 — deep-JSON RecursionErrorの400分類parity(CLI 3経路)
 

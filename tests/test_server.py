@@ -703,6 +703,52 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(j["sources"]), 1)
         self.assertEqual(j["sources"][0]["id"], src.id)
 
+    def test_src_text_reads_under_one_snapshot(self) -> None:
+        """v0.2.719: GET /api/sources/{id}/text builds its page across one
+        SELECT per batch on auto-commit snapshots. A concurrent
+        replace_chunks_for_source landing mid-loop spliced new rows after
+        old ones — a torn page whose `rev`/`total` still described the old
+        state, invisible to the client's per-page epoch check. read_snapshot
+        pins every batch to the same commit point."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "srcsnap"})
+        nb_id = nb["id"]
+        db = str(Path(self.tmp.name) / "s.db")
+        with Store(db) as store:
+            src = store.add_source(nb_id, "txt", "doc", "o", "h-ss")
+            store.add_chunks(src.id, ["c1", "c2", "c3", "c4"])
+            rev0 = src.content_rev
+
+        orig = Store.id_seq_text_chunks_for_source
+        fired = []
+
+        def inject(self2: Store, src_id: int, **kw: object) -> list[object]:
+            rows = orig(self2, src_id, **kw)
+            if src_id == src.id and not fired:
+                fired.append(True)
+                # Commit a full chunk replacement between batch fetches —
+                # batch N+1 would read new rows behind batch N's old rows.
+                with Store(db) as other:
+                    other.replace_chunks_for_source(
+                        src.id, ["NEW1", "NEW2", "NEW3"]
+                    )
+            return rows
+
+        with (
+            patch.object(Store, "id_seq_text_chunks_for_source", inject),
+            patch("shoin.server.SRC_TEXT_BATCH", 2),
+        ):
+            status, j = self._json("GET", f"/api/sources/{src.id}/text")
+        self.assertEqual(status, 200)
+        self.assertTrue(fired)
+        # The snapshot answers entirely pre-replace: all four original
+        # chunks, none of the replacement's.
+        texts = [c["text"] for c in j["chunks"]]
+        self.assertEqual(texts, ["c1", "c2", "c3", "c4"])
+        self.assertEqual(j["total"], 4)
+        self.assertEqual(j["rev"], rev0)
+
     def test_nb_list_and_trash_paged_at_limit(self) -> None:
         """v0.2.696: GET /api/notebooks and GET /api/trash were the last
         unbounded LIST responses — every dashboard load refetched every row.
