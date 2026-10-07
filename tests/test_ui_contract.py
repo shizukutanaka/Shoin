@@ -3375,7 +3375,7 @@ const calls = {fetches: [], toasts: []};
 const mk = () => {
   const n = {textContent: "", children: [], kids: [], dataset: {}, style: {},
     disabled: false, type: "", className: "", tag: "", title: "",
-    onclick: null, onkeydown: null, tabIndex: 0,
+    onclick: null, onkeydown: null, tabIndex: 0, isConnected: true,
     replaceChildren(){ n.children = []; n.kids = []; },
     append(...xs){ xs.forEach(x => { x._parent = n; });
       n.children.push(...xs); n.kids.push(...xs); },
@@ -3385,7 +3385,8 @@ const mk = () => {
       else { n.children.splice(i, 0, x); n.kids.splice(i, 0, x); } },
     remove(){ const c = n._parent; if (c){
       c.kids = c.kids.filter(k => k !== n);
-      c.children = c.children.filter(k => k !== n); } },
+      c.children = c.children.filter(k => k !== n); }
+      n.isConnected = false; },
     setAttribute(){}, focus(){}, addEventListener(){},
   };
   return n;
@@ -3436,6 +3437,78 @@ const api = p => { calls.fetches.push(p);
   console.log("ok");
 })();
 """
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok", out)
+
+    def test_earlier_pager_drops_page_after_notebook_switch(self) -> None:
+        """v0.2.699: a wireEarlierPager page that resolves after the user
+        switched notebooks must be dropped — otherwise this nb's rows
+        would be merged into the OTHER notebook's array (r.arr binds the
+        live cur inside the fetch callback) and the open notebook's list
+        would show foreign rows. Executes the real function under node."""
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        try:
+            block = _js_block(src, "function wireEarlierPager")
+        except ValueError:
+            self.fail("no wireEarlierPager function in index.html")
+        harness = (
+            """\
+let cur = {id: 9, sources: [{id: 3}], sources_omitted: 2};
+const calls = {prepended: [], renders: 0, toasts: []};
+const list = {prepend(x){ calls.prepended.push(x) }};
+function el(tag, cls, txt){ return {tag, cls, text: txt, textContent: txt,
+  kids: [], append(...xs){ this.kids.push(...xs) },
+  setAttribute(){}, type: "", disabled: false, onclick: null} }
+function t(k){ return k + "={n}" }
+function toast(m){ calls.toasts.push(m) }
+const render = () => { calls.renders++; };
+let resolveFetch;
+const fetchFn = () => new Promise(res => { resolveFetch = res; });
+"""
+            + block
+            + """
+(async () => {
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier",
+    render, fetchFn);
+  const btn = calls.prepended[0].kids[0];
+  const oldNb = cur;
+  const clickDone = btn.onclick();
+  // user opens notebook 42 while the page fetch is still in flight
+  cur = {id: 42, sources: [{id: 90}], sources_omitted: 5};
+  // the stale callback binds the live cur -> returns nb42's array
+  resolveFetch({arr: cur.sources, rows: [{id: 2}], total: 4});
+  await clickDone;
+  await new Promise(r => setTimeout(r, 0));
+  if (oldNb.sources.length !== 1 || cur.sources.length !== 1 ||
+      cur.sources[0].id !== 90)
+    { console.error("stale page merged into the open notebook");
+      process.exit(1) }
+  if (cur.sources_omitted !== 5)
+    { console.error("stale page rewrote the open notebook counter");
+      process.exit(1) }
+  if (calls.renders !== 0)
+    { console.error("stale page triggered a merge render"); process.exit(1) }
+  // same-nb still merges (guard must not over-fire)
+  cur = oldNb;
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier",
+    render, fetchFn);
+  const btn2 = calls.prepended[1].kids[0];
+  const done2 = btn2.onclick();
+  resolveFetch({arr: cur.sources, rows: [{id: 2}], total: 4});
+  await done2;
+  await new Promise(r => setTimeout(r, 0));
+  if (cur.sources.length !== 2 || cur.sources[0].id !== 2 ||
+      cur.sources_omitted !== 2 || calls.renders !== 1)
+    { console.error("fresh page not merged"); process.exit(1) }
+  if (calls.toasts.length)
+    { console.error("unexpected toast: " + calls.toasts); process.exit(1) }
+  console.log("ok");
+})();
+"""
+        )
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
         self.assertIn("ok", out)

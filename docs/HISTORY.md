@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.698
+## Version History: v0.1.37 → v0.2.699
+
+### v0.2.699 — nb切替中に解決したページ応答を破棄(ページャー競合閉塞)
+
+- **新規短所83解消(ソクラテス問いで発掘)**: 「ページャーのfetchは非同期で安全か」——`wireEarlierPager`/`nb.more`のページfetchは解決時に**live状態へ無条件merge**。nb A(3000ソース)でページャークリック→nb BへopenNotebook→Aの応答がresolveすると、fetchコールバック内の`cur.sources`が**Bの配列**を参照し、Aの行がBのソースリストへ混入+`sources_omitted`カウンタをB由来で上書き——v0.2.249のopenNotebookレスポンス競合と同族だがページャー経路は未防御だった
+- **`cur`同一性ガード**: クリック時のnbオブジェクトを`target`引数経由で捕捉し、resolve時にlive `cur !== target`なら破棄(マージ・カウンタ書込・render全てスキップ)。引数名を`cur`→`target`へ改名——`cur`名のままだと引数がモジュールlive `cur`をshadowしてガード不発の罠を明示
+- **`nb.more`は`!holder.isConnected`ガード**: loadNotebooks再実行で旧holderがdetach済みならmergeスキップ(実DOMでreplaceChildren/detach後に発火したstale onclickを無害化)
+- **`src.more`は既防御**: `sig.aborted`チェックでviewer再オープン時にabort済み——同族3面中最後の1面として記録
+- **行動ピン1件**: node実実行でページ解決前に`cur`を別nbオブジェクトへ差替→旧nb配列・新nb配列・カウンタ全て無変更+render不発、同一nbでは通常マージ(ガード過剰発火なし)を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.698 — chat履歴/ノートのcap開示をページャー化+notes開示行の位置修正
 

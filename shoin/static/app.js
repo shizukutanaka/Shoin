@@ -234,6 +234,7 @@ async function loadNotebooks(){
       btn.disabled = true;
       try{
         const pj = await (await api(`/api/notebooks?offset=${notebooks.length}`)).json();
+        if (!holder.isConnected) return;  // a newer loadNotebooks rebuilt the list
         for (const nb2 of (pj.notebooks || [])){
           notebooks.push(nb2); ul.insertBefore(mkNbRow(nb2), holder);
         }
@@ -846,23 +847,32 @@ async function refreshQuestions(){
 // {arr, rows, total}; the DESC rows are unshifted so the ASC list stays
 // oldest-first, the omitted counter recomputes from total, and the
 // passed-in render re-runs so new rows get the same wiring. Parameters
-// keep the function side-effect-pure for the node harness.
-function wireEarlierPager(list, cur, omitKey, i18nKey, render, fetch){
-  if (!cur[omitKey]) return;
+// keep the function side-effect-pure for the node harness. `target` is
+// deliberately not named `cur`: the click handler must compare against
+// the LIVE module-level cur to drop a page that resolves after the
+// user switched notebooks — a `cur` parameter would shadow it and the
+// guard could never fire.
+function wireEarlierPager(list, target, omitKey, i18nKey, render, fetch){
+  if (!target[omitKey]) return;
   const holder = el("div","src-more");
   const btn = el("button","btn",
-    t(i18nKey).replace("{n}", cur[omitKey]));
+    t(i18nKey).replace("{n}", target[omitKey]));
   btn.type = "button";
   btn.onclick = async ()=>{
     btn.disabled = true;
+    const nb = target;
     try{
       const r = await fetch();
+      // A page can resolve after the user switched notebooks — cur now
+      // points at a different object, so merging would inject this nb's
+      // rows into that nb's array and rewrite its omitted counter.
+      if (cur !== nb) return;
       // unshift each DESC page row -> the list stays oldest-first, and the
       // id guard absorbs a concurrent add shifting the offset window.
       const seen = new Set(r.arr.map(x=>x.id));
       for (const row of r.rows)
         if (!seen.has(row.id)){ seen.add(row.id); r.arr.unshift(row); }
-      cur[omitKey] = Math.max(0,
+      nb[omitKey] = Math.max(0,
         (typeof r.total === "number" ? r.total : r.arr.length)
         - r.arr.length);
       render();
