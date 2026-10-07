@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.717
+## Version History: v0.1.37 → v0.2.718
+
+### v0.2.718 — deep-JSON RecursionErrorの400分類parity(CLI 3経路)
+
+- **新規短所102解消(ソクラテス問いで発掘)**: 「server側のRecursionError→400分類はCLIも同値か」——v0.2.314はserver `_read_json`のみcoded化したがCLIの3ファイルparse経路(`import` doc・`eval` cases・`eval --diff` baseline)が`RecursionError`をexcept対象に含まずcatch-allへ転落。**~40KBの`[[[[…`1ファイルでSYSTEM_INTERNAL_ERROR(500)へ誤分類**——400-class入力欠陥が500系に見える境界誤判定
+- **3 exceptへ`RecursionError`追加**: `NOTEBOOK_IMPORT_INVALID`/`VALIDATION_FIELD_FORMAT_INVALID`の各coded境界へ合流——server同値分類
+- **行動ピン3件**: 20000深度ファイルで3経路ともrc=1+400系code+`SYSTEM_INTERNAL_ERROR`非含有を検証(深度はserver test同値)
+- **却下した問い(記録)**: stored json.loads(L580/918/2064)のRecursionError——write pathが4KB boundのため深度不可達(foreign DBのみ)・`export --format tree`のdumps(フィールドboundで深度bounded)
+
+
 
 ### v0.2.717 — untrusted bytesのターミナルescape網羅(出力sinkの残存面)
 

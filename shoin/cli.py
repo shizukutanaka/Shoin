@@ -793,9 +793,12 @@ def _cmd_import(store: Store, args: argparse.Namespace) -> int:
         raise StoreError(
             "SYSTEM_IO_ERROR", f"cannot read export file: {exc}"
         ) from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         # Same classification as _cmd_eval's cases file: a non-UTF-8 or
         # non-JSON file is a 400-class input defect, never a traceback.
+        # v0.2.718: RecursionError too — a deeply nested doc (server.py's
+        # _read_json already codes the same shape) must not fall through to
+        # the catch-all's SYSTEM_INTERNAL_ERROR: input defect, not 500.
         raise StoreError(
             "NOTEBOOK_IMPORT_INVALID", f"export file is not valid JSON: {exc}"
         ) from exc
@@ -858,11 +861,12 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         raw = json.loads(raw_bytes.decode("utf-8"))
     except OSError as exc:
         raise StoreError("SYSTEM_IO_ERROR", f"cannot read cases file: {exc}") from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         # UnicodeDecodeError comes from the strict UTF-8 decode — a
         # non-UTF-8 file is definitionally not JSON, and neither it nor
         # JSONDecodeError is an OSError, so without this both escape main()'s
-        # handler chain as a raw traceback.
+        # handler chain as a raw traceback. RecursionError (v0.2.718): a
+        # deeply nested file is the same 400-class defect, not a 500.
         raise StoreError(
             "VALIDATION_FIELD_FORMAT_INVALID",
             f"cases file is not valid JSON: {exc}",
@@ -907,7 +911,9 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             base_raw = json.loads(base_bytes.decode("utf-8"))
         except OSError as exc:
             raise StoreError("SYSTEM_IO_ERROR", f"cannot read baseline file: {exc}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            # RecursionError (v0.2.718): deeply nested baseline = same
+            # 400-class input defect as malformed JSON, not a 500.
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID", f"baseline file is not valid JSON: {exc}"
             ) from exc

@@ -241,6 +241,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~99~~ | doc`meta`が`_meta_text`形状検証のみで`SOURCE_META_MAX`をバイパス→~10MB metaがverbatim永続化し`_source_json` embedで全detail応答へ増幅。settingsもper-entry guardでは合計増幅を止められない | v0.2.715 `_meta_text`内部へ`SOURCE_META_MAX` bound移設(import/restore/将来呼出を1ゲート化)+`_import_settings_text`のper-entry len除去(全オブジェクトboundへ置換) |
 | ~~100~~ | `MAX_UPLOAD_BYTES`はファイルbytesのみ制限→PDF内部増幅を制御しない: page objectは~200B/個で数万ページCPU burn・flate解凍で抽出textがファイルの~100倍に膨張し`pages.append`がGB蓄積 | v0.2.716 `MAX_PDF_PAGES=2000`+`MAX_EXTRACT_CHARS=64MB`で`INGEST_FILE_TOO_LARGE` coded拒否(2経路を同一タクソノミーで閉塞) |
 | ~~101~~ | `_one_line`適用が部分的→untrusted bytes(stats nb.name・messages body・refresh title・suggest語・report sec・LLM delta/answer/studio/questions・check行・health embed名)がESC/Cf制御系列をターミナルへ素通し(Trojan Source/OSC注入) | v0.2.717 `one_line`/`safe_text`をlog.py集約+Cf追加+残存9経路へwrap(qa警告含む) |
+| ~~102~~ | server `_read_json`のみdeep-JSON `RecursionError`を400 coded(v0.2.314) → CLI 3ファイルparse経路(`import` doc・`eval` cases・`eval --diff` baseline)はcatch-allへ転落で~40KBファイルがSYSTEM_INTERNAL_ERROR(500)へ誤分類 | v0.2.718 3 exceptへ`RecursionError`追加(400系coded parity)+20000深度の行動ピン3件 |
 
 ### 解決済み(記録)
 

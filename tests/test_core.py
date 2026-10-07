@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.717")
+        self.assertEqual(VERSION, "0.2.718")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -14830,6 +14830,99 @@ class TestTerminalEscape(unittest.TestCase):
             os.unlink(db_file)
 
 
+class TestCliDeepJsonCodedErrors(unittest.TestCase):
+    """v0.2.718: a deeply nested JSON file raises RecursionError inside
+    json.loads. server.py's _read_json already codes that shape as a 400-class
+    input defect (v0.2.314); the CLI's three file-parse sites (import doc,
+    eval cases, eval --diff baseline) let it fall through to the catch-all's
+    SYSTEM_INTERNAL_ERROR — a 500 misclassification of a 400-class defect."""
+
+    _DEEP = "[" * 20000 + "]" * 20000
+
+    def _tmp(self, content: str) -> str:
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        f.write(content)
+        f.close()
+        return f.name
+
+    def _db(self) -> tuple[str, int]:
+        import tempfile
+
+        from shoin.store import Store
+
+        f = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        f.close()
+        with Store(f.name) as s:
+            nb_id = s.create_notebook("deep-json").id
+        return f.name, nb_id
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        import io
+        from unittest.mock import patch
+
+        from shoin.cli import main
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            rc = main(argv)
+        return rc, err.getvalue()
+
+    def test_import_deep_doc_is_coded_400(self) -> None:
+        import os
+
+        db_file, _ = self._db()
+        doc = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(["--db", db_file, "import", doc])
+            self.assertEqual(rc, 1)
+            self.assertIn("NOTEBOOK_IMPORT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(doc)
+
+    def test_eval_cases_deep_file_is_coded_400(self) -> None:
+        import os
+
+        db_file, nb_id = self._db()
+        cases = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(
+                ["--db", db_file, "eval", str(nb_id), cases]
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(cases)
+
+    def test_eval_diff_deep_baseline_is_coded_400(self) -> None:
+        import os
+
+        db_file, nb_id = self._db()
+        cases = self._tmp("[]")
+        deep = self._tmp(self._DEEP)
+        try:
+            rc, err = self._run(
+                [
+                    "--db", db_file, "eval", str(nb_id), cases,
+                    "--diff", deep,
+                ]
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+            self.assertNotIn("SYSTEM_INTERNAL_ERROR", err)
+        finally:
+            os.unlink(db_file)
+            os.unlink(cases)
+            os.unlink(deep)
+
+
 class TestCLIMessagesList(unittest.TestCase):
     """CLI `messages list` (v0.2.74): cli.py's own module docstring claims 'the
     CLI exposes every core capability so the product is fully usable headless
@@ -20001,11 +20094,14 @@ class TestResidualGuards(unittest.TestCase):
             "cli.py": [
                 "(IngestError,StoreError)",
                 "(IngestError,LLMError,StoreError)",
-                "(UnicodeDecodeError,json.JSONDecodeError)",
-                "(UnicodeDecodeError,json.JSONDecodeError)",
+                # v0.2.718: RecursionError joins all three CLI file-parse
+                # tuples — deeply nested JSON is a 400-class input defect
+                # (server.py's _read_json sets the same classification).
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
                 # +1: _cmd_import maps a non-UTF-8/non-JSON export file to
                 # NOTEBOOK_IMPORT_INVALID — same coded contract (v0.2.655).
-                "(UnicodeDecodeError,json.JSONDecodeError)",
+                "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
                 "Exception", "KeyboardInterrupt",
                 # v0.2.627: process-boundary catch-all in main() — a custom
                 # ChatBackend raising a non-LLMError escaped every handler as
