@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.726
+## Version History: v0.1.37 → v0.2.727
+
+### v0.2.727 — scope所属検証をretrieval snapshot内へ統合(CLI検証欠落も閉塞)
+
+- 短所111: `/ask`・`/search`の`source_ids`所属検証がretrieval snapshot**外**で実行——検証(T1)とscoped read(T2)が別コミット点を読むtear。間にdelete+re-add(id再利用・非AUTOINCREMENT INTEGER PKはmax+1再利用)が着弾するとvalidated sidが他nbの新ソースを指し、scoped readがそのnb chunkを混入(非漏洩契約の破れ)。さらにCLI `_cmd_ask`は検証自体が欠落し`--source <他nb sid>`で他nb接地のまま回答+reportが永続化。`check_source_scope`を共有helper化し3箇所(`qa.ask`・`_h_ask_sse`・`_h_nb_search`)のsnapshot内で実行——CLIもqa.ask経由で同一SOURCE_NOT_FOUND契約を得てparity完結+get_source全呼出snapshot内発火のスパイピン(library+server両面)。
 
 ### v0.2.726 — multi-query展開のLLM相をretrieval snapshot外へ分離
 

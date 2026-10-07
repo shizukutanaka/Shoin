@@ -73,6 +73,7 @@ from .qa import (
     _query_vector,
     build_context,
     build_messages,
+    check_source_scope,
     expand_query,
     history_messages,
     prepare_retrieval,
@@ -1457,10 +1458,6 @@ class _Handler(BaseHTTPRequestHandler):
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404, same contract as /ask
-            for sid in scope_ids or ():
-                # Same non-leak rule as /ask: a foreign source id is a dead id.
-                if store.get_source(sid).notebook_id != nb_id:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
             retrieval_q = expand_query(question, [])
             qvec = (
                 _query_vector(self.llm, retrieval_q)
@@ -1474,8 +1471,13 @@ class _Handler(BaseHTTPRequestHandler):
             # v0.2.726: multi-query expansion is pure LLM traffic — it runs
             # BEFORE the snapshot so a network round-trip can't pin the
             # WAL read point for its duration.
+            # v0.2.727: the scope-membership check joins the snapshot — an
+            # outside check could validate a source that a concurrent
+            # delete+re-add then replaces with a recycled id on another
+            # notebook.
             queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
             with store.read_snapshot():
+                check_source_scope(store, nb_id, scope_ids)
                 hits = retrieve_prepared(
                     store, nb_id, queries, vecs, k=k, source_ids=scope_ids
                 )
@@ -1582,13 +1584,6 @@ class _Handler(BaseHTTPRequestHandler):
         scope_ids = self._optional_id_list(body, "source_ids")
         with Store(self.db) as store:
             store.get_notebook(nb_id)  # 404 before headers go out
-            for sid in scope_ids or ():
-                # A foreign source id must 404 exactly like a dead one —
-                # answering scoped to another notebook's sources would both
-                # leak its existence and silently ground the reply in content
-                # the user never attached to this notebook.
-                if store.get_source(sid).notebook_id != nb_id:
-                    raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
             history = history_messages(store, nb_id)  # before persisting this turn
             retrieval_q = expand_query(question, history)
             qvec = (
@@ -1609,6 +1604,12 @@ class _Handler(BaseHTTPRequestHandler):
             # network round-trip.
             queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
             with store.read_snapshot():
+                # v0.2.727: the scope-membership check shares the retrieval
+                # commit — an outside check could validate a source that a
+                # concurrent delete+re-add replaces with a recycled id from
+                # another notebook, and the scoped read would then silently
+                # ground the answer in that notebook's chunks.
+                check_source_scope(store, nb_id, scope_ids)
                 hits = retrieve_prepared(
                     store, nb_id, queries, vecs, source_ids=scope_ids
                 )

@@ -35,7 +35,7 @@ from shoin.qa import (
     history_messages,
 )
 from shoin.search import retrieve
-from shoin.store import Store
+from shoin.store import Store, StoreError
 
 
 class FakeLLM:
@@ -447,6 +447,69 @@ class TestAsk(unittest.TestCase):
             self.assertTrue(fired)
             self.assertTrue(ans.hits)
             self.assertLessEqual({h.text for h in ans.hits}, old_texts)
+
+    def test_ask_rejects_foreign_and_dead_scope(self) -> None:
+        """v0.2.727 (#111): the library ask path enforces the API's non-leak
+        contract — a foreign or dead source id raises SOURCE_NOT_FOUND
+        (CLI parity: cli ask --source reaches this through qa.ask)."""
+        s, nb = seeded_store()
+        with s:
+            nb2 = s.create_notebook("他")
+            other = s.add_source(nb2.id, "txt", "x", "o", "sh")
+            for bad in (other.id, 99999):
+                with self.assertRaises(StoreError) as cm:
+                    ask(
+                        s,
+                        FakeLLM(),
+                        nb,
+                        "差別化は何か？",
+                        persist=False,
+                        source_ids=[bad],
+                    )
+                self.assertEqual(cm.exception.code, "SOURCE_NOT_FOUND")
+
+    def test_ask_scope_check_runs_inside_the_snapshot(self) -> None:
+        """v0.2.727 (#111): the scope-membership get_source reads must share
+        the retrieval commit — on a different commit a concurrent
+        delete+re-add could swap a validated id onto another notebook's
+        source and ground the answer in its chunks."""
+        import contextlib
+
+        s, nb = seeded_store()
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+        orig_gs = Store.get_source
+
+        @contextlib.contextmanager
+        def rs(self2: Store):
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        def gs(self2: Store, source_id: int) -> object:
+            flags.append(inside["v"])
+            return orig_gs(self2, source_id)
+
+        with s:
+            with patch.object(Store, "read_snapshot", rs), patch.object(
+                Store, "get_source", gs
+            ):
+                ans = ask(
+                    s,
+                    FakeLLM(reply="書斎の核は引用検証[S1]。"),
+                    nb,
+                    "差別化は何か？",
+                    persist=False,
+                    source_ids=[1],
+                )
+        self.assertFalse(ans.degraded)
+        self.assertTrue(flags)
+        self.assertNotIn(False, flags)
 
 
 class TestMultiTurn(unittest.TestCase):

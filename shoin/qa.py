@@ -763,6 +763,25 @@ def retrieve_prepared(
     return retrieve_multi(store, notebook_id, queries, vecs, k=k, source_ids=source_ids)
 
 
+def check_source_scope(
+    store: Store, notebook_id: int, source_ids: list[int] | None
+) -> None:
+    """Reject scoped retrieval whose source isn't in this notebook.
+
+    Called INSIDE the caller's retrieval snapshot (v0.2.727): the check and
+    the scoped read must describe one commit point — an outside check could
+    validate a source that a concurrent delete+re-add then replaces with a
+    recycled id belonging to a different notebook, and the scoped read
+    would silently ground the answer in that notebook's chunks. A foreign
+    id 404s exactly like a dead one: get_source() raises SOURCE_NOT_FOUND
+    for the dead case, and this raises the same code for the foreign case —
+    never leaking that the source exists on another notebook.
+    """
+    for sid in source_ids or ():
+        if store.get_source(sid).notebook_id != notebook_id:
+            raise StoreError("SOURCE_NOT_FOUND", f"source {sid} not found")
+
+
 def retrieve_for_question(
     store: Store,
     llm: ChatBackend,
@@ -842,6 +861,12 @@ def ask(
         # from pinning the WAL read point for its whole duration.
         queries, vecs = prepare_retrieval(llm, retrieval_q, qvec)
         with store.read_snapshot():
+            # v0.2.727: the scope-membership check shares the retrieval
+            # commit — a foreign/dead id raises SOURCE_NOT_FOUND here too
+            # (CLI parity with the API handlers), and a concurrent
+            # delete+re-add can't swap a validated id onto another
+            # notebook's source between check and read.
+            check_source_scope(store, notebook_id, source_ids)
             hits = retrieve_prepared(
                 store, notebook_id, queries, vecs, k=k, source_ids=source_ids
             )

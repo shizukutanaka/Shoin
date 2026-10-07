@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.726")
+        self.assertEqual(VERSION, "0.2.727")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -20503,7 +20503,10 @@ class TestResidualGuards(unittest.TestCase):
             ],
             # +1 RE-RAISE: the metrics wrapper re-raises after counting
             # ask.fail (v0.2.653).
-            "qa.py": ["RE-RAISE", "StoreError"],
+            # +1 StoreError: check_source_scope's foreign-source guard —
+            # membership validation moved inside the retrieval snapshot
+            # (v0.2.727).
+            "qa.py": ["RE-RAISE", "StoreError", "StoreError"],
             "server.py": [
                 "IngestError", "IngestError", "IngestError",
                 "IngestError", "IngestError",
@@ -20524,8 +20527,10 @@ class TestResidualGuards(unittest.TestCase):
                 #     (MAX_SCOPE_IDS) (v0.2.688)
                 "StoreError", "StoreError", "StoreError",
                 "StoreError",
-                "StoreError", "StoreError", "StoreError",
-                "StoreError",
+                "StoreError", "StoreError",
+                # -2: the two per-handler scope-validation raises folded
+                #     into qa.check_source_scope inside the snapshot
+                #     (v0.2.727)
                 # +4: _optional_int x2 + _h_nb_search question/k guards
                 # +2: _q_int (v0.2.646) non-integer/out-of-range query params
                 "ValueError",

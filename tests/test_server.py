@@ -486,6 +486,57 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")
 
+    def test_search_scope_check_shares_the_retrieval_snapshot(self) -> None:
+        """v0.2.727 (#111): the membership get_source reads on /search must
+        run inside the request's read_snapshot — an outside check could
+        validate a source that a concurrent delete+re-add then replaces
+        with a recycled id belonging to a different notebook."""
+        import contextlib
+
+        status, nb = self._json("POST", "/api/notebooks", {"name": "scopetear"})
+        nb_id = nb["id"]
+        status, _, raw = self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            b"scope corpus text.",
+            {"X-Filename": urllib.parse.quote("s.txt")},
+        )
+        self.assertEqual(status, 201)
+        src_id = json.loads(raw)["source"]["id"]
+
+        from shoin.store import Store
+
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+        orig_gs = Store.get_source
+
+        @contextlib.contextmanager
+        def rs(self2: Store) -> Iterator[None]:
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        def gs(self2: Store, source_id: int) -> object:
+            flags.append(inside["v"])
+            return orig_gs(self2, source_id)
+
+        with patch.object(Store, "read_snapshot", rs), patch.object(
+            Store, "get_source", gs
+        ):
+            status, out = self._json(
+                "POST",
+                f"/api/notebooks/{nb_id}/search",
+                {"question": "scope", "source_ids": [src_id]},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(flags)
+        self.assertNotIn(False, flags)
+
     def test_global_search_endpoint_crosses_notebooks(self) -> None:
         """v0.2.649: POST /api/search is the notebook-less sibling of
         /notebooks/{id}/search — the same retrieve pipeline with scope
