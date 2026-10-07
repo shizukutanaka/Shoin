@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.734
+## Version History: v0.1.37 → v0.2.735
+
+### v0.2.735 — リクエストJSONの非標準定数(NaN/Infinity)を境界+store両面で拒否(stored self-DoS閉塞)
+
+- ソクラテスの問い: 「`json.loads`が受理する拡張リテラル(NaN/Infinity/-Infinity)は永続化層まで到達しないか」——`_read_json`はデフォルトの`parse_constant`で非標準定数を実float化し、自由dictフィールド(`sources.meta`)経由でDBへ潜入。カラム内の`NaN`は以後の全応答で同リテラルとして再送出され、厳格な`JSON.parse`のブラウザUIがnotebook detail全体を読めなくなるstored self-DoSだった
+- 二層防御: `_read_json`の`parse_constant`を`_reject_non_finite`化して全フィールド一括で`VALIDATION_FIELD_FORMAT_INVALID`(400)へ写像(境界層)＋`_meta_dump`を`allow_nan=False`化して非API writer(import/trash restore/`source meta` CLI)も同契約へ
+- import/restore: `_meta_text`→`_meta_dump`のValueErrorは`NOTEBOOK_IMPORT_INVALID`/既存coded境界へ自然合流
+- 行動ピン2件: store層(update_source_metaがnan/±infを coded 400で拒否・meta不変)＋HTTP層(PATCH bodyの`NaN`リテラル→400)
+- カタログ追随1件: raise inventory(server.py StoreError +1)
 
 ### v0.2.734 — chat_streamのerrorフレームへ秘密情報スクラブを拡張(streaming側残存面を閉塞)
 

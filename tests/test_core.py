@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.734")
+        self.assertEqual(VERSION, "0.2.735")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -20746,9 +20746,12 @@ class TestResidualGuards(unittest.TestCase):
                 #     at least one required) (v0.2.659)
                 # +1: _optional_id_list's scope-length guard
                 #     (MAX_SCOPE_IDS) (v0.2.688)
+                # +1: _reject_non_finite's parse_constant guard — the
+                #     non-standard NaN/Infinity literals are a 400 input
+                #     defect, never a persisted value (v0.2.735)
                 "StoreError", "StoreError", "StoreError",
                 "StoreError",
-                "StoreError", "StoreError",
+                "StoreError", "StoreError", "StoreError",
                 # -2: the two per-handler scope-validation raises folded
                 #     into qa.check_source_scope inside the snapshot
                 #     (v0.2.727)
@@ -24714,6 +24717,24 @@ class TestSourceMeta(unittest.TestCase):
         self.assertEqual(
             main(["--db", db, "source", "meta", "999", "a=b"]), 1
         )
+
+    def test_meta_rejects_non_finite_numbers(self) -> None:
+        """v0.2.735 (weakness #119): json.loads' default parse_constant
+        accepts the non-standard ``NaN``/``Infinity``/``-Infinity``
+        literals, so a request could spell a non-finite float inside
+        ``meta``. Persisted, the column holds the literal ``NaN`` and every
+        later response re-serializes it the same way — invalid JSON for
+        strict parsers (the web UI's JSON.parse fails on the whole
+        notebook detail body, a stored self-DoS). Writers must reject
+        non-finite numbers like every other unserializable value."""
+        store = make_store()
+        nb_id = seed(store)
+        src = store.sources_for_notebook(nb_id)[0]
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(StoreError) as cm:
+                store.update_source_meta(src.id, {"x": bad})
+            self.assertEqual(cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID")
+        self.assertEqual(store.get_source(src.id).meta, {})
 
 
 class TestNotebookSettings(unittest.TestCase):

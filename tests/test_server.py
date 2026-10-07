@@ -4728,6 +4728,40 @@ class InputValidationSecurityTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
 
+    def test_non_finite_meta_constant_returns_400(self) -> None:
+        """v0.2.735 (weakness #119): json.loads accepts ``NaN``/
+        ``Infinity``/``-Infinity`` by default — extended literals that are
+        not valid JSON. Persisted inside ``meta`` they re-emit on every
+        later response as the same literal, so one PATCH poisons the whole
+        notebook detail view for strict JSON parsers (browser JSON.parse
+        throws). The body parser must reject non-finite constants as a 400
+        input defect."""
+        import json as _json
+
+        nb_body = _json.dumps({"name": "nan-meta-test"}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self._CONN_TIMEOUT)
+        conn.request(
+            "POST", "/api/notebooks", body=nb_body,
+            headers={"Content-Type": "application/json"},
+        )
+        nb_id = _json.loads(conn.getresponse().read())["id"]
+        conn.request(
+            "POST", f"/api/notebooks/{nb_id}/upload",
+            body="非有限値のテスト用文書です。".encode() * 10,
+            headers={"X-Filename": "nan.txt"},
+        )
+        src_id = _json.loads(conn.getresponse().read())["source"]["id"]
+        conn.request(
+            "PATCH", f"/api/sources/{src_id}",
+            body=b'{"meta":{"x":NaN}}',
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        data = _json.loads(resp.read())
+        conn.close()
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(data["error"]["code"], "VALIDATION_FIELD_FORMAT_INVALID")
+
 
 class _OverlapDetectingLLM:
     """Records whether chat_stream() was ever entered while already active.
