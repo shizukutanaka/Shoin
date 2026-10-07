@@ -29,7 +29,24 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.733
+## Version History: v0.1.37 → v0.2.734
+
+### v0.2.734 — chat_streamのerrorフレームへ秘密情報スクラブを拡張(streaming側残存面を閉塞)
+
+短所118: 「errorフレームのサーバー生成テキストはHTTP本文と同じ防御を受けるか」
+の問いで発掘——v0.2.678(product-review #62)は`_post_once`のHTTPエラー本文に
+対し、Bearer token・URL userinfoを`***`へ置換するecho防御を導入したが、
+`chat_stream`のin-stream `{"error": ...}`フレーム経路は同じサーバー生成
+テキストを未スクラブのまま`LLMError`メッセージへ埋め込んでいた。敵対的
+ゲートウェイがリクエストのヘッダ/URLをerror payload内にechoした場合、
+認証情報が502 JSONエンベロープやstderrへ伝播し得た(streaming側残存面)。
+
+- `_scrub_secrets(text)`をLLMClientの共有helper化——`_post_once`のHTTPエラー
+  本文と`chat_stream`のerrorフレームの両経路で同一スクラブを適用
+- スクラブは`[:200]`切り捨てより先に適用——切り捨て後だと秘密情報が切断面を
+  跨いでマッチせず、部分秘密が漏洩し得る
+- 行動ピン1件(test_chat_stream_error_frame_scrubs_sent_secrets): error
+  フレーム内のBearer keyとuserinfoが`***`へ置換されることを検証(旧挙動でfail確認済)
 
 ### v0.2.733 — duplicate_notebookのreport chunkポインタをfork先へremap(cross-notebookポインタを閉塞)
 

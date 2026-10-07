@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.733")
+        self.assertEqual(VERSION, "0.2.734")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9886,6 +9886,38 @@ class TestLLMClient(unittest.TestCase):
         self.assertNotIn(key, msg, "Bearer token must not survive the error body")
         self.assertNotIn("u:p", msg, "URL userinfo must not survive the error body")
         self.assertIn("localhost", msg, "host stays visible for diagnosis")
+        self.assertIn("***", msg)
+
+    def test_chat_stream_error_frame_scrubs_sent_secrets(self) -> None:
+        """v0.2.734 (weakness #118): a chat_stream ``{"error": ...}`` frame is
+        server-produced text with the same echo threat as the HTTP error body
+        — the unscrubbed message reached the 502 envelope/stderr carrying
+        whatever a hostile gateway reflected of the request's headers/URL."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        key = "k" + "1"
+        url = "http://" + "u:p@localhost:11434/v1"
+        echo = "echo Authorization: Bearer " + key + " at " + url
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.__iter__ = lambda s: iter(
+            [('data: {"error": "' + echo + '"}').encode()]
+        )
+        with (
+            patch.dict(os.environ, {"SHOIN_LLM_API_KEY": key}),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
+            client = LLMClient(base_url=url)
+            with self.assertRaises(LLMError) as cm:
+                list(client.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(cm.exception.code, "SYSTEM_LLM_BAD_RESPONSE")
+        msg = str(cm.exception)
+        self.assertNotIn(key, msg, "Bearer token must not survive the stream error")
+        self.assertNotIn("u:p", msg, "URL userinfo must not survive the stream error")
         self.assertIn("***", msg)
 
     def test_post_retries_transport_failures_then_succeeds(self) -> None:

@@ -257,6 +257,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~115~~ | 子行writer(add_source/add_chunks/add_note/add_studio_output/add_message/clear_messages)の親probeがautocommit実行——probe→write間の親delete+rowid再利用でFKが別親を受理し子行がprobeの見なかった親へ着地(cross-notebook汚染) | v0.2.731 全6 writerのprobeを`BEGIN IMMEDIATE`内へ統一(probeとwriteが同一commit点・第二接続のforeign BEGIN失敗を行動ピン) |
 | ~~116~~ | eval CLI文書書込み(`--gen`/`--save`)が`write_text`非原子——中断で半書込みJSONが残り次回`--diff`/`--gen`消費時に生JSONエラー(「成功した保存」が文書でなかった) | v0.2.732 `_atomic_write_text`新設: sibling temp+os.replace原子rename・OSError→`SYSTEM_IO_ERROR`・stagingはfinally除去(行動ピン: 完結書込/上書き/debris無し/coded) |
 | ~~117~~ | `duplicate_notebook`の`_remap_report_source_ids`が2引数(chunk_map無し)——fork先のmessage/studio reportの`source_chunk_ids`が原本notebookの存続chunkを指したまま残存(S#解決が別nb chunkへ向くcross-notebookポインタ) | v0.2.733 chunkコピーをper-row INSERT化して`chunk_id_map`構築→3引数remapでimport/merge/restore(v0.2.686)と同一契約へ統一(行動ピン: 両tableでfork chunk集合一致) |
+| ~~118~~ | `chat_stream`のin-stream `{"error": ...}`フレームがサーバー生成テキストを未スクラブで`LLMError`メッセージへ埋め込み——敵対ゲートウェイのechoでBearer token/URL userinfoが502エンベロープ/stderrへ伝播(v0.2.678のHTTP本文防御のstreaming側残存面) | v0.2.734 `_scrub_secrets`を共有helper化して両経路へ適用・スクラブは切り捨て前に実施(行動ピン: errorフレーム内のkey/userinfoが***へ) |
 
 ### 解決済み(記録)
 
