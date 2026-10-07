@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.728
+## Version History: v0.1.37 → v0.2.729
+
+### v0.2.729 — ベクトル書込みをtext照合でガード(recycled rowidへの誤格納を閉塞)
+
+- 短所113: `_embed_chunks`は`id_context_text_chunks_for_*`の読取り→LLM embed→batchコミットの3相——読取りと書込みの間に並行`replace_chunks_for_source`/`delete_source`+addが着弾すると、削除されたchunkのrowid(非AUTOINCREMENT INTEGER PK=max+1再利用)が別textの新chunkへ再利用され、`WHERE id=?`のUPDATEが**旧text由来のvectorを別内容の行へ格納**(dim一致のためmismatch guardも発火しない完全に静かなcorruption——retrievalのcosineが外国の内容を記述し続ける)。`set_embedding`/`_set_embedding_pair`に`expected_text`を追加し`UPDATE ... WHERE id=? AND text=?`でガード——不一致は既存deleted-rowと同じCHUNK_NOT_FOUND→batch rollbackに合流。`_embed_chunks`は`expected_texts`を受け全4本番呼出(index/rename/refresh/reindex)がraw textを引き渡し、ASTピンで呼出側省略を静的防止。
 
 ### v0.2.728 — 複数フィールドPATCHの部分適用tearを閉塞(400応答で先段が永続化)
 

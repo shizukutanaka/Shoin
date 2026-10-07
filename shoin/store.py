@@ -2507,7 +2507,13 @@ class Store:
             ) from e
         return ids
 
-    def _set_embedding_pair(self, chunk_id: int, blob: bytes, norm: float) -> None:
+    def _set_embedding_pair(
+        self,
+        chunk_id: int,
+        blob: bytes,
+        norm: float,
+        expected_text: str | None = None,
+    ) -> None:
         # Two statements, one transaction, and the order matters: writing the
         # embedding fires the migration-9 trigger, which clears the cached norm
         # unconditionally; the second statement then writes the norm that belongs
@@ -2515,16 +2521,34 @@ class Store:
         # trigger to guess whether a writer knew about the norm column, and every
         # guess has a case it gets wrong (migration 8's did — see its note).
         # Measured: the split costs nothing (29.1 us vs 32.5 us per chunk).
-        cur = self.conn.execute(
-            "UPDATE chunks SET embedding=? WHERE id=?", (blob, chunk_id)
-        )
+        if expected_text is None:
+            cur = self.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=?", (blob, chunk_id)
+            )
+        else:
+            # The vector only lands while the row still carries the exact text
+            # it was computed from. A deleted rowid that has been reused for a
+            # different chunk's text misses the WHERE — same CHUNK_NOT_FOUND
+            # contract as a plainly missing row, instead of silently storing
+            # a vector that describes foreign content (v0.2.729).
+            cur = self.conn.execute(
+                "UPDATE chunks SET embedding=? WHERE id=? AND text=?",
+                (blob, chunk_id, expected_text),
+            )
         if cur.rowcount == 0:
             raise StoreError("CHUNK_NOT_FOUND", f"chunk {chunk_id} not found")
         self.conn.execute(
             "UPDATE chunks SET embedding_norm=? WHERE id=?", (norm, chunk_id)
         )
 
-    def set_embedding(self, chunk_id: int, vec: list[float], *, commit: bool = True) -> None:
+    def set_embedding(
+        self,
+        chunk_id: int,
+        vec: list[float],
+        *,
+        commit: bool = True,
+        expected_text: str | None = None,
+    ) -> None:
         if not vec:
             raise StoreError("EMBEDDING_INVALID", "embedding vector must not be empty")
         # Norm computed from the float32 round-trip (array("f", vec)), not from the
@@ -2538,11 +2562,15 @@ class Store:
             # leave the vector write pending for a later commit on this
             # connection to publish unnormed (v0.2.417-418 leak class).
             with self.conn:
-                self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
+                self._set_embedding_pair(
+                    chunk_id, packed.tobytes(), norm, expected_text
+                )
         else:
             # commit=False callers own the surrounding transaction
             # (_embed_chunks rolls back a partial batch on failure).
-            self._set_embedding_pair(chunk_id, packed.tobytes(), norm)
+            self._set_embedding_pair(
+                chunk_id, packed.tobytes(), norm, expected_text
+            )
 
     def chunks_for_notebook(self, notebook_id: int) -> list[Chunk]:
         rows = self.conn.execute(

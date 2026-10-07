@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.728")
+        self.assertEqual(VERSION, "0.2.729")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -16002,6 +16002,58 @@ class TestRenameReembed(unittest.TestCase):
         finally:
             st.close()
 
+    def test_embed_write_never_lands_on_a_recycled_rowid(self) -> None:
+        """v0.2.729 (#113): between id_context_text's read and the batch
+        commit, a concurrent replace can delete the row and reuse its rowid
+        for DIFFERENT text — the guarded write (`WHERE id=? AND text=?`)
+        must miss and leave the new chunk vector-NULL rather than store a
+        vector describing foreign content (rowcount=0 → CHUNK_NOT_FOUND →
+        batch rolled back, same contract as a plainly deleted row)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "s.db")
+            st = Store(db)
+            nb = st.create_notebook("N")
+            a = st.add_source(nb.id, "md", "旧題", "mem://a", "sha-a")
+            st.add_chunks(a.id, ["ワクチンの話題についての本文"], contexts=["旧題"])
+
+            class _SwapMidEmbed(TestRenameReembed._FakeLLM):
+                def __init__(
+                    self,
+                    vec: Callable[[str], list[float]],
+                    db_path: str,
+                    src_id: int,
+                ) -> None:
+                    super().__init__(vec)
+                    self._db, self._src = db_path, src_id
+
+                def embed(self, texts: list[str]) -> list[list[float]]:
+                    # The concurrent write lands mid-embed, on a second
+                    # connection — the exact commit tear the guard covers.
+                    with Store(self._db) as other:
+                        other.replace_chunks_for_source(
+                            self._src,
+                            ["全く別の本文に差し替えられたチャンク"],
+                            sha256="sha-x",
+                        )
+                    return super().embed(texts)
+
+            try:
+                n = rename_source(
+                    st, a.id, "新しい題", "mem://a",
+                    _SwapMidEmbed(self._vec, db, a.id),
+                )
+                self.assertEqual(n, 0)
+                row = st.conn.execute(
+                    "SELECT embedding, text FROM chunks WHERE source_id=?",
+                    (a.id,),
+                ).fetchone()
+                # The recycled rowid keeps the swapped text but must NOT
+                # carry a vector computed for the deleted text.
+                self.assertIsNone(row["embedding"])
+                self.assertEqual(row["text"], "全く別の本文に差し替えられたチャンク")
+            finally:
+                st.close()
+
 
 class TestQueryVectorCache(unittest.TestCase):
     """_query_vector must not re-embed a repeated (model, question) pair.
@@ -17957,7 +18009,11 @@ class TestResidualGuards(unittest.TestCase):
             "_migrate_once": None,  # executescript issues its own COMMIT
             "touch_notebook": 1,  # callee — docstring: callers must commit
             "_rewrite_chunk_context_titles": 1,  # runs inside caller's with
-            "_set_embedding_pair": 2,  # caller-transacted when commit=False
+            # v0.2.729: +1 for the guarded-write branch — `expected_text`
+            # selects `UPDATE ... WHERE id=? AND text=?` vs the unguarded
+            # UPDATE, both literal, then the norm UPDATE (3 sites, still
+            # 2 statements per call path).
+            "_set_embedding_pair": 3,  # caller-transacted when commit=False
             "create_notebook": 1,
             "rename_notebook": 1,
             "trash_purge": 1,  # single-statement writer like rename_notebook
@@ -22270,6 +22326,43 @@ class TestResidualGuards(unittest.TestCase):
             "initial/inherit:\n" + "\n".join(missing),
         )
 
+    def test_embed_chunks_callers_pass_expected_texts(self) -> None:
+        """v0.2.729: every production _embed_chunks() call must pass
+        expected_texts= so the vector write is guarded (`WHERE id=? AND
+        text=?`) against the delete-then-rowid-recycled tear — a caller
+        omitting it silently reopens foreign-content vector storage."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "shoin"
+        calls = 0
+        problems: list[str] = []
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_target = (
+                    (isinstance(func, ast.Name) and func.id == "_embed_chunks")
+                    or (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "_embed_chunks"
+                    )
+                )
+                if not is_target:
+                    continue
+                calls += 1
+                if not any(k.arg == "expected_texts" for k in node.keywords):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: _embed_chunks() without "
+                        "expected_texts="
+                    )
+        self.assertGreaterEqual(
+            calls, 4, "non-vacuous: the scan must see every production call"
+        )
+        self.assertFalse(
+            problems, "unguarded embed call(s):\n" + "\n".join(problems)
+        )
 
 
 if __name__ == "__main__":
