@@ -28,6 +28,8 @@ const I18N = {
     "notes.earlier":"— 以前の {n} 件は省略 —",
     "src.earlier":"— 以前の {n} 件は省略 —",
     "src.load_earlier":"以前の {n} 件を表示",
+    "chat.load_earlier":"以前の {n} 件を表示",
+    "notes.load_earlier":"以前の {n} 件を表示",
     "src.more":"残り {n} チャンクを表示",
     "export.head":"エクスポート","viewer.close":"閉じる",
     "reindex.head":"埋め込み","reindex.btn":"埋め込みを再構築",
@@ -71,6 +73,8 @@ const I18N = {
     "notes.earlier":"— {n} earlier notes not shown —",
     "src.earlier":"— {n} earlier sources not shown —",
     "src.load_earlier":"Show {n} earlier sources",
+    "chat.load_earlier":"Show {n} earlier messages",
+    "notes.load_earlier":"Show {n} earlier notes",
     "src.more":"Show {n} more chunks",
     "export.head":"Export","viewer.close":"Close",
     "reindex.head":"Embeddings","reindex.btn":"Rebuild embeddings",
@@ -447,7 +451,12 @@ function renderNotebook(){
     // unreachable for it). The pager fetches /api/notebooks/{id}/sources
     // pages and rebuilds — the paged rows get the same checkbox/srcIndex
     // wiring a normal row has.
-    wireSrcListPager(list, cur, renderNotebook);
+    wireEarlierPager(list, cur, "sources_omitted",
+      "src.load_earlier", renderNotebook, async ()=>{
+        const pj = await (await api(
+          `/api/notebooks/${cur.id}/sources?offset=${cur.sources.length}`)).json();
+        return {arr: cur.sources, rows: pj.sources || [], total: pj.total};
+      });
     $("#srcEmpty").hidden = (cur.sources?.length||0)>0;
     updateScopeInfo();
     renderChatHistory(); renderStudio(); renderNotes(); refreshQuestions();
@@ -784,11 +793,15 @@ function addMsg(role, body, report){
 function renderChatHistory(){
   $("#degBadge").hidden = true;
   $("#chat").replaceChildren();
-  // Disclose the server-side history cap (messages_omitted) rather than
-  // silently rendering a partial log — same honesty convention as the
-  // budget-cut marker and truncated badge.
-  if (cur.messages_omitted)
-    $("#chat").prepend(el("div","empty", t("chat.earlier").replace("{n}", cur.messages_omitted)));
+  // Disclose the server-side history cap (messages_omitted) — and make
+  // it a pager (v0.2.698): a disclosure without a fetch left the older
+  // log unreachable even though the ?offset= endpoint exists.
+  wireEarlierPager($("#chat"), cur, "messages_omitted",
+    "chat.load_earlier", renderChatHistory, async ()=>{
+      const pj = await (await api(
+        `/api/notebooks/${cur.id}/messages?offset=${cur.messages.length}`)).json();
+      return {arr: cur.messages, rows: pj.messages || [], total: pj.total};
+    });
   (cur.messages||[]).forEach(m=>addMsg(m.role==="user"?"user":"ai", m.body, m.report));
   const hasChat = (cur.messages||[]).length > 0;
   $("#chatEmpty").hidden = hasChat;
@@ -822,33 +835,36 @@ async function refreshQuestions(){
     });
   }catch(_e){ /* suggestions are best-effort */ }
 }
-// v0.2.697: the sources_omitted disclosure is a pager, not dead text —
-// a source beyond the detail cap could never join srcSel, so scoped ask
-// (source_ids) was unreachable for it. Each click fetches one
-// /api/notebooks/{id}/sources page (the scan endpoint the cap already
-// exposed), prepends the older rows to cur.sources, and re-runs the
-// passed-in render so the new rows get the same checkbox/srcIndex wiring.
-// `render` is a parameter so the function stays side-effect-pure for the
-// node harness; the call site passes renderNotebook.
-function wireSrcListPager(list, cur, render){
-  if (!cur.sources_omitted) return;
+// v0.2.697/698: a cap disclosure is a pager, not dead text — every
+// *_omitted field is accompanied by a GET ...?offset= scan endpoint the
+// UI must actually call, or the rows beyond the cap are unreachable
+// (for sources that meant they could never join srcSel, so scoped ask
+// was physically impossible for them; for messages/notes the older
+// history simply could not be viewed). One click merges one page:
+// `fetch` is a per-kind literal-endpoint callback (kept at each call
+// site so the route pins can resolve the URL) returning
+// {arr, rows, total}; the DESC rows are unshifted so the ASC list stays
+// oldest-first, the omitted counter recomputes from total, and the
+// passed-in render re-runs so new rows get the same wiring. Parameters
+// keep the function side-effect-pure for the node harness.
+function wireEarlierPager(list, cur, omitKey, i18nKey, render, fetch){
+  if (!cur[omitKey]) return;
   const holder = el("div","src-more");
   const btn = el("button","btn",
-    t("src.load_earlier").replace("{n}", cur.sources_omitted));
+    t(i18nKey).replace("{n}", cur[omitKey]));
   btn.type = "button";
   btn.onclick = async ()=>{
     btn.disabled = true;
     try{
-      const pj = await (await api(
-        `/api/notebooks/${cur.id}/sources?offset=${cur.sources.length}`)).json();
+      const r = await fetch();
       // unshift each DESC page row -> the list stays oldest-first, and the
       // id guard absorbs a concurrent add shifting the offset window.
-      const seen = new Set(cur.sources.map(x=>x.id));
-      for (const s2 of (pj.sources || []))
-        if (!seen.has(s2.id)){ seen.add(s2.id); cur.sources.unshift(s2); }
-      cur.sources_omitted = Math.max(0,
-        (typeof pj.total === "number" ? pj.total : cur.sources.length)
-        - cur.sources.length);
+      const seen = new Set(r.arr.map(x=>x.id));
+      for (const row of r.rows)
+        if (!seen.has(row.id)){ seen.add(row.id); r.arr.unshift(row); }
+      cur[omitKey] = Math.max(0,
+        (typeof r.total === "number" ? r.total : r.arr.length)
+        - r.arr.length);
       render();
     }catch(err){ btn.disabled = false; toast(err.message); }
   };
@@ -1020,10 +1036,17 @@ function renderNotes(){
     const e0 = el("div","empty"); e0.append(el("b",null,t("notes.empty.title")), el("span",null,t("notes.empty.body")));
     out.append(e0); return;
   }
-  // Disclose the server-side notes cap (notes_omitted) rather than silently
-  // dropping the oldest notes — same honesty rule as chat.earlier (v0.2.250).
-  if (cur.notes_omitted)
-    out.append(el("div","empty", t("notes.earlier").replace("{n}", cur.notes_omitted)));
+  // Disclose the server-side notes cap (notes_omitted) — and make it a
+  // pager (v0.2.698). The old disclosure line was also appended at the
+  // BOTTOM, i.e. below the newest note, while cur.notes is oldest-first —
+  // the marker sat at the wrong end. Prepending it here fixes the
+  // position and makes the omitted rows reachable.
+  wireEarlierPager(out, cur, "notes_omitted",
+    "notes.load_earlier", renderNotes, async ()=>{
+      const pj = await (await api(
+        `/api/notebooks/${cur.id}/notes?offset=${cur.notes.length}`)).json();
+      return {arr: cur.notes, rows: pj.notes || [], total: pj.total};
+    });
   items.forEach(n=>{
     const card = el("div","card");
     const x = el("button","x","×"); x.setAttribute("aria-label",t("a11y.delnote"));

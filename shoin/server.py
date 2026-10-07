@@ -270,6 +270,7 @@ def _notebook_json(store: Store, nb_id: int) -> Json:
         ],
         "messages": [
             {
+                "id": m["id"],
                 "role": m["role"],
                 "body": m["body"],
                 "report": _safe_report(m["citation_report"]),

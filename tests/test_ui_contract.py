@@ -1915,7 +1915,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2469,7 +2469,8 @@ main().catch(e => { console.error(e.message || e); process.exit(1) })
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
         try:
-            block = _js_block(src, "function renderChatHistory")
+            block = _js_block(src, "function renderChatHistory")\
+                + _js_block(src, "function wireEarlierPager")
         except ValueError:
             self.fail("no renderChatHistory function in index.html")
         harness = (
@@ -2486,15 +2487,18 @@ const degBadge = {hidden: false}, chatEmpty = {hidden: true}, clearChat = {hidde
 const map = {"#degBadge": degBadge, "#chat": chat,
              "#chatEmpty": chatEmpty, "#clearChat": clearChat};
 const $ = s => map[s];
-function el(tag, cls, txt){ return {tag, cls, text: txt} }
+function el(tag, cls, txt){ return {tag, cls, text: txt, textContent: txt,
+  kids: [], append(...xs){ this.kids.push(...xs) },
+  setAttribute(){}, type: "", disabled: false, onclick: null} }
 function t(k){ return k + "={n}" }
 function addMsg(role, body, report){ calls.added.push(role + ":" + body) }
 """
             + block
             + """
 renderChatHistory();
-if (calls.prepended.length !== 1 || !String(calls.prepended[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(calls.prepended));
+if (calls.prepended.length !== 1 ||
+    !String(calls.prepended[0].kids[0].text).includes("8"))
+  { console.error("omitted pager missing: " + JSON.stringify(calls.prepended));
     process.exit(1) }
 if (calls.added.length !== 2)
   { console.error("messages not rendered: " + calls.added.length); process.exit(1) }
@@ -2521,7 +2525,8 @@ console.log("ok")
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
         try:
-            block = _js_block(src, "function renderNotes")
+            block = _js_block(src, "function renderNotes")\
+                + _js_block(src, "function wireEarlierPager")
         except ValueError:
             self.fail("no renderNotes function in index.html")
         harness = (
@@ -2531,7 +2536,8 @@ let cur = {id: 1, notes: [{id: 5, title: "n5", body: "b5"},
            notes_omitted: 8};
 const noteList = {cleared: 0, kids: [],
   replaceChildren(){ this.cleared++; this.kids = [] },
-  append(x){ this.kids.push(x) }};
+  append(x){ this.kids.push(x) },
+  prepend(x){ this.kids.unshift(x) }};
 const map = {"#noteList": noteList};
 const $ = s => map[s];
 function el(tag, cls, txt){ return {tag, cls, text: txt, kids: [],
@@ -2546,8 +2552,8 @@ function toast(){}
 renderNotes();
 if (noteList.kids.length !== 3)
   { console.error("disclosure + 2 notes expected, got: " + noteList.kids.length); process.exit(1) }
-if (!String(noteList.kids[0].text).includes("8"))
-  { console.error("omitted-count line missing: " + JSON.stringify(noteList.kids[0]));
+if (!String(noteList.kids[0].kids[0].text).includes("8"))
+  { console.error("omitted pager missing: " + JSON.stringify(noteList.kids[0]));
     process.exit(1) }
 cur.notes_omitted = 0;
 renderNotes();
@@ -2758,7 +2764,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2850,7 +2856,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -2997,7 +3003,7 @@ console.log("ok")
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireSrcListPager")
+        fn = _js_block(src, "function renderNotebook") + _js_block(src, "function wireEarlierPager")
         scope_fns = _js_block(src, "function scopeSelection") + _js_block(
             src, "function updateScopeInfo"
         )
@@ -3288,13 +3294,13 @@ const sig = {aborted: false};
         fetches /api/notebooks/{id}/sources?offset=<len>, prepends the DESC
         page rows so the list stays oldest-first, recomputes omitted from
         total, re-renders, and skips duplicates; a fetch error re-enables
-        the button and toasts. Executes wireSrcListPager under node."""
+        the button and toasts. Executes wireEarlierPager under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
-        fn = _js_block(src, "function wireSrcListPager")
+        fn = _js_block(src, "function wireEarlierPager")
         harness = """\
-const calls = {fetches: [], toasts: [], renders: 0};
+const calls = {toasts: [], renders: 0};
 const mk = () => {
   const n = {textContent: "", children: [], kids: [], className: "",
     tag: "", type: "", disabled: false, onclick: null,
@@ -3309,13 +3315,12 @@ const t = k => k === "src.load_earlier" ? "earlier {n}" : k;
 const toast = m => calls.toasts.push(m);
 let cur = {id: 9, sources: [{id: 3}, {id: 4}], sources_omitted: 2};
 let page = {sources: [{id: 2}, {id: 1}], total: 4, offset: 2, limit: 2};
-const api = p => { calls.fetches.push(p);
-  return Promise.resolve({json: async () => page}); };
 const render = () => { calls.renders++; };
 """ + fn + """
 (async () => {
   const list = mk();
-  wireSrcListPager(list, cur, render);
+  wireEarlierPager(list, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
   const holder = list.kids[0];
   if (!holder || holder.className !== "src-more")
     { console.error("pager holder missing"); process.exit(1) }
@@ -3324,8 +3329,6 @@ const render = () => { calls.renders++; };
     { console.error("label: " + btn.textContent); process.exit(1) }
   await btn.onclick();
   await new Promise(r => setTimeout(r, 0));
-  if (calls.fetches.join() !== "/api/notebooks/9/sources?offset=2")
-    { console.error("fetch: " + calls.fetches); process.exit(1) }
   // DESC page [2,1] unshifted -> ASC [1,2,3,4]
   const ids = cur.sources.map(s => s.id).join(",");
   if (ids !== "1,2,3,4") { console.error("order: " + ids); process.exit(1) }
@@ -3335,13 +3338,15 @@ const render = () => { calls.renders++; };
     { console.error("renders: " + calls.renders); process.exit(1) }
   // omitted==0 -> a re-render wires nothing
   const list2 = mk();
-  wireSrcListPager(list2, cur, render);
+  wireEarlierPager(list2, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
   if (list2.kids.length) { console.error("holder on zero omitted"); process.exit(1) }
   // duplicate guard: a page replaying an already-listed id is skipped
   cur = {id: 9, sources: [{id: 3}], sources_omitted: 1};
   page = {sources: [{id: 3}, {id: 2}], total: 3, offset: 1, limit: 2};
   const list3 = mk();
-  wireSrcListPager(list3, cur, render);
+  wireEarlierPager(list3, cur, "sources_omitted", "src.load_earlier", render,
+    async ()=>({arr: cur.sources, rows: page.sources, total: page.total}));
   await list3.kids[0].kids[0].onclick();
   await new Promise(r => setTimeout(r, 0));
   const ids3 = cur.sources.map(s => s.id).join(",");
@@ -4044,6 +4049,7 @@ console.log("ok")
         for name, marker in (
             ("noteForm", '$("#noteForm").onsubmit'),
             ("renderNotes", "function renderNotes()"),
+            ("wireEarlierPager", "function wireEarlierPager"),
             ("reindex", '$("#reindexBtn").onclick'),
             ("clearChat", '$("#clearChat").onclick'),
             ("buildKinds", "function buildKindButtons()"),
@@ -4062,7 +4068,8 @@ const clearEl = {disabled: false};
 const kindsEl = {kids: [], replaceChildren(){ this.kids = [] },
   append(x){ this.kids.push(x) }};
 const noteList = {kids: [], replaceChildren(){ this.kids = [] },
-  append(x){ this.kids.push(x) }};
+  append(x){ this.kids.push(x) },
+  prepend(x){ this.kids.unshift(x) }};
 const $ = s => s === "#noteTitle" ? noteTitle : s === "#noteBody" ? noteBody
     : s === "#reindexBtn" ? reindexEl : s === "#clearChat" ? clearEl
     : s === "#kinds" ? kindsEl : s === "#noteList" ? noteList : {};
@@ -4095,6 +4102,7 @@ const events = {};
             + "events.clearChat = async ()=>\n"
             + f"{blocks['clearChat'].split('onclick = async ()=>',1)[1]}\n"
             + f"{blocks['buildKinds']}\n"
+            + f"{blocks['wireEarlierPager']}\n"
             + f"{blocks['renderNotes']}\n"
             + """\
 const noteBtn = {disabled: false};

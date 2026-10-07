@@ -29,7 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.697
+## Version History: v0.1.37 → v0.2.698
+
+### v0.2.698 — chat履歴/ノートのcap開示をページャー化+notes開示行の位置修正
+
+- **新規短所82解消(ソクラテス問いで発掘)**: 「capは到達不能なデータを生んでいないか(残面)」——v0.2.697でsourcesを救済した同族欠陥の残存2面: `chat.earlier`(messages_omitted)と`notes.earlier`(notes_omitted)も**開示のみの死文**だった。走査端点`GET /api/notebooks/{id}/messages|notes?offset=`はv0.2.646から存在するのにUIが呼ばず、古い会話履歴・古いノートへ到達不能
+- **副次修正(notes開示行の位置欠陥)**: `notes.earlier`は`out.append`で**最下部**に表示されていたが、`cur.notes`は最古→最新のASC順——省略された「以前の」ノートが表示最新ノートの**下**に位置する誤導配置。ページャーprependで正しい最古側へ修正
+- **`wireEarlierPager`を3面共用化**: v0.2.697のwireSrcListPagerを一般化——`fetch`コールバック(各コールサイトにliteral endpointを保持しrouteピン解決を維持)が`{arr, rows, total}`を返し、DESC行をunshiftでASC順維持・`*_omitted`を`total-len`で再計算・seen Setでoffset窓ずれ重複を吸収
+- **messages埋込へ`id`追加**: detail embedは`{role,body,report}`のみでdedupキーが不在——`id`を追加してsources/notesと同一のdedup契約へ(応答への追加フィールド・後方互換)
+- **行動ピン更新+追加**: v0.2.697ピンを新シグネチャへ更新+chat/notes disclosureピンがpager holder構造を検証するよう更新
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.697 — sources_omittedを開示のみから到達可能なページャーへ(スコープ選択救済)
 

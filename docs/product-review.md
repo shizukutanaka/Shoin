@@ -221,6 +221,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~79~~ | ~~**`GET /api/sources/{id}/text`が全chunk本文を無制限返却——import由来ソースが~1GiB応答を生成可能**~~ → **解消済み(v0.2.695)** | 「全ての読取り応答は有界か」の問いで発掘: detail埋込み(messages/notes/sources)はcap済みだが`/text`はfetchall一括返却のまま残存——import文書はchunk本文長を制限しないため細工exportが1ソースに~1GiB本文を置き得る(viewerクリック毎に二重実体化+64接続でプロセス枯渇)。`SRC_TEXT_BYTES_MAX`(32MiB)上界+境界chunk全体送り+`truncated`/`next_offset`/`total`開示+`?offset=`走査+UI「残り{n}チャンクを表示」導線 |
 | ~~80~~ | `GET /api/notebooks`/`GET /api/trash`のリスト応答が行数無制限(同族・アクレッティブ増殖) | v0.2.696 `?offset&limit`ページング+total開示、UIにnb.moreページャー |
 | ~~81~~ | cap範囲外sourceは開示のみでscope選択・scoped askが到達不能 | v0.2.697 `src.load_earlier`ページャーで`sources?offset=`追記+scope配線 |
+| ~~82~~ | chat履歴・ノートのcap開示も死文(走査端点あり・UI非呼出)+notes開示行が最古側と逆の最下部 | v0.2.698 `wireEarlierPager`3面共用+notes prepend化+messages埋込`id`追加 |
 
 ### 解決済み(記録)
 
