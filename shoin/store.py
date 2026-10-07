@@ -435,8 +435,17 @@ def _meta_dump(meta: dict[str, Any]) -> str:
     in the column — a re-PATCH of the same fields cannot churn storage,
     and round-trip tests compare strings, not dict ordering.
     """
+    # allow_nan=False: NaN/Infinity are not valid JSON — a persisted copy
+    # would re-emit as the same non-standard literal on every response,
+    # breaking strict JSON.parse consumers (v0.2.735, weakness #119).
+    # ValueError here is a coded VALIDATION_FIELD_FORMAT_INVALID via
+    # validate_source_meta, and NOTEBOOK_IMPORT_INVALID at import.
     return json.dumps(
-        meta, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        meta,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
 
 

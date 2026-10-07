@@ -177,6 +177,25 @@ def _hostname_of(netloc_like: str) -> str:
         return ""
 
 
+def _reject_non_finite(value: str) -> None:
+    """json.loads parse_constant hook for request bodies (v0.2.735).
+
+    The default hook materializes the non-standard NaN/Infinity/-Infinity
+    literals as floats — none of which is valid JSON. A non-finite value
+    persisted via a free-form field (source meta) re-serializes as the
+    same literal on every later response, and strict JSON.parse
+    consumers (the whole web UI) then fail on the containing body — a
+    stored self-DoS from a single PATCH. Raising StoreError here lets the
+    bad body surface as the same coded 400 every other malformed input
+    gets; the store-side _meta_dump(allow_nan=False) covers writers that
+    never pass through _read_json (imports, restores).
+    """
+    raise StoreError(
+        "VALIDATION_FIELD_FORMAT_INVALID",
+        f"non-JSON constant {value} in request body",
+    )
+
+
 Json = dict[str, Any]
 
 
@@ -381,7 +400,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise IngestError("INGEST_FILE_TOO_LARGE", "request body too large")
         raw = self.rfile.read(n) if n else b"{}"
         try:
-            data = json.loads(raw.decode("utf-8"))
+            data = json.loads(raw.decode("utf-8"), parse_constant=_reject_non_finite)
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             # RecursionError: a deeply nested body exceeds json.loads' depth —
             # still a 400 input defect, not a 500.
