@@ -29,7 +29,19 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.713
+## Version History: v0.1.37 → v0.2.714
+
+### v0.2.714 — 全verbatim-bindフィールドのper-field bound(v0.2.713の残存面を一律閉塞)
+
+- **新規短所98解消(ソクラテス問いで発掘)**: 「body以外の文書フィールドも全てboundedか」——v0.2.713はbodyをboundしたが、同じverbatim-bind族の残存面が分散していた: (a)writer側の`origin`/`sha256`は`_utf8`のみで無制限(API経由~10MB→`_source_json`がdetail応答へverbatim embedで増幅) (b)document側のsource title/origin/sha256・chunk text/context・timestampが`_import_str`通過のみでboundなし(chunk textは**全retrievalで全文ロード**される別増幅経路) (c)embedding `$blob`がb64decode無制限(vector検索でchunk毎ロード) (d)settingsの未知キーがkey/value両方無制限でverbatim保持
+- **`_import_str`一律bound**: 全文書str fieldに`MAX_BODY_LEN`を適用——title/origin/sha256/added_at/chunk text/context/note title/created_at/citation_reportを1ゲートでカバー(v0.2.713の個別5チェックは先着する`_import_str`に畳込み削除)
+- **embedding blob**: b64文字列をdecode**前**にbound——decode自体のメモリ確保を防ぎdecoded blobも制限内に(正規embedding≦~22KB b64)
+- **`_import_settings_text`**: `len(k)`/`len(json.dumps(v))`超過の未知エントリをdrop(既知キーの範囲検査と併合——forward-compat保持を維持)
+- **writer側3面**: `add_source`(origin+sha256)・`update_source_title`(origin)・`update_source_sha256`(sha256)に`VALIDATION_FIELD_FORMAT_INVALID` coded拒否——truncateはrefresh用pathを破損するためreject
+- **行動ピン2件**: (1)writer 8面の拒否/受理境界(origin/sha256系3面追加) (2)doc側6ケース(title/origin/chunk text/context/blob)+settings巨大エントリdrop
+- **却下した問い(記録)**: `add_chunks`のchunk text(ingest由来でchunk budget天然bounded・request非露出)・nb name(truncate済lenient)・seq/embedding_norm(float化で実値8byte・doc cap以下)
+
+
 
 ### v0.2.713 — free-text bodyのper-rowバイト上限(GB級detail応答の増幅経路を閉塞)
 

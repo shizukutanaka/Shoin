@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.713")
+        self.assertEqual(VERSION, "0.2.714")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -477,6 +477,12 @@ class TestStore(unittest.TestCase):
                 lambda: s.add_message(nb.id, "user", big),
                 lambda: s.add_studio_output(nb.id, "briefing", big, "{}"),
                 lambda: s.update_chunk_text(cid, big),
+                # v0.2.714: origin/sha256 ride _source_json verbatim on
+                # every detail fetch — same amplification class as body.
+                lambda: s.add_source(nb.id, "txt", "t2", big, "h2"),
+                lambda: s.add_source(nb.id, "txt", "t2", "o2", big),
+                lambda: s.update_source_title(src.id, "t2", big),
+                lambda: s.update_source_sha256(src.id, big, "t2"),
             )
             for i, write in enumerate(writers):
                 with self.subTest(writer=i):
@@ -491,6 +497,9 @@ class TestStore(unittest.TestCase):
             s.add_message(nb.id, "user", ok)
             s.add_studio_output(nb.id, "briefing", ok, "{}")
             s.update_chunk_text(cid, ok)
+            s.add_source(nb.id, "txt", "t2", ok, ok)
+            s.update_source_title(src.id, "t2", ok)
+            s.update_source_sha256(src.id, "y" * MAX_BODY_LEN, "t2")
 
     def test_get_chunk_unknown_id_raises(self) -> None:
         with make_store() as s:
@@ -20279,7 +20288,11 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 97,  # +9: per-row body bounds on the four
+            ] + ["StoreError"] * 98,  # +6: origin/sha256 writer bounds,
+                                      #     _import_str field bound, blob
+                                      #     bound (v0.2.714); -5: per-field
+                                      #     doc checks folded into _import_str
+                                      # +9: per-row body bounds on the four
                                       #     writers and the import document
                                       #     (v0.2.713)
                                       # -2: update_source_title/sha256's in-TX
@@ -23212,6 +23225,25 @@ class TestNbExportImport(unittest.TestCase):
                      "citation_report": "x" * (MAX_BODY_LEN + 1),
                      "created_at": "t"}
                 ]},
+                # v0.2.714: every document string field shares the bound —
+                # _import_str covers title/origin/sha256/chunk text/context
+                # and the timestamp fields verbatim.
+                {**good, "sources": [
+                    {**good["sources"][0], "title": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "sources": [
+                    {**good["sources"][0], "origin": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0], "text": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0], "context": "x" * (MAX_BODY_LEN + 1)}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0],
+                     "embedding": {"$blob": "x" * (MAX_BODY_LEN + 1)}}
+                ]},
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):
@@ -23220,6 +23252,24 @@ class TestNbExportImport(unittest.TestCase):
                     self.assertEqual(cm.exception.code, "NOTEBOOK_IMPORT_INVALID")
             # nothing leaked in: only the seeded notebook exists
             self.assertEqual(len(s.list_notebooks()), 1)
+
+    def test_import_settings_drops_oversized_entries(self) -> None:
+        """v0.2.714: unknown settings keys stay for forward-compat, but an
+        entry whose key or serialized value exceeds the field bound would
+        persist verbatim and embed in every detail response — drop it."""
+        from shoin.config import MAX_BODY_LEN
+
+        with make_store() as s:
+            nb = s.create_notebook("nb")
+            doc = self._tree_doc(s, nb.id)
+            doc["notebook"]["settings"] = {
+                "x" * (MAX_BODY_LEN + 1): 1,
+                "future_key": "x" * (MAX_BODY_LEN + 1),
+                "top_k": 4,
+                "kept": "ok",
+            }
+            imp = s.import_notebook(doc)
+            self.assertEqual(imp.settings, {"top_k": 4, "kept": "ok"})
 
     def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
         """v0.2.664: every chunk-write transaction ends with the FTS5

@@ -490,11 +490,15 @@ def _import_settings_text(value: Any) -> str:
     parsed = json.loads(_meta_text(value))
     kept = {
         k: v for k, v in parsed.items()
-        if k not in _NB_SETTING_BOUNDS
-        or (
-            isinstance(v, int)
-            and not isinstance(v, bool)
-            and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
+        if len(k) <= MAX_BODY_LEN
+        and len(json.dumps(v)) <= MAX_BODY_LEN
+        and (
+            k not in _NB_SETTING_BOUNDS
+            or (
+                isinstance(v, int)
+                and not isinstance(v, bool)
+                and _NB_SETTING_BOUNDS[k][0] <= v <= _NB_SETTING_BOUNDS[k][1]
+            )
         )
     }
     return _meta_dump(kept)
@@ -514,6 +518,16 @@ def _import_str(value: Any) -> None:
     if not isinstance(value, str):
         raise StoreError(
             "NOTEBOOK_IMPORT_INVALID", "export field is not a string"
+        )
+    # v0.2.714: a per-field size bound on EVERY document string, not just
+    # bodies — _insert_tree_rows binds fields verbatim, so a giant title,
+    # origin, sha256, chunk text or timestamp also persists at whatever
+    # size the MAX_IMPORT_BYTES doc cap allows and then amplifies through
+    # the verbatim embeds (title/origin ride _source_json on every detail
+    # fetch; chunk text is loaded whole on every retrieval).
+    if len(value) > MAX_BODY_LEN:
+        raise StoreError(
+            "NOTEBOOK_IMPORT_INVALID", "export field exceeds the field limit"
         )
     value.encode("utf-8")
 
@@ -1446,22 +1460,23 @@ class Store:
                 if c["embedding_norm"] is not None:
                     float(c["embedding_norm"])
                 if c["embedding"] is not None:
-                    c["embedding"] = base64.b64decode(c["embedding"]["$blob"])
+                    # v0.2.714: bound the base64 BEFORE decode — the blob
+                    # binds verbatim and is loaded on every vector
+                    # retrieval, so a giant one amplifies like a giant
+                    # text field. (Legit embeddings are ~dim*4 bytes,
+                    # i.e. ≤~22KB base64 for 4k-dim vectors.)
+                    blob64 = c["embedding"]["$blob"]
+                    if isinstance(blob64, str) and len(blob64) > MAX_BODY_LEN:
+                        raise StoreError(
+                            "NOTEBOOK_IMPORT_INVALID",
+                            "export embedding blob exceeds the field limit",
+                        )
+                    c["embedding"] = base64.b64decode(blob64)
             for n in notes:
                 for k in ("title", "body", "created_at"):
                     n[k]
                 for k in ("title", "body", "created_at"):
                     _import_str(n[k])
-                # v0.2.713: same per-row body bound the writers enforce —
-                # _insert_tree_rows bypasses add_note/add_message/
-                # add_studio_output's guards, so an export can otherwise
-                # persist a body of arbitrary size that every detail
-                # fetch then embeds verbatim.
-                if len(n["body"]) > MAX_BODY_LEN:
-                    raise StoreError(
-                        "NOTEBOOK_IMPORT_INVALID",
-                        "export note body exceeds the field limit",
-                    )
             for o in studio_outputs:
                 for k in ("kind", "body", "citation_report", "created_at"):
                     o[k]
@@ -1472,16 +1487,6 @@ class Store:
                     )
                 for k in ("body", "citation_report", "created_at"):
                     _import_str(o[k])
-                if len(o["body"]) > MAX_BODY_LEN:
-                    raise StoreError(
-                        "NOTEBOOK_IMPORT_INVALID",
-                        "export studio body exceeds the field limit",
-                    )
-                if len(o["citation_report"]) > MAX_BODY_LEN:
-                    raise StoreError(
-                        "NOTEBOOK_IMPORT_INVALID",
-                        "export studio report exceeds the field limit",
-                    )
             for m in messages:
                 for k in ("role", "body", "citation_report", "created_at"):
                     m[k]
@@ -1492,16 +1497,6 @@ class Store:
                     )
                 for k in ("body", "citation_report", "created_at"):
                     _import_str(m[k])
-                if len(m["body"]) > MAX_BODY_LEN:
-                    raise StoreError(
-                        "NOTEBOOK_IMPORT_INVALID",
-                        "export message body exceeds the field limit",
-                    )
-                if len(m["citation_report"]) > MAX_BODY_LEN:
-                    raise StoreError(
-                        "NOTEBOOK_IMPORT_INVALID",
-                        "export message report exceeds the field limit",
-                    )
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "NOTEBOOK_IMPORT_INVALID",
@@ -1930,6 +1925,16 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(origin, str) and len(origin) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"origin too long (max {MAX_BODY_LEN} chars)",
+            )
+        if isinstance(sha256, str) and len(sha256) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"sha256 too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(origin, "origin")
         _utf8(sha256, "sha256")
@@ -1980,6 +1985,11 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(origin, str) and len(origin) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"origin too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(origin, "origin")
         with self.conn:
@@ -2285,6 +2295,11 @@ class Store:
         title = title.strip()[:MAX_TITLE_LEN]
         if not title:
             raise StoreError("VALIDATION_REQUIRED_FIELD_MISSING", "source title is empty")
+        if isinstance(sha256, str) and len(sha256) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"sha256 too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(title, "title")
         _utf8(sha256, "sha256")
         try:
