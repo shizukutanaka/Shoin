@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.715")
+        self.assertEqual(VERSION, "0.2.716")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -4340,6 +4340,54 @@ class TestIngest(unittest.TestCase):
             with self.assertRaises(IngestError) as ctx:
                 pdf_to_text(b"fake pdf bytes")
         self.assertEqual(ctx.exception.code, "INGEST_PARSE_FAILED")
+
+    def test_pdf_to_text_bounds_pages_and_extracted_text(self) -> None:
+        """v0.2.716: the upload cap bounds file bytes, not what extraction
+        produces — a page object is ~200 file bytes but costs one
+        extract_text() call each (CPU burn at 10⁴+ pages), and flate-
+        compressed content streams let extracted text run ~100x the file
+        size. Both excesses are INGEST_FILE_TOO_LARGE rejections."""
+        from unittest.mock import MagicMock, patch
+
+        from shoin.ingest import IngestError, pdf_to_text
+
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+
+        fake_reader = MagicMock()
+        fake_reader.pages = [MagicMock() for _ in range(4)]
+        with patch("shoin.ingest.MAX_PDF_PAGES", 3), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_FILE_TOO_LARGE")
+
+        # Page count at the bound still extracts.
+        for p in fake_reader.pages:
+            p.extract_text.return_value = "ok"
+        fake_reader.pages = fake_reader.pages[:3]
+        with patch("shoin.ingest.MAX_PDF_PAGES", 3), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            text, n_failed = pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(n_failed, 0)
+        self.assertIn("ok", text)
+
+        # Accumulated extracted text past the bound rejects mid-loop.
+        big1 = MagicMock()
+        big1.extract_text.return_value = "x" * 10
+        big2 = MagicMock()
+        big2.extract_text.return_value = "y" * 10
+        fake_reader.pages = [big1, big2]
+        with patch("shoin.ingest.MAX_EXTRACT_CHARS", 15), patch(
+            "pypdf.PdfReader", return_value=fake_reader
+        ):
+            with self.assertRaises(IngestError) as ctx:
+                pdf_to_text(b"fake pdf bytes")
+        self.assertEqual(ctx.exception.code, "INGEST_FILE_TOO_LARGE")
 
     def test_validate_resolved_dns_failure(self) -> None:
         """DNS failure in _validate_resolved must raise INGEST_FETCH_FAILED (line 154)."""
@@ -20228,7 +20276,10 @@ class TestResidualGuards(unittest.TestCase):
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
             # +1: _decode's binary guard (INGEST_BINARY) — v0.2.673.
-            "ingest.py": ["IngestError"] * 28 + ["zlib.error", "RE-RAISE"],
+            "ingest.py": ["IngestError"] * 30 + ["zlib.error", "RE-RAISE"],
+             # +2: pdf_to_text's page-count + extracted-text bounds —
+             #     PDF-internal amplification past the 10MB file cap
+             #     (v0.2.716)
              # +1: extract_file's non-regular-file guard — a FIFO/device
              #     passes st_size 0 then blocks read_bytes forever (v0.2.680)
             "llm.py": ["LLMError"] * 17 + ["RE-RAISE"] * 2,

@@ -29,7 +29,18 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.715
+## Version History: v0.1.37 → v0.2.716
+
+### v0.2.716 — PDF抽出内部増幅のbound(10MBファイルcapがカバーしない2経路)
+
+- **新規短所100解消(ソクラテス問いで発掘)**: 「`MAX_UPLOAD_BYTES`は抽出産物も制御するか」——ファイルcapは入力bytesを制限するがPDF内部構造の増幅を制御しない: (a)page objectは~200bytes/個で1万〜5万ページの細工ファイルが`extract_text()`を数万回呼ぶCPU burn経路 (b)各ページのcontent streamはflate圧縮のため抽出テキストはファイルの~100倍まで膨張——`pages.append`がGB級strを蓄積しメモリ+chunk()が爆発
+- **`MAX_PDF_PAGES=2000`**: ページ数bound——論文/レポート/書籍の正当上限(~1500頁)に十分な余裕、最悪caseの抽出コストを~秒オーダーへ収束
+- **`MAX_EXTRACT_CHARS=64MB`**: 累積抽出文字数bound——正当10MB PDFの抽出(~30MB)に2倍マージン、解凍bombは早期にcoded拒否
+- **両方とも`INGEST_FILE_TOO_LARGE`**: 「input exceeds ingest limits」の共有coded——新コード追加せずタクソノミー維持。拒否はtruncateでなくreject(部分index黙認よりhonest)
+- **行動ピン1件**: patch上限で4ページ/15文字の両越境→coded拒否+境界内受理
+- **却下した問い(記録)**: html/md/txt抽出(入力≤10MBで天然bounded・PDFのみ解凍増幅)・per-page単発メモリ(vendor内部・修正不能を明記)・CLI vacuum/check lock(busy_timeout→coded済)
+
+
 
 ### v0.2.715 — meta/settingsオブジェクトのSOURCE_META_MAX sink bound(verbatim embed増幅の最終面)
 

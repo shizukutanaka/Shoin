@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.715"
+VERSION = "0.2.716"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -77,6 +77,15 @@ NB_SOURCES_LIMIT = 2000  # newest sources embedded in GET /api/notebooks/{id} (v
 # the cap stays reachable via ?offset paging (row position, seq order) and
 # is disclosed by `truncated` + `next_offset` (v0.2.695).
 SRC_TEXT_BYTES_MAX = 32 * 1024 * 1024
+
+# v0.2.716: bounds on the PDF-internal amplification — MAX_UPLOAD_BYTES
+# bounds the FILE, not what extraction produces from it. A page object
+# costs ~200 file bytes but one extract_text() call each (a crafted 10MB
+# PDF holds tens of thousands of pages of CPU), and per-page content
+# streams are flate-compressed, so extracted text can run ~100x the
+# file size before chunk() ever sees it.
+MAX_PDF_PAGES = 2000  # page-count bound on PDF text extraction
+MAX_EXTRACT_CHARS = 64 * 1024 * 1024  # total extracted chars (~64MB)
 # Rows fetched per batch while accumulating toward the byte cap — bounds the
 # working set without a SQL-side byte limit.
 SRC_TEXT_BATCH = 512

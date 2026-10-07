@@ -239,6 +239,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~97~~ | `NB_*_LIMIT`はembed行の件数のみ制限→各行のbodyバイト無制限で~10MB×500行≒5GBのdetail応答(書込1回→全fetchで増幅) | v0.2.713 `MAX_BODY_LEN`をwriter 4面+import document 5面へ coded bound |
 | ~~98~~ | #97族の残存面: source `origin`/`sha256`はwriter側`_utf8`のみで無制限→verbatim embed増幅。doc側はtitle/chunk text/context/timestampがunbound(chunk textは全retrievalで全文ロード)、embedding `$blob`とsettings未知エントリもverbatim | v0.2.714 `_import_str`へ一律`MAX_BODY_LEN` bound+embedding blob decode前bound+settings巨大エントリdrop+writer 3面(`add_source` origin/sha256・`update_source_title` origin・`update_source_sha256` sha256)coded拒否 |
 | ~~99~~ | doc`meta`が`_meta_text`形状検証のみで`SOURCE_META_MAX`をバイパス→~10MB metaがverbatim永続化し`_source_json` embedで全detail応答へ増幅。settingsもper-entry guardでは合計増幅を止められない | v0.2.715 `_meta_text`内部へ`SOURCE_META_MAX` bound移設(import/restore/将来呼出を1ゲート化)+`_import_settings_text`のper-entry len除去(全オブジェクトboundへ置換) |
+| ~~100~~ | `MAX_UPLOAD_BYTES`はファイルbytesのみ制限→PDF内部増幅を制御しない: page objectは~200B/個で数万ページCPU burn・flate解凍で抽出textがファイルの~100倍に膨張し`pages.append`がGB蓄積 | v0.2.716 `MAX_PDF_PAGES=2000`+`MAX_EXTRACT_CHARS=64MB`で`INGEST_FILE_TOO_LARGE` coded拒否(2経路を同一タクソノミーで閉塞) |
 
 ### 解決済み(記録)
 

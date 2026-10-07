@@ -20,6 +20,8 @@ from io import BytesIO
 from pathlib import Path
 
 from .config import (
+    MAX_EXTRACT_CHARS,
+    MAX_PDF_PAGES,
     MAX_UPLOAD_BYTES,
     URL_MAX_REDIRECTS,
     URL_TIMEOUT_SEC,
@@ -443,14 +445,34 @@ def pdf_to_text(data: bytes) -> tuple[str, int]:
         n_pages = len(page_seq)
     except Exception as exc:
         raise IngestError("INGEST_PARSE_FAILED", f"PDF page list failed: {exc}") from exc
+    # v0.2.716: bound what extraction produces, not just the file — the
+    # 10MB upload cap says nothing about a page object costing ~200 bytes
+    # but one extract_text() call each (a crafted file holds tens of
+    # thousands of pages of CPU) or about flate-compressed content
+    # streams inflating extracted text ~100x past the file size. Reject
+    # like the byte cap does: INGEST_FILE_TOO_LARGE is the shared "input
+    # exceeds ingest limits" code.
+    if n_pages > MAX_PDF_PAGES:
+        raise IngestError(
+            "INGEST_FILE_TOO_LARGE",
+            f"PDF has {n_pages} pages (max {MAX_PDF_PAGES})",
+        )
     pages: list[str] = []
     n_failed = 0
+    total = 0
     for i in range(n_pages):
         try:
             pages.append(page_seq[i].extract_text() or "")
         except Exception:
             n_failed += 1
             continue
+        total += len(pages[-1])
+        if total > MAX_EXTRACT_CHARS:
+            raise IngestError(
+                "INGEST_FILE_TOO_LARGE",
+                "extracted PDF text exceeds"
+                f" {MAX_EXTRACT_CHARS // (1024 * 1024)}MB limit",
+            )
     return "\n\n".join(p.strip() for p in pages if p.strip()), n_failed
 
 
