@@ -226,6 +226,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~84~~ | exportの複数SELECTが別コミット点を読み同時deleteで破損export化 | v0.2.700 `Store.read_snapshot`で3 export関数を単一WAL読TXへ |
 | ~~85~~ | `update_chunk_text`がsha256を動かさず質問キャッシュ指紋不変→編集前テキストのstale質問が無期限配信 | v0.2.701 `questions_fingerprint`がsources行+overview_hits実入力を鍵化 |
 | ~~86~~ | `nb.more`ページャーにseen dedup無し→newest-first窓ずれで既表示nbが二重表示 | v0.2.702 seen Set吸収(wireEarlierPager同型) |
+| ~~87~~ | `export_notebook`(JSONツリー)がread_snapshot未適用→同時deleteで破損envelopeがimport先へ永続化 | v0.2.703 export_notebookをread_snapshotで包む |
 
 ### 解決済み(記録)
 

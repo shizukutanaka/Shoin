@@ -1260,8 +1260,19 @@ class Store:
     def export_notebook(self, notebook_id: int) -> dict[str, Any]:
         """Portable notebook-tree document (v0.2.655) — the same envelope
         as the trash undo-log: a deleted notebook's archive is already a
-        valid import document, and vice versa."""
-        return self._notebook_tree_dict(notebook_id)
+        valid import document, and vice versa.
+
+        Read under one WAL snapshot (v0.2.703): _notebook_tree_dict issues
+        several auto-commit SELECTs, so a concurrent delete could land
+        between them and serialize a torn document — sources present but
+        chunks/notes/messages gone. The md/bib/ris exports got the same
+        guard in v0.2.700; this path is the machine-transfer envelope, so
+        a torn doc here gets *imported* and the loss persists on the far
+        side. Trash-restore callers run inside their own write TX and
+        call _notebook_tree_dict directly, so the snapshot lives here at
+        the standalone-read boundary only."""
+        with self.read_snapshot():
+            return self._notebook_tree_dict(notebook_id)
 
     def import_notebook(self, payload: dict[str, Any]) -> Notebook:
         """Insert an export document as a NEW notebook (v0.2.655).

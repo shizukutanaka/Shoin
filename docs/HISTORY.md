@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.702
+## Version History: v0.1.37 → v0.2.703
+
+### v0.2.703 — JSONツリーエクスポートも単一WALスナップショットで読取(転送経路の破損文書閉塞)
+
+- **新規短所87解消(ソクラテス問いで発掘)**: 「スナップショット化は全export経路を覆ったか」——v0.2.700は`export_markdown`/`export_bibtex`/`export_ris`の3関数のみ。`export_notebook`(JSONツリー文書=ゴミ箱アーカイブ共有envelope)は`_notebook_tree_dict`の複数auto-commit SELECTが**各々別コミット点**を読み続けていた——同時deleteが途中に挟まると「sources列挙済み・chunks/notes/messages消失」の破損文書。人間可読exportより質が悪い: **機械転送envelopeの破損はimport先へ永続化**される
+- **`export_notebook`を`read_snapshot`で包む**: merge/trash-restoreは自TX(`BEGIN IMMEDIATE`)内で`_notebook_tree_dict`を直接呼ぶため、スナップショットはstandalone-read境界(export_notebook)にのみ配置——二重BEGINを回避
+- **行動ピン1件**: 2接続で`get_notebook`直後に別接続delete注入→snapshot下でsources/chunks/notes/messages全保持を検証
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし
 
 ### v0.2.702 — nb.moreページャーのid重複除外(オフセット窓ずれ二重表示閉塞)
 

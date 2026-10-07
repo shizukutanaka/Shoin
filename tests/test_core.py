@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.702")
+        self.assertEqual(VERSION, "0.2.703")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -11268,6 +11268,46 @@ class TestExport(unittest.TestCase):
         self.assertIn("1. 資料 (txt) — o", md)
         self.assertIn("メモ", md)
         self.assertIn("回答[S1]。", md)
+
+    def test_export_notebook_consistent_snapshot_under_concurrent_delete(self) -> None:
+        """v0.2.703: the JSON tree export must read one snapshot too.
+
+        export_notebook drives _notebook_tree_dict's several auto-commit
+        SELECTs — without a WAL snapshot a concurrent delete lands between
+        them and the *machine-transfer* envelope goes out torn (sources
+        listed, children gone), then gets imported and the loss persists
+        on the far side. Same guard the md/bib/ris exports took in
+        v0.2.700, now on the standalone read boundary.
+        """
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "資料", "o", "sha")
+            s.add_chunks(src.id, ["本文。"])
+            s.add_note(nb.id, "メモ", "中身")
+            s.add_message(nb.id, "assistant", "回答[S1]。",
+                          json.dumps({"cited": [1], "invalid": []}))
+            torn = {"done": False}
+            orig = s.get_notebook
+
+            def read_then_delete(nb_id: int):
+                row = orig(nb_id)
+                if not torn["done"]:
+                    torn["done"] = True
+                    s2.delete_notebook(nb_id)
+                return row
+
+            s.get_notebook = read_then_delete  # type: ignore[method-assign]
+            doc = s.export_notebook(nb.id)
+
+        self.assertTrue(torn["done"])
+        self.assertEqual(len(doc["sources"]), 1)
+        self.assertEqual(len(doc["chunks"]), 1)
+        self.assertEqual(len(doc["notes"]), 1)
+        self.assertEqual(len(doc["messages"]), 1)
 
     def test_export_markdown_newline_in_note_title_single_heading(self) -> None:
         """Embedded newline in note title must not break the Markdown heading."""
