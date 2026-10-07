@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.712
+## Version History: v0.1.37 → v0.2.713
+
+### v0.2.713 — free-text bodyのper-rowバイト上限(GB級detail応答の増幅経路を閉塞)
+
+- **新規短所97解消(ソクラテス問いで発掘)**: 「embed件数capは各行のバイト量も制御するか」——v0.2.250/409/694の`NB_*_LIMIT`群は`GET /api/notebooks/{id}`へ埋め込む行の**件数**を制限したが、各行が運ぶ**バイト量**は無制限のまま。note/message/studioの`body`(とdocument側の`citation_report`)に長さ検証がなく、request側10MB capだけが上限だった——1書込で~10MB行が永続化し、500行のembedで**detail応答が最大~5GB**へ増幅(openNotebook・SSE断回復refetchのたびに再増幅)
+- **`MAX_BODY_LEN=100_000` chars**: note/message/studio body・`update_chunk_text`の4 writerに`VALIDATION_FIELD_FORMAT_INVALID` coded拒否。LLM実体(MAX_TOKENS≈16KB)やメモ利用の~6倍余裕を残しつつ最悪case embedを~50MBへ収束
+- **import文書側にも同bound**: `_insert_tree_rows`がwriter guardをバイパスするため、document検証にnote/studio/message `body`+`citation_report`の5面を追加(`NOTEBOOK_IMPORT_INVALID` coded)——v0.2.693/710と同じ「writer同値の検証をdocument側へ」拡張
+- **行動ピン2件**: (1)4 writerが`MAX_BODY_LEN+1`をcoded拒否+ちょうど上限値は受理 (2)細工exportの5面(body×3+report×2)が`NOTEBOOK_IMPORT_INVALID`で拒否
+- **却下した問い(記録)**: sources embed(title 500字/meta oversize guard済)・chunk textのingest由来本文(chunk budget由来で天然bounded・update経路のみ防御)・restore/duplicate(自DB行コピーのためwriter boundが伝播)・writer側citation_report(内部生成でbounded)
 
 ### v0.2.712 — 書込TXプローブをロック内へ移動(メタデータwriterのcross-commit-point経路を閉塞)
 

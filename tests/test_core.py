@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.712")
+        self.assertEqual(VERSION, "0.2.713")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -458,6 +458,39 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(StoreError) as cm:
                 s.add_note(nb.id, "   ", "body")
             self.assertEqual(cm.exception.code, "VALIDATION_REQUIRED_FIELD_MISSING")
+
+    def test_body_len_bound_on_writers(self) -> None:
+        """v0.2.713: free-text bodies carry a per-row bound — the NB_*_LIMIT
+        caps bound how MANY rows embed in the detail payload, nothing bound
+        how BIG each row is, so a single ~10MB body persisted verbatim and
+        multiplied on every fetch."""
+        from shoin.config import MAX_BODY_LEN
+
+        big = "x" * (MAX_BODY_LEN + 1)
+        with make_store() as s:
+            nb = s.create_notebook("研究")
+            src = s.add_source(nb.id, "txt", "t", "o", "h")
+            s.add_chunks(src.id, ["chunk one"])
+            cid = s.chunks_for_notebook(nb.id)[0].id
+            writers = (
+                lambda: s.add_note(nb.id, "t", big),
+                lambda: s.add_message(nb.id, "user", big),
+                lambda: s.add_studio_output(nb.id, "briefing", big, "{}"),
+                lambda: s.update_chunk_text(cid, big),
+            )
+            for i, write in enumerate(writers):
+                with self.subTest(writer=i):
+                    with self.assertRaises(StoreError) as cm:
+                        write()
+                    self.assertEqual(
+                        cm.exception.code, "VALIDATION_FIELD_FORMAT_INVALID"
+                    )
+            # At the bound the same fields still write.
+            ok = "x" * MAX_BODY_LEN
+            s.add_note(nb.id, "t", ok)
+            s.add_message(nb.id, "user", ok)
+            s.add_studio_output(nb.id, "briefing", ok, "{}")
+            s.update_chunk_text(cid, ok)
 
     def test_get_chunk_unknown_id_raises(self) -> None:
         with make_store() as s:
@@ -20246,7 +20279,10 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 88,  # -2: update_source_title/sha256's in-TX
+            ] + ["StoreError"] * 97,  # +9: per-row body bounds on the four
+                                      #     writers and the import document
+                                      #     (v0.2.713)
+                                      # -2: update_source_title/sha256's in-TX
                                       #     re-read guards folded into the
                                       #     lock-held get_source probe (v0.2.712)
                                       # +2: add_chunks/replace_chunks_for_source
@@ -23099,6 +23135,8 @@ class TestNbExportImport(unittest.TestCase):
             self.assertEqual(len(s.list_notes(imp.id)), 1)
 
     def test_import_rejects_malformed_documents(self) -> None:
+        from shoin.config import MAX_BODY_LEN
+
         with make_store() as s:
             nb_id, src_ids = self._seed_with_report(s)
             good = self._tree_doc(s, nb_id)
@@ -23149,6 +23187,31 @@ class TestNbExportImport(unittest.TestCase):
                     {"role": "system", "body": "b",
                      "citation_report": "{}", "created_at": "t"}
                 ]},  # out-of-vocab message role
+                # v0.2.713: document rows bypass the writers' MAX_BODY_LEN
+                # bound through _insert_tree_rows — an oversized row would
+                # embed verbatim in every detail fetch.
+                {**good, "notes": [
+                    {"title": "t", "body": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
+                {**good, "studio_outputs": [
+                    {"kind": "briefing", "body": "x" * (MAX_BODY_LEN + 1),
+                     "citation_report": "{}", "created_at": "t"}
+                ]},
+                {**good, "studio_outputs": [
+                    {"kind": "briefing", "body": "b",
+                     "citation_report": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
+                {**good, "messages": [
+                    {"role": "user", "body": "x" * (MAX_BODY_LEN + 1),
+                     "citation_report": "{}", "created_at": "t"}
+                ]},
+                {**good, "messages": [
+                    {"role": "user", "body": "b",
+                     "citation_report": "x" * (MAX_BODY_LEN + 1),
+                     "created_at": "t"}
+                ]},
             ]
             for bad in cases:
                 with self.subTest(bad=repr(bad)[:60]):

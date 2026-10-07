@@ -24,6 +24,7 @@ from typing import Any, TypedDict, TypeVar
 
 from .chunk import _MAX_CONTEXT_CHARS
 from .config import (
+    MAX_BODY_LEN,
     MAX_CHUNKS_PER_NOTEBOOK,
     MAX_NAME_LEN,
     MAX_TITLE_LEN,
@@ -1451,6 +1452,16 @@ class Store:
                     n[k]
                 for k in ("title", "body", "created_at"):
                     _import_str(n[k])
+                # v0.2.713: same per-row body bound the writers enforce —
+                # _insert_tree_rows bypasses add_note/add_message/
+                # add_studio_output's guards, so an export can otherwise
+                # persist a body of arbitrary size that every detail
+                # fetch then embeds verbatim.
+                if len(n["body"]) > MAX_BODY_LEN:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export note body exceeds the field limit",
+                    )
             for o in studio_outputs:
                 for k in ("kind", "body", "citation_report", "created_at"):
                     o[k]
@@ -1461,6 +1472,16 @@ class Store:
                     )
                 for k in ("body", "citation_report", "created_at"):
                     _import_str(o[k])
+                if len(o["body"]) > MAX_BODY_LEN:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export studio body exceeds the field limit",
+                    )
+                if len(o["citation_report"]) > MAX_BODY_LEN:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export studio report exceeds the field limit",
+                    )
             for m in messages:
                 for k in ("role", "body", "citation_report", "created_at"):
                     m[k]
@@ -1471,6 +1492,16 @@ class Store:
                     )
                 for k in ("body", "citation_report", "created_at"):
                     _import_str(m[k])
+                if len(m["body"]) > MAX_BODY_LEN:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export message body exceeds the field limit",
+                    )
+                if len(m["citation_report"]) > MAX_BODY_LEN:
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "export message report exceeds the field limit",
+                    )
         except (KeyError, TypeError, ValueError) as exc:
             raise StoreError(
                 "NOTEBOOK_IMPORT_INVALID",
@@ -2547,6 +2578,11 @@ class Store:
             raise StoreError(
                 "VALIDATION_REQUIRED_FIELD_MISSING", "chunk text is empty"
             )
+        if len(text) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"text too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(text, "text")
         with self.conn:
             # BEGIN IMMEDIATE + the JOIN probe under the lock (v0.2.712):
@@ -2632,6 +2668,11 @@ class Store:
             raise StoreError(
                 "VALIDATION_FIELD_FORMAT_INVALID",
                 f"title too long (max {MAX_NAME_LEN} chars)",
+            )
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
             )
         _utf8(title, "title")
         _utf8(body, "body")
@@ -2731,6 +2772,11 @@ class Store:
             # to overwrite it. Same fail-at-the-write class as add_message()'s
             # role guard.
             raise StoreError("STUDIO_KIND_INVALID", f"unknown studio kind: {kind!r}")
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
@@ -2788,6 +2834,11 @@ class Store:
             # typo'd literal would silently corrupt turn alternation, so fail
             # loudly at the write.
             raise StoreError("VALIDATION_FIELD_FORMAT_INVALID", f"unknown message role: {role!r}")
+        if isinstance(body, str) and len(body) > MAX_BODY_LEN:
+            raise StoreError(
+                "VALIDATION_FIELD_FORMAT_INVALID",
+                f"body too long (max {MAX_BODY_LEN} chars)",
+            )
         _utf8(body, "body")
         _utf8(citation_report, "citation_report")
         self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing

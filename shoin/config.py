@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.712"
+VERSION = "0.2.713"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -17,6 +17,16 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # REQ-002: 10MB upload limit
 MAX_QUESTION_LEN = 2000  # chars; a longer FTS5 OR-expression becomes pathologically slow
 MAX_NAME_LEN = 200       # chars; notebook names and note titles
 MAX_TITLE_LEN = 500      # chars; source titles silently truncated (external content)
+# v0.2.713: per-row bound on free-text bodies (note/message/studio output
+# bodies, citation_report JSON, edited chunk text). NB_*_LIMIT caps bound
+# the COUNT of rows embedded in GET /api/notebooks/{id} but nothing bound
+# the BYTES each row carries — the request-side 10MB cap let one ~10MB
+# body persist verbatim, and 500 such rows made every detail fetch build
+# a multi-GB JSON body (write once, amplified on every read). 100k chars
+# is far beyond legitimate content (LLM outputs are bounded by
+# MAX_TOKENS≈16KB; notes are memos) while keeping the worst-case embed
+# at ~50MB instead of ~5GB.
+MAX_BODY_LEN = 100_000   # chars; note/message/studio/chunk-edit bodies
 CHUNK_TOKENS = 512  # REQ-003: target tokens per chunk
 CHUNK_OVERLAP = 64  # REQ-003: overlap tokens between chunks
 TOP_K = 8  # default retrieval depth

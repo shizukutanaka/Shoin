@@ -236,6 +236,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~94~~ | import文書の`settings`が値検証なしでverbatim格納→`top_k=10**9`/非intがretrieval側で爆発 | v0.2.710 `_import_settings_text`で既知キーを範囲検査(未知キーは前方互換として保持) |
 | ~~95~~ | pagerのid dedupが再遭遇行を全スキップ→ページ間のrename/counts変化がリロードまで画面に残る(staleness族第4面: 同一性≠内容不変) | v0.2.711 `Set`→`Map` refresh-merge化(`Object.assign`で可変フィールド更新+nb.moreはDOM行も`replaceWith`再構築) |
 | ~~96~~ | メタデータwriterのprobe(get_source/JOIN)がTX外auto-commit読み→A→B間の削除+rowid再利用でwrong-row UPDATE/wrong-nb touch/cap計算 | v0.2.712 5面(update_chunk_text・title・sha256・meta・replace_chunks)をBEGIN IMMEDIATE+ロック内probeへ |
+| ~~97~~ | `NB_*_LIMIT`はembed行の件数のみ制限→各行のbodyバイト無制限で~10MB×500行≒5GBのdetail応答(書込1回→全fetchで増幅) | v0.2.713 `MAX_BODY_LEN`をwriter 4面+import document 5面へ coded bound |
 
 ### 解決済み(記録)
 
