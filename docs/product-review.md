@@ -232,6 +232,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~90~~ | `src_text`ページャーが`total`のみ検査→in-place編集/同件数replaceでtotal不変のまま新旧テキスト混在(torn残存面) | v0.2.706 migration 15 `content_rev`エポック+`p.rev`比較で不変条件完全カバー |
 | ~~91~~ | `_notebook_json`の~8 SELECTがauto-commit連結→同時deleteで埋込リストと`counts`不一致/`omitted`負値 | v0.2.707 `_h_nb_get`を`read_snapshot`で包み単一WALビューへ |
 | ~~92~~ | `duplicate_notebook`のdeferred TXでプローブとコピーが別コミット点を読む→同時deleteで子行ゼロの複製がコミット | v0.2.708 `BEGIN IMMEDIATE`+プローブTX内化で単一スナップショット |
+| ~~93~~ | chunk上限プローブがpipeline側auto-commit読み→並行ingest/refreshが両方合格し上限越えコミット | v0.2.709 `add_chunks`/`replace_chunks_for_source`をBEGIN IMMEDIATE+TX内cap検査へ |
 
 ### 解決済み(記録)
 

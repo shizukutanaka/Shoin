@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.708")
+        self.assertEqual(VERSION, "0.2.709")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -1019,6 +1019,58 @@ class TestStore(unittest.TestCase):
 
             s.replace_chunks_for_source(src.id, ["x", "y"])
             self.assertEqual(s.get_source(src.id).content_rev, 2)
+
+    def test_chunk_cap_enforced_at_the_sink_under_lock(self) -> None:
+        """v0.2.709: MAX_CHUNKS_PER_NOTEBOOK probes ran in pipeline before
+        the write TX — a concurrent ingest could read the same sub-cap
+        count and both commits land, over-filling the notebook. The cap
+        now runs at the sink under BEGIN IMMEDIATE: the second writer
+        serializes behind the first and sees the post-commit count."""
+        with tempfile.TemporaryDirectory() as td, \
+                Store(f"{td}/x.db") as s, Store(f"{td}/x.db") as s2:
+            nb = s.create_notebook("nb")
+            src = s.add_source(nb.id, "txt", "a", "o", "h1")
+            src2 = s.add_source(nb.id, "txt", "b", "o", "h2")
+            s.add_chunks(src.id, ["a", "b"])
+            s2.conn.execute("PRAGMA busy_timeout = 0")
+            locked: list[bool] = []
+            orig = s.counts
+
+            def counts_then_try_other(nb_id: int) -> dict[str, int]:
+                got = orig(nb_id)
+                if not locked:
+                    try:
+                        s2.conn.execute("BEGIN IMMEDIATE")
+                        locked.append(False)
+                        s2.conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        locked.append(True)
+                return got
+
+            with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 4):
+                # The cap probe runs while the write lock is held.
+                s.counts = counts_then_try_other  # type: ignore[method-assign]
+                s.add_chunks(src.id, ["x", "y"])
+                self.assertEqual(locked, [True])
+                # Sink-side cap: the second commit sees the post-first
+                # count — 4 + 1 > 4 → coded rejection, zero rows written.
+                with self.assertRaises(StoreError) as cm:
+                    s2.add_chunks(src2.id, ["z"])
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(s.chunks_for_source(src2.id), [])
+                # refresh path: the source's own rows are excluded — at
+                # 4 total, replacing 4 with 4 fits, replacing 4 with 5
+                # over-fills.
+                s.replace_chunks_for_source(src.id, ["1", "2", "3", "4"])
+                with self.assertRaises(StoreError) as cm:
+                    s.replace_chunks_for_source(
+                        src.id, ["1", "2", "3", "4", "5"]
+                    )
+                self.assertEqual(cm.exception.code, "INGEST_NOTEBOOK_FULL")
+                self.assertEqual(
+                    [c.text for c in s.chunks_for_source(src.id)],
+                    ["1", "2", "3", "4"],
+                )
 
     def test_update_source_sha256_collision_raises_source_already_exists(self) -> None:
         """update_source_sha256 must raise SOURCE_ALREADY_EXISTS when the new hash
@@ -11187,10 +11239,11 @@ class TestChunkLimit(unittest.TestCase):
 
                 # import: a document whose tree alone exceeds the cap →
                 # refused BEFORE the notebook row commits (no half-import).
-                # (add_chunks is the low-level writer and holds no cap, so
-                # an over-cap document is buildable directly — the same way
-                # a foreign export file arrives.)
-                big = _nb_with_chunks(s, "big", 6)
+                # An over-cap notebook can only exist if created under a
+                # looser cap — v0.2.709 closed the direct add_chunks path —
+                # so seed it inside a wider window.
+                with patch("shoin.store.MAX_CHUNKS_PER_NOTEBOOK", 100):
+                    big = _nb_with_chunks(s, "big", 6)
                 doc = s.export_notebook(big)
                 nb_count = len(s.list_notebooks())
                 with self.assertRaises(StoreError) as cm2:
@@ -20127,7 +20180,9 @@ class TestResidualGuards(unittest.TestCase):
                 # (KeyError, TypeError, ValueError) → SYSTEM_INTERNAL_ERROR
                 # corrupt boundary, never onto the request path.
                 "ValueError", "ValueError",
-            ] + ["StoreError"] * 88,  # +1: update_chunk_text's content_rev
+            ] + ["StoreError"] * 90,  # +2: add_chunks/replace_chunks_for_source
+                                      #     sink-side chunk-cap guards (v0.2.709)
+                                      # +1: update_chunk_text's content_rev
                                       #     bump deleted-source guard (v0.2.706)
                                       # +5: import field-guard parity (v0.2.693)
                                       # +1: import_notebook's duplicate

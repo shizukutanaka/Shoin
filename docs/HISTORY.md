@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.708
+## Version History: v0.1.37 → v0.2.709
+
+### v0.2.709 — chunk上限を書込TX内へ移設(並行ingest/refreshで上限突破するTOCTOUを閉塞)
+
+- **新規短所93解消(ソクラテス問いで発掘)**: 「上限プローブは書込と同一コミット点を読むか」——`MAX_CHUNKS_PER_NOTEBOOK`の検査はpipeline側(`index_source`/`refresh_source`)でwrite TX**前**のauto-commitで読んでいた。並行する2 ingestが同じ sub-cap 件数を読んで両方合格→両方コミットで**上限越えのnbが永続化**——v0.2.672のsink防御と同じTOCTOU面がingest/refresh経路に残存
+- **sink側TX内検査へ移設**: `add_chunks`と`replace_chunks_for_source`を`BEGIN IMMEDIATE`化し、`counts`/`count_chunks_for_source`プローブをロック下で実行——2番目のwriterは1番目の直列化後に**post-commit件数**を見て`INGEST_NOTEBOOK_FULL`でcoded拒否。pipelineの事前チェックはorphan source行防止の早期失敗として維持（補完関係）
+- **行動ピン**: patched MAX=4で(1)capプローブ中に別接続のbusy_timeout=0 BEGIN IMMEDIATEが失敗(ロック保持) (2)2番目のaddがpost-commit件数でcoded拒否+ゼロ書込 (3)refresh側も自source除外式で同契約(4→4合格/4→5拒否+既存chunk保全)
+- **却下した問い(記録)**: merge_notebooks(v0.2.687でBEGIN IMMEDIATE+再プローブ済)・import_notebook(v0.2.672でTX内cap済)
 
 ### v0.2.708 — duplicate_notebookをBEGIN IMMEDIATE化(同時deleteで空複製がコミットされる経路を閉塞)
 

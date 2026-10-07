@@ -2140,6 +2140,22 @@ class Store:
         ids: list[int] = []
         try:
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.709): the chunk-cap probe must see
+                # the same commit point the inserts land on — pipeline's
+                # pre-check read an unlocked count, so two concurrent
+                # replaces in one notebook could both pass and over-fill
+                # it. The notebook-total-excluding-this-source formula
+                # mirrors pipeline.refresh_source's.
+                self.conn.execute("BEGIN IMMEDIATE")
+                nb_chunks = self.counts(src.notebook_id)["chunks"]
+                here = self.count_chunks_for_source(source_id)
+                if nb_chunks - here + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+                    raise StoreError(
+                        "INGEST_NOTEBOOK_FULL",
+                        f"notebook chunk limit exceeded: {nb_chunks - here} existing"
+                        f" (excl. this source) + {len(texts)} new"
+                        f" > {MAX_CHUNKS_PER_NOTEBOOK}",
+                    )
                 self.conn.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
@@ -2347,6 +2363,19 @@ class Store:
         ids: list[int] = []
         try:
             with self.conn:
+                # BEGIN IMMEDIATE (v0.2.709): the cap probe must see the
+                # same commit point the inserts land on — pipeline's
+                # pre-check read an unlocked count, so two concurrent
+                # ingests could each pass and both commit, breaching
+                # MAX_CHUNKS_PER_NOTEBOOK. The probe moves to the sink.
+                self.conn.execute("BEGIN IMMEDIATE")
+                existing = self.counts(src.notebook_id)["chunks"]
+                if existing + len(texts) > MAX_CHUNKS_PER_NOTEBOOK:
+                    raise StoreError(
+                        "INGEST_NOTEBOOK_FULL",
+                        f"notebook chunk limit exceeded: {existing} existing"
+                        f" + {len(texts)} new > {MAX_CHUNKS_PER_NOTEBOOK}",
+                    )
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
