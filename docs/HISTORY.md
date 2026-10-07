@@ -29,7 +29,11 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.725
+## Version History: v0.1.37 → v0.2.726
+
+### v0.2.726 — multi-query展開のLLM相をretrieval snapshot外へ分離
+
+- 短所110: `retrieve_for_question`はmulti_query有効時`rewrite_queries`(chat)+per-rewrite `_query_vector`をcallerの`read_snapshot()`内で実行——WAL読取点をLLM往復時間分(タイムアウト級)ピン留めし、並行writerの追加分をcheckpoint不能=WAL肥大化+checkout阻害。`prepare_retrieval`(LLM相・store無接触)+`retrieve_prepared`(k解決+retrieval・store相)へ分解し、snapshot保持caller4箇所(ask/`_h_ask_sse`/`_h_nb_search`/`_h_global_search`)でprepare→snapshot→retrieve_preparedの相順へ再配線。非snapshot caller(cli/eval/compose)は`retrieve_for_question`の組合せ形で互換維持+「全LLM呼出はsnapshot外で発火」のスパイ行動ピン。
 
 ### v0.2.725 — 質問fallbackのtitlesを生成snapshot内へ統合
 

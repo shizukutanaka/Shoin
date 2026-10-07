@@ -686,6 +686,83 @@ def rewrite_queries(
     return out
 
 
+def prepare_retrieval(
+    llm: ChatBackend, retrieval_q: str, qvec: list[float] | None
+) -> tuple[list[str], list[list[float] | None]]:
+    """The LLM-only half of retrieve_for_question: rewrites + their vectors.
+
+    No store access at all — callers holding a WAL read snapshot MUST run
+    this BEFORE opening it: a chat/embedding call inside a read transaction
+    pins the snapshot for the whole network round-trip (up to the endpoint
+    timeout), so writers appending meanwhile cannot be checkpointed and the
+    WAL grows for the full duration (v0.2.726).
+
+    With SHOIN_MULTI_QUERY unset (the default) this is the identity — the
+    original question and its vector alone, zero extra LLM traffic. When
+    enabled, the LLM proposes MULTI_QUERY_REWRITES alternate phrasings.
+
+    The rewrite call is deliberately NOT serialized under server.py's
+    generation_lock (the v0.2.70 single-concurrent-generation DoS control),
+    matching how _query_vector()'s embedding calls a few lines above in every
+    caller are already unlocked: a short 2-phrasing rewrite is comparable
+    LLM-endpoint load to an embedding call, not the long, context-heavy,
+    fully streamed answer generation the lock exists to serialize. An earlier
+    version of this pipeline accepted the lock and held it here, which made a
+    single /ask acquire generation_lock TWICE (rewrite, then answer), up to
+    doubling the worst-case time other concurrent requests could be blocked —
+    and, since this call happens before server.py sends any SSE headers, that
+    lock hold could be spent on a request whose client had already
+    disconnected. Skipping serialization here removes both problems.
+    """
+    if not multi_query_enabled():
+        return [retrieval_q], [qvec]
+    rewrites = rewrite_queries(llm, retrieval_q)
+    if not rewrites:
+        return [retrieval_q], [qvec]
+    queries = [retrieval_q, *rewrites]
+    vecs: list[list[float] | None] = [qvec]
+    # Only embed rewrites when the original query itself embedded — a None
+    # qvec means embeddings are disabled/mismatched/unreachable and each
+    # per-rewrite embed_one would just repeat the same failure.
+    vecs.extend(_query_vector(llm, rq) if qvec is not None else None for rq in rewrites)
+    return queries, vecs
+
+
+def retrieve_prepared(
+    store: Store,
+    notebook_id: int | None,
+    queries: list[str],
+    vecs: list[list[float] | None],
+    k: int | None = None,
+    source_ids: list[int] | None = None,
+) -> list[Hit]:
+    """The store-only half of retrieve_for_question: k resolution + retrieval.
+
+    This is what callers wrap in their WAL snapshot — every SELECT inside
+    (the settings read and the bm25/vector/text legs) reads the one commit
+    point the snapshot pins. One query is byte-identical to retrieve();
+    several are RRF-fused by retrieve_multi (all ranked lists fused).
+
+    k=None means "let the notebook decide" (v0.2.659): a per-notebook
+    settings.top_k override wins over the TOP_K global default, so a
+    project can retrieve deeper or shallower than the process default.
+    notebook_id=None (cross-notebook search) has no settings owner and
+    always falls back to TOP_K. Callers that accept an explicit k (the
+    API's k field, CLI -k) pass it through and it wins over the setting.
+    """
+    if k is None:
+        if notebook_id is None:
+            k = TOP_K
+        else:
+            settings = store.notebook_settings(notebook_id)
+            k = int(settings.get("top_k") or TOP_K)
+    if len(queries) == 1:
+        return retrieve(
+            store, notebook_id, queries[0], query_vec=vecs[0], k=k, source_ids=source_ids
+        )
+    return retrieve_multi(store, notebook_id, queries, vecs, k=k, source_ids=source_ids)
+
+
 def retrieve_for_question(
     store: Store,
     llm: ChatBackend,
@@ -697,53 +774,15 @@ def retrieve_for_question(
 ) -> list[Hit]:
     """Retrieval entry point for ask(): single-query, or RAG-Fusion when opted in.
 
-    k=None means "let the notebook decide" (v0.2.659): a per-notebook
-    settings.top_k override wins over the TOP_K global default, so a
-    project can retrieve deeper or shallower than the process default.
-    notebook_id=None (cross-notebook search) has no settings owner and
-    always falls back to TOP_K. Callers that accept an explicit k (the
-    API's k field, CLI -k) pass it through and it wins over the setting.
-
-    With SHOIN_MULTI_QUERY unset (the default) this is exactly retrieve() —
-    byte-identical behavior and zero extra LLM traffic. When enabled, the LLM
-    proposes MULTI_QUERY_REWRITES alternate phrasings and all ranked lists are
-    RRF-fused (retrieve_multi).
-
-    The rewrite call is deliberately NOT serialized under server.py's
-    generation_lock (the v0.2.70 single-concurrent-generation DoS control),
-    matching how _query_vector()'s embedding calls a few lines above in every
-    caller are already unlocked: a short 2-phrasing rewrite is comparable
-    LLM-endpoint load to an embedding call, not the long, context-heavy,
-    fully streamed answer generation the lock exists to serialize. An earlier
-    version of this function accepted the lock and held it here, which made a
-    single /ask acquire generation_lock TWICE (rewrite, then answer), up to
-    doubling the worst-case time other concurrent requests could be blocked —
-    and, since this call happens before server.py sends any SSE headers, that
-    lock hold could be spent on a request whose client had already
-    disconnected. Skipping serialization here removes both problems.
+    Composes prepare_retrieval() + retrieve_prepared(). Snapshot-holding
+    callers MUST invoke the two phases separately — prepare BEFORE the
+    snapshot, retrieve_prepared INSIDE it — because the first half is pure
+    LLM traffic that would otherwise pin the WAL read transaction for the
+    whole network round-trip (v0.2.726). This convenience form is for
+    callers that hold no snapshot (CLI search, the eval harness).
     """
-    if k is None:
-        if notebook_id is None:
-            k = TOP_K
-        else:
-            settings = store.notebook_settings(notebook_id)
-            k = int(settings.get("top_k") or TOP_K)
-    if not multi_query_enabled():
-        return retrieve(
-            store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
-        )
-    rewrites = rewrite_queries(llm, retrieval_q)
-    if not rewrites:
-        return retrieve(
-            store, notebook_id, retrieval_q, query_vec=qvec, k=k, source_ids=source_ids
-        )
-    queries = [retrieval_q, *rewrites]
-    vecs: list[list[float] | None] = [qvec]
-    # Only embed rewrites when the original query itself embedded — a None
-    # qvec means embeddings are disabled/mismatched/unreachable and each
-    # per-rewrite embed_one would just repeat the same failure.
-    vecs.extend(_query_vector(llm, rq) if qvec is not None else None for rq in rewrites)
-    return retrieve_multi(store, notebook_id, queries, vecs, k=k, source_ids=source_ids)
+    queries, vecs = prepare_retrieval(llm, retrieval_q, qvec)
+    return retrieve_prepared(store, notebook_id, queries, vecs, k=k, source_ids=source_ids)
 
 
 def _degraded_text(hits: list[Hit]) -> str:
@@ -798,9 +837,13 @@ def ask(
         # stays outside it); the write below must stay outside too — a write
         # inside the read TX would fail SQLITE_BUSY_SNAPSHOT under a
         # concurrent writer.
+        # v0.2.726: the multi-query expansion is pure LLM traffic — running
+        # it here and not inside the snapshot keeps a network round-trip
+        # from pinning the WAL read point for its whole duration.
+        queries, vecs = prepare_retrieval(llm, retrieval_q, qvec)
         with store.read_snapshot():
-            hits = retrieve_for_question(
-                store, llm, notebook_id, retrieval_q, qvec, k=k, source_ids=source_ids
+            hits = retrieve_prepared(
+                store, notebook_id, queries, vecs, k=k, source_ids=source_ids
             )
             try:
                 # settings.source_text_tokens overrides the global

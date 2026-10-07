@@ -1811,6 +1811,48 @@ class TestMultiQuery(unittest.TestCase):
             self.assertFalse(ans.degraded)
             self.assertIn("引用検証", ans.text)
 
+    def test_ask_multi_query_llm_traffic_stays_outside_the_snapshot(self) -> None:
+        """v0.2.726 (product-review #110): with SHOIN_MULTI_QUERY on, the
+        rewrite chat call (and any per-rewrite embedding) is pure network
+        traffic — inside the WAL read snapshot it would pin the read point
+        for the whole round-trip, so writers appending meanwhile can't be
+        checkpointed. Every LLM call must fire with the snapshot CLOSED."""
+        import contextlib
+
+        s, nb = seeded_store()
+        inside = {"v": False}
+        orig_rs = Store.read_snapshot
+
+        @contextlib.contextmanager
+        def rs(self2: Store):
+            inside["v"] = True
+            try:
+                with orig_rs(self2):
+                    yield
+            finally:
+                inside["v"] = False
+
+        flags: list[bool] = []
+
+        class SpyLLM(FakeLLM):
+            def chat(self, messages: list[Message], temperature: float = 0.2) -> str:
+                flags.append(inside["v"])
+                return super().chat(messages, temperature)
+
+            def embed_one(self, text: str) -> list[float]:
+                flags.append(inside["v"])
+                return super().embed_one(text)
+
+        with s:
+            with patch.dict(os.environ, {"SHOIN_MULTI_QUERY": "1"}, clear=False):
+                with patch.object(Store, "read_snapshot", rs):
+                    llm = SpyLLM(reply="書斎の核は引用検証[S1]。")
+                    ask(s, llm, nb, "差別化は何か？", persist=False)
+        # rewrite + answer chat calls both fired, none inside the snapshot.
+        self.assertEqual(len(llm.chat_calls), 2)
+        self.assertTrue(flags)
+        self.assertNotIn(True, flags)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -249,6 +249,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~107~~ | `_h_questions`がlookup fingerprint(state A)でcache key化→lookup→generation間のcorpus変更でstate B生成questionsをAのキーへ格納——キーが内容を記述せずstate A閲覧者へAに無い内容のsuggestionsが返る | v0.2.723 `suggest_questions_fingerprinted`が生成snapshot内fingerprintを返却しgen stateでキー化+lockピンregex追随+行動ピン |
 | ~~108~~ | `_h_ask_sse`のbudget/context組立てがheaders後の別auto-commitで動作——mid-flight replace/deleteでstreamed回答が旧hits+新context/titleの混在を接地(intra-request tear最終面) | v0.2.724 budget/contextをretrieve snapshot内へ統合——context失敗は_dispatch JSON envelopeへ合流(dangling-guard不要化)+行動ピン4件+カタログ3追随 |
 | ~~109~~ | `_title_questions`がfallback時にsnapshot外で`sources_for_notebook`を再読——2読取り間のrenameで新title名指し質問が旧corpusを記述するfpキーでcache(#107のfallback残存面) | v0.2.725 snapshot内の同一sourcesをtitlesとして再利用(第2読取り消去)+`not in titles`死ガード除去+`sources_for_notebook`呼出1回ピン |
+| ~~110~~ | multi_query有効時、rewrite(chat)+per-rewrite embed LLM呼出がcallerの`read_snapshot()`内で実行——WAL読取点をネットワーク往復時間分ピン留めし並行writer追加分をcheckpoint不能(WAL肥大化) | v0.2.726 `prepare_retrieval`(LLM相・snapshot外)+`retrieve_prepared`(store相・snapshot内)へ分解、snapshot保持4 callerで相分離+全LLM呼出snapshot外発火の行動ピン |
 
 ### 解決済み(記録)
 

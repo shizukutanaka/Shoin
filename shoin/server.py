@@ -75,7 +75,8 @@ from .qa import (
     build_messages,
     expand_query,
     history_messages,
-    retrieve_for_question,
+    prepare_retrieval,
+    retrieve_prepared,
 )
 from .qa import (
     _t as _qa_t,
@@ -1470,9 +1471,13 @@ class _Handler(BaseHTTPRequestHandler):
             # reads must describe one commit point — on auto-commit
             # snapshots a concurrent ingest/replace mid-request splices rows
             # from different commits into the hit list and its titles.
+            # v0.2.726: multi-query expansion is pure LLM traffic — it runs
+            # BEFORE the snapshot so a network round-trip can't pin the
+            # WAL read point for its duration.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
             with store.read_snapshot():
-                hits = retrieve_for_question(
-                    store, self.llm, nb_id, retrieval_q, qvec, k=k, source_ids=scope_ids
+                hits = retrieve_prepared(
+                    store, nb_id, queries, vecs, k=k, source_ids=scope_ids
                 )
                 titles = {s.id: s.title for s in store.sources_for_notebook(nb_id)}
                 # Zero hits is a dead end (product-review #42): offer the nearest
@@ -1526,10 +1531,10 @@ class _Handler(BaseHTTPRequestHandler):
                 else None
             )
             # v0.2.720: same one-snapshot corpus contract as _h_nb_search.
+            # v0.2.726: the LLM expansion phase stays outside it.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
             with store.read_snapshot():
-                hits = retrieve_for_question(
-                    store, self.llm, None, retrieval_q, qvec, k=k
-                )
+                hits = retrieve_prepared(store, None, queries, vecs, k=k)
                 meta = store.notebooks_for_sources([h.source_id for h in hits])
                 # A source deleted by a concurrent request between the search and
                 # this provenance lookup is dropped rather than KeyErroring — the
@@ -1595,13 +1600,17 @@ class _Handler(BaseHTTPRequestHandler):
             # this call's rewrite LLM request nor the qvec embedding call above
             # it is serialized under generation_lock (spec.md single-generation
             # DoS control) — only the actual answer-generation streaming call
-            # below is. See retrieve_for_question()'s own docstring for why.
+            # below is. See prepare_retrieval()'s own docstring for why.
             # v0.2.720: the legs run under one WAL snapshot so a concurrent
             # replace/ingest mid-request can't splice different commits into
             # the grounding set (history stays outside — conversation state).
+            # v0.2.726: the expansion itself runs BEFORE the snapshot — it is
+            # pure LLM traffic and must not pin the WAL read point across a
+            # network round-trip.
+            queries, vecs = prepare_retrieval(self.llm, retrieval_q, qvec)
             with store.read_snapshot():
-                hits = retrieve_for_question(
-                    store, self.llm, nb_id, retrieval_q, qvec, source_ids=scope_ids
+                hits = retrieve_prepared(
+                    store, nb_id, queries, vecs, source_ids=scope_ids
                 )
                 # v0.2.724: the per-notebook budget read and the context
                 # build join the retrieval snapshot — they used to run after
