@@ -255,6 +255,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~113~~ | embed書込みが`WHERE id=?`のみ——read→commit間のdelete+rowid再利用で旧text由来vectorが別textの新chunkへ誤格納(静かなcorruption) | v0.2.729 `set_embedding`/`_set_embedding_pair`に`expected_text`ガード(`id=? AND text=?`)→rowcount 0→CHUNK_NOT_FOUND→batch rollback・`_embed_chunks` `expected_texts`全呼出必須化(ASTピン) |
 | ~~114~~ | ファイル源originが`str(p)`相対パス保存——refreshが実行時cwdで再解釈し、別cwdで失敗 or 同名の別ファイルを無言で再取込(内容の静かな差替) | v0.2.730 `extract_file`が`os.path.abspath`化した絶対origin保存——取込時点の実パスをlocatorとして固定(行動ピン: 相対add→別cwd refresh→byte-identical no-op) |
 | ~~115~~ | 子行writer(add_source/add_chunks/add_note/add_studio_output/add_message/clear_messages)の親probeがautocommit実行——probe→write間の親delete+rowid再利用でFKが別親を受理し子行がprobeの見なかった親へ着地(cross-notebook汚染) | v0.2.731 全6 writerのprobeを`BEGIN IMMEDIATE`内へ統一(probeとwriteが同一commit点・第二接続のforeign BEGIN失敗を行動ピン) |
+| ~~116~~ | eval CLI文書書込み(`--gen`/`--save`)が`write_text`非原子——中断で半書込みJSONが残り次回`--diff`/`--gen`消費時に生JSONエラー(「成功した保存」が文書でなかった) | v0.2.732 `_atomic_write_text`新設: sibling temp+os.replace原子rename・OSError→`SYSTEM_IO_ERROR`・stagingはfinally除去(行動ピン: 完結書込/上書き/debris無し/coded) |
 
 ### 解決済み(記録)
 

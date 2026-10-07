@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.731")
+        self.assertEqual(VERSION, "0.2.732")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -19756,8 +19756,10 @@ class TestResidualGuards(unittest.TestCase):
         self.assertEqual(
             problems, [], f"locale-dependent text I/O: {problems}"
         )
+        # v0.2.732: the two eval write_text sites now funnel through
+        # _atomic_write_text's single write_text — visible sites 3 -> 2.
         self.assertGreaterEqual(
-            sites, 3,
+            sites, 2,
             "non-vacuous: read_text/write_text call sites must be visible",
         )
 
@@ -20085,8 +20087,9 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "cli.py": 2,     # Path(args.save).write_text — eval baseline export
-            # +1: Path(args.gen).write_text — eval --gen case-scaffold (v0.2.651)
+            "cli.py": 3,     # _atomic_write_text: tmp.write_text + os.replace
+            #     + finally tmp.unlink — the eval --gen/--save writers funnel
+            #     through one atomic helper (v0.2.732)
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)
@@ -20260,6 +20263,10 @@ class TestResidualGuards(unittest.TestCase):
                 # SYSTEM_IO_ERROR contract with _cmd_eval's cases file
                 # (v0.2.655).
                 "OSError", "OSError", "OSError", "OSError", "OSError",
+                # +1: _atomic_write_text maps a failed staging write/rename
+                # to SYSTEM_IO_ERROR — same coded OSError contract, now on
+                # the write side (v0.2.732).
+                "OSError",
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
                 # crash print() on strict-UTF-8 stdout — boundary catch in
@@ -20619,6 +20626,9 @@ class TestResidualGuards(unittest.TestCase):
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError",
+                # +1: _atomic_write_text's OSError -> SYSTEM_IO_ERROR wrap
+                #     (v0.2.732).
+                "StoreError",
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -22521,6 +22531,55 @@ class TestCliEvalGen(unittest.TestCase):
                 self.assertIn("1", out.getvalue())  # {n} in the saved line
         finally:
             os.unlink(db_file)
+
+    def test_cli_json_writes_are_atomic(self) -> None:
+        """v0.2.732: `eval --gen FILE` / `eval --save FILE` staged through
+        write_text — an interrupt mid-write left a torn JSON document behind
+        that --diff/gen consumers then failed to parse (a "successful" save
+        that was never a document). _atomic_write_text stages to a
+        pid-suffixed sibling temp and os.replace()s it whole: the target is
+        either the complete new document or the previous one, never half."""
+        import tempfile
+
+        from shoin.cli import _atomic_write_text
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "base.json"
+            _atomic_write_text(target, '{"a": 1}\n')
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"a": 1}\n')
+            # an overwrite replaces the whole document — never appends or merges
+            _atomic_write_text(target, '{"b": 2}\n')
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"b": 2}\n')
+            # the staging file never outlives the write
+            self.assertEqual([f.name for f in Path(td).iterdir()], ["base.json"])
+            # a failed write surfaces the coded IO error and leaves no debris:
+            # no target and no staging file
+            with self.assertRaises(StoreError) as cm:
+                _atomic_write_text(Path(td) / "missing-dir" / "x.json", "{}")
+            self.assertEqual(cm.exception.code, "SYSTEM_IO_ERROR")
+            self.assertEqual([f.name for f in Path(td).iterdir()], ["base.json"])
+            # end-to-end: --gen leaves no staging file beside its output
+            import io
+            import os
+            from contextlib import redirect_stdout
+
+            from shoin.cli import main
+
+            db_file, nb_id = self._db()
+            try:
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = main(
+                        ["--db", db_file, "eval", str(nb_id), "--gen",
+                         str(Path(td) / "gen.json")]
+                    )
+                self.assertEqual(rc, 0)
+                self.assertEqual(
+                    sorted(f.name for f in Path(td).iterdir()),
+                    ["base.json", "gen.json"],
+                )
+            finally:
+                os.unlink(db_file)
 
     def test_eval_without_cases_or_gen_is_coded(self) -> None:
         import io

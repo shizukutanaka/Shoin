@@ -29,7 +29,31 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.731
+## Version History: v0.1.37 → v0.2.732
+
+### v0.2.732 — CLI文書書込みの原子化(--gen/--saveの破損JSON残存を閉塞)
+
+短所116: 「ファイルへの書込みは原子的か」の問いで発掘——`_cmd_eval`の
+`eval --gen FILE`(スケルトンscaffold)と`eval --save FILE`(ベースラインJSON)
+が`Path.write_text`の非原子書込み。中断(Ctrl-C/kill/disk-full)で半書込みの
+破損JSONが残り、ユーザーが「成功した」と信じたベースラインを次回`--diff`
+が`VALIDATION_FIELD_FORMAT_INVALID`の生JSONパースエラーで拒否——読込み側は
+全経路coded化済み(v0.2.690/718)なのに書込み側だけが破損を製造していた。
+
+- `_atomic_write_text(path, text)`新設: 同一ディレクトリのpid suffix付き
+  tempへ書込み→`os.replace`で原子rename——対象は常に完全な新文書か旧文書の
+  どちらか、半文書は存在し得ない。OSErrorは`SYSTEM_IO_ERROR`へ写像(読込み側の
+  `cannot read cases file`契約と同系統)し、stagingファイルはfinallyで必ず除去
+- 適用箇所: `eval --gen FILE`出力・`eval --save FILE`ベースライン(パッケージ
+  全域のwrite_text監査で残存はこの2サイトのみ——server.pyのアップロード
+  tempfileはdelete-managed tempで別契約)
+- 行動ピン1件(test_cli_json_writes_are_atomic): 完結書込み・上書き全体置換・
+  tmp非残留・失敗時SYSTEM_IO_ERROR+debris無し・e2eで`--gen`の隣接staging無し
+- 却下(記録): `backup_to`(宛先照合済み・SQLite backup APIの上書きはbackup
+  semanticsとして設計通り)・shoin export(stdout出力=ファイル書込み無し)・
+  delete_note/update_chunk_text等の残writer(BEGIN IMMEDIATE+probe完備を確認)
+- 残存(記録): ハードkill直前のstale .tmp残存は理論上あり得るが、次回書込みの
+  finally除去で自己治癒するため許容
 
 ### v0.2.731 — 子行writerの親probeをwrite lock内へ統一(親rowid再利用によるcross-notebook誤着地を閉塞)
 

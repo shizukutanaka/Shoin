@@ -7,6 +7,7 @@ product is fully usable headless (REQ-103).
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -70,6 +71,25 @@ def _port_num(value: str) -> int:
     if not 0 <= n <= 65535:
         raise argparse.ArgumentTypeError("port must be in 0-65535")
     return n
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: sibling temp file + os.replace.
+
+    A plain write_text that is interrupted mid-write (Ctrl-C, kill,
+    disk-full) leaves a half-written JSON document behind — the next
+    `eval --diff` then dies parsing a corrupt baseline that reads as a
+    save the user believed succeeded. The pid-suffixed temp keeps two
+    concurrent invocations from clobbering each other's staging file.
+    """
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StoreError("SYSTEM_IO_ERROR", f"cannot write file: {exc}") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # v0.2.717: the terminal-escape helpers live in log.py (the output leaf)
@@ -829,7 +849,7 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         if args.gen == "-":
             print(payload, end="")
         else:
-            Path(str(args.gen)).expanduser().write_text(payload, encoding="utf-8")
+            _atomic_write_text(Path(str(args.gen)).expanduser(), payload)
             print(
                 _t(
                     "eval.gen_saved",
@@ -889,9 +909,9 @@ def _cmd_eval(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     if args.save:
         from .evaluate import report_to_dict
 
-        Path(str(args.save)).expanduser().write_text(
+        _atomic_write_text(
+            Path(str(args.save)).expanduser(),
             json.dumps(report_to_dict(rep, int(args.k)), ensure_ascii=False, indent=1),
-            encoding="utf-8",
         )
         print(_t("eval.saved", f=_one_line(str(args.save))))
     if args.diff:
