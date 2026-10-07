@@ -82,7 +82,7 @@ from .qa import (
 )
 from .search import suggest_corrections
 from .store import Source, Store, StoreError
-from .studio import KINDS, generate, suggest_questions
+from .studio import KINDS, generate, questions_fingerprint, suggest_questions
 
 # Startup-log strings for serve(). Kept module-local (same minimal pattern as
 # export.py) rather than imported from cli.py, which imports THIS module.
@@ -292,8 +292,8 @@ class _Handler(BaseHTTPRequestHandler):
     llm: ChatBackend  # set by make_server
     db: str
     questions_cache: dict[
-        int, tuple[tuple[tuple[int, str, str], ...], list[str]]
-    ]  # set by make_server; fingerprint = (source id, sha256, title) per source
+        int, tuple[tuple[object, ...], list[str]]
+    ]  # set by make_server; fingerprint = questions_fingerprint() (v0.2.701)
     questions_cache_lock: threading.Lock  # guards questions_cache across threads
     generation_lock: threading.Lock  # serializes LLM generation (spec.md STRIDE DoS control)
 
@@ -1313,15 +1313,13 @@ class _Handler(BaseHTTPRequestHandler):
             store.get_notebook(nb_id)
             # Suggestions change when the source SET or its content changes;
             # cache per notebook so reopening the UI does not re-run the LLM
-            # every time. sha256 moves on refresh (same-source-id content
-            # rewrite — including `shoin src refresh` from another process,
-            # which the per-request fingerprint is the only check that can
-            # see) and title feeds the chunk contexts suggest_questions()
-            # reads. `shoin reindex` only re-embeds; suggestions read chunk
-            # text/context, not vectors, so reindex does not move it.
-            fingerprint = tuple(
-                (s.id, s.sha256, s.title) for s in store.sources_for_notebook(nb_id)
-            )
+            # every time. The fingerprint keys on exactly what
+            # suggest_questions() reads — the source rows PLUS the sampled
+            # overview hits — so it also moves on an in-place chunk edit:
+            # update_chunk_text deliberately keeps sha256 (it labels the
+            # origin document, not the current text), which the old
+            # (id, sha, title)-only fingerprint could not see (v0.2.701).
+            fingerprint = questions_fingerprint(store, nb_id)
             with self.questions_cache_lock:
                 cached = self.questions_cache.get(nb_id)
             if cached is not None and cached[0] == fingerprint:

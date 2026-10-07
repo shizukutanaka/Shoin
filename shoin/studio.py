@@ -224,6 +224,32 @@ def generate(
     return StudioResult(kind, body, report)
 
 
+def questions_fingerprint(store: Store, notebook_id: int) -> tuple[object, ...]:
+    """Fingerprint of everything suggest_questions() reads (v0.2.701).
+
+    (id, sha256, title) alone misses the one content mutation that keeps
+    all three: update_chunk_text() rewrites a chunk's text in place while
+    sources.sha256 stays put — the sha labels the *origin* document by
+    design (the v0.2.682 dedupe relies on that), so the edit moved nothing
+    in the tuple while changing exactly what suggestions would be built
+    from. The fingerprint therefore also carries the sampled hit rows
+    themselves — the same overview_hits(per_source=2) the generator
+    consumes — so every mutation that could change the output moves it:
+    add/delete/refresh/rename AND in-place edits. Sampling keeps the check
+    cheap too: O(sources + per_source×source_count), never the corpus.
+    """
+    return (
+        tuple(
+            (s.id, s.sha256, s.title) for s in store.sources_for_notebook(notebook_id)
+        ),
+        # per_source must match suggest_questions()'s sample width below.
+        tuple(
+            (h.chunk_id, h.source_id, h.text, h.context)
+            for h in overview_hits(store, notebook_id, per_source=2)
+        ),
+    )
+
+
 def suggest_questions(store: Store, llm: ChatBackend, notebook_id: int, n: int = 4) -> list[str]:
     """Suggested questions for a notebook (REQ-102). Best-effort parsing."""
     store.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing

@@ -1268,6 +1268,38 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.llm.chat_count, before + 1)  # regenerated, not stale
 
+    def test_questions_cache_invalidates_on_chunk_edit(self) -> None:
+        """An in-place chunk edit must expire the questions cache (v0.2.701).
+
+        update_chunk_text (the v0.2.647 fix path) replaces a chunk's text
+        without touching sources.sha256 — the sha labels the *origin*
+        document, not the current text, so the (id, sha256, title)
+        fingerprint never moved on the edit and suggestions generated from
+        the old text were served indefinitely. The v0.2.701 fingerprint
+        carries the sampled overview hits themselves, so an edit to any
+        chunk the generator reads moves it."""
+        from shoin.store import Store
+
+        _, nb = self._json("POST", "/api/notebooks", {"name": "fp-edit"})
+        nb_id = nb["id"]
+        self._req(
+            "POST",
+            f"/api/notebooks/{nb_id}/upload",
+            ("編集前の文書。" * 50).encode(),
+            {"X-Filename": "e.txt"},
+        )
+        self._json("GET", f"/api/notebooks/{nb_id}/questions")  # prime cache
+        before = self.llm.chat_count
+        # Cross-process edit: same chunk row, new text, unchanged source sha —
+        # exactly what PATCH /api/chunks/{id} / CLI chunk edit performs.
+        with Store(str(Path(self.tmp.name) / "s.db")) as other:
+            src = other.sources_for_notebook(nb_id)[0]
+            chunk = other.id_seq_text_chunks_for_source(src.id, limit=1, offset=0)[0]
+            other.update_chunk_text(chunk[0], "編集後の内容。" * 50)
+        status, _ = self._json("GET", f"/api/notebooks/{nb_id}/questions")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.llm.chat_count, before + 1)  # regenerated, not stale
+
     def test_questions_cache_stale_write_does_not_overwrite_newer_entry(self) -> None:
         """A concurrent source-add must not let a stale fingerprint clobber the cache.
 

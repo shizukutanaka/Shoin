@@ -29,9 +29,16 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.700
+## Version History: v0.1.37 → v0.2.701
 
-### v0.2.700 — export読取を単一スナップショット化(破破損export閉塞)
+### v0.2.701 — 質問キャッシュ指紋を実入力へ(編集後stale質問閉塞)
+
+- **新規短所85解消(ソクラテス問いで発掘)**: 「指紋は`suggest_questions`の実入力を全て覆うか」——v0.2.395の内容認識指紋は`(id, sha256, title)`だが、sha256は**起源文書**のハッシュを指す設計(v0.2.682のdedupeが依拠)。`update_chunk_text`(v0.2.647の修正経路)はチャンク本文をin-placeで書き換えてもsha256を動かさないため、編集後も指紋は不変——**編集前テキストから生成した質問が無期限に配信**される(クロスプロセス編集でもin-memory cacheへpopが届かないのは同staleness class)
+- **`questions_fingerprint`をstudio.pyへ新設**: 実入力そのものを鍵化——`(id, sha256, title)`タプル + `overview_hits(per_source=2)`のサンプル行(id/text/context)。生成器が読む範囲のみを覆うため非サンプルchunkの編集は不要な失効を起こさず、コストはO(sources+sampled)で全corpus走査なし
+- **却下案**: `nb.updated_at`を指紋へ追加——`add_message`もtouchするため質問毎にキャッシュ不発のリグレッション
+- **行動ピン1件**: クロスプロセス`update_chunk_text`後の`/questions`がchat_count+1で再生成(既存sha変更テストと同型)
+
+### v0.2.700 — export読取を単一スナップショット化(破損export閉塞)
 
 - **新規短所84解消(ソクラテス問いで発掘)**: 「exportの読取は単一スナップショット下か」——`export_markdown`/`export_bibtex`/`export_ris`は複数getterをauto-commit SELECTで連結。pysqliteはSELECTでTXを開始しないため各SELECTが**別コミット点**を読み、同時deleteが途中に挟まると「sourcesは列挙済み・notes/messagesは消失」の**破損export**が生成される——サーバは最大64同時要求で実行環境的に成立する経路
 - **`Store.read_snapshot`**: `BEGIN`(明示)でWAL読スナップショットを固定——`with self.conn`はpysqlite仕様でSELECTをTX化しないため不十分。WAL読者はwriterをブロックしないため同時書込は従来通り進行。3 export関数を`_`内部関数+snapshotラッパーへ分解(公開名不変・呼出側無変更)

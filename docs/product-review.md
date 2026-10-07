@@ -224,6 +224,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~82~~ | chat履歴・ノートのcap開示も死文(走査端点あり・UI非呼出)+notes開示行が最古側と逆の最下部 | v0.2.698 `wireEarlierPager`3面共用+notes prepend化+messages埋込`id`追加 |
 | ~~83~~ | ページャーのfetchがnb切替後にresolveすると別nb配列へ誤merge | v0.2.699 `cur!==target`ガード+`nb.more` isConnectedガード |
 | ~~84~~ | exportの複数SELECTが別コミット点を読み同時deleteで破損export化 | v0.2.700 `Store.read_snapshot`で3 export関数を単一WAL読TXへ |
+| ~~85~~ | `update_chunk_text`がsha256を動かさず質問キャッシュ指紋不変→編集前テキストのstale質問が無期限配信 | v0.2.701 `questions_fingerprint`がsources行+overview_hits実入力を鍵化 |
 
 ### 解決済み(記録)
 
