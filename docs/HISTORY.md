@@ -29,7 +29,15 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.704
+## Version History: v0.1.37 → v0.2.705
+
+### v0.2.705 — import文書のfile origin無害化をsink側へ移設(CLI import経由LFI閉塞)
+
+- **新規短所89解消(ソクラテス問いで発掘)**: 「`_neutralize_import_origins`は全import経路を覆うか」——HTTP import(`_h_nb_import`)のみ呼出で、CLI `shoin import`(`_cmd_import`)は無害化を素通り。悪意あるexport文書に`origin: /etc/passwd`等を書くとCLI importでverbatim保存→後続の`shoin refresh`/`POST /api/sources/{id}/refresh`(`refresh_source`はfile originを`extract_file`で再読)が**任意ファイルをソース内容として読込**——`_h_src_add`が拒否するconfused-deputy LFIの同一欠陥族が別入口に残存
+- **`import_notebook`内部へ移設**: sink側で防御しCLI・HTTP・将来の呼出を一本化——`_h_nb_import`の前置呼出は削除(二重prefix回避)。非dict payloadでもAttributeErrorを出さないよう`isinstance`ガード+try内呼出でcoded拒否を維持
+- **merge/trash-restoreは対象外**: `_insert_tree_rows`直接呼出でimport_notebookを経由しない——自前アーカイブ行のoriginはユーザ自身のもので正しい境界
+- **行動ピン**: file origin文書をimport→`imported:` prefix確認+`source_is_refreshable` False+`refresh_source`がcoded IngestError、URL originはrefreshable維持
+- **カタログ追随ゼロ**: raise/except/.lower()/find/importsドリフトなし(server.pyは関数移設のみ)
 
 ### v0.2.704 — src_textページャーがtotal整合を検証(refresh中torn表示閉塞)
 

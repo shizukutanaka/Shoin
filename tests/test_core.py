@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.704")
+        self.assertEqual(VERSION, "0.2.705")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -23360,6 +23360,48 @@ class TestNbMerge(unittest.TestCase):
                 )
             }
             self.assertIn("書き換えられた別テキスト", texts)
+
+    def test_import_neutralizes_file_origins_at_the_sink(self) -> None:
+        """v0.2.705: an untrusted export's file-path origins must not
+        become refreshable — refresh_source re-reads file origins from
+        disk, so a shared document naming /etc/passwd would turn the
+        CLI `shoin refresh` and the API refresh endpoint into an
+        arbitrary-file read. The guard lives in import_notebook itself
+        (not just _h_nb_import) so the CLI import entry shares it; URL
+        origins stay refreshable."""
+        from shoin.pipeline import (
+            _NoEmbed,
+            refresh_source,
+            source_is_refreshable,
+        )
+
+        with make_store() as s:
+            doc = {
+                "format": "shoin-nb-tree-v1",
+                "notebook": {"name": "x"},
+                "sources": [
+                    {"id": 1, "kind": "txt", "title": "a",
+                     "origin": "/etc/passwd", "sha256": "x1",
+                     "added_at": "t"},
+                    {"id": 2, "kind": "url", "title": "b",
+                     "origin": "https://example.com/x", "sha256": "x2",
+                     "added_at": "t"},
+                ],
+                "chunks": [], "notes": [],
+                "studio_outputs": [], "messages": [],
+            }
+            imp = s.import_notebook(doc)
+            rows = {
+                r.origin: r for r in s.sources_for_notebook(imp.id)
+            }
+            file_row = rows["imported:/etc/passwd"]
+            self.assertFalse(source_is_refreshable(file_row))
+            self.assertIn("https://example.com/x", rows)
+            # The refresh sink itself also fails closed on the
+            # prefixed path — coded ingest error, never a read.
+            with self.assertRaises(IngestError) as cm:
+                refresh_source(s, file_row.id, _NoEmbed())
+            self.assertEqual(cm.exception.code, "INGEST_UNSUPPORTED_FORMAT")
 
     def test_merge_rejects_self_and_missing(self) -> None:
         with make_store() as s:

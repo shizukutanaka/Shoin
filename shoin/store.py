@@ -467,6 +467,31 @@ def _import_str(value: Any) -> None:
     value.encode("utf-8")
 
 
+_IMPORTED_ORIGIN_PREFIX = "imported:"
+
+
+def _neutralize_import_origins(doc: dict[str, Any]) -> dict[str, Any]:
+    """File-path origins in an untrusted export must not become
+    refreshable: refresh re-reads file origins from disk, so a shared
+    document carrying /etc/passwd would turn refresh_source — and the
+    API refresh endpoint that calls it — into an arbitrary-file read of
+    whatever the doc named. Non-URL origins are kept, prefixed, for
+    display only. Enforced inside import_notebook itself so the CLI
+    `shoin import` entry shares the guard _h_nb_import used to apply
+    alone (v0.2.705 — the store is the sink every caller funnels
+    through; merge/trash-restore skip it because their rows come from
+    the user's own archives, not a foreign document)."""
+    sources = doc.get("sources") if isinstance(doc, dict) else None
+    if isinstance(sources, list):
+        for s in sources:
+            origin = s.get("origin") if isinstance(s, dict) else None
+            if isinstance(origin, str) and not origin.startswith(
+                ("http://", "https://")
+            ):
+                s["origin"] = _IMPORTED_ORIGIN_PREFIX + origin
+    return doc
+
+
 def _settings_of(row: sqlite3.Row) -> dict[str, Any]:
     """Parse a notebooks row's settings column for the Notebook dataclass.
 
@@ -1285,8 +1310,14 @@ class Store:
         BLOBs decode back verbatim — same model, zero re-embed cost —
         and chunk INSERTs re-fire the FTS triggers, so the notebook is
         searchable the moment import returns.
+
+        The payload is untrusted bytes: file-path origins it carries are
+        neutralized before anything else reads them (v0.2.705). The call
+        stays inside the try so a non-dict payload still classifies as
+        NOTEBOOK_IMPORT_INVALID rather than a raw AttributeError.
         """
         try:
+            _neutralize_import_origins(payload)
             nb = payload["notebook"]
             name = nb["name"]
             if not isinstance(name, str):
