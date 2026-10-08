@@ -645,6 +645,29 @@ def _settings_of(row: sqlite3.Row) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+# INSERT shapes shared by the tree writers (_insert_tree_rows, trash
+# restores, duplicate_notebook) and the single-row adders — one source of
+# truth per column list so sibling writers cannot drift apart (v0.2.737).
+_INSERT_CHUNK_EMBED = (
+    "INSERT INTO chunks(source_id, seq, text, context,"
+    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)"
+)
+_INSERT_CHUNK_PLAIN = (
+    "INSERT INTO chunks(source_id, seq, text, context) VALUES (?,?,?,?)"
+)
+_INSERT_NOTE = (
+    "INSERT INTO notes(notebook_id, title, body, created_at) VALUES(?,?,?,?)"
+)
+_INSERT_STUDIO_OUTPUT = (
+    "INSERT INTO studio_outputs(notebook_id, kind, body,"
+    " citation_report, created_at) VALUES(?,?,?,?,?)"
+)
+_INSERT_MESSAGE = (
+    "INSERT INTO messages(notebook_id, role, body,"
+    " citation_report, created_at) VALUES(?,?,?,?,?)"
+)
+
+
 def pack_vector(vec: list[float]) -> bytes:
     """Pack a float vector into a compact little-endian float32 BLOB."""
     return array.array("f", vec).tobytes()
@@ -1335,8 +1358,7 @@ class Store:
                 # as max(rowid)+1, so re-inserting the archived ids
                 # collided with whatever later insert reused them.
                 self.conn.execute(
-                    "INSERT INTO chunks(source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                    _INSERT_CHUNK_EMBED,
                     (
                         src["id"], c["seq"], c["text"],
                         c["context"], c["embedding"], c["embedding_norm"],
@@ -1373,8 +1395,7 @@ class Store:
                     f"notebook {nb_id} is gone — cannot restore note into it",
                 )
             cur = self.conn.execute(
-                "INSERT INTO notes(notebook_id, title, body, created_at)"
-                " VALUES(?,?,?,?)",
+                _INSERT_NOTE,
                 (nb_id, note["title"], note["body"], note["created_at"]),
             )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
@@ -1728,8 +1749,7 @@ class Store:
             if c["source_id"] in deduped:
                 continue
             cur = self.conn.execute(
-                "INSERT INTO chunks(source_id, seq, text, context,"
-                " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                _INSERT_CHUNK_EMBED,
                 (
                     id_map[c["source_id"]], c["seq"], c["text"],
                     c["context"], c["embedding"], c["embedding_norm"],
@@ -1741,14 +1761,12 @@ class Store:
             chunk_id_map[c["id"]] = int(cur.lastrowid or 0)
         for n in notes:
             self.conn.execute(
-                "INSERT INTO notes(notebook_id, title, body, created_at)"
-                " VALUES(?,?,?,?)",
+                _INSERT_NOTE,
                 (notebook_id, n["title"], n["body"], n["created_at"]),
             )
         for o in studio_outputs:
             self.conn.execute(
-                "INSERT INTO studio_outputs(notebook_id, kind, body,"
-                " citation_report, created_at) VALUES(?,?,?,?,?)",
+                _INSERT_STUDIO_OUTPUT,
                 (
                     notebook_id, o["kind"], o["body"],
                     _remap_report_source_ids(
@@ -1759,8 +1777,7 @@ class Store:
             )
         for m in messages:
             self.conn.execute(
-                "INSERT INTO messages(notebook_id, role, body,"
-                " citation_report, created_at) VALUES(?,?,?,?,?)",
+                _INSERT_MESSAGE,
                 (
                     notebook_id, m["role"], m["body"],
                     _remap_report_source_ids(
@@ -1940,8 +1957,7 @@ class Store:
                 (notebook_id,),
             ).fetchall():
                 cur = self.conn.execute(
-                    "INSERT INTO chunks(source_id, seq, text, context,"
-                    " embedding, embedding_norm) VALUES(?,?,?,?,?,?)",
+                    _INSERT_CHUNK_EMBED,
                     (
                         id_map[int(row["source_id"])], row["seq"], row["text"],
                         row["context"], row["embedding"], row["embedding_norm"],
@@ -1966,8 +1982,7 @@ class Store:
                 (notebook_id,),
             ).fetchall():
                 self.conn.execute(
-                    "INSERT INTO studio_outputs(notebook_id, kind, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?)",
+                    _INSERT_STUDIO_OUTPUT,
                     (
                         new_id, row["kind"], row["body"],
                         _remap_report_source_ids(
@@ -1982,8 +1997,7 @@ class Store:
                 (notebook_id,),
             ).fetchall():
                 self.conn.execute(
-                    "INSERT INTO messages(notebook_id, role, body,"
-                    " citation_report, created_at) VALUES(?,?,?,?,?)",
+                    _INSERT_MESSAGE,
                     (
                         new_id, row["role"], row["body"],
                         _remap_report_source_ids(
@@ -2332,7 +2346,7 @@ class Store:
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
-                        "INSERT INTO chunks(source_id, seq, text, context) VALUES (?,?,?,?)",
+                        _INSERT_CHUNK_PLAIN,
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
@@ -2541,7 +2555,7 @@ class Store:
                 for seq, text in enumerate(texts):
                     ctx = contexts[seq] if contexts is not None else ""
                     cur = self.conn.execute(
-                        "INSERT INTO chunks(source_id, seq, text, context) VALUES (?,?,?,?)",
+                        _INSERT_CHUNK_PLAIN,
                         (source_id, seq, text, ctx),
                     )
                     ids.append(int(cur.lastrowid or 0))
@@ -2817,7 +2831,7 @@ class Store:
                 self.conn.execute("BEGIN IMMEDIATE")
                 self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
-                    "INSERT INTO notes(notebook_id, title, body, created_at) VALUES (?,?,?,?)",
+                    _INSERT_NOTE,
                     (notebook_id, title, body, _now()),
                 )
                 self.touch_notebook(notebook_id)
@@ -2929,8 +2943,7 @@ class Store:
                 self.conn.execute("BEGIN IMMEDIATE")
                 self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
-                    "INSERT INTO studio_outputs(notebook_id, kind, body, citation_report,"
-                    " created_at) VALUES (?,?,?,?,?)",
+                    _INSERT_STUDIO_OUTPUT,
                     (notebook_id, kind, body, citation_report, _now()),
                 )
                 self.conn.execute(
@@ -2992,8 +3005,7 @@ class Store:
                 self.conn.execute("BEGIN IMMEDIATE")
                 self.get_notebook(notebook_id)  # raises NOTEBOOK_NOT_FOUND if missing
                 cur = self.conn.execute(
-                    "INSERT INTO messages(notebook_id, role, body, citation_report, created_at)"
-                    " VALUES (?,?,?,?,?)",
+                    _INSERT_MESSAGE,
                     (notebook_id, role, body, citation_report, _now()),
                 )
                 self.touch_notebook(notebook_id)
