@@ -29,7 +29,12 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.735
+## Version History: v0.1.37 → v0.2.736
+
+### v0.2.736 — インポート文書の非有限chunk数値を拒否(指数表記→Infinity永続化経路を閉塞)
+
+- `import_notebook`のdocument検証で`seq`/`embedding_norm`へ`math.isfinite(float(x))`を必須化——jsonのfloatパーサは`parse_constant`を素通りして`1e400`→infを生成するため、v0.2.735の両層防御に残った唯一の非有限ingress(CLIインポートは`_read_json`非経由)
+- 効果: 非有限値がverbatim bindで永続化され`seq`として全source-text/search応答へ`Infinity`として再送出され厳格JSON.parseを破壊するstored self-DoSを閉塞(Devin Review指摘、weakness #120)
 
 ### v0.2.735 — リクエストJSONの非標準定数(NaN/Infinity)を境界+store両面で拒否(stored self-DoS閉塞)
 

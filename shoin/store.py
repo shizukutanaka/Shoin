@@ -1507,12 +1507,27 @@ class Store:
                     c[k]
                 for k in ("text", "context"):
                     _import_str(c[k])
-                float(c["seq"])
+                # v0.2.736: json's float parser — never parse_constant —
+                # produces infinity for a legal exponent like 1e400, so
+                # file bytes can carry a non-finite seq/embedding_norm
+                # into the verbatim bind; seq re-emits as Infinity on
+                # every source-text/search response (strict-parser
+                # poison, Devin Review on v0.2.735).
+                if not math.isfinite(float(c["seq"])):
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "chunk seq is not finite",
+                    )
                 # embedding_norm is NULL whenever the chunk carries no
                 # embedding — a legit export emits null, only a present
-                # value must be numeric.
-                if c["embedding_norm"] is not None:
+                # value must be a finite number.
+                if c["embedding_norm"] is not None and not math.isfinite(
                     float(c["embedding_norm"])
+                ):
+                    raise StoreError(
+                        "NOTEBOOK_IMPORT_INVALID",
+                        "chunk embedding_norm is not finite",
+                    )
                 if c["embedding"] is not None:
                     # v0.2.714: bound the base64 BEFORE decode — the blob
                     # binds verbatim and is loaded on every vector

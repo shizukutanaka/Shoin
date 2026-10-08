@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.735")
+        self.assertEqual(VERSION, "0.2.736")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -20781,7 +20781,9 @@ class TestResidualGuards(unittest.TestCase):
                 # same programmer-error builtin class, funnels into the
                 # coded boundary at every caller.
                 "ValueError",
-            ] + ["StoreError"] * 98,  # +6: origin/sha256 writer bounds,
+            ] + ["StoreError"] * 100,  # +2: import chunk seq/embedding_norm
+                                      #     finiteness guards (v0.2.736)
+                                      # +6: origin/sha256 writer bounds,
                                       #     _import_str field bound, blob
                                       #     bound (v0.2.714); -5: per-field
                                       #     doc checks folded into _import_str
@@ -23765,6 +23767,18 @@ class TestNbExportImport(unittest.TestCase):
                 {**good, "sources": [
                     {**good["sources"][0], "weight": float("inf")}
                 ]},  # Infinity weight (stored before)
+                # v0.2.736: the JSON float parser — never parse_constant —
+                # produces infinity for a legal exponent like 1e400, so a
+                # non-finite seq/embedding_norm can ride the file bytes
+                # into the verbatim bind (seq then emits as Infinity on
+                # every source-text/search response).
+                {**good, "chunks": [
+                    {**good["chunks"][0], "seq": float("inf")}
+                ]},
+                {**good, "chunks": [
+                    {**good["chunks"][0],
+                     "embedding_norm": float("inf")}
+                ]},
                 {**good, "sources": [
                     {**good["sources"][0], "title": "t\ud800x"}
                 ]},  # lone surrogate (died raw on bind before)
