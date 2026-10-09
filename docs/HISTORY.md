@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.736
+## Version History: v0.1.37 → v0.2.737
+
+### v0.2.737 — ツリーwriter共通INSERT列リストをモジュール定数へ一元化(ドリフト経路閉塞)
+
+**発見（第一原理・削除/統合レンズ）**: 公開メソッド棚卸しではtest専用helperの削除は総コスト増（30+呼出の書換え）と判定し、代わりに「3つのtree writerと単一行adderが同じINSERT文を独立リテラルで複写している」構造を摘出。`chunks`(source_id,seq,text,context,embedding,embedding_norm)・`notes`・`studio_outputs`・`messages`・`chunks`4列形——いずれも片側だけ列を追加/並替した場合に他writerが黙って旧列へbindする静かな不整合経路(実害: migration 11/12列の欠落・`_remap`非対称で2件の欠陥実績あり)。
+**修正**: 5つの共有INSERT形をモジュール定数(`_INSERT_CHUNK_EMBED`/`_INSERT_CHUNK_PLAIN`/`_INSERT_NOTE`/`_INSERT_STUDIO_OUTPUT`/`_INSERT_MESSAGE`)へ抽出し15箇所で共有——実行時SQLはバイト同一、未共有リテラルは列集合が正当に異なる別形のみ残存。
+**効果**: 列変更の修正面が1点化し、ドリフト欠陥クラスを構造的に再発不能化。
+**却下した問い**: test専用helper4件(pack_vector/list_notebooks/chunks_for_notebook/id_text_chunks_for_notebook)の削除——書換えコストが維持利益を上回るためYAGNI判断で保持。
 
 ### v0.2.736 — インポート文書の非有限chunk数値を拒否(指数表記→Infinity永続化経路を閉塞)
 

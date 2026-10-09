@@ -260,6 +260,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~118~~ | `chat_stream`のin-stream `{"error": ...}`フレームがサーバー生成テキストを未スクラブで`LLMError`メッセージへ埋め込み——敵対ゲートウェイのechoでBearer token/URL userinfoが502エンベロープ/stderrへ伝播(v0.2.678のHTTP本文防御のstreaming側残存面) | v0.2.734 `_scrub_secrets`を共有helper化して両経路へ適用・スクラブは切り捨て前に実施(行動ピン: errorフレーム内のkey/userinfoが***へ) |
 | ~~119~~ | `json.loads`の拡張リテラル(NaN/Infinity/-Infinity)が`_read_json`を素通りして`meta`等の自由dictへ潜入——永続化後は全応答で同リテラルが再送出され厳格JSON.parse利用者がnotebook detail全体を読めなくなるstored self-DoS | v0.2.735 `_read_json`のparse_constantを`_reject_non_finite`化＋`_meta_dump`を`allow_nan=False`化の二層防御(行動ピン: store層nan/±inf拒否＋HTTP層PATCH body NaN→400) |
 | ~~120~~ | `json.loads`のfloatパーサは`parse_constant`フック非経由で`1e400`→infを生成——インポート文書(CLI経由・`_read_json`非経由)のchunk `seq`/`embedding_norm`がverbatim bindで永続化され、infの`seq`が全source-text/search応答へ`Infinity`として再送出され厳格JSON.parseを破壊(v0.2.735の両層防御の残存ingress) | v0.2.736 `import_notebook`のdocument検証で`math.isfinite`必須化(行動ピン: malformed cases 2件→NOTEBOOK_IMPORT_INVALID・PATCH 1e400→400は既守備でbaseline通過) |
+| ~~121~~ | 同一INSERT列リストが3つのtree writer+単一行adderに独立リテラルで複写——片側の列変更に他側が追随せず旧列へbindし続ける静かなドリフト経路(migration列欠落・remap非対称の実績欠陥2件) | v0.2.737 5共有形を`_INSERT_*`モジュール定数へ一元化・15箇所共有(実行時バイト同一・統合層のみで行動変更ゼロ) |
 
 ### 解決済み(記録)
 
