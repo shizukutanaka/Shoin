@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.738")
+        self.assertEqual(VERSION, "0.2.740")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9981,6 +9981,59 @@ class TestLLMClient(unittest.TestCase):
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
         self.assertEqual(calls["n"], client.retries + 1)
 
+    def test_post_fails_fast_after_exhausted_retries_until_endpoint_returns(self) -> None:
+        import urllib.error
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        response = MagicMock()
+        response.__enter__ = lambda s: s
+        response.__exit__ = MagicMock(return_value=False)
+        response.read.return_value = b'{"choices":[{"message":{"content":"ok"}}]}'
+        state = {"up": False}
+        calls = {"n": 0}
+
+        def _controlled_urlopen(req, **kw):
+            calls["n"] += 1
+            if not state["up"]:
+                raise urllib.error.URLError(OSError("connection refused"))
+            return response
+
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        messages = [{"role": "user", "content": "hi"}]
+        with (
+            patch("urllib.request.urlopen", side_effect=_controlled_urlopen),
+            patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(LLMError) as first:
+                client.chat(messages)
+            self.assertEqual(first.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"], client.retries + 1)
+            self.assertEqual(sleep.call_count, client.retries)
+
+            calls_before = calls["n"]
+            sleeps_before = sleep.call_count
+            with self.assertRaises(LLMError) as second:
+                client.chat(messages)
+            self.assertEqual(second.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"] - calls_before, 1)
+            self.assertEqual(sleep.call_count, sleeps_before)
+
+            state["up"] = True
+            calls_before = calls["n"]
+            self.assertEqual(client.chat(messages), "ok")
+            self.assertEqual(calls["n"] - calls_before, 1)
+
+            state["up"] = False
+            calls_before = calls["n"]
+            sleeps_before = sleep.call_count
+            with self.assertRaises(LLMError) as third:
+                client.chat(messages)
+            self.assertEqual(third.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"] - calls_before, client.retries + 1)
+            self.assertEqual(sleep.call_count - sleeps_before, client.retries)
+
     def test_post_does_not_retry_http_errors(self) -> None:
         """An HTTP 4xx/5xx is a deterministic server answer — retrying it
         waits to the same result, so it must fail on the first attempt
@@ -13301,6 +13354,32 @@ class TestCLI(unittest.TestCase):
         )
         with self.assertRaises(SystemExit):
             _build_parser().parse_args(["ask", "1", "楮は？", "--source", "0"])
+
+    def test_source_refresh_help_mentions_url_and_file_sources(self) -> None:
+        """The source refresh help should include file refresh added in v0.2.633/648."""
+        from argparse import _SubParsersAction
+
+        from shoin.cli import _build_parser
+
+        parser = _build_parser()
+        source_action = next(
+            action for action in parser._actions
+            if isinstance(action, _SubParsersAction) and "source" in action.choices
+        )
+        source_parser = source_action.choices["source"]
+        source_subparsers = next(
+            action for action in source_parser._actions
+            if isinstance(action, _SubParsersAction)
+        )
+        source_subparsers.choices["refresh"]
+        refresh_help = next(
+            action.help
+            for action in source_subparsers._choices_actions
+            if action.dest == "refresh"
+        )
+
+        self.assertIn("URL", refresh_help)
+        self.assertIn("ファイル", refresh_help)
 
     def test_ask_and_eval_reject_non_positive_k(self) -> None:
         """-k is a free int: k=0 silently yields an empty hit list (degraded
