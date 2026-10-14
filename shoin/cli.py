@@ -439,7 +439,9 @@ def _build_parser() -> argparse.ArgumentParser:
     src_ren = srcsub.add_parser("rename", help="改名")
     src_ren.add_argument("source_id", type=int)
     src_ren.add_argument("title")
-    src_ref = srcsub.add_parser("refresh", help="URLソースの再取込")
+    src_ref = srcsub.add_parser(
+        "refresh", help="ソースの再取込 (URL、または元ファイルが残るファイルソース)"
+    )
     src_ref.add_argument("source_id", type=int)
     src_ra = srcsub.add_parser(
         "refresh-all", help="ノートブック内の全ソースを一括再取込 (cron向け)"

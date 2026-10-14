@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.738
+## Version History: v0.1.37 → v0.2.739
+
+### v0.2.739 — CLI source refreshヘルプのURL/ファイル対象を明示
+
+**発見**: CLIヘルプがURL限定と表示し、ファイルrefresh(v0.2.633/648)を隠していた。
+**修正**: `shoin source refresh` のヘルプをURLと元ファイルが残るファイルソースの再取込と明記し、文言ピンを追加。
+**効果**: CLI利用者がファイルソースも再取込できると把握できる。
+**却下**: README/spec変更(既に正確)。
 
 ### v0.2.738 — 収益導線: 商用サポートissueテンプレート+FUNDING.yml+Funding URL
 

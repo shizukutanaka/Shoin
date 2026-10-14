@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.738")
+        self.assertEqual(VERSION, "0.2.739")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -13301,6 +13301,32 @@ class TestCLI(unittest.TestCase):
         )
         with self.assertRaises(SystemExit):
             _build_parser().parse_args(["ask", "1", "楮は？", "--source", "0"])
+
+    def test_source_refresh_help_mentions_url_and_file_sources(self) -> None:
+        """The source refresh help should include file refresh added in v0.2.633/648."""
+        from argparse import _SubParsersAction
+
+        from shoin.cli import _build_parser
+
+        parser = _build_parser()
+        source_action = next(
+            action for action in parser._actions
+            if isinstance(action, _SubParsersAction) and "source" in action.choices
+        )
+        source_parser = source_action.choices["source"]
+        source_subparsers = next(
+            action for action in source_parser._actions
+            if isinstance(action, _SubParsersAction)
+        )
+        source_subparsers.choices["refresh"]
+        refresh_help = next(
+            action.help
+            for action in source_subparsers._choices_actions
+            if action.dest == "refresh"
+        )
+
+        self.assertIn("URL", refresh_help)
+        self.assertIn("ファイル", refresh_help)
 
     def test_ask_and_eval_reject_non_positive_k(self) -> None:
         """-k is a free int: k=0 silently yields an empty hit list (degraded
