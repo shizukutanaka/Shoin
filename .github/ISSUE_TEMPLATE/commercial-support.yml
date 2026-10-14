@@ -1,0 +1,47 @@
+name: 商用サポート・導入相談 / Commercial support
+description: 有償サービスの相談窓口です。ソフトウェア本体はMITライセンスで無料のままです。
+title: "[商用] "
+labels: ["commercial"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Shoin remains MIT-licensed and free; paid services are scoped and quoted in this issue thread.
+        ShoinはMITライセンスのまま無料です。有償サービスの範囲・見積はこのissueで相談します。
+  - type: dropdown
+    id: service
+    attributes:
+      label: ご希望のサービス / Service
+      options:
+        - 導入支援(セットアップ・モデル選定)
+        - カスタマイズ開発
+        - 優先サポート(不具合の優先対応)
+        - 研修・ワークショップ
+        - その他
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 利用目的・規模・環境 / Context
+      description: 利用目的、規模、環境(OS/RAM/LLM)を記載してください。
+      placeholder: |
+        利用目的:
+        規模:
+        環境(OS/RAM/LLM):
+    validations:
+      required: true
+  - type: input
+    id: timeline
+    attributes:
+      label: 希望時期・予算感 / Timeline and budget
+      placeholder: 任意 / Optional
+    validations:
+      required: false
+  - type: checkboxes
+    id: confidentiality
+    attributes:
+      label: 機密情報の確認 / Confidentiality
+      options:
+        - label: 公開issueに機密情報(文書内容・社内情報)を書いていないことを確認しました
+          required: true

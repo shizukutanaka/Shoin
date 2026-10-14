@@ -175,6 +175,13 @@ git config core.hooksPath .githooks                    # push前に自動実行(
 (緊急時は `git push --no-verify`)。GitHub Actions の権限が無い環境でも
 「landする前に自動検証される」という要件をこれで満たす — 詳細は `ci/README.md`。
 
+## Support / 商用サポート
+
+Shoin is MIT-licensed and free forever, with no feature gating.
+Paid services: 導入支援・カスタマイズ開発・優先サポート・研修/ワークショップ.
+Request support through the [commercial support issue template](https://github.com/shizukutanaka/Shoin/issues/new?template=commercial-support.yml).
+Do not paste document contents or confidential company information into public issues.
+
 ## License
 
 MIT
