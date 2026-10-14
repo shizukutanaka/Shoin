@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.737
+## Version History: v0.1.37 → v0.2.738
+
+### v0.2.738 — 収益導線: 商用サポートissueテンプレート+FUNDING.yml+Funding URL
+
+**発見**: 継続保守の資金源と商用利用の相談窓口がなかった。
+**修正**: GitHub Sponsorボタンから有償の導入支援・カスタマイズ・優先サポート等を相談できるissueテンプレートを追加し、FUNDING.yml・project URL・READMEから案内。公開issueに機密情報を書かないよう明示。
+**効果**: ソフトウェア本体はMITのまま、対価は個別サービスの範囲・見積に限定。UI・オフライン利用は変更なし。
+**却下**: paywall・license key・telemetry・UI内外部リンク(offline pin)・Sponsors未登録のgithubキー。
 
 ### v0.2.737 — ツリーwriter共通INSERT列リストをモジュール定数へ一元化(ドリフト経路閉塞)
 
@@ -6449,4 +6456,3 @@ Neither `llm.py` production code needed a change — both failures were stale te
 - Run tests: `pytest tests/` and manual UI check.
 
 ---
-

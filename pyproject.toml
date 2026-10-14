@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoin"
-version = "0.2.737"
+version = "0.2.738"
 
 description = "Local, citation-verified NotebookLM alternative for lightweight LLMs"
 readme = "README.md"
@@ -25,6 +25,12 @@ classifiers = [
     "Natural Language :: Japanese",
     "Natural Language :: English",
 ]
+
+[project.urls]
+Homepage = "https://github.com/shizukutanaka/Shoin"
+Repository = "https://github.com/shizukutanaka/Shoin"
+Issues = "https://github.com/shizukutanaka/Shoin/issues"
+Funding = "https://github.com/shizukutanaka/Shoin/issues/new?template=commercial-support.yml"
 
 [tool.setuptools.packages.find]
 include = ["shoin*"]

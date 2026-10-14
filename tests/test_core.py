@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.737")
+        self.assertEqual(VERSION, "0.2.738")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -17324,6 +17324,36 @@ class TestResidualGuards(unittest.TestCase):
                 any(fnmatch.fnmatchcase(f"static/{f.name}", g) for g in globs),
                 f"{f.name} not covered by package-data globs {globs}",
             )
+
+    def test_funding_links_resolve_to_shipped_template(self) -> None:
+        """Keep the custom funding route pointed at a shipped issue template."""
+        import re
+        import tomllib
+        from urllib.parse import parse_qs, urlsplit
+
+        root = Path(__file__).resolve().parent.parent
+        funding_text = (root / ".github" / "FUNDING.yml").read_text(encoding="utf-8")
+        self.assertNotRegex(funding_text, r"(?m)^\s*github\s*:")
+        custom_lines = [
+            line.strip() for line in funding_text.splitlines()
+            if line.strip().startswith("custom:")
+        ]
+        self.assertEqual(len(custom_lines), 1)
+        custom_urls = re.findall(r"""["'](https?://[^"']+)["']""", custom_lines[0])
+        self.assertEqual(len(custom_urls), 1)
+
+        template_dir = root / ".github" / "ISSUE_TEMPLATE"
+        for url in custom_urls:
+            template_names = parse_qs(urlsplit(url).query).get("template", [])
+            self.assertTrue(template_names, f"funding URL has no template parameter: {url}")
+            for template_name in template_names:
+                self.assertTrue(
+                    (template_dir / template_name).is_file(),
+                    f"funding URL template is not shipped: {template_name}",
+                )
+
+        config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(config["project"]["urls"]["Funding"], custom_urls[0])
 
     def test_every_shoin_env_var_is_documented_in_readme(self) -> None:
         """v0.2.294+: every SHOIN_* key read by code must appear in README.md —
