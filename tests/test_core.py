@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.739")
+        self.assertEqual(VERSION, "0.2.740")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -9980,6 +9980,59 @@ class TestLLMClient(unittest.TestCase):
                 client.chat([{"role": "user", "content": "hi"}])
         self.assertEqual(cm.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
         self.assertEqual(calls["n"], client.retries + 1)
+
+    def test_post_fails_fast_after_exhausted_retries_until_endpoint_returns(self) -> None:
+        import urllib.error
+        from unittest.mock import MagicMock, patch
+
+        from shoin.llm import LLMClient, LLMError
+
+        response = MagicMock()
+        response.__enter__ = lambda s: s
+        response.__exit__ = MagicMock(return_value=False)
+        response.read.return_value = b'{"choices":[{"message":{"content":"ok"}}]}'
+        state = {"up": False}
+        calls = {"n": 0}
+
+        def _controlled_urlopen(req, **kw):
+            calls["n"] += 1
+            if not state["up"]:
+                raise urllib.error.URLError(OSError("connection refused"))
+            return response
+
+        client = LLMClient(base_url="http://localhost:11434/v1")
+        messages = [{"role": "user", "content": "hi"}]
+        with (
+            patch("urllib.request.urlopen", side_effect=_controlled_urlopen),
+            patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(LLMError) as first:
+                client.chat(messages)
+            self.assertEqual(first.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"], client.retries + 1)
+            self.assertEqual(sleep.call_count, client.retries)
+
+            calls_before = calls["n"]
+            sleeps_before = sleep.call_count
+            with self.assertRaises(LLMError) as second:
+                client.chat(messages)
+            self.assertEqual(second.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"] - calls_before, 1)
+            self.assertEqual(sleep.call_count, sleeps_before)
+
+            state["up"] = True
+            calls_before = calls["n"]
+            self.assertEqual(client.chat(messages), "ok")
+            self.assertEqual(calls["n"] - calls_before, 1)
+
+            state["up"] = False
+            calls_before = calls["n"]
+            sleeps_before = sleep.call_count
+            with self.assertRaises(LLMError) as third:
+                client.chat(messages)
+            self.assertEqual(third.exception.code, "SYSTEM_SERVICE_UNAVAILABLE")
+            self.assertEqual(calls["n"] - calls_before, client.retries + 1)
+            self.assertEqual(sleep.call_count - sleeps_before, client.retries)
 
     def test_post_does_not_retry_http_errors(self) -> None:
         """An HTTP 4xx/5xx is a deterministic server answer — retrying it

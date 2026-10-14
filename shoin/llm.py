@@ -138,6 +138,8 @@ class LLMClient:
         # as report.truncated instead of presenting a clipped answer as whole.
         self.last_finish_reason: str | None = None
         self.retries = llm_retries()
+        # After transport retries exhaust, later requests try once until the endpoint responds.
+        self._endpoint_down = False
         # Auth gateways (vLLM behind a proxy, hosted OpenAI-compatible) need
         # a Bearer token; local runtimes ignore auth entirely. Attached only
         # when configured — never logged (error paths report codes/details,
@@ -188,17 +190,23 @@ class LLMClient:
         until return). chat_stream keeps its own no-retry path: deltas
         already emitted are visible output a retry would duplicate.
         available() is deliberately excluded too — the health probe exists
-        to answer "is it up" fast, not to wait for it to come up.
+        to answer "is it up" fast, not to wait for it to come up. After retries
+        exhaust on a transport failure, later calls try once until one succeeds.
         """
+        budget = 0 if self._endpoint_down else self.retries
         attempt = 0
         while True:
             try:
-                return self._post_once(path, payload, timeout)
+                result = self._post_once(path, payload, timeout)
             except LLMError as exc:
-                if exc.code not in _RETRYABLE or attempt >= self.retries:
+                if exc.code not in _RETRYABLE or attempt >= budget:
+                    self._endpoint_down = exc.code in _RETRYABLE
                     raise
                 time.sleep(_RETRY_BACKOFF_SEC * (2**attempt))
                 attempt += 1
+            else:
+                self._endpoint_down = False
+                return result
 
     def _post_once(self, path: str, payload: dict[str, Any], timeout: int) -> Any:
         try:
