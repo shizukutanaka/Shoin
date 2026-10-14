@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.740
+## Version History: v0.1.37 → v0.2.741
+
+### v0.2.741 — FTS5 optimizeをvacuum時のみ実行
+
+**発見**: FTS5 'optimize'は索引全体を再構築するため、毎書込み実行で取込が二次化していた。BM25-onlyで1,000文書(~4.4KB/件、4,000チャンク)を100件×10バッチ追加した測定では、変更前の各バッチが0.53, 1.76, 2.02, 2.90, 4.21, 4.56, 4.73, 6.98, 5.83, 6.48秒、合計40.0秒、DB 18,305,024 B(freelist 1,016 pages)。
+**修正**: 全チャンク書込経路の'optimize'を除去し、明示保守の`shoin vacuum`のみで実行。FTS5 automerge(default 4)が書込中に段階マージするため、`_optimize_fts()`はvacuum内の独立TXで実行し、commit後にcheckpoint+VACUUMする。
+**効果**: optimizeを各書込で実行しない測定では各バッチが0.42, 0.85, 0.79, 0.31, 0.39, 0.78, 0.31, 0.48, 0.32, 0.63秒、合計5.28秒、DB 14,495,744 B(freelist 47 pages)。最終DBのFTS MATCHは5種類のtrigram queryを各20回測定し0.37 ms対0.42 ms/queryで有意差なし。
+**却下**: `merge`コマンドでの段階的マージ(automergeが既に同等)・'optimize'の完全削除(`vacuum`で明示保守として保持)。
 
 ### v0.2.740 — LLM輸送障害時の後続リトライを高速化
 
