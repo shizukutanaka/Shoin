@@ -1299,7 +1299,6 @@ class Store:
                 nb["id"], sources, chunks, notes, studio_outputs, messages
             )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
-            self._optimize_fts()
         return {"kind": "notebook", "id": nb["id"], "name": nb["name"]}
 
     def _restore_trashed_source(
@@ -1366,7 +1365,6 @@ class Store:
                 )
             self.conn.execute("DELETE FROM trash_items WHERE id=?", (trash_id,))
             self.touch_notebook(nb_id)
-            self._optimize_fts()
         return {"kind": "source", "id": int(src["id"]), "name": str(src["title"])}
 
     def _restore_trashed_note(
@@ -1609,7 +1607,6 @@ class Store:
                 self._insert_tree_rows(
                     new_id, sources, chunks, notes, studio_outputs, messages
                 )
-                self._optimize_fts()
         except sqlite3.InterfaceError as exc:
             # Unbindable value types (dict where TEXT belongs) are a
             # malformed payload, not a DB failure — classify honestly.
@@ -1788,16 +1785,13 @@ class Store:
             )
 
     def _optimize_fts(self) -> None:
-        """Merge every FTS5 b-tree segment into one ('optimize' insert).
+        """Merge FTS5 segments for explicit maintenance only.
 
-        Callee-transacted: the caller owns `with self.conn:` (same
-        contract as touch_notebook). Each chunk INSERT creates a new
-        unmerged index segment; automerge only chips at the pile
-        incrementally, so after bulk writes the trigram index carries
-        avoidable segment overhead on top of its inherent per-gram
-        cost. Every chunk-write path calls this once at the end of its
-        transaction: the merge runs on whatever rows the caller just
-        indexed, inside the same commit boundary (v0.2.664).
+        Callee-transacted: the caller owns `with self.conn:`. This runs
+        only from `vacuum()`. Optimizing after every chunk write made
+        each write O(index size): 1,000 documents took 40.0s versus
+        5.28s without per-write optimize. FTS5 automerge (default 4)
+        already merges segments incrementally.
         """
         self.conn.execute(
             "INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')"
@@ -1867,7 +1861,6 @@ class Store:
                     "DELETE FROM notebooks WHERE id=?", (source_id,)
                 )
                 self.touch_notebook(target_id)
-                self._optimize_fts()
             except (KeyError, TypeError, ValueError) as exc:
                 raise StoreError(
                     "SYSTEM_INTERNAL_ERROR",
@@ -2006,7 +1999,6 @@ class Store:
                         row["created_at"],
                     ),
                 )
-            self._optimize_fts()
         return Notebook(new_id, name, ts, ts, src.settings)
 
     # --- sources / chunks ---
@@ -2373,7 +2365,6 @@ class Store:
                             f"source {source_id} was concurrently deleted",
                         )
                 self.touch_notebook(src.notebook_id)
-                self._optimize_fts()
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 raise StoreError(
@@ -2560,7 +2551,6 @@ class Store:
                     )
                     ids.append(int(cur.lastrowid or 0))
                 self.touch_notebook(src.notebook_id)
-                self._optimize_fts()
         except sqlite3.IntegrityError as e:
             if "FOREIGN KEY" in str(e):
                 # chunks.source_id REFERENCES sources(id) — this is the genuine
@@ -3142,14 +3132,14 @@ class Store:
 
         SQLite never shrinks the db file on its own: every DELETE moves
         pages onto the free list, where they keep occupying disk until a
-        full VACUUM rebuilds the file. wal_checkpoint(TRUNCATE) runs
-        first so pending -wal frames fold into the main file before the
-        rebuild (otherwise the checkpoint could resurrect a larger db).
-        VACUUM refuses to run inside a transaction by definition, so
-        these executes deliberately stay outside `with self.conn:` —
-        the caller must hold no open transaction (every call site here
-        runs on an idle connection)."""
+        full VACUUM rebuilds the file. FTS5 optimize commits first, then
+        wal_checkpoint(TRUNCATE) folds pending -wal frames into the main
+        file before the rebuild. The checkpoint and VACUUM stay outside
+        `with self.conn:` because SQLite refuses them inside a transaction;
+        the caller must hold no open transaction."""
         before = self.db_bytes()
+        with self.conn:
+            self._optimize_fts()
         # Consume the checkpoint row so the cursor is fully read.
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         self.conn.execute("VACUUM")

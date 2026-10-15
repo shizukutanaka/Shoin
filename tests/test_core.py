@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.740")
+        self.assertEqual(VERSION, "0.2.741")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -23243,8 +23243,10 @@ class TestTrash(unittest.TestCase):
                 seen.append(s.conn.in_transaction)
                 seen.append(foreign_write_blocked())
 
-            orig_opt = s._optimize_fts
-            s._optimize_fts = lambda: (probe(), orig_opt())
+            orig_tree = s._insert_tree_rows
+            s._insert_tree_rows = lambda *a, **kw: (
+                probe(), orig_tree(*a, **kw)
+            )[1]
             orig_touch = s.touch_notebook
             s.touch_notebook = lambda i: (probe(), orig_touch(i))
 
@@ -23257,12 +23259,12 @@ class TestTrash(unittest.TestCase):
             # child ids may occupy the archived source id, and the coded
             # SOURCE_ALREADY_EXISTS refusal (not a probe failure) would
             # end the scenario early.
-            s.trash_restore(tid("source"))    # probes via touch + optimize
+            s.trash_restore(tid("source"))    # probes via touch_notebook
             s.delete_notebook(nb_id)
-            s.trash_restore(tid("notebook"))  # probes via _optimize_fts
+            s.trash_restore(tid("notebook"))  # probes via _insert_tree_rows
             s.trash_restore(tid("note"))      # probes via touch_notebook
 
-        self.assertEqual(seen, [True, True] * 4)
+        self.assertEqual(seen, [True, True] * 3)
 
     def test_restore_rowid_reuse_restores_under_fresh_ids(self) -> None:
         """v0.2.686: restore used to re-insert the ARCHIVED ids verbatim,
@@ -23997,11 +23999,9 @@ class TestNbExportImport(unittest.TestCase):
                 {"a": "x" * (SOURCE_META_MAX - 20)},
             )
 
-    def test_fts_optimize_fires_on_every_chunk_write_path(self) -> None:
-        """v0.2.664: every chunk-write transaction ends with the FTS5
-        'optimize' merge — each INSERT otherwise leaves an unmerged
-        index segment automerge only chips at incrementally. The trace
-        callback records issued SQL, so the pin checks the wire."""
+    def test_fts_optimize_runs_only_during_vacuum(self) -> None:
+        """v0.2.741: FTS5 automerge handles incremental merging; optimize
+        is explicit maintenance, not work on every chunk-write transaction."""
         calls: list[str] = []
         with make_store() as s:
             s.conn.set_trace_callback(calls.append)
@@ -24024,20 +24024,17 @@ class TestNbExportImport(unittest.TestCase):
                 ).fetchone()["id"])
                 s.trash_restore(trash_id)                           # 6
                 s.merge_notebooks(nb2.id, nb.id)                    # 7
+                n_opt = sum(1 for q in calls if "VALUES('optimize')" in q)
+                self.assertEqual(
+                    n_opt, 0,
+                    "chunk-write paths must leave FTS merging to automerge",
+                )
+                s.vacuum()
+                n_opt = sum(1 for q in calls if "VALUES('optimize')" in q)
+                self.assertEqual(n_opt, 1, "vacuum should optimize FTS once")
+                self.assertTrue(bm25_search(s, nb2.id, "eta", 5))
             finally:
                 s.conn.set_trace_callback(None)
-        n_opt = sum(1 for q in calls if "VALUES('optimize')" in q)
-        self.assertGreaterEqual(
-            n_opt, 7,
-            "add_chunks/replace/duplicate/import/merge/restore must each "
-            f"end their TX with the optimize merge — saw {n_opt}",
-        )
-        # ...and the index still answers after the merges
-        with make_store() as s2:
-            nb3 = s2.create_notebook("n3")
-            src3 = s2.add_source(nb3.id, "txt", "t3", "o3", "h3")
-            s2.add_chunks(src3.id, ["検索できること"])
-            self.assertTrue(bm25_search(s2, nb3.id, "検索", 5))
 
     def test_duplicate_remapped_source_id_map(self) -> None:
         """Regression pin for the drift this version fixed: a verbatim copy
@@ -24444,7 +24441,7 @@ class TestNbMerge(unittest.TestCase):
 
     def test_merge_runs_under_one_write_lock(self) -> None:
         """v0.2.687: serialize→copy→archive→delete inside one BEGIN
-        IMMEDIATE — pin in_transaction at the serialize and optimize
+        IMMEDIATE — pin in_transaction at the serialize and tree-copy
         seams plus a blocked foreign writer (tiny busy_timeout), the
         same probe style as the delete/restore lock pins."""
         path = self._tmpdb()
@@ -24475,8 +24472,10 @@ class TestNbMerge(unittest.TestCase):
 
             orig_tree = s._notebook_tree_dict
             s._notebook_tree_dict = lambda i: (probe(), orig_tree(i))[1]
-            orig_opt = s._optimize_fts
-            s._optimize_fts = lambda: (probe(), orig_opt())
+            orig_insert = s._insert_tree_rows
+            s._insert_tree_rows = lambda *a, **kw: (
+                probe(), orig_insert(*a, **kw)
+            )[1]
 
             merged = s.merge_notebooks(target.id, src_nb)
             self.assertEqual(merged.id, target.id)
