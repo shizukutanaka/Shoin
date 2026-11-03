@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.744"
+VERSION = "0.2.745"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -100,6 +100,12 @@ NB_LIST_LIMIT = 2000  # notebooks per GET /api/notebooks page
 TRASH_LIST_LIMIT = 2000  # trash rows per GET /api/trash page
 
 QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+question)
+# v0.2.745: MMR rebuilds the same 24 folded bigram sets on every query (chunk
+# text is immutable once indexed); the LRU keeps the rebuild cost at one pass
+# per DISTINCT window instead of one per query. ~25KB/entry measured (600-char
+# key + ~250-599 two-char frozenset elements), so 128 entries stay <= ~3.2MB —
+# a fixed bound, not corpus-proportional.
+BIGRAM_CACHE_SIZE = 128
 # v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
 # no element cap, so a ~10MB ask/search body could name millions of ids and the
 # per-id get_source loop burned one SELECT each — an unbounded-CPU vector on a
