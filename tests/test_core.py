@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.742")
+        self.assertEqual(VERSION, "0.2.743")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2776,6 +2776,31 @@ class TestChunk(unittest.TestCase):
             "\u30c8\u3099\u30fb\u031b",
         ):
             self.assertEqual(_match_fold(_match_fold(s)), _match_fold(s))
+
+
+    def test_match_fold_memoizes_per_char_with_identical_output(self) -> None:
+        """v0.2.743: _match_fold memoizes each post-NFKC code point's fold in
+        _MATCH_FOLD_CHAR_CACHE — the transform is deterministic per char, so
+        caching changes only speed, never output. Hot callers (_char_bigrams
+        for MMR, citation grounding) re-fold the same corpus text on every
+        query; a 30k-string equivalence fuzz against the pre-memo code
+        verified identical output."""
+        from shoin.chunk import _MATCH_FOLD_CHAR_CACHE, _match_fold
+
+        text = "caf\u00e9 \u30c7\u30fc\u30bf \u5b66\u7fd2 \u0663\u0664\u0665 \u0153uvre"
+        _MATCH_FOLD_CHAR_CACHE.clear()
+        self.assertEqual(_match_fold(text), "cafe \u3067\u30fc\u305f \u5b66\u7fd2 345 oeuvre")
+        populated = len(_MATCH_FOLD_CHAR_CACHE)
+        self.assertGreater(populated, 0, "first fold must populate the cache")
+        self.assertEqual(_match_fold(text), "cafe \u3067\u30fc\u305f \u5b66\u7fd2 345 oeuvre")
+        self.assertEqual(
+            len(_MATCH_FOLD_CHAR_CACHE), populated,
+            "re-folding the same text must not grow the cache",
+        )
+        # A second distinct text only adds ITS unseen chars.
+        _match_fold("\u65b0\u3057\u3044\u6587\u5b57\u5217\u3067\u3059")
+        self.assertGreater(len(_MATCH_FOLD_CHAR_CACHE), populated)
+        _MATCH_FOLD_CHAR_CACHE.clear()
 
 
     def test_numeric_check_folds_digit_rows(self) -> None:
@@ -19040,7 +19065,7 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
-            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU"},
+            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU", "_MATCH_FOLD_CHAR_CACHE"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
             "store.py": {"MIGRATIONS", "_NB_SETTING_BOUNDS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},

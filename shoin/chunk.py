@@ -610,6 +610,49 @@ def _ascii_fold(term: str) -> str:
     return "".join(out)
 
 
+# v0.2.743: _match_fold is a pure per-code-point transform applied AFTER
+# whole-text NFKC + casefold, and its hot callers (_char_bigrams for MMR,
+# citation grounding, content matching) re-fold the same corpus text on
+# every query — a 600-char window x 24 MMR candidates is ~14k char
+# transforms per retrieve, each costing several Unicode-table lookups.
+# Memoizing the per-char result turns repeats into a dict hit. Output is
+# unchanged because the transform is deterministic per code point, and
+# cache keys are single post-NFKC chars, so growth is bounded by the
+# distinct-character alphabet of the corpus in use ("" means dropped).
+_MATCH_FOLD_CHAR_CACHE: dict[str, str] = {}
+
+
+def _fold_char_uncached(ch: str) -> str:
+    """One post-NFKC char -> its _match_fold spelling ("" = dropped)."""
+    cp = ord(ch)
+    if 0x30A1 <= cp <= 0x30F6:
+        return chr(cp - 0x60)  # katakana → hiragana
+    if unicodedata.category(ch) == "Cf":
+        return ""  # ZWSP / SHY / ZWNJ / WJ / tag characters carry no content
+    if unicodedata.combining(ch):
+        # A mark that survived NFKC could not compose into any base char —
+        # marks that can are consumed by the composition pass above (and
+        # precomposed accents lose theirs in the decomp branch below).
+        # What reaches here is a stray diacritic glued to a non-letter or
+        # stacked behind an already-composed char (é + ◌́): it carries no
+        # glyph, and keeping it split the fold of its neighbors, making
+        # the fold non-idempotent ('é'+◌́ → 'e'+◌́ → 'e') and letting NFD
+        # fragments diverge from their NFC spellings.
+        return ""
+    mapped = _LATIN_SPECIALS.get(ch)
+    if mapped is not None:
+        return mapped
+    if ch.isdecimal():  # every script's Nd row → ASCII digits
+        return chr(ord("0") + unicodedata.decimal(ch))
+    kyu = _KYU_TO_SHIN.get(ch)
+    if kyu is not None:
+        return kyu
+    decomp = unicodedata.normalize("NFD", ch)
+    if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
+        return "".join(c for c in decomp if not unicodedata.combining(c))
+    return ch
+
+
 def _match_fold(text: str) -> str:
     """Canonical spelling for content comparison (v0.2.540).
 
@@ -623,41 +666,17 @@ def _match_fold(text: str) -> str:
     Per character, after NFKC + casefold: katakana → hiragana, format
     characters (ZWSP/SHY/ZWNJ/WJ/tags) dropped, decimal digit rows →
     ASCII digits, kyujitai → shinjitai, Latin specials → ASCII, and
-    combining marks on ASCII bases stripped."""
+    combining marks on ASCII bases stripped.  Each code point's transform
+    is memoized in _MATCH_FOLD_CHAR_CACHE (v0.2.743) — see above."""
+    cache = _MATCH_FOLD_CHAR_CACHE
     out: list[str] = []
     for ch in unicodedata.normalize("NFKC", text).casefold():
-        cp = ord(ch)
-        if 0x30A1 <= cp <= 0x30F6:
-            out.append(chr(cp - 0x60))  # katakana → hiragana
-            continue
-        if unicodedata.category(ch) == "Cf":
-            continue  # ZWSP / SHY / ZWNJ / WJ / tag characters carry no content
-        if unicodedata.combining(ch):
-            # A mark that survived NFKC could not compose into any base char —
-            # marks that can are consumed by the composition pass above (and
-            # precomposed accents lose theirs in the decomp branch below).
-            # What reaches here is a stray diacritic glued to a non-letter or
-            # stacked behind an already-composed char (é + ◌́): it carries no
-            # glyph, and keeping it split the fold of its neighbors, making
-            # the fold non-idempotent ('é'+◌́ → 'e'+◌́ → 'e') and letting NFD
-            # fragments diverge from their NFC spellings.
-            continue
-        mapped = _LATIN_SPECIALS.get(ch)
-        if mapped is not None:
-            out.append(mapped)
-            continue
-        if ch.isdecimal():  # every script's Nd row → ASCII digits
-            out.append(chr(ord("0") + unicodedata.decimal(ch)))
-            continue
-        kyu = _KYU_TO_SHIN.get(ch)
-        if kyu is not None:
-            out.append(kyu)
-            continue
-        decomp = unicodedata.normalize("NFD", ch)
-        if len(decomp) > 1 and decomp[0].isascii() and decomp[0].isalpha():
-            out.append("".join(c for c in decomp if not unicodedata.combining(c)))
-        else:
-            out.append(ch)
+        folded = cache.get(ch)
+        if folded is None:
+            folded = _fold_char_uncached(ch)
+            cache[ch] = folded
+        if folded:
+            out.append(folded)
     return "".join(out)
 
 
