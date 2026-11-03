@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.741")
+        self.assertEqual(VERSION, "0.2.742")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -5985,6 +5985,36 @@ class TestSearch(unittest.TestCase):
         cafe = Hit(4, 1, "café 345 notes", 1.0)
         plain = Hit(5, 1, "cafe ٣٤٥ notes", 0.9)
         self.assertGreater(_sim(cafe, plain), 0.9)
+
+    def test_mmr_folds_each_candidate_once(self) -> None:
+        """v0.2.742: mmr() must fold each candidate's bigram set exactly once.
+
+        Before v0.2.742 every similarity evaluation re-derived both sets from
+        scratch, so a pool of n hits at k selections spent O(k^2 * n)
+        _char_bigrams passes over the same 600 chars (measured ≈65% of ask()'s
+        wall time on a 100-document notebook). The selection result is
+        unchanged; only the fold count drops to n.
+        """
+        from unittest.mock import patch as mock_patch
+
+        from shoin import search as search_mod
+
+        hits = [
+            Hit(i, 1, f"ユニークなテキスト{i}番の内容です。" * 20, 1.0 - i * 0.01)
+            for i in range(1, 13)
+        ]
+        calls = 0
+        real_bigrams = search_mod._char_bigrams
+
+        def counting(text: str) -> set[str]:
+            nonlocal calls
+            calls += 1
+            return real_bigrams(text)
+
+        with mock_patch.object(search_mod, "_char_bigrams", counting):
+            picked = mmr(hits, k=4)
+        self.assertEqual(len(picked), 4)
+        self.assertEqual(calls, len(hits), "each pool member must be folded exactly once")
 
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
@@ -16757,8 +16787,9 @@ _DYNAMIC_COMPILE_CATALOG = {
     "search.py:1105",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
-    # the v0.2.662 synonym-table block).
-    "search.py:1935",
+    # the v0.2.662 synonym-table block, to 1952 by the v0.2.742 mmr
+    # bigram-precompute block).
+    "search.py:1952",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -22419,8 +22450,10 @@ class TestResidualGuards(unittest.TestCase):
             # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
             # constant character class — same static-constant category as
             # the other sites (v0.2.650 suggestion oracle). Both search.py
-            # sites shifted +153 by the v0.2.662 synonym-table block.
-            "search.py": [73, 1935, 1105],
+            # sites shifted +153 by the v0.2.662 synonym-table block;
+            # _CJK_RUN_RE then shifted +17 by the v0.2.742 mmr
+            # bigram-precompute block.
+            "search.py": [73, 1952, 1105],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
