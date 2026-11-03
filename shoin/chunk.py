@@ -373,6 +373,36 @@ def _hard_split(block: str, limit: int) -> list[str]:
     return [p.strip() for p in out if p.strip()]
 
 
+# v0.2.746: _tail() walks its overlap window one character at a time —
+# ~365 chars per chunk on English prose — classifying each char with
+# is_cjk() (bisect over ~100 range bounds) and _is_word_char()
+# (isascii/isalnum): ~1.1µs/char, the second-largest cost of the whole
+# ingest chunker. Both predicates are pure per code point and the corpus
+# alphabet is tiny (English prose repeats a few dozen chars; a Japanese
+# book a few thousand), so classify once per distinct char and serve dict
+# hits afterwards — the same memo pattern as _MATCH_FOLD_CHAR_CACHE
+# (v0.2.743). Class values encode the loop's exact if/elif/else branch:
+# 1 = is_cjk, 2 = _is_word_char, 0 = neither (no char is both — every CJK
+# range starts above ASCII, so the elif's short-circuit never mattered).
+_TAIL_CLASS_CJK = 1
+_TAIL_CLASS_WORD = 2
+_TAIL_CHAR_CLASS: dict[str, int] = {}
+
+
+def _tail_char_class(ch: str) -> int:
+    """_tail()'s per-char branch class, memoized (see _TAIL_CHAR_CLASS)."""
+    cls = _TAIL_CHAR_CLASS.get(ch)
+    if cls is None:
+        if is_cjk(ch):
+            cls = _TAIL_CLASS_CJK
+        elif _is_word_char(ch):
+            cls = _TAIL_CLASS_WORD
+        else:
+            cls = 0
+        _TAIL_CHAR_CLASS[ch] = cls
+    return cls
+
+
 def _tail(text: str, tokens: int) -> str:
     """Return a suffix of *text* containing roughly *tokens* tokens."""
     if tokens <= 0:
@@ -381,8 +411,8 @@ def _tail(text: str, tokens: int) -> str:
     run_len = 0
     run_credited = False  # base 1-token cost of the current run already counted
     for i in range(len(text) - 1, -1, -1):
-        ch = text[i]
-        if is_cjk(ch):
+        cls = _tail_char_class(text[i])
+        if cls == _TAIL_CLASS_CJK:
             if run_len and not run_credited:
                 # An alnum run was interrupted by this CJK character (common in
                 # Japanese text with no space before an ASCII model/section
@@ -397,7 +427,7 @@ def _tail(text: str, tokens: int) -> str:
             acc += 1
             if acc >= tokens:
                 return text[i:].lstrip()
-        elif _is_word_char(ch):
+        elif cls == _TAIL_CLASS_WORD:
             run_len += 1
             # A normal-length word/identifier is only credited once fully
             # scanned (at its left boundary, below) so a short word is never
@@ -478,19 +508,26 @@ def split_text_with_context(
     carried over from a previous chunk for overlap keeps the new chunk's own
     section, since that is where the fresh content lives).
     """
-    pieces: list[tuple[str, str]] = []
+    # v0.2.746: a block that fits chunk_tokens IS the merge loop's piece —
+    # carry its token count instead of estimating the same string twice (the
+    # duplicate was ~half of estimate_tokens() calls on paragraph-dense prose,
+    # ~16k of 36k calls on a 4.6MB Gutenberg text). Hard-split parts are
+    # estimated once here, on the final stripped strings — the same values
+    # the merge loop used to recompute — so chunk boundaries are unchanged.
+    pieces: list[tuple[str, str, int]] = []
     for ctx, block in _context_blocks(text):
-        if estimate_tokens(block) > chunk_tokens:
-            pieces.extend((ctx, p) for p in _hard_split(block, chunk_tokens))
+        block_tokens = estimate_tokens(block)
+        if block_tokens > chunk_tokens:
+            parts = _hard_split(block, chunk_tokens)
+            pieces.extend((ctx, p, estimate_tokens(p)) for p in parts)
         else:
-            pieces.append((ctx, block))
+            pieces.append((ctx, block, block_tokens))
 
     chunks: list[tuple[str, str]] = []
     buf = ""
     buf_ctx = ""
     buf_tokens = 0
-    for ctx, piece in pieces:
-        piece_tokens = estimate_tokens(piece)
+    for ctx, piece, piece_tokens in pieces:
         # Running total rather than estimate_tokens(candidate): same rescans-
         # buf-per-piece stall as _hard_split above. ±1 boundary overestimate is
         # safe (errs toward emitting early).

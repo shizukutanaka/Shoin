@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.745
+## Version History: v0.1.37 → v0.2.746
+
+### v0.2.746 — ingest chunkerの二重トークン推定を解消し、_tailの文字分類をメモ化（分割 3.5倍）
+
+**発見**: v0.2.745監査で残った唯一の測定済み候補、ingest経路をGutenberg実テキスト(pg1342 4.59MB・段落密の英文)でcProfile実測。`split_text_with_context`実時間877ms/1950チャンクの内訳: estimate_tokens計36,383呼出(1.47s、プロファイル時)と_tail 1,949呼出(1.07s)。2つの純粋な重複計算を特定——(1)小ブロック(収まる段落=大半)は`split_text_with_context`で483行目の`estimate_tokens(block)`と493行目の`estimate_tokens(piece)`に**同一文字列オブジェクトが2回**渡っていた(16k/36k呼出≒半分);(2)`_tail`はチャンク毎にoverlap窓~365字を`is_cjk`(bisect約100境界)+`_is_word_char`(isascii/isalnum)で**1文字ずつ**分類(~1.1µs/字、712k字)。
+**修正**: (1)piecesを(ctx, text, tokens)三つ組にし、収まるブロックはブロック時点の推定値をそのまま運ぶ——ハード分割パートは最終strip後文字列で1回だけ推定(=旧コードが493行目で再計算していたのと同じ値)。マージループの`piece_tokens`はタプル由来に。チャンク境界は不変(運ぶ値は旧再計算と同一)。(2)`_TAIL_CHAR_CLASS`+`_tail_char_class`を新設——1=is_cjk/2=_is_word_char/0=neither(全CJKレンジがASCIIより上なので両立なし)を文字ごとに一度だけ計算してdictヒット化(v0.2.743の`_MATCH_FOLD_CHAR_CACHE`と同じ宣言済みキャッシュ・GILアトミック・lock不要の方式)。クラス分岐は旧if/elif/elseと完全同一。
+**効果**: 実測split_text_with_context **876.7→249.9ms(3.5倍)**、1x版152.2→45.4ms、関数呼出10.19M→5.04M。チャンク数(1950)・出力文字数(5,075,040)・全チャンク内容は旧版と完全一致。等価性は旧chunk.py(git HEAD)との直接比較で検証: pg1342 1x/6x + 30乱数合成 + 15-crafted(U+3000端・長ラン41/44/45字・フェンス・結合文字・半角カナ・絵文字)のsplit_text/split_text_with_context/_tail/estimate_tokens全一致。回帰テスト2本追加(ブロック1回推定ピンfail-then-pass: 旧6呼出、新3呼出; _tailキャッシュ不増ピン)。mutable-globals許可リストに`_TAIL_CHAR_CLASS`を宣言。
+**却下**: estimate_tokens内部のregex書き換え(既にC-level 2パスで、語ごとのPython sumが残るが二重呼出解消で呼出数自体が半減するため不要)・_blocksの行単位regex削減(実測0.2s/2.9sで非支配)・add_chunksのSQL+FTSバッチ改善(次サイクル候補、INSERT文の生成自体はbit-identical制約が強い)・_hard_split内部構造の変更(収まるブロックが大半で発火しない)。
 
 ### v0.2.745 — MMRのbigram集合をLRUメモ化し、繰り返しクエリの再構築をゼロに
 
