@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.743")
+        self.assertEqual(VERSION, "0.2.744")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6049,6 +6049,48 @@ class TestSearch(unittest.TestCase):
             picked = mmr(hits, k=1)
         self.assertEqual([h.chunk_id for h in picked], [1])
         self.assertEqual(calls, 0, "k=1 must not fold any candidate text")
+
+    def test_mmr_scores_each_candidate_selected_pair_once(self) -> None:
+        """v0.2.744: mmr() must score each (candidate, selected) pair once.
+
+        Before v0.2.744 every round recomputed max similarity against ALL
+        selected hits, so a pair was re-scored once per remaining round —
+        O(k^2 * n) _jaccard calls (measured 532 per retrieve at pool=24,
+        k=8, 41% of retrieve's wall time). max is associative, so the
+        running-max update is bit-identical; only the call count drops.
+        12 hits at k=4: rounds 1-3 update 11+10+9 = 30 pairs; the old form
+        recomputed 11 + 10*2 + 9*3 = 58.
+        """
+        from unittest.mock import patch as mock_patch
+
+        from shoin import search as search_mod
+
+        hits = [
+            Hit(i, 1, f"ユニークなテキスト{i}番の内容です。" * 20, 1.0 - i * 0.01)
+            for i in range(1, 13)
+        ]
+        calls = 0
+        real_jaccard = search_mod._jaccard
+
+        def counting(ga: set[str], gb: set[str]) -> float:
+            nonlocal calls
+            calls += 1
+            return real_jaccard(ga, gb)
+
+        with mock_patch.object(search_mod, "_jaccard", counting):
+            picked = mmr(hits, k=4)
+        self.assertEqual(len(picked), 4)
+        self.assertEqual(
+            calls, 30,
+            "each (candidate, selected) pair must be scored exactly once",
+        )
+
+        # k=1 has no selected hits to compare against at any point.
+        calls = 0
+        with mock_patch.object(search_mod, "_jaccard", counting):
+            picked = mmr(hits, k=1)
+        self.assertEqual([h.chunk_id for h in picked], [1])
+        self.assertEqual(calls, 0, "k=1 must not score any pair")
 
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
@@ -16822,8 +16864,9 @@ _DYNAMIC_COMPILE_CATALOG = {
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
     # the v0.2.662 synonym-table block, to 1965 by the v0.2.742 mmr
-    # lazy-bigram-fold block; +13 over the eager-precompute draft).
-    "search.py:1965",
+    # lazy-bigram-fold block; +13 over the eager-precompute draft,
+    # to 1986 by the v0.2.744 mmr incremental-similarity block).
+    "search.py:1986",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -22486,8 +22529,9 @@ class TestResidualGuards(unittest.TestCase):
             # the other sites (v0.2.650 suggestion oracle). Both search.py
             # sites shifted +153 by the v0.2.662 synonym-table block;
             # _CJK_RUN_RE then shifted +30 by the v0.2.742 mmr
-            # lazy-bigram-fold block.
-            "search.py": [73, 1965, 1105],
+            # lazy-bigram-fold block, +21 by the v0.2.744 mmr
+            # incremental-similarity block.
+            "search.py": [73, 1986, 1105],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}

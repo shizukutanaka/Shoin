@@ -1652,9 +1652,15 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
 
 
 def _jaccard(ga: set[str], gb: set[str]) -> float:
-    if not ga or not gb:
+    if not ga and not gb:
         return 0.0
-    return len(ga & gb) / len(ga | gb)
+    # v0.2.744: derive the union size from the intersection instead of
+    # computing `ga | gb` as a second set pass — |A ∪ B| = |A| + |B| − |A ∩ B|
+    # is exact integer math, so the float result is bit-identical to the
+    # two-pass form. One-empty cases still yield 0.0 (empty intersection,
+    # denominator = len of the non-empty side); both-empty stays guarded.
+    inter = ga & gb
+    return len(inter) / (len(ga) + len(gb) - len(inter))
 
 
 def _sim(a: Hit, b: Hit) -> float:
@@ -1689,17 +1695,32 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
         return s
 
     selected: list[Hit] = []
+    # v0.2.744: track each pool member's max similarity to the selected set
+    # INCREMENTALLY. max is associative and commutative, so
+    # max(jaccard(c, s1..sr)) == max(running_max, jaccard(c, s_new)) — the
+    # values feeding the argmax are bit-identical to recomputing the whole
+    # max every round, but each (candidate, selected) pair is scored exactly
+    # once instead of once per remaining round: O(k*n) jaccard calls
+    # instead of O(k^2*n/2) — measured 532 -> 140 per retrieve() at
+    # pool=24, k=8, where _jaccard alone was 41% of retrieve()'s time.
+    # Keyed by id() for the same reason as bigrams above; entries are never
+    # read after their hit leaves the pool, so staleness is impossible.
+    redundancy: dict[int, float] = {}
     while pool and len(selected) < k:
         best_idx, best_val = 0, -math.inf
         for i, cand in enumerate(pool):
-            redundancy = max(
-                (_jaccard(fold(cand), fold(s)) for s in selected),
-                default=0.0,
-            )
-            val = lam * cand.score - (1 - lam) * redundancy
+            val = lam * cand.score - (1 - lam) * redundancy.get(id(cand), 0.0)
             if val > best_val:
                 best_idx, best_val = i, val
-        selected.append(pool.pop(best_idx))
+        chosen = pool.pop(best_idx)
+        selected.append(chosen)
+        if pool and len(selected) < k:
+            fs = fold(chosen)
+            for cand in pool:
+                key = id(cand)
+                sim = _jaccard(fold(cand), fs)
+                if sim > redundancy.get(key, 0.0):
+                    redundancy[key] = sim
     return selected
 
 
