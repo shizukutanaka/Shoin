@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.744")
+        self.assertEqual(VERSION, "0.2.745")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -6091,6 +6091,75 @@ class TestSearch(unittest.TestCase):
             picked = mmr(hits, k=1)
         self.assertEqual([h.chunk_id for h in picked], [1])
         self.assertEqual(calls, 0, "k=1 must not score any pair")
+
+    def test_mmr_reuses_bigram_sets_across_calls(self) -> None:
+        """v0.2.745: mmr() must reuse each window's bigram set across calls.
+
+        Chunk text is immutable once indexed, so the same 600-char windows
+        recur on every query; rebuilding ~24 folded sets per retrieve()
+        measured ~3.9ms of retrieve()'s time post-v0.2.744. The bounded LRU
+        (_BIGRAM_CACHE) makes a repeat pool cost zero _char_bigrams
+        computations, and cached sets must not change the selection.
+        """
+        from unittest.mock import patch as mock_patch
+
+        from shoin import search as search_mod
+
+        search_mod._BIGRAM_CACHE.clear()
+        self.addCleanup(search_mod._BIGRAM_CACHE.clear)
+        hits = [
+            Hit(i, 1, f"別テスト専用の一意な文章{i}の内容です。" * 30, 1.0 - i * 0.01)
+            for i in range(1, 13)
+        ]
+        calls = 0
+        real_bigrams = search_mod._char_bigrams
+
+        def counting(text: str) -> set[str]:
+            nonlocal calls
+            calls += 1
+            return real_bigrams(text)
+
+        with mock_patch.object(search_mod, "_char_bigrams", counting):
+            first = mmr(hits, k=4)
+            second = mmr(hits, k=4)
+        self.assertEqual(len(first), 4)
+        self.assertEqual(len(second), 4)
+        self.assertEqual(
+            calls, len(hits),
+            "first pool computes once per window; the repeat pool is all hits",
+        )
+        self.assertEqual(
+            [h.chunk_id for h in first], [h.chunk_id for h in second],
+            "cached bigram sets must not change selection",
+        )
+
+    def test_bigram_cache_stays_bounded(self) -> None:
+        """The LRU must evict: memory stays a fixed bound, never grows with
+        the corpus (the v0.2.743 rejection of an unbounded text-level cache
+        is why the bound exists at all)."""
+        from shoin import config
+        from shoin import search as search_mod
+
+        search_mod._BIGRAM_CACHE.clear()
+        self.addCleanup(search_mod._BIGRAM_CACHE.clear)
+        for i in range(config.BIGRAM_CACHE_SIZE + 5):
+            search_mod._char_bigrams_cached(f"境界値確認用の一意テキスト{i}")
+        self.assertLessEqual(len(search_mod._BIGRAM_CACHE), config.BIGRAM_CACHE_SIZE)
+
+    def test_bigram_cache_covers_max_mmr_pool(self) -> None:
+        """v0.2.745 review fix: the LRU must hold one full MMR pool at the
+        /search k cap, or a repeated max-k query scans 150 distinct windows
+        through a smaller cache — every entry evicted before reuse, zero
+        hits plus eviction overhead on every call."""
+        from shoin import config
+
+        max_pool = max(config.SEARCH_K_MAX * 3, 12)
+        self.assertGreaterEqual(
+            config.BIGRAM_CACHE_SIZE,
+            max_pool,
+            "BIGRAM_CACHE_SIZE must cover the largest pool retrieve() can "
+            "hand to mmr() (max(k*3, 12) at SEARCH_K_MAX) or the LRU thrashes",
+        )
 
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
@@ -16858,15 +16927,17 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:73",
-    # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105).
-    "search.py:1105",
+    "search.py:76",
+    # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105);
+    # +3 by the v0.2.745 search.py import block (threading/OrderedDict/AbstractSet).
+    "search.py:1108",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
     # the v0.2.662 synonym-table block, to 1965 by the v0.2.742 mmr
     # lazy-bigram-fold block; +13 over the eager-precompute draft,
-    # to 1986 by the v0.2.744 mmr incremental-similarity block).
-    "search.py:1986",
+    # to 1986 by the v0.2.744 mmr incremental-similarity block, to 2019
+    # by the v0.2.745 import block + bigram-LRU cache block).
+    "search.py:2019",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -19109,6 +19180,10 @@ class TestResidualGuards(unittest.TestCase):
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
             "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU", "_MATCH_FOLD_CHAR_CACHE"},
+            # v0.2.745: bounded MMR bigram-set LRU — same declared-cache
+            # category as qa._QUERY_VEC_CACHE (immutable values, lock-
+            # serialized check-and-evict for ThreadingHTTPServer).
+            "search.py": {"_BIGRAM_CACHE"},
             "server.py": {"_STRINGS", "_EXPORT_MIME", "_EXPORT_EXT"},
             "store.py": {"MIGRATIONS", "_NB_SETTING_BOUNDS"},
             "studio.py": {"_INSTRUCTIONS", "_STRINGS"},
@@ -19791,7 +19866,7 @@ class TestResidualGuards(unittest.TestCase):
         # v0.2.662: the synonym-table block shifted the MATCH site
         # +153 lines (702 -> 855).
         self.assertEqual(
-            sites, ["search.py:855"],
+            sites, ["search.py:858"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -21753,6 +21828,9 @@ class TestResidualGuards(unittest.TestCase):
             # fields) — monotonic durations, not clock reads.
             "pipeline.py": ["time.monotonic", "time.monotonic"],
             "qa.py": ["threading.Lock", "time.monotonic", "time.monotonic"],
+            # v0.2.745: the bigram-LRU check-and-evict is serialized — same
+            # bounded-cache pattern as qa.py's _QUERY_VEC_LOCK.
+            "search.py": ["threading.Lock"],
             # v0.2.691: the in-flight request cap — a bounded semaphore is
             # the concurrency primitive, not a new thread source.
             "server.py": [
@@ -22531,7 +22609,7 @@ class TestResidualGuards(unittest.TestCase):
             # _CJK_RUN_RE then shifted +30 by the v0.2.742 mmr
             # lazy-bigram-fold block, +21 by the v0.2.744 mmr
             # incremental-similarity block.
-            "search.py": [73, 1986, 1105],
+            "search.py": [76, 2019, 1108],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -22580,7 +22658,7 @@ class TestResidualGuards(unittest.TestCase):
                             )
         # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105).
         self.assertEqual(
-            escaped_interps, ["search.py:1105"],
+            escaped_interps, ["search.py:1108"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

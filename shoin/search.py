@@ -20,8 +20,11 @@ import operator
 import os
 import re
 import sys
+import threading
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from .chunk import (
@@ -33,7 +36,7 @@ from .chunk import (
     is_cjk,
 )
 from .citation import _ERAS, _KANJI_DIGIT, _numbers_expanded
-from .config import TOP_K
+from .config import BIGRAM_CACHE_SIZE, TOP_K
 from .store import Store
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -1445,6 +1448,35 @@ def _char_bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
+# v0.2.745: the MMR pool is redrawn from the same stable chunk set on every
+# query, so retrieve() rebuilt the same ~24 folded bigram sets per call —
+# ~3.9ms of retrieve()'s time at pool=24 on a 100-document notebook, measured
+# post-v0.2.744 (the _match_fold char memo made each build cheaper, not free:
+# 600-char fold + ~600 slice/insert per candidate). Memoize the set per
+# 600-char window. Chunk text is immutable once indexed, so entries never go
+# stale; the LRU bound (BIGRAM_CACHE_SIZE, ~25KB/entry measured) keeps memory
+# fixed rather than corpus-proportional. ThreadingHTTPServer serves asks
+# concurrently, so check-and-evict is serialized like qa._QUERY_VEC_CACHE.
+_BIGRAM_CACHE: OrderedDict[str, frozenset[str]] = OrderedDict()
+_BIGRAM_CACHE_LOCK = threading.Lock()
+
+
+def _char_bigrams_cached(text: str) -> frozenset[str]:
+    """_char_bigrams with a bounded LRU — identical sets, computed once."""
+    with _BIGRAM_CACHE_LOCK:
+        cached = _BIGRAM_CACHE.get(text)
+        if cached is not None:
+            _BIGRAM_CACHE.move_to_end(text)
+            return cached
+    result = frozenset(_char_bigrams(text))
+    with _BIGRAM_CACHE_LOCK:
+        _BIGRAM_CACHE[text] = result
+        _BIGRAM_CACHE.move_to_end(text)
+        while len(_BIGRAM_CACHE) > BIGRAM_CACHE_SIZE:
+            _BIGRAM_CACHE.popitem(last=False)
+    return result
+
+
 def _norm_query_terms(query: str) -> list[list[str]]:
     """Query terms as variant GROUPS, NFKC-folded and lower-cased.
 
@@ -1651,7 +1683,7 @@ def rerank(query: str, hits: list[Hit], weight: float = 0.3) -> list[Hit]:
     return sorted(hits, key=lambda h: h.score, reverse=True)
 
 
-def _jaccard(ga: set[str], gb: set[str]) -> float:
+def _jaccard(ga: AbstractSet[str], gb: AbstractSet[str]) -> float:
     if not ga and not gb:
         return 0.0
     # v0.2.744: derive the union size from the intersection instead of
@@ -1684,13 +1716,14 @@ def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
     # Keyed by id(): pool and selected hold the same objects for the whole
     # call (pool.pop only moves an object between the two lists, never drops
     # it), so identity stays valid and unique until return.
-    bigrams: dict[int, set[str]] = {}
+    bigrams: dict[int, frozenset[str]] = {}
 
-    def fold(h: Hit) -> set[str]:
+    def fold(h: Hit) -> frozenset[str]:
         key = id(h)
         s = bigrams.get(key)
         if s is None:
-            s = _char_bigrams(h.text[:600])
+            # v0.2.745: the LRU makes repeat queries over the same chunks free.
+            s = _char_bigrams_cached(h.text[:600])
             bigrams[key] = s
         return s
 
