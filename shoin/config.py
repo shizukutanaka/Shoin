@@ -103,9 +103,13 @@ QUERY_VEC_CACHE_SIZE = 64  # LRU entries for question embeddings (per model+ques
 # v0.2.745: MMR rebuilds the same 24 folded bigram sets on every query (chunk
 # text is immutable once indexed); the LRU keeps the rebuild cost at one pass
 # per DISTINCT window instead of one per query. ~25KB/entry measured (600-char
-# key + ~250-599 two-char frozenset elements), so 128 entries stay <= ~3.2MB —
-# a fixed bound, not corpus-proportional.
-BIGRAM_CACHE_SIZE = 128
+# key + ~250-599 two-char frozenset elements). Capacity must cover one full
+# MMR pool — max(k*3, 12) at the /search k cap (SEARCH_K_MAX=50) is 150 —
+# or a repeated max-k query thrashes the LRU (sequential scan larger than
+# capacity evicts every entry before its next use: zero hits plus eviction
+# overhead). 160 covers the pool with headroom, <= ~4MB, a fixed bound,
+# not corpus-proportional.
+BIGRAM_CACHE_SIZE = 160
 # v0.2.688: bound on a request's source_ids scope list. _optional_id_list has
 # no element cap, so a ~10MB ask/search body could name millions of ids and the
 # per-id get_source loop burned one SELECT each — an unbounded-CPU vector on a

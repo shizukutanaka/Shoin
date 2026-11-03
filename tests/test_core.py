@@ -6146,6 +6146,21 @@ class TestSearch(unittest.TestCase):
             search_mod._char_bigrams_cached(f"境界値確認用の一意テキスト{i}")
         self.assertLessEqual(len(search_mod._BIGRAM_CACHE), config.BIGRAM_CACHE_SIZE)
 
+    def test_bigram_cache_covers_max_mmr_pool(self) -> None:
+        """v0.2.745 review fix: the LRU must hold one full MMR pool at the
+        /search k cap, or a repeated max-k query scans 150 distinct windows
+        through a smaller cache — every entry evicted before reuse, zero
+        hits plus eviction overhead on every call."""
+        from shoin import config
+
+        max_pool = max(config.SEARCH_K_MAX * 3, 12)
+        self.assertGreaterEqual(
+            config.BIGRAM_CACHE_SIZE,
+            max_pool,
+            "BIGRAM_CACHE_SIZE must cover the largest pool retrieve() can "
+            "hand to mmr() (max(k*3, 12) at SEARCH_K_MAX) or the LRU thrashes",
+        )
+
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
 
