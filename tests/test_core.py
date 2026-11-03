@@ -6016,6 +6016,15 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(len(picked), 4)
         self.assertEqual(calls, len(hits), "each pool member must be folded exactly once")
 
+        # k=1 never compares candidates (the only round has no selected
+        # hits, so no similarity is computed) — the fold must stay lazy and
+        # not normalize any candidate text (Devin Review on #367).
+        calls = 0
+        with mock_patch.object(search_mod, "_char_bigrams", counting):
+            picked = mmr(hits, k=1)
+        self.assertEqual([h.chunk_id for h in picked], [1])
+        self.assertEqual(calls, 0, "k=1 must not fold any candidate text")
+
     def test_fallback_no_row_cap(self) -> None:
         """The LIKE fallback must not silently truncate to the first N chunks.
 
@@ -16787,9 +16796,9 @@ _DYNAMIC_COMPILE_CATALOG = {
     "search.py:1105",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
-    # the v0.2.662 synonym-table block, to 1952 by the v0.2.742 mmr
-    # bigram-precompute block).
-    "search.py:1952",
+    # the v0.2.662 synonym-table block, to 1965 by the v0.2.742 mmr
+    # lazy-bigram-fold block; +13 over the eager-precompute draft).
+    "search.py:1965",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -22451,9 +22460,9 @@ class TestResidualGuards(unittest.TestCase):
             # constant character class — same static-constant category as
             # the other sites (v0.2.650 suggestion oracle). Both search.py
             # sites shifted +153 by the v0.2.662 synonym-table block;
-            # _CJK_RUN_RE then shifted +17 by the v0.2.742 mmr
-            # bigram-precompute block.
-            "search.py": [73, 1952, 1105],
+            # _CJK_RUN_RE then shifted +30 by the v0.2.742 mmr
+            # lazy-bigram-fold block.
+            "search.py": [73, 1965, 1105],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}

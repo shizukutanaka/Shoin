@@ -1664,23 +1664,36 @@ def _sim(a: Hit, b: Hit) -> float:
 def mmr(hits: list[Hit], k: int, lam: float = 0.7) -> list[Hit]:
     """REQ-106 — Maximal Marginal Relevance: relevance vs. redundancy trade-off."""
     pool = list(hits)
-    # v0.2.742: fold each candidate's char-bigram set ONCE before the loop.
-    # The selection loop compares every pool member against every already
-    # selected hit on every round — O(k^2 * n) similarity evaluations — and
-    # each one used to re-derive both sets from scratch via _match_fold
-    # (per-character Unicode normalization over 600 chars), so a 24-hit pool
-    # at k=8 spent ~1,064 fold passes (measured ≈65% of ask()'s wall time on
-    # a 100-document BM25-only notebook) recomputing sets that never change.
+    # v0.2.742: fold each candidate's char-bigram set AT MOST once, and only
+    # when a similarity is actually needed. The selection loop compares every
+    # pool member against every already-selected hit on every round —
+    # O(k^2 * n) similarity evaluations — and each one used to re-derive both
+    # sets from scratch via _match_fold (per-character Unicode normalization
+    # over 600 chars), so a 24-hit pool at k=8 spent ~1,064 fold passes
+    # (measured ≈65% of ask()'s wall time on a 100-document BM25-only
+    # notebook) recomputing sets that never change. Laziness keeps the k=1
+    # path at zero folds: the first round has no selected hits, so no
+    # similarity is ever computed (an eager precompute would fold all n
+    # candidates for a search that never looks at a second one).
     # Keyed by id(): pool and selected hold the same objects for the whole
     # call (pool.pop only moves an object between the two lists, never drops
     # it), so identity stays valid and unique until return.
-    bigrams = {id(h): _char_bigrams(h.text[:600]) for h in pool}
+    bigrams: dict[int, set[str]] = {}
+
+    def fold(h: Hit) -> set[str]:
+        key = id(h)
+        s = bigrams.get(key)
+        if s is None:
+            s = _char_bigrams(h.text[:600])
+            bigrams[key] = s
+        return s
+
     selected: list[Hit] = []
     while pool and len(selected) < k:
         best_idx, best_val = 0, -math.inf
         for i, cand in enumerate(pool):
             redundancy = max(
-                (_jaccard(bigrams[id(cand)], bigrams[id(s)]) for s in selected),
+                (_jaccard(fold(cand), fold(s)) for s in selected),
                 default=0.0,
             )
             val = lam * cand.score - (1 - lam) * redundancy
