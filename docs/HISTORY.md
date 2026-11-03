@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.742
+## Version History: v0.1.37 → v0.2.743
+
+### v0.2.743 — _match_foldの文字変換をコードポイント単位でメモ化
+
+**発見**: v0.2.742でMMRのfold**回数**は最小化したが、1回あたりのコスト自体が残っていた。`_match_fold`は全文NFKC+casefold後に**文字ごと**category/combining/isdecimal/NFD normalize等のUnicodeテーブル照会を実行し、MMRが600字窓×24候補=約14,400字分を毎retrieveで変換——100文書BM25-onlyノートブックでretrieve 20.9ms/回のうちmmr()が16.1ms(77%)。fold回数は既に最小(24回/回)のため、真のボトルネックはfoldの**単価**だった。
+**修正**: `_match_fold`の文字ごと変換を`_fold_char_uncached`へ純粋関数として分離し、結果を`_MATCH_FOLD_CHAR_CACHE`(コードポイント→変換結果のdict)でメモ化。キャッシュキーはNFKC+casefold後の単一コードポイントで変換は決定的なため、出力は完全に同一(箇条書き分岐の順序・ドロップ条件・空文字セマンティクスを逐語保持)。`""`はドロップを表し、`cache.get`のNone判定で空文字との衝突を回避。成長はコーパスの文字種に比例する上限付き(dict.getのヒットで以降の照会を全スキップ)。
+**効果**: 実測retrieve 20.9ms→13.6ms/回(1.5倍)、mmr() 16.1ms→7.2ms/回(2.2倍・関数呼出総数2,328,341→668,661=3.5分の1)。効果は呼出元全体に及ぶ: MMRの`_char_bigrams`に加え、引用grounding(`verify_grounding`等の_match_fold経由の全文比較)も同じキャッシュを共有して高速化。等価性は旧実装(HEAD由来の原文)との30,000文字列ファズ(仮名全半角・CJK・ラテン特殊字・アラビア数字・結合文字・書式文字・合字を混合)で不一致ゼロを確認済み。
+**却下**: テキスト全体のfoldキャッシュ(キーがチャンク本文でメモリがコーパスサイズに比例、文字種キャッシュより粗い)・600字窓の短縮(MMRの多様性信号の質を下げる挙動変更)・`_match_fold`のC拡張/書き換え(即金性なくリスクのみ増加)。
 
 ### v0.2.742 — MMRの文字bigram集合を候補ごとに1回だけ畳み込む(ask経路の65%を解消)
 
