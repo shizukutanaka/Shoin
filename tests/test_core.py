@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.745")
+        self.assertEqual(VERSION, "0.2.746")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2802,6 +2802,52 @@ class TestChunk(unittest.TestCase):
         self.assertGreater(len(_MATCH_FOLD_CHAR_CACHE), populated)
         _MATCH_FOLD_CHAR_CACHE.clear()
 
+
+    def test_split_text_with_context_estimates_each_block_once(self) -> None:
+        """v0.2.746: a block that fits chunk_tokens IS the merge loop's piece —
+        it must be token-estimated exactly once, not re-estimated as the piece
+        (the duplicate was ~half of estimate_tokens() calls on paragraph-dense
+        prose; chunk boundaries are unchanged because the carried count equals
+        the old recompute)."""
+        from unittest.mock import patch
+
+        import shoin.chunk as chunk_mod
+
+        text = "alpha beta gamma.\n\ndelta epsilon zeta.\n\neta theta iota."
+        with patch.object(
+            chunk_mod, "estimate_tokens", wraps=chunk_mod.estimate_tokens
+        ) as m:
+            chunks = chunk_mod.split_text_with_context(text)
+        self.assertEqual(m.call_count, 3, f"one estimate per block, got {m.call_count}")
+        self.assertEqual(len(chunks), 1)
+
+    def test_tail_char_class_memoizes_with_identical_results(self) -> None:
+        """v0.2.746: _tail()'s per-char is_cjk/_is_word_char classification is
+        memoized in _TAIL_CHAR_CLASS (same pattern as _MATCH_FOLD_CHAR_CACHE,
+        v0.2.743) — both predicates are pure per code point, so cached classes
+        return identical branch decisions and _tail() returns identical
+        suffixes; only the per-char cost changes. Re-running the same windows
+        must not grow the cache."""
+        from shoin.chunk import _TAIL_CHAR_CLASS, _tail
+
+        samples = [
+            "alpha beta gamma delta",
+            "書院のテストデータです",
+            "café résumé naïve",
+            "ﾊﾝｶｸｶﾅと全角ＡＢＣ",
+            "a" * 100 + "bcdef" * 20,
+        ]
+        _TAIL_CHAR_CLASS.clear()
+        first = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
+        populated = len(_TAIL_CHAR_CLASS)
+        self.assertGreater(populated, 0, "first pass must populate the cache")
+        second = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
+        self.assertEqual(first, second)
+        self.assertEqual(
+            len(_TAIL_CHAR_CLASS), populated,
+            "repeat windows must not grow the cache",
+        )
+        _TAIL_CHAR_CLASS.clear()
 
     def test_numeric_check_folds_digit_rows(self) -> None:
         """v0.2.541: _NUM_TOKEN_RE's \\d is Unicode-wide, so '٣٤٥'
@@ -19179,7 +19225,11 @@ class TestResidualGuards(unittest.TestCase):
             "export.py": {"_STRINGS", "_BIB_ESC", "_RIS_TYPE"},
             "ingest.py": {"_EXT_KIND"},
             "qa.py": {"_STRINGS", "_QUERY_VEC_CACHE"},
-            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU", "_MATCH_FOLD_CHAR_CACHE"},
+            # v0.2.746: _TAIL_CHAR_CLASS — _tail()'s per-char branch-class
+            # memo, same declared-cache category as _MATCH_FOLD_CHAR_CACHE
+            # (immutable int values, GIL-atomic dict, no lock needed).
+            "chunk.py": {"_LATIN_SPECIALS", "_SHIN_TO_KYU", "_MATCH_FOLD_CHAR_CACHE",
+                         "_TAIL_CHAR_CLASS"},
             # v0.2.745: bounded MMR bigram-set LRU — same declared-cache
             # category as qa._QUERY_VEC_CACHE (immutable values, lock-
             # serialized check-and-evict for ThreadingHTTPServer).
