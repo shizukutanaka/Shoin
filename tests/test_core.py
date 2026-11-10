@@ -21343,10 +21343,20 @@ class TestResidualGuards(unittest.TestCase):
                 self.closed = True
 
         class _BoomCtx:
+            # Python 3.11's HTTPSConnection.__init__ reads verify_mode /
+            # check_hostname off the context at construction time (3.12+
+            # defers it); the fakes must carry both or construction itself
+            # raises AttributeError before the handshake is ever reached.
+            verify_mode = ssl.CERT_NONE
+            check_hostname = False
+
             def wrap_socket(self, sock: object, server_hostname: str) -> object:
                 raise ssl.SSLError("handshake failed")
 
         class _GoodCtx:
+            verify_mode = ssl.CERT_NONE
+            check_hostname = False
+
             def wrap_socket(self, sock: object, server_hostname: str) -> object:
                 return object()  # the SSLSocket taking ownership
 
