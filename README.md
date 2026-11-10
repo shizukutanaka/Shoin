@@ -25,7 +25,7 @@ shoin serve              # 起動したら http://localhost:7440 をブラウザ
 `pip install` せずにソースツリーから直接動かす場合は `python -m shoin serve` も使えます(v0.2.459 以降、両者は同一エントリに委譲)。
 
 ```bash
-# 単一ファイル .pyz (インストール不要・Python 3.11+ のみ必要, v0.2.668)
+# 単一ファイル .pyz (インストール不要・Python 3.11+ のみ必要, v0.2.746)
 python3 scripts/build_pyz.py        # dist/shoin.pyz を生成
 python3 dist/shoin.pyz serve        # 全機能が1ファイルで動く
 ```
@@ -174,6 +174,15 @@ git config core.hooksPath .githooks                    # push前に自動実行(
 `.githooks/pre-push` を有効化すると push 前に自動で走り、失敗すれば push を止める
 (緊急時は `git push --no-verify`)。GitHub Actions の権限が無い環境でも
 「landする前に自動検証される」という要件をこれで満たす — 詳細は `ci/README.md`。
+
+### バージョンとリリース
+
+- バージョンの正本 (source of truth) は `pyproject.toml` の `project.version` で、
+  現在のバージョンは **v0.2.746** です。`shoin.config.VERSION` と `CLAUDE.md` の
+  `Current version` も同じ値を指します (テスト `test_version_markers_agree` が固定)。
+- リリースタグは `v<pyproject.toml のバージョン>` (例: `v0.2.746`) とします。
+- タグはリリース時に切ります。まだタグが切られていない版が最新のことがあるため、
+  過去のタグは現在のバージョンを示しません。
 
 ## Support / 商用サポート
 
