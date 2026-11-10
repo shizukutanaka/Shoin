@@ -178,8 +178,7 @@ git config core.hooksPath .githooks                    # push前に自動実行(
 ## Support / 商用サポート
 
 Shoin is MIT-licensed and free forever, with no feature gating.
-Paid services: 導入支援・カスタマイズ開発・優先サポート・研修/ワークショップ.
-Request support through the [commercial support issue template](https://github.com/shizukutanaka/Shoin/issues/new?template=commercial-support.yml).
+Support development via [GitHub Sponsors](https://github.com/sponsors/shizukutanaka).
 Do not paste document contents or confidential company information into public issues.
 
 ## License

@@ -30,7 +30,7 @@ classifiers = [
 Homepage = "https://github.com/shizukutanaka/Shoin"
 Repository = "https://github.com/shizukutanaka/Shoin"
 Issues = "https://github.com/shizukutanaka/Shoin/issues"
-Funding = "https://github.com/shizukutanaka/Shoin/issues/new?template=commercial-support.yml"
+Funding = "https://github.com/sponsors/shizukutanaka"
 
 [tool.setuptools.packages.find]
 include = ["shoin*"]

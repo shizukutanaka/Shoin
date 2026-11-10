@@ -17629,35 +17629,24 @@ class TestResidualGuards(unittest.TestCase):
                 f"{f.name} not covered by package-data globs {globs}",
             )
 
-    def test_funding_links_resolve_to_shipped_template(self) -> None:
-        """Keep the custom funding route pointed at a shipped issue template."""
+    def test_funding_uses_github_sponsors_only(self) -> None:
+        """Project policy (2026-11-10): the software is free; support is
+        accepted only through GitHub Sponsors — no custom funding links."""
         import re
         import tomllib
-        from urllib.parse import parse_qs, urlsplit
 
         root = Path(__file__).resolve().parent.parent
         funding_text = (root / ".github" / "FUNDING.yml").read_text(encoding="utf-8")
-        self.assertNotRegex(funding_text, r"(?m)^\s*github\s*:")
-        custom_lines = [
-            line.strip() for line in funding_text.splitlines()
-            if line.strip().startswith("custom:")
-        ]
-        self.assertEqual(len(custom_lines), 1)
-        custom_urls = re.findall(r"""["'](https?://[^"']+)["']""", custom_lines[0])
-        self.assertEqual(len(custom_urls), 1)
-
-        template_dir = root / ".github" / "ISSUE_TEMPLATE"
-        for url in custom_urls:
-            template_names = parse_qs(urlsplit(url).query).get("template", [])
-            self.assertTrue(template_names, f"funding URL has no template parameter: {url}")
-            for template_name in template_names:
-                self.assertTrue(
-                    (template_dir / template_name).is_file(),
-                    f"funding URL template is not shipped: {template_name}",
-                )
+        self.assertRegex(
+            funding_text, r"(?m)^\s*github\s*:\s*\[?\"?shizukutanaka\"?\]?\s*$"
+        )
+        self.assertNotRegex(funding_text, r"(?m)^\s*custom\s*:")
 
         config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(config["project"]["urls"]["Funding"], custom_urls[0])
+        self.assertEqual(
+            config["project"]["urls"]["Funding"],
+            "https://github.com/sponsors/shizukutanaka",
+        )
 
     def test_every_shoin_env_var_is_documented_in_readme(self) -> None:
         """v0.2.294+: every SHOIN_* key read by code must appear in README.md —
