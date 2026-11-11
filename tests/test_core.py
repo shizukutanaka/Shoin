@@ -17632,7 +17632,6 @@ class TestResidualGuards(unittest.TestCase):
     def test_funding_uses_github_sponsors_only(self) -> None:
         """Project policy (2026-11-10): the software is free; support is
         accepted only through GitHub Sponsors — no custom funding links."""
-        import re
         import tomllib
 
         root = Path(__file__).resolve().parent.parent
