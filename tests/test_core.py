@@ -17631,7 +17631,10 @@ class TestResidualGuards(unittest.TestCase):
 
     def test_funding_uses_github_sponsors_only(self) -> None:
         """Project policy (2026-11-10): the software is free; support is
-        accepted only through GitHub Sponsors — no custom funding links."""
+        accepted only through GitHub Sponsors — no custom funding links.
+        Display policy (2026-11-13): the FUNDING.yml entry stays as the
+        Sponsors entry point, but the README must not solicit donations
+        on the repository page itself."""
         import tomllib
 
         root = Path(__file__).resolve().parent.parent
@@ -17646,6 +17649,10 @@ class TestResidualGuards(unittest.TestCase):
             config["project"]["urls"]["Funding"],
             "https://github.com/sponsors/shizukutanaka",
         )
+
+        readme_text = (root / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("https://github.com/sponsors/shizukutanaka", readme_text)
+        self.assertNotIn("Support development via", readme_text)
 
     def test_every_shoin_env_var_is_documented_in_readme(self) -> None:
         """v0.2.294+: every SHOIN_* key read by code must appear in README.md —
