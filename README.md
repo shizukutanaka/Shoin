@@ -187,7 +187,6 @@ git config core.hooksPath .githooks                    # push前に自動実行(
 ## Support / 商用サポート
 
 Shoin is MIT-licensed and free forever, with no feature gating.
-Support development via [GitHub Sponsors](https://github.com/sponsors/shizukutanaka).
 Do not paste document contents or confidential company information into public issues.
 
 ## License
