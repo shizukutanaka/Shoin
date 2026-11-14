@@ -26,7 +26,8 @@ shoin serve              # 起動したら http://localhost:7440 をブラウザ
 
 ```bash
 # 単一ファイル .pyz (インストール不要・Python 3.11+ のみ必要)
-# ビルド済みの .pyz は配布していないため、現行ソース (v0.2.746) から生成する
+# ビルド済みは GitHub Releases (v0.2.746) に shoin.pyz として添付している
+# ソースから生成する場合は:
 python3 scripts/build_pyz.py        # dist/shoin.pyz を生成
 python3 dist/shoin.pyz serve        # 全機能が1ファイルで動く
 ```
@@ -182,10 +183,10 @@ git config core.hooksPath .githooks                    # push前に自動実行(
   現在のバージョンは **v0.2.746** です。`shoin.config.VERSION` と `CLAUDE.md` の
   `Current version` も同じ値を指します (テスト `test_version_markers_agree` が固定)。
 - リリースタグは `v<pyproject.toml のバージョン>` (例: `v0.2.746`) とします。
-- タグはリリース時に切ります。現時点で切られているタグは `v0.2.474` のみで、
-  現在のバージョン (v0.2.746) にはタグが無く、GitHub Releases にもビルド済みの
-  配布物は公開していません。過去のタグは現在のバージョンを示しません —
-  最新版はソースから入れてください (Installation 参照)。
+- タグはリリース時に切ります。現在のバージョン (v0.2.746) にはタグを切り、
+  GitHub Releases にビルド済みの shoin.pyz を公開しています。過去のタグ
+  (`v0.2.474` 等) は現在のバージョンを示しません — 最新版は Release の
+  shoin.pyz か、ソースから入れてください (Installation 参照)。
 
 ## Support / 商用サポート
 
