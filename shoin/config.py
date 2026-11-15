@@ -420,3 +420,16 @@ def log_json_enabled() -> bool:
     stderr — the machine-readable observability half that complements
     SHOIN_DEBUG's human-readable diagnostics. Default OFF (stderr quiet)."""
     return _get("SHOIN_LOG_JSON", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def export_credit_enabled() -> bool:
+    """Attribution line on human-readable exports (SHOIN_EXPORT_CREDIT).
+
+    Default ON: Markdown exports gain a one-line footer and BibTeX exports
+    a one-line `%` comment naming Shoin and its repository, so a shared
+    export still says where it came from. The line is plain text in the
+    output (delete it and nothing changes), and SHOIN_EXPORT_CREDIT=0
+    (or false/no/off) turns it off entirely. Machine-readable formats
+    (the JSON tree export, RIS) never carry it."""
+    return _get("SHOIN_EXPORT_CREDIT", "1").strip().casefold() not in (
+        "0", "false", "no", "off")

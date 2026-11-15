@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from .citation import COVERAGE_LOW, found_bits
-from .config import ui_lang
+from .config import export_credit_enabled, ui_lang
 from .store import Source, Store
 
 _STRINGS: dict[str, dict[str, str]] = {
@@ -37,7 +37,19 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_degenerate": {"ja": "⚠繰り返し生成の疑い", "en": "⚠ possible generation loop"},
     "status_contradict": {"ja": "⚠前後の記述が矛盾", "en": "⚠ contradictory statements"},
     "status_coverage_low": {"ja": "⚠引用被覆 低", "en": "⚠ low citation coverage"},
+    "export_credit": {"ja": "Shoinでエクスポート", "en": "Exported with Shoin"},
 }
+
+_REPO_URL = "https://github.com/shizukutanaka/Shoin"
+
+
+def _credit_line() -> str:
+    """One modest attribution line for human-readable exports.
+
+    Plain text in the output: deleting it changes nothing, and
+    SHOIN_EXPORT_CREDIT=0 suppresses it (see config.export_credit_enabled).
+    """
+    return f"{_t('export_credit')} — {_REPO_URL}"
 
 
 def _t(key: str) -> str:
@@ -267,6 +279,13 @@ def _export_markdown(store: Store, notebook_id: int) -> str:
                     parts.append(f"*{status}*")
                 parts.append("")
 
+    if export_credit_enabled():
+        # Modest footer after the last section: a shared export still
+        # names the tool that made it. One plain line — delete it and
+        # the document is unchanged in every other respect.
+        parts.append("---")
+        parts.append(f"*{_credit_line()}*")
+
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -363,7 +382,13 @@ def _export_bibtex(store: Store, notebook_id: int) -> str:
             f"  note = {{Shoin source, added {date}}}\n"
             "}"
         )
-    return "\n\n".join(entries) + ("\n" if entries else "")
+    body = "\n\n".join(entries) + ("\n" if entries else "")
+    if entries and export_credit_enabled():
+        # A `%` comment header: BibTeX ignores text outside entries and
+        # reference managers treat `%` lines as comments, so the entries
+        # below stay byte-identical. Delete the line to remove it.
+        return f"% {_credit_line()}\n\n" + body
+    return body
 
 
 # RIS reference type per Shoin source kind. Shoin is primarily a URL-ingesting
