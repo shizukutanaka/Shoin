@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.746")
+        self.assertEqual(VERSION, "0.2.747")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2539,6 +2539,32 @@ class TestChunk(unittest.TestCase):
         for q in ("2025", "२०२५"):
             hits = bm25_search(s, nb.id, q, 10)
             self.assertTrue(any("२०२५" in h.text for h in hits), q)
+
+    def test_like_cap_keeps_densest_rows_for_needle_rich_query(self) -> None:
+        """v0.2.747: the LIKE fallback caps its candidate pool at
+        max(k*10, 2000) rows ordered by the SQL needle score, so the cap
+        must keep the DENSEST rows rather than the first ones inserted.
+        An era-year query (令和6年) bridges to ~70 needles (2024 plus every
+        digit-script spelling), making it the shape that exercises this
+        ordering. With more matching chunks than the cap and the densest
+        chunks inserted LAST, the top hits must all come from that last
+        group — an insertion-ordered cap would return none of them. Pins
+        the observable contract of the cap ORDER BY, independently of how
+        the SQL computes the score (v0.2.747 rewrote that SQL around a
+        MATERIALIZED CTE + instr() guard with bit-identical values)."""
+        s = Store(":memory:")
+        nb = s.create_notebook("n")
+        src = s.add_source(nb.id, "txt", "doc", "mem://cap", "sha-cap")
+        texts = [
+            "令和6年の予算記録。" + "2024年の予算。" * (8 if i >= 2000 else 1)
+            + f"整理番号{i}。"
+            for i in range(2100)
+        ]
+        s.add_chunks(src.id, texts)
+        hits = bm25_search(s, nb.id, "令和6年の予算", 8)
+        self.assertEqual(len(hits), 8)
+        dense = set(texts[2000:])
+        self.assertTrue(all(h.text in dense for h in hits), [h.text for h in hits])
 
     def test_latin_accent_fold_bridges_unaccented_docs(self) -> None:
         """v0.2.535: 'café'/'naïve'/'œuvre'/'Straße' queries gain the ASCII
@@ -5541,7 +5567,11 @@ class TestSearch(unittest.TestCase):
         """Both retrieval ORDER BYs must carry an explicit tie-break. A plain
         `ORDER BY score` leaves equal-key order unspecified in SQLite —
         deterministic in practice but never contractual, and silently
-        arbitrary at every LIMIT boundary."""
+        arbitrary at every LIMIT boundary.
+
+        v0.2.747: the LIKE fallback's ORDER BY now sits outside its
+        MATERIALIZED CTE, so the tie-break reads `, id` — the same chunk
+        id, carried through the CTE under that alias."""
         import inspect
         import re
 
@@ -5550,7 +5580,7 @@ class TestSearch(unittest.TestCase):
         src = inspect.getsource(shoin.search)
         self.assertIn("ORDER BY rank, c.id", src)
         like_orders = re.findall(r'ORDER BY \{score_expr\} DESC([^"]*)', src)
-        self.assertEqual(like_orders, [", c.id"], like_orders)
+        self.assertEqual(like_orders, [", id"], like_orders)
 
     def test_rrf_fuse_bm25_only_scores_nonzero(self) -> None:
         """rrf_fuse() with empty vec_hits must return BM25 hits with RRF scores > 0."""
@@ -17275,15 +17305,17 @@ _DYNAMIC_COMPILE_CATALOG = {
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
     "search.py:76",
     # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105);
-    # +3 by the v0.2.745 search.py import block (threading/OrderedDict/AbstractSet).
-    "search.py:1108",
+    # +3 by the v0.2.745 search.py import block (threading/OrderedDict/AbstractSet);
+    # +21 by the v0.2.747 LIKE-score CTE comment block in bm25_search.
+    "search.py:1129",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
     # the v0.2.662 synonym-table block, to 1965 by the v0.2.742 mmr
     # lazy-bigram-fold block; +13 over the eager-precompute draft,
     # to 1986 by the v0.2.744 mmr incremental-similarity block, to 2019
-    # by the v0.2.745 import block + bigram-LRU cache block).
-    "search.py:2019",
+    # by the v0.2.745 import block + bigram-LRU cache block, to 2040
+    # by the v0.2.747 LIKE-score CTE comment block).
+    "search.py:2040",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -23035,8 +23067,9 @@ class TestResidualGuards(unittest.TestCase):
             # sites shifted +153 by the v0.2.662 synonym-table block;
             # _CJK_RUN_RE then shifted +30 by the v0.2.742 mmr
             # lazy-bigram-fold block, +21 by the v0.2.744 mmr
-            # incremental-similarity block.
-            "search.py": [76, 2019, 1108],
+            # incremental-similarity block, and both sites shifted +21
+            # by the v0.2.747 LIKE-score CTE comment block.
+            "search.py": [76, 2040, 1129],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -23083,9 +23116,10 @@ class TestResidualGuards(unittest.TestCase):
                             escaped_interps.append(
                                 f"{path.name}:{node.lineno}"
                             )
-        # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105).
+        # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105);
+        # +21 by the v0.2.747 LIKE-score CTE comment block (1108 -> 1129).
         self.assertEqual(
-            escaped_interps, ["search.py:1108"],
+            escaped_interps, ["search.py:1129"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(
