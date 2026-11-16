@@ -14886,6 +14886,306 @@ class TestCLI(unittest.TestCase):
             os.unlink(db_file)
 
 
+class TestSetupWizard(unittest.TestCase):
+    """`shoin setup` first-time wizard: detect a local LLM, save the
+    working configuration, then run a citation-verified sample trial.
+    Detection/probing/prompting are injected so every branch is verified
+    without a real endpoint, network, or terminal."""
+
+    class _Backend:
+        """ChatBackend stub with a scriptable available() probe."""
+
+        embedding_model = ""
+
+        def __init__(
+            self, reply: str = "回答です。[S1]", avail: bool = True,
+            chat_error: bool = False,
+        ) -> None:
+            self.reply = reply
+            self._avail = avail
+            self.chat_error = chat_error
+
+        def available(self) -> bool:
+            return self._avail
+
+        def chat(self, messages, temperature=0.2):  # type: ignore[no-untyped-def]
+            if self.chat_error:
+                raise LLMError("SYSTEM_SERVICE_UNAVAILABLE", "down")
+            return self.reply
+
+        def embed_one(self, text):  # type: ignore[no-untyped-def]
+            raise LLMError("SYSTEM_EMBED_DISABLED", "no embed")
+
+    @staticmethod
+    def _args(*extra: str):  # type: ignore[no-untyped-def]
+        from shoin.cli import _build_parser
+
+        return _build_parser().parse_args(["setup", *extra])
+
+    def test_setup_candidates_order_and_dedup(self) -> None:
+        from shoin.cli import _setup_candidates
+
+        cands = _setup_candidates("http://localhost:11434/v1", None)
+        urls = [u for _, u in cands]
+        self.assertEqual(urls[0], "http://localhost:11434/v1")
+        self.assertEqual(
+            urls.count("http://localhost:11434/v1"), 1,
+            "the configured Ollama URL must not be probed twice",
+        )
+        self.assertIn("http://localhost:1234/v1", urls)
+        custom = _setup_candidates(
+            "http://localhost:11434/v1", "http://localhost:9999/v1"
+        )
+        self.assertEqual(custom[0][1], "http://localhost:9999/v1")
+
+    def test_setup_detect_uses_backend_for_configured_probe_for_others(
+        self,
+    ) -> None:
+        from shoin.cli import _setup_candidates, _setup_detect
+
+        probed: list[str] = []
+
+        def probe(url: str) -> bool:
+            probed.append(url)
+            return url == "http://localhost:1234/v1"
+
+        backend = self._Backend(avail=False)
+        found = _setup_detect(
+            backend,
+            _setup_candidates("http://localhost:11434/v1", None),
+            probe,
+        )
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found[1], "http://localhost:1234/v1")
+        self.assertNotIn(
+            "http://localhost:11434/v1", probed,
+            "the configured endpoint is checked via the backend, not probe()",
+        )
+
+    def test_setup_detect_all_miss_returns_none(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from shoin.cli import _setup_candidates, _setup_detect
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            found = _setup_detect(
+                self._Backend(avail=False),
+                _setup_candidates("http://localhost:11434/v1", None),
+                lambda url: False,
+            )
+        self.assertIsNone(found)
+        self.assertIn("11434", out.getvalue())
+
+    def test_setup_guide_lines_follow_platform(self) -> None:
+        from shoin.cli import _setup_guide_lines
+
+        for platform, needle in (
+            ("win32", "ollama.com"),
+            ("darwin", "brew install ollama"),
+            ("linux", "ollama.com"),
+        ):
+            with patch("sys.platform", platform):
+                lines = _setup_guide_lines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn(needle, lines[0])
+
+    def test_setup_save_config_merges_and_preserves(self) -> None:
+        import tempfile
+
+        from shoin import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "sub" / "config.json"
+            with patch.object(cli, "config_file", return_value=cfg), patch.object(
+                cli, "_file_config", return_value={"SHOIN_PORT": "7441"}
+            ):
+                saved = cli._setup_save_config(
+                    "http://localhost:1234/v1", "qwen3:4b", "nomic-embed-text"
+                )
+            self.assertEqual(saved, cfg)
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["SHOIN_PORT"], "7441")
+            self.assertEqual(data["SHOIN_LLM_URL"], "http://localhost:1234/v1")
+            self.assertEqual(data["SHOIN_LLM_MODEL"], "qwen3:4b")
+            self.assertEqual(data["SHOIN_EMBED_MODEL"], "nomic-embed-text")
+
+    def test_setup_ensure_sample_is_idempotent(self) -> None:
+        from shoin.cli import _setup_ensure_sample
+
+        with make_store() as s:
+            first = _setup_ensure_sample(s)
+            second = _setup_ensure_sample(s)
+            self.assertEqual(first, second)
+            self.assertEqual(s.counts(first)["sources"], 1)
+
+    def test_setup_wizard_happy_path_saves_config_and_runs_demo(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin import cli
+
+        backend = self._Backend(
+            reply="Shoinは文書を外部のサーバーへ送信しません。[S1]"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            cfg = Path(td) / "config.json"
+            out = io.StringIO()
+            with Store(db) as s, patch.object(
+                cli, "config_file", return_value=cfg
+            ), patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(out):
+                rc = cli._cmd_setup(
+                    s, backend, self._args(), probe=lambda url: False
+                )
+                notebooks = s.list_notebooks()
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("LLMが見つかりました", text)
+            self.assertIn("送信しません", text)
+            self.assertIn("[S1]", text)
+            self.assertEqual(len(notebooks), 1)
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["SHOIN_LLM_URL"], "http://localhost:11434/v1"
+            )
+
+    def test_setup_wizard_not_found_guides_and_returns_1(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            cfg = Path(td) / "config.json"
+            out, err = io.StringIO(), io.StringIO()
+            with Store(db) as s, patch.object(
+                cli, "config_file", return_value=cfg
+            ), patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(
+                out
+            ), redirect_stderr(err):
+                rc = cli._cmd_setup(
+                    s,
+                    self._Backend(avail=False),
+                    self._args(),
+                    probe=lambda url: False,
+                    prompt=lambda q: "",
+                )
+                notebooks = s.list_notebooks()
+            self.assertEqual(rc, 1)
+            self.assertIn("見つかりませんでした", err.getvalue())
+            self.assertIn("応答しませんでした", err.getvalue())
+            self.assertIn("ollama pull", out.getvalue())
+            self.assertIn("shoin setup", out.getvalue())
+            self.assertEqual(notebooks, [])
+            self.assertFalse(cfg.exists(), "a failed setup must not save config")
+
+    def test_setup_wizard_custom_url_from_prompt_is_saved(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin import cli
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            cfg = Path(td) / "config.json"
+            out = io.StringIO()
+            with Store(db) as s, patch.object(
+                cli, "config_file", return_value=cfg
+            ), patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(out):
+                rc = cli._cmd_setup(
+                    s,
+                    self._Backend(avail=False),
+                    self._args("--skip-demo"),
+                    probe=lambda url: url == "http://localhost:9999/v1",
+                    prompt=lambda q: "http://localhost:9999/v1",
+                )
+            self.assertEqual(rc, 0)
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["SHOIN_LLM_URL"], "http://localhost:9999/v1")
+
+    def test_setup_wizard_candidate_demo_uses_client_factory(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin import cli
+
+        calls: list[tuple[str, str, str]] = []
+
+        def factory(url: str, model: str, embed: str) -> TestSetupWizard._Backend:
+            calls.append((url, model, embed))
+            return self._Backend(reply="候補から回答です。[S1]")
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            cfg = Path(td) / "config.json"
+            out = io.StringIO()
+            with Store(db) as s, patch.object(
+                cli, "config_file", return_value=cfg
+            ), patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(out):
+                rc = cli._cmd_setup(
+                    s,
+                    self._Backend(avail=False),
+                    self._args(),
+                    probe=lambda url: url == "http://localhost:1234/v1",
+                    client_factory=factory,
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "http://localhost:1234/v1")
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["SHOIN_LLM_URL"], "http://localhost:1234/v1")
+            self.assertIn("候補から回答です", out.getvalue())
+
+    def test_setup_wizard_degraded_demo_returns_1(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from shoin import cli
+
+        backend = self._Backend(avail=True, chat_error=True)
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            cfg = Path(td) / "config.json"
+            out, err = io.StringIO(), io.StringIO()
+            with Store(db) as s, patch.object(
+                cli, "config_file", return_value=cfg
+            ), patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(
+                out
+            ), redirect_stderr(err):
+                rc = cli._cmd_setup(
+                    s, backend, self._args(), probe=lambda url: False
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("完了できませんでした", err.getvalue())
+
+    def test_setup_via_main_dispatches(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from shoin.cli import main
+
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "t.sqlite3")
+            out = io.StringIO()
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}), redirect_stdout(out):
+                rc = main(
+                    ["--db", db, "setup", "--skip-demo", "--no-save"],
+                    llm=self._Backend(avail=True),
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("LLMが見つかりました", out.getvalue())
+
+
 class TestCLINoteSourceParity(unittest.TestCase):
     """CLI note/source subcommands (v0.2.68): before this, notes and source
     management (delete/rename/refresh) existed only as Web API routes, despite
@@ -20497,9 +20797,13 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "cli.py": 3,     # _atomic_write_text: tmp.write_text + os.replace
+            "cli.py": 4,     # _atomic_write_text: tmp.write_text + os.replace
             #     + finally tmp.unlink — the eval --gen/--save writers funnel
             #     through one atomic helper (v0.2.732)
+            #     +1: _setup_save_config creates the config directory
+            #     (config_file().parent.mkdir) before the atomic write —
+            #     the setup wizard is the first writer of config.json, and
+            #     ~/.config/shoin may not exist on a first run.
             "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)

@@ -10,9 +10,10 @@ import argparse
 import os
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from .chunk import split_text_with_context
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
     EMBED_MODEL_SETTING_KEY,
@@ -21,8 +22,10 @@ from .config import (
     MAX_TITLE_LEN,
     TOP_K,
     VERSION,
+    _file_config,
     chunk_overlap,
     chunk_tokens,
+    config_file,
     db_path,
     embed_batch,
     embed_model,
@@ -220,6 +223,98 @@ _STRINGS: dict[str, dict[str, str]] = {
             "警告: LLMエンドポイントはローカルではありません"
             "——チャンク本文と質問文がこのマシンを離れます"
         ),
+        "setup.title": "Shoin 初回セットアップ",
+        "setup.step_detect": "1/3 ローカルLLMを検出しています…",
+        "setup.step_config": "2/3 構成を保存しています…",
+        "setup.step_demo": "3/3 サンプル文書で引用付き回答を体験しています…",
+        "setup.label_configured": "現在の設定",
+        "setup.label_custom": "指定されたエンドポイント",
+        "setup.probe_miss": "  検出先: {url} … 応答なし",
+        "setup.found": "✓ LLMが見つかりました: {label} ({url})",
+        "setup.not_found": "✗ ローカルLLMが見つかりませんでした",
+        "setup.not_found_reason": (
+            "理由: 検出した全てのエンドポイントが応答しませんでした。"
+            "LLMが未導入か、起動していない可能性があります。"
+        ),
+        "setup.guide_intro": (
+            "次の手順で導入できます"
+            "（ダウンロードやインストールは自動では行いません）:"
+        ),
+        "setup.guide_win": (
+            "  1. https://ollama.com/download から Ollama を入れるか、"
+            "LM Studio を導入してください。"
+        ),
+        "setup.guide_mac": (
+            "  1. https://ollama.com/download から Ollama を入れるか、"
+            "`brew install ollama` で導入してください。"
+        ),
+        "setup.guide_linux": (
+            "  1. https://ollama.com/download の手順で Ollama を入れるか、"
+            "LM Studio / llama.cpp を導入してください。"
+        ),
+        "setup.guide_pull": (
+            "  2. モデルを取得してください: "
+            "`ollama pull qwen3:4b` と `ollama pull nomic-embed-text`"
+            "（埋め込み用は任意）"
+        ),
+        "setup.guide_start": (
+            "  3. LLMを起動してください（Ollamaは通常自動で起動します。"
+            "手動の場合は `ollama serve`）。"
+        ),
+        "setup.guide_rerun": "  4. 起動したら、もう一度 `shoin setup` を実行してください。",
+        "setup.guide_custom": (
+            "別のエンドポイントを使う場合は "
+            "`shoin setup --url <OpenAI互換URL>` を指定できます。"
+        ),
+        "setup.guide_bm25": (
+            "なお LLMなしでも検索だけは使えます: `shoin serve` で起動して"
+            "文書を追加すると全文検索(BM25)で探せます"
+            "（回答の生成にはLLMが必要です）。"
+        ),
+        "setup.prompt_url": (
+            "カスタムエンドポイントのURLを入力してください（空Enterで終了）: "
+        ),
+        "setup.saved": "✓ 構成を保存しました: {path}",
+        "setup.no_save": "構成は保存しませんでした（--no-save）",
+        "setup.config_values": (
+            "  LLMエンドポイント: {url} / 生成モデル: {model}"
+            " / 埋め込みモデル: {embed}"
+        ),
+        "setup.env_note": (
+            "注意: 環境変数 SHOIN_LLM_URL 等が設定されている場合は、"
+            "保存した構成より環境変数が優先されます。"
+        ),
+        "setup.sample_nb_name": "Shoin サンプル",
+        "setup.sample_title": "Shoinについて（サンプル文書）",
+        "setup.sample_text": (
+            "# Shoinについて\n\n"
+            "Shoin（書院）は、文書を自分のパソコンの中だけに置いて使う"
+            "ノートブックです。文書や質問が外部のサーバーへ送信されることは"
+            "ありません。\n\n"
+            "ShoinのWeb UIは既定でポート7440で起動します。対応する文書形式は"
+            "PDF、Markdown、テキスト、HTMLです。\n\n"
+            "回答には必ず引用が付き、引用は元の文書の該当箇所へ移動して"
+            "確認できます。埋め込みモデルが無い場合はBM25という全文検索"
+            "だけで動作します。"
+        ),
+        "setup.sample_question": "Shoinは文書を外部のサーバーへ送信しますか？",
+        "setup.demo_question": "サンプルの質問: {q}",
+        "setup.demo_degraded": (
+            "⚠ LLMに接続できず、引用付き回答の体験を完了できませんでした。"
+            "LLMの起動を確認して `shoin setup` を再実行してください。"
+        ),
+        "setup.demo_done": "✓ 体験が完了しました。サンプルノートブック: [{id}] {name}",
+        "setup.next_steps": (
+            "次の手順: `shoin serve` で Web UI を開くか、"
+            "`shoin ask {id} \"質問\"` でサンプルへ質問できます。"
+        ),
+        "setup.skip_demo": (
+            "サンプル体験はスキップしました（--skip-demo）。"
+            "`shoin serve` で開始できます。"
+        ),
+        "setup.serve_hint": (
+            "初めての方は `shoin setup` でLLMの検出と初期構成ができます。"
+        ),
         "stats.name": "ノートブック: {v}",
         "stats.sources": "ソース: {n}",
         "stats.chunks": "チャンク: {n}",
@@ -350,6 +445,96 @@ _STRINGS: dict[str, dict[str, str]] = {
         "health.llm_external": (
             "Warning: the LLM endpoint is not local"
             " — chunk text and questions leave this machine"
+        ),
+        "setup.title": "Shoin first-time setup",
+        "setup.step_detect": "1/3 Detecting a local LLM…",
+        "setup.step_config": "2/3 Saving the configuration…",
+        "setup.step_demo": "3/3 Trying a cited answer on a sample document…",
+        "setup.label_configured": "current configuration",
+        "setup.label_custom": "specified endpoint",
+        "setup.probe_miss": "  probed: {url} … no response",
+        "setup.found": "✓ LLM found: {label} ({url})",
+        "setup.not_found": "✗ No local LLM was found",
+        "setup.not_found_reason": (
+            "Reason: none of the probed endpoints responded. "
+            "An LLM may not be installed yet, or it may not be running."
+        ),
+        "setup.guide_intro": (
+            "Install one with these steps "
+            "(nothing is downloaded or installed automatically):"
+        ),
+        "setup.guide_win": (
+            "  1. Install Ollama from https://ollama.com/download, "
+            "or install LM Studio."
+        ),
+        "setup.guide_mac": (
+            "  1. Install Ollama from https://ollama.com/download, "
+            "or run `brew install ollama`."
+        ),
+        "setup.guide_linux": (
+            "  1. Install Ollama following https://ollama.com/download, "
+            "or install LM Studio / llama.cpp."
+        ),
+        "setup.guide_pull": (
+            "  2. Fetch the models: `ollama pull qwen3:4b` and "
+            "`ollama pull nomic-embed-text` (the embedding model is optional)"
+        ),
+        "setup.guide_start": (
+            "  3. Start the LLM (Ollama usually starts automatically; "
+            "otherwise run `ollama serve`)."
+        ),
+        "setup.guide_rerun": "  4. Once it is running, run `shoin setup` again.",
+        "setup.guide_custom": (
+            "To use a different endpoint, pass "
+            "`shoin setup --url <OpenAI-compatible URL>`."
+        ),
+        "setup.guide_bm25": (
+            "Note: search alone works without an LLM — start `shoin serve`, "
+            "add documents, and full-text (BM25) search finds them "
+            "(answer generation needs an LLM)."
+        ),
+        "setup.prompt_url": (
+            "Enter a custom endpoint URL (empty Enter to finish): "
+        ),
+        "setup.saved": "✓ Configuration saved: {path}",
+        "setup.no_save": "Configuration was not saved (--no-save)",
+        "setup.config_values": (
+            "  LLM endpoint: {url} / chat model: {model} / embed model: {embed}"
+        ),
+        "setup.env_note": (
+            "Note: when environment variables such as SHOIN_LLM_URL are set, "
+            "they take precedence over the saved configuration."
+        ),
+        "setup.sample_nb_name": "Shoin Sample",
+        "setup.sample_title": "About Shoin (sample document)",
+        "setup.sample_text": (
+            "# About Shoin\n\n"
+            "Shoin is a notebook that keeps documents only on your own "
+            "computer. Documents and questions are never sent to an external "
+            "server.\n\n"
+            "Shoin's Web UI starts on port 7440 by default. Supported "
+            "document formats are PDF, Markdown, text, and HTML.\n\n"
+            "Every answer carries citations, and each citation jumps to the "
+            "matching passage in the original document. Without an embedding "
+            "model, Shoin works with BM25 full-text search alone."
+        ),
+        "setup.sample_question": "Does Shoin send documents to an external server?",
+        "setup.demo_question": "Sample question: {q}",
+        "setup.demo_degraded": (
+            "⚠ Could not reach the LLM, so the cited-answer trial did not "
+            "complete. Check that the LLM is running and run `shoin setup` again."
+        ),
+        "setup.demo_done": "✓ Trial complete. Sample notebook: [{id}] {name}",
+        "setup.next_steps": (
+            "Next steps: open the Web UI with `shoin serve`, or ask the "
+            "sample with `shoin ask {id} \"question\"`."
+        ),
+        "setup.skip_demo": (
+            "Sample trial skipped (--skip-demo). Start with `shoin serve`."
+        ),
+        "setup.serve_hint": (
+            "First time? Run `shoin setup` to detect an LLM and save the "
+            "initial configuration."
         ),
         "stats.name": "Notebook: {v}",
         "stats.sources": "Sources: {n}",
@@ -526,6 +711,24 @@ def _build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
 
     sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
+
+    setup = sub.add_parser(
+        "setup",
+        help="初回セットアップ (LLM検出→構成保存→サンプル文書で引用付き回答を体験)",
+    )
+    setup.add_argument(
+        "--url", default=None, help="OpenAI互換エンドポイントURL (検出より優先)"
+    )
+    setup.add_argument("--model", default=None, help="生成モデル名")
+    setup.add_argument(
+        "--embed-model", default=None, help="埋め込みモデル名 (空文字でBM25のみ)"
+    )
+    setup.add_argument(
+        "--no-save", action="store_true", help="構成を config.json に保存しない"
+    )
+    setup.add_argument(
+        "--skip-demo", action="store_true", help="サンプル文書での体験を省略"
+    )
 
     stt = sub.add_parser("stats", help="ノートブック統計 (ソース/チャンク/DBサイズ)")
     stt.add_argument("notebook_id", type=int)
@@ -725,6 +928,224 @@ def _cmd_health(llm: ChatBackend, db: str | None = None) -> int:
     print(_t("health.embed_batch", v=batch_v))
     print(_t("health.chunking", tokens=str(chunk_tokens()), overlap=str(chunk_overlap())))
     print(_t("health.data_dir", v=_one_line(db if db else str(db_path()))))
+    return 0
+
+
+# Well-known local OpenAI-compatible endpoints the setup wizard probes, in
+# preference order. Every entry is loopback: detection never contacts an
+# external host, and the wizard never downloads or installs anything —
+# installation stays an explicit user action (see _setup_guide_lines).
+_SETUP_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("Ollama", "http://localhost:11434/v1"),
+    ("LM Studio", "http://localhost:1234/v1"),
+    ("llama.cpp", "http://localhost:8080/v1"),
+)
+
+
+def _setup_probe(url: str) -> bool:
+    """Reachability of one candidate endpoint via the real LLM client."""
+    return LLMClient(base_url=url).available()
+
+
+def _setup_client(url: str, model: str, embed: str) -> ChatBackend:
+    return LLMClient(base_url=url, model=model, embedding_model=embed)
+
+
+def _setup_candidates(
+    configured: str, extra: str | None
+) -> list[tuple[str, str]]:
+    """Probe order: the user's explicit --url, the configured endpoint,
+    then the well-known local runtimes — deduplicated by URL."""
+    raw: list[tuple[str, str]] = []
+    if extra:
+        raw.append((_t("setup.label_custom"), extra))
+    raw.append((_t("setup.label_configured"), configured))
+    raw.extend(_SETUP_ENDPOINTS)
+    seen: set[str] = set()
+    candidates: list[tuple[str, str]] = []
+    for label, url in raw:
+        key = url.rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((label, url))
+    return candidates
+
+
+def _setup_detect(
+    llm: ChatBackend,
+    candidates: list[tuple[str, str]],
+    probe: Callable[[str], bool],
+) -> tuple[str, str] | None:
+    """First reachable (label, url), printing one miss line per failure so
+    a detection failure is never silent about where it looked. The
+    configured endpoint is checked through the caller's backend (the same
+    object `health` reports on); other candidates go through *probe*."""
+    configured = llm_url().rstrip("/")
+    for label, url in candidates:
+        if url.rstrip("/") == configured:
+            ok = getattr(llm, "available", lambda: False)()
+        else:
+            ok = probe(url)
+        if ok:
+            return label, url
+        print(_t("setup.probe_miss", url=_one_line(redact_url_credentials(url))))
+    return None
+
+
+def _setup_guide_lines() -> list[str]:
+    """Platform-specific install guidance. Guidance only: the wizard
+    prints these steps and stops — downloads and installs are the user's
+    explicit actions, never the wizard's."""
+    if sys.platform.startswith("win"):
+        return [_t("setup.guide_win")]
+    if sys.platform == "darwin":
+        return [_t("setup.guide_mac")]
+    return [_t("setup.guide_linux")]
+
+
+def _setup_save_config(url: str, model: str, embed: str) -> Path:
+    """Persist the detected configuration to config.json, preserving any
+    keys the user already had. Written through the shared atomic writer
+    so an interrupted save never leaves a half-written config behind."""
+    import json
+
+    merged = _file_config()
+    merged["SHOIN_LLM_URL"] = url
+    merged["SHOIN_LLM_MODEL"] = model
+    merged["SHOIN_EMBED_MODEL"] = embed
+    path = config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def _setup_ensure_sample(store: Store) -> int:
+    """Create (or reuse) the sample notebook with one sample source, so a
+    first-time user reaches a cited answer without preparing a document.
+    Idempotent: an existing sample notebook with sources is left as-is."""
+    import hashlib
+
+    name = _t("setup.sample_nb_name")
+    nb_id = 0
+    for nb in store.list_notebooks():
+        if nb.name == name:
+            nb_id = nb.id
+            break
+    if not nb_id:
+        nb_id = store.create_notebook(name).id
+    if store.counts(nb_id)["sources"] == 0:
+        text = _t("setup.sample_text")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        src = store.add_source(
+            nb_id, "txt", _t("setup.sample_title"), "shoin://setup-sample", digest
+        )
+        pairs = split_text_with_context(
+            text, chunk_tokens=chunk_tokens(), overlap_tokens=chunk_overlap()
+        )
+        store.add_chunks(
+            src.id, [t for _, t in pairs], [c for c, _ in pairs]
+        )
+    return nb_id
+
+
+def _cmd_setup(
+    store: Store,
+    llm: ChatBackend,
+    args: argparse.Namespace,
+    probe: Callable[[str], bool] | None = None,
+    prompt: Callable[[str], str] | None = None,
+    client_factory: Callable[[str, str, str], ChatBackend] | None = None,
+) -> int:
+    """First-time setup wizard: detect a local LLM, save the working
+    configuration, then let the user experience a citation-verified
+    answer on a bundled sample document. Returns 1 (with the reason and
+    the next step printed) when no LLM is reachable or the sample trial
+    cannot complete — a failed setup is never reported as success."""
+    probe_fn = probe if probe is not None else _setup_probe
+    print(_t("setup.title"))
+    print(_t("setup.step_detect"))
+    candidates = _setup_candidates(
+        llm_url(), str(args.url) if args.url else None
+    )
+    found = _setup_detect(llm, candidates, probe_fn)
+    if found is None and prompt is not None:
+        custom = prompt(_t("setup.prompt_url")).strip()
+        if custom:
+            if probe_fn(custom):
+                found = (_t("setup.label_custom"), custom)
+            else:
+                print(
+                    _t(
+                        "setup.probe_miss",
+                        url=_one_line(redact_url_credentials(custom)),
+                    ),
+                    file=sys.stderr,
+                )
+    if found is None:
+        print(_t("setup.not_found"), file=sys.stderr)
+        print(_t("setup.not_found_reason"), file=sys.stderr)
+        print(_t("setup.guide_intro"))
+        for line in _setup_guide_lines():
+            print(line)
+        print(_t("setup.guide_pull"))
+        print(_t("setup.guide_start"))
+        print(_t("setup.guide_rerun"))
+        print(_t("setup.guide_custom"))
+        print(_t("setup.guide_bm25"))
+        return 1
+    label, url = found
+    print(
+        _t(
+            "setup.found",
+            label=_one_line(label),
+            url=_one_line(redact_url_credentials(url)),
+        )
+    )
+    if endpoint_is_external(url):
+        print(_t("health.llm_external"), file=sys.stderr)
+    model = str(args.model) if args.model else llm_model()
+    embed = str(args.embed_model) if args.embed_model is not None else embed_model()
+    print(_t("setup.step_config"))
+    if args.no_save:
+        print(_t("setup.no_save"))
+    else:
+        path = _setup_save_config(url, model, embed)
+        print(_t("setup.saved", path=_one_line(str(path))))
+    print(
+        _t(
+            "setup.config_values",
+            url=_one_line(redact_url_credentials(url)),
+            model=_one_line(model),
+            embed=_one_line(embed) if embed.strip() else _t("health.embed_model_off"),
+        )
+    )
+    print(_t("setup.env_note"))
+    if args.skip_demo:
+        print(_t("setup.skip_demo"))
+        return 0
+    print(_t("setup.step_demo"))
+    nb_id = _setup_ensure_sample(store)
+    if url.rstrip("/") == llm_url().rstrip("/"):
+        demo_llm: ChatBackend = llm
+    elif client_factory is not None:
+        demo_llm = client_factory(url, model, embed)
+    else:
+        demo_llm = _setup_client(url, model, embed)
+    question = _t("setup.sample_question")
+    print(_t("setup.demo_question", q=question))
+    answer = ask(store, demo_llm, nb_id, question)
+    print(_safe_text(answer.text))
+    if answer.degraded:
+        print(_t("setup.demo_degraded"), file=sys.stderr)
+        return 1
+    if answer.hits and _report_has_output(answer.report):
+        print("---")
+        _print_report(answer.report)
+    print(
+        _t("setup.demo_done", id=str(nb_id), name=_t("setup.sample_nb_name"))
+    )
+    print(_t("setup.next_steps", id=str(nb_id)))
     return 0
 
 
@@ -1438,6 +1859,10 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
     if str(args.command) == "serve":
         from .server import serve
 
+        if not config_file().exists():
+            # First run: point at the wizard once, on stderr, without
+            # probing anything — serve must start just as fast as before.
+            print(_t("setup.serve_hint"), file=sys.stderr)
         try:
             serve(int(args.port), _db_arg(args))
         except OSError as exc:
@@ -1470,6 +1895,13 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
             command = str(args.command)
             if command == "notebook":
                 return _cmd_notebook(store, args)
+            if command == "setup":
+                return _cmd_setup(
+                    store,
+                    backend,
+                    args,
+                    prompt=input if sys.stdin.isatty() else None,
+                )
             if command == "add":
                 return _cmd_add(store, backend, args)
             if command == "ask":
