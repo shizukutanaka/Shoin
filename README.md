@@ -47,9 +47,18 @@ ollama pull qwen3:4b              # 生成用(推奨)
 ollama pull nomic-embed-text      # 埋め込み用(任意。無くてもBM25検索で動作)
 ```
 
+LLMの用意ができているか分からない場合は、初回セットアップウィザードが案内します:
+
+```bash
+shoin setup                       # LLM検出 → 構成保存 → サンプル文書で引用付き回答を体験
+```
+
+ウィザードは現在の設定・Ollama・LM Studio・llama.cpp の順にローカルエンドポイントを検出し、応答したものを `~/.config/shoin/config.json` に保存します。見つからない場合は理由と環境別の導入手順を表示して終了します（ダウンロードやインストールを自動で始めることはありません）。接続できたら、サンプル文書だけのノートブック「Shoin サンプル」を用意し、引用付き回答が返るところまでをその場で体験できます。`--url` で任意のOpenAI互換エンドポイントの指定、`--no-save` で保存の省略、`--skip-demo` で体験の省略ができます。構成ファイルが無い状態で `shoin serve` を起動した場合も、開始前にウィザードへの案内が1行表示されます。
+
 ## Usage
 
 ```bash
+shoin setup                           # 初回セットアップ (LLM検出→構成保存→サンプル体験)
 shoin serve                           # Web UI起動
 shoin notebook new "研究ノート"        # CLIでも操作可
 shoin notebook duplicate 1             # ノートブックを複製(ソース/チャンク/ノート全コピー)
