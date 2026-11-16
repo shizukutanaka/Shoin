@@ -950,26 +950,47 @@ def bm25_search(
     # notebook silently drops the densest late-added chunks before Python ever
     # sees them.  REPLACE-based counting matches str.count's non-overlapping
     # semantics; LOWER() folds ASCII exactly like LIKE and str.lower() do.
+    # v0.2.747: the score expression runs once per (matching row, needle),
+    # and its text term recomputed LOWER(c.text) twice per needle. For a
+    # needle-rich query — an era year like 令和6年 bridges to "2024" and to
+    # every digit-script spelling of it, ~70 needles — over a large
+    # notebook that redundant lowering dominates the whole search
+    # (measured on a 510-chunk notebook: ~0.88 s of the ~0.99 s bm25_search
+    # was this ORDER BY; at 5,101 chunks the same query took ~5.3 s).
+    # The scan now runs inside a MATERIALIZED CTE that computes
+    # LOWER(c.text) and its LENGTH once per row (lt / ltlen); a plain
+    # subquery is flattened by SQLite and the lowering creeps back into
+    # the sorter. Each needle term is also guarded by instr(): when the
+    # needle is absent from lt the REPLACE count is 0 by definition, so
+    # the guard skips only work — every computed value, the ordering, and
+    # the rows surviving the cap are bit-identical to the flat form.
+    # (MATERIALIZED needs SQLite 3.35+; every CPython 3.11+ build ships
+    # or links a newer SQLite than that.)
     score_terms = [
-        "((LENGTH(LOWER(c.text)) - LENGTH(REPLACE(LOWER(c.text), LOWER(?), ''))) / ?"
-        " + CASE WHEN c.context LIKE ? ESCAPE '|' THEN ? ELSE 0.0 END)"
+        "((CASE WHEN instr(lt, LOWER(?)) > 0"
+        " THEN (ltlen - LENGTH(REPLACE(lt, LOWER(?), ''))) / ? ELSE 0 END)"
+        " + CASE WHEN context LIKE ? ESCAPE '|' THEN ? ELSE 0.0 END)"
         for _ in needles
     ]
     score_expr = " + ".join(score_terms)
     score_params = [
         p
         for n in needles
-        for p in (n, len(n), f"%{_esc_like(n)}%", _CTX_BM25_WEIGHT)
+        for p in (n, n, len(n), f"%{_esc_like(n)}%", _CTX_BM25_WEIGHT)
     ]
     like_cap = max(k * 10, 2000)
     rows = store.conn.execute(
-        f"SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
-        f" JOIN sources s ON s.id = c.source_id"
+        "WITH m AS MATERIALIZED ("
+        "SELECT c.id AS id, c.source_id AS source_id, c.text AS text,"
+        " c.context AS context, c.seq AS seq,"
+        " LOWER(c.text) AS lt, LENGTH(LOWER(c.text)) AS ltlen"
+        " FROM chunks c JOIN sources s ON s.id = c.source_id"
         f" WHERE (? IS NULL OR s.notebook_id = ?) AND ({conditions})"
         " AND (json_array_length(?) = 0"
-        " OR s.id IN (SELECT value FROM json_each(?)))"
-        f" ORDER BY {score_expr} DESC, c.id"
-        f" LIMIT ?",
+        " OR s.id IN (SELECT value FROM json_each(?))))"
+        " SELECT id, source_id, text, context, seq FROM m"
+        f" ORDER BY {score_expr} DESC, id"
+        " LIMIT ?",
         [notebook_id, notebook_id, *like_params, *scope_params, *score_params, like_cap],
     ).fetchall()
     like_hits: list[Hit] = []

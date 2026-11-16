@@ -29,7 +29,17 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.746
+## Version History: v0.1.37 → v0.2.747
+
+### v0.2.747 — 数値・元号クエリの LIKE フォールバックを高速化（bm25 2.5〜8.5倍、結果はビット同一）
+**Performance**: A measured performance pass (method, environment, and full tables in `docs/performance.md`) found one dominant cost: numeric / era-name queries in `bm25_search`'s LIKE fallback. A query like 「令和6年の予算」 expands through the era bridge to ~75 substring needles; the old SQL evaluated the density score in `ORDER BY` with `LOWER(c.text)` — and its `LENGTH` — recomputed for every (row × needle) pair. Medians on the benchmark VM: 990 ms at 510 chunks, 5.3 s at 5,101, 12.1 s at 20,405, 22.6 s at 48,974.
+
+- Fix (`shoin/search.py`, `bm25_search` only, no score-semantics change): the candidate scan is wrapped in a `WITH m AS MATERIALIZED (...)` CTE that computes `LOWER(text)` / `LOWER(context)` and their lengths once per row, and each needle's occurrence-count term is guarded by `instr(lt, needle) > 0`, skipping the REPLACE count when the needle is absent (where the count is definitionally 0). Score expression, weights, the 2,000-row cap, and the id tie-break are unchanged. Medians after: 117 ms / 1,049 ms / 3,858 ms / 9,160 ms at the same scales (8.5× / 5.0× / 3.1× / 2.5×); `retrieve()` on the same query improves 5.7× / 4.5× / 2.8× at the three smaller scales.
+- Equivalence evidence: the pre-change `search.py` (from git HEAD) and the new code return identical (chunk_id, score) lists for 22 queries × k ∈ {8, 24} on the 510- and 5,101-chunk stores, plus the numeric query on the 48,974-chunk store. 1 regression test added (`test_like_cap_keeps_densest_rows_for_needle_rich_query`) pinning the cap's observable contract — past the 2,000-row cap the densest rows must still win — and verified to fail if the cap's `ORDER BY` is dropped.
+- Guard-pin updates (line shifts from the new comment block; no behavior change): `_DYNAMIC_COMPILE_CATALOG` search.py sites 1108→1129 / 2019→2040, the interpolated-regex baseline in `test_interpolated_regexes_are_cataloged`, and `test_retrieval_sql_has_deterministic_tiebreak`'s expected LIKE tie-break literal (`, c.id` → `, id` — the same chunk id, carried through the CTE under that alias).
+- Measured and deliberately NOT changed: `vector_search`'s linear scan (≈40–100 µs/chunk on the benchmark VM; a two-phase prototype deferring text fetches to the top-k gained only ~3% in A/B — the dot product itself dominates, and beating it needs an index / storage-format change); ingest (≈1 ms/chunk); startup (≈0.2–0.5 s); citation reports (≈25 ms for 8 sources). Residual known cost: at the 50,000-chunk notebook cap the needle-rich LIKE path still takes ~9 s on the throttled benchmark VM — inherent to substring occurrence counting over ~41k candidate rows × ~75 needles; removing it needs an n-gram index, a storage-format change left for a separate decision.
+
+`pytest tests/` now runs 1,524 tests (up from 1,523). `scripts/verify.sh` reports ALL GATES PASSED (ruff, mypy --strict, tests + coverage, secret scan).
 
 ### v0.2.746 — ingest chunkerの二重トークン推定を解消し、_tailの文字分類をメモ化（分割 3.5倍）
 
