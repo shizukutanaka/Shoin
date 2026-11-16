@@ -326,6 +326,65 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.metric_ask": "  ask: {n} 回 (degraded {d}・no-hit {z}・fail {f}・平均 {ms}ms)",
         "stats.metric_index": "  index: {n} 回 (fail {f}・embed-skip {e}・平均 {ms}ms)",
         "backup.done": "バックアップを保存しました: {path}",
+        "help.description": "Shoin (書院) — local notebook",
+        "help.db": "データベースパス(既定: SHOIN_DATA_DIR)",
+        "help.notebook": "ノートブック管理",
+        "help.create": "作成",
+        "help.list": "一覧",
+        "help.delete": "削除",
+        "help.rename": "改名",
+        "help.add": "追加",
+        "help.nb.duplicate": "複製(ソース・チャンク・ノート等を全コピー)",
+        "help.nb.merge": "統合(別nbの中身を取込み、元nbはゴミ箱へアーカイブ)",
+        "help.nb.settings": (
+            "nb単位設定 (top_k=N source_text_tokens=N; 引数なしで表示・--clearで消去)"
+        ),
+        "help.messages": "チャット履歴管理",
+        "help.messages.clear": "履歴クリア",
+        "help.add_source": "ソース追加(ファイル/URL)",
+        "help.reindex": "ノートブックの埋め込みを再構築",
+        "help.note": "ノート管理",
+        "help.source": "ソース管理",
+        "help.source.refresh": "ソースの再取込 (URL、または元ファイルが残るファイルソース)",
+        "help.source.refresh_all": "ノートブック内の全ソースを一括再取込 (cron向け)",
+        "help.source.weight": "検索重みの設定 (1.0=標準・>1優遇・<1降格・0で下位固定)",
+        "help.source.meta": (
+            "ソースメタデータ (author=… year=…; 引数なしで表示・--clearで消去)"
+        ),
+        "help.chunk": "チャンク管理",
+        "help.chunk.edit": "抽出テキスト修正(埋込みクリア→reindexで再構築)",
+        "help.ask": "ソース限定Q&A",
+        "help.ask.k": "検索深さ (省略時: nb設定か既定値)",
+        "help.ask.source": "このソースIDのみを検索対象にする(複数回指定可)",
+        "help.k": "検索深さ",
+        "help.studio": "Studio出力生成",
+        "help.questions": "推奨質問の提案",
+        "help.search": "全ノートブック横断検索",
+        "help.eval": "検索精度を測定 (recall/MRR)",
+        "help.eval.cases": "JSONファイル (「q」と「sources」の配列)",
+        "help.eval.save": "この実行をベースラインJSONとして保存",
+        "help.eval.diff": "保存済みベースラインとの差分を表示",
+        "help.eval.gen": "ノートブックからケース雛形を生成 (--gen単独=stdout、--gen FILE=保存)",
+        "help.export": "エクスポート",
+        "help.import": "インポート(export --format tree のJSONからnbを復元)",
+        "help.import.file": "export JSONファイル ('-' でstdin)",
+        "help.serve": "Web UI起動 (127.0.0.1のみ)",
+        "help.serve.port": "ポート(既定: {port})",
+        "help.health": "設定・LLM到達性を表示 (headless diagnostics)",
+        "help.setup": "初回セットアップ (LLM検出→構成保存→サンプル文書で引用付き回答を体験)",
+        "help.setup.url": "OpenAI互換エンドポイントURL (検出より優先)",
+        "help.setup.model": "生成モデル名",
+        "help.setup.embed_model": "埋め込みモデル名 (空文字でBM25のみ)",
+        "help.setup.no_save": "構成を config.json に保存しない",
+        "help.setup.skip_demo": "サンプル文書での体験を省略",
+        "help.stats": "ノートブック統計 (ソース/チャンク/DBサイズ)",
+        "help.backup": "DBをバックアップ (オンラインスナップショット)",
+        "help.trash": "ゴミ箱 (削除済みnbの一覧・復元・完全削除)",
+        "help.trash.restore": "元id・埋込み込みで復元",
+        "help.trash.purge": "アーカイブを完全削除(復元不可)",
+        "help.trash.empty": "ゴミ箱を空にする(全アーカイブ完全削除・復元不可)",
+        "help.vacuum": "DBをVACUUMして削除済み領域をOSへ返却",
+        "help.check": "DB物理整合性を診断 (integrity/FK違反/スキーマ版、破損時rc=1)",
     },
     "en": {
         "nb.created": "Created: [{id}] {name}",
@@ -547,6 +606,79 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stats.metric_ask": "  ask: {n} calls (degraded {d}, no-hit {z}, failed {f}, avg {ms}ms)",
         "stats.metric_index": "  index: {n} calls (failed {f}, embed-skipped {e}, avg {ms}ms)",
         "backup.done": "Backup written: {path}",
+        "help.description": "Shoin — local notebook",
+        "help.db": "Database path (default: SHOIN_DATA_DIR)",
+        "help.notebook": "Manage notebooks",
+        "help.create": "Create",
+        "help.list": "List",
+        "help.delete": "Delete",
+        "help.rename": "Rename",
+        "help.add": "Add",
+        "help.nb.duplicate": "Duplicate (copies sources, chunks, notes — everything)",
+        "help.nb.merge": "Merge (absorb another notebook; the source is archived to trash)",
+        "help.nb.settings": (
+            "Per-notebook settings (top_k=N source_text_tokens=N; "
+            "no pairs shows them, --clear removes)"
+        ),
+        "help.messages": "Manage chat history",
+        "help.messages.clear": "Clear history",
+        "help.add_source": "Add sources (files/URLs)",
+        "help.reindex": "Rebuild a notebook's embeddings",
+        "help.note": "Manage notes",
+        "help.source": "Manage sources",
+        "help.source.refresh": (
+            "Re-fetch a source (URL, or a file source whose original file still exists)"
+        ),
+        "help.source.refresh_all": "Re-fetch every source in a notebook (for cron)",
+        "help.source.weight": (
+            "Set search weight (1.0=standard, >1 boosts, <1 demotes, 0 pins to the bottom)"
+        ),
+        "help.source.meta": (
+            "Source metadata (author=… year=…; no pairs shows it, --clear removes)"
+        ),
+        "help.chunk": "Manage chunks",
+        "help.chunk.edit": "Edit extracted text (clears the embedding; rebuild with reindex)",
+        "help.ask": "Q&A over sources",
+        "help.ask.k": "Retrieval depth (default: the notebook's setting or the built-in default)",
+        "help.ask.source": "Restrict retrieval to this source ID (may be repeated)",
+        "help.k": "Retrieval depth",
+        "help.studio": "Generate Studio output",
+        "help.questions": "Suggest questions",
+        "help.search": "Search across all notebooks",
+        "help.eval": "Measure retrieval quality (recall/MRR)",
+        "help.eval.cases": "JSON file (an array of \"q\"/\"sources\" entries)",
+        "help.eval.save": "Save this run as a baseline JSON",
+        "help.eval.diff": "Show the diff against a saved baseline",
+        "help.eval.gen": (
+            "Generate a case template from a notebook "
+            "(--gen alone = stdout, --gen FILE = save)"
+        ),
+        "help.export": "Export",
+        "help.import": "Import (restore a notebook from export --format tree JSON)",
+        "help.import.file": "Export JSON file ('-' for stdin)",
+        "help.serve": "Start the Web UI (127.0.0.1 only)",
+        "help.serve.port": "Port (default: {port})",
+        "help.health": "Show configuration and LLM reachability (headless diagnostics)",
+        "help.setup": (
+            "First-time setup (detect an LLM, save the config, "
+            "try a cited answer on a sample document)"
+        ),
+        "help.setup.url": "OpenAI-compatible endpoint URL (takes priority over detection)",
+        "help.setup.model": "Generation model name",
+        "help.setup.embed_model": "Embedding model name (empty string = BM25 only)",
+        "help.setup.no_save": "Do not save the configuration to config.json",
+        "help.setup.skip_demo": "Skip the sample-document trial",
+        "help.stats": "Notebook statistics (sources/chunks/DB size)",
+        "help.backup": "Back up the DB (online snapshot)",
+        "help.trash": "Trash (list, restore, or permanently delete deleted notebooks)",
+        "help.trash.restore": "Restore with the original ID and embeddings",
+        "help.trash.purge": "Permanently delete an archive (unrecoverable)",
+        "help.trash.empty": "Empty the trash (permanently delete all archives)",
+        "help.vacuum": "VACUUM the DB and return deleted space to the OS",
+        "help.check": (
+            "Diagnose DB physical integrity "
+            "(integrity/FK violations/schema version; rc=1 if corrupt)"
+        ),
     },
 }
 
@@ -560,104 +692,104 @@ def _t(key: str, **kw: str) -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="shoin", description="Shoin (書院) — local notebook")
+    p = argparse.ArgumentParser(prog="shoin", description=_t("help.description"))
     p.add_argument("--version", action="version", version=f"shoin {VERSION}")
-    p.add_argument("--db", default=None, help="データベースパス(既定: SHOIN_DATA_DIR)")
+    p.add_argument("--db", default=None, help=_t("help.db"))
     sub = p.add_subparsers(dest="command", required=True)
 
     # REQ-105: the full subcommand surface — UI-free operation of every feature
-    nb = sub.add_parser("notebook", help="ノートブック管理")
+    nb = sub.add_parser("notebook", help=_t("help.notebook"))
     nbsub = nb.add_subparsers(dest="action", required=True)
-    nb_new = nbsub.add_parser("new", help="作成")
+    nb_new = nbsub.add_parser("new", help=_t("help.create"))
     nb_new.add_argument("name")
-    nbsub.add_parser("list", help="一覧")
-    nb_del = nbsub.add_parser("delete", help="削除")
+    nbsub.add_parser("list", help=_t("help.list"))
+    nb_del = nbsub.add_parser("delete", help=_t("help.delete"))
     nb_del.add_argument("notebook_id", type=int)
-    nb_ren = nbsub.add_parser("rename", help="改名")
+    nb_ren = nbsub.add_parser("rename", help=_t("help.rename"))
     nb_ren.add_argument("notebook_id", type=int)
     nb_ren.add_argument("name")
-    nb_dup = nbsub.add_parser("duplicate", help="複製(ソース・チャンク・ノート等を全コピー)")
+    nb_dup = nbsub.add_parser("duplicate", help=_t("help.nb.duplicate"))
     nb_dup.add_argument("notebook_id", type=int)
     nb_dup.add_argument("name", nargs="?", default=None)
     nb_mg = nbsub.add_parser(
-        "merge", help="統合(別nbの中身を取込み、元nbはゴミ箱へアーカイブ)"
+        "merge", help=_t("help.nb.merge")
     )
     nb_mg.add_argument("notebook_id", type=int)
     nb_mg.add_argument("source_id", type=int)
     nb_set = nbsub.add_parser(
         "settings",
-        help="nb単位設定 (top_k=N source_text_tokens=N; 引数なしで表示・--clearで消去)",
+        help=_t("help.nb.settings"),
     )
     nb_set.add_argument("notebook_id", type=int)
     nb_set.add_argument("pairs", nargs="*", metavar="key=value")
     nb_set.add_argument("--clear", action="store_true")
 
-    msgs = sub.add_parser("messages", help="チャット履歴管理")
+    msgs = sub.add_parser("messages", help=_t("help.messages"))
     msgssub = msgs.add_subparsers(dest="action", required=True)
-    msgs_list = msgssub.add_parser("list", help="一覧")
+    msgs_list = msgssub.add_parser("list", help=_t("help.list"))
     msgs_list.add_argument("notebook_id", type=int)
-    msgs_clear = msgssub.add_parser("clear", help="履歴クリア")
+    msgs_clear = msgssub.add_parser("clear", help=_t("help.messages.clear"))
     msgs_clear.add_argument("notebook_id", type=int)
 
-    add = sub.add_parser("add", help="ソース追加(ファイル/URL)")
+    add = sub.add_parser("add", help=_t("help.add_source"))
     add.add_argument("notebook_id", type=int)
     add.add_argument("targets", nargs="+")
 
-    ri = sub.add_parser("reindex", help="ノートブックの埋め込みを再構築")
+    ri = sub.add_parser("reindex", help=_t("help.reindex"))
     ri.add_argument("notebook_id", type=int)
 
-    note = sub.add_parser("note", help="ノート管理")
+    note = sub.add_parser("note", help=_t("help.note"))
     notesub = note.add_subparsers(dest="action", required=True)
-    note_add = notesub.add_parser("add", help="追加")
+    note_add = notesub.add_parser("add", help=_t("help.add"))
     note_add.add_argument("notebook_id", type=int)
     note_add.add_argument("title")
     note_add.add_argument("body")
-    note_list = notesub.add_parser("list", help="一覧")
+    note_list = notesub.add_parser("list", help=_t("help.list"))
     note_list.add_argument("notebook_id", type=int)
-    note_del = notesub.add_parser("delete", help="削除")
+    note_del = notesub.add_parser("delete", help=_t("help.delete"))
     note_del.add_argument("note_id", type=int)
 
-    src = sub.add_parser("source", help="ソース管理")
+    src = sub.add_parser("source", help=_t("help.source"))
     srcsub = src.add_subparsers(dest="action", required=True)
-    src_del = srcsub.add_parser("delete", help="削除")
+    src_del = srcsub.add_parser("delete", help=_t("help.delete"))
     src_del.add_argument("source_id", type=int)
-    src_ren = srcsub.add_parser("rename", help="改名")
+    src_ren = srcsub.add_parser("rename", help=_t("help.rename"))
     src_ren.add_argument("source_id", type=int)
     src_ren.add_argument("title")
     src_ref = srcsub.add_parser(
-        "refresh", help="ソースの再取込 (URL、または元ファイルが残るファイルソース)"
+        "refresh", help=_t("help.source.refresh")
     )
     src_ref.add_argument("source_id", type=int)
     src_ra = srcsub.add_parser(
-        "refresh-all", help="ノートブック内の全ソースを一括再取込 (cron向け)"
+        "refresh-all", help=_t("help.source.refresh_all")
     )
     src_ra.add_argument("notebook_id", type=int)
     src_w = srcsub.add_parser(
-        "weight", help="検索重みの設定 (1.0=標準・>1優遇・<1降格・0で下位固定)"
+        "weight", help=_t("help.source.weight")
     )
     src_w.add_argument("source_id", type=int)
     src_w.add_argument("weight", type=float)
     src_m = srcsub.add_parser(
         "meta",
-        help="ソースメタデータ (author=… year=…; 引数なしで表示・--clearで消去)",
+        help=_t("help.source.meta"),
     )
     src_m.add_argument("source_id", type=int)
     src_m.add_argument("pairs", nargs="*", metavar="key=value")
     src_m.add_argument("--clear", action="store_true")
 
-    chk = sub.add_parser("chunk", help="チャンク管理")
+    chk = sub.add_parser("chunk", help=_t("help.chunk"))
     chksub = chk.add_subparsers(dest="action", required=True)
-    chk_edit = chksub.add_parser("edit", help="抽出テキスト修正(埋込みクリア→reindexで再構築)")
+    chk_edit = chksub.add_parser("edit", help=_t("help.chunk.edit"))
     chk_edit.add_argument("chunk_id", type=int)
     chk_edit.add_argument("text")
 
-    askp = sub.add_parser("ask", help="ソース限定Q&A")
+    askp = sub.add_parser("ask", help=_t("help.ask"))
     askp.add_argument("notebook_id", type=int)
     askp.add_argument("question")
     # default=None lets the notebook's own settings.top_k decide (v0.2.659):
     # an explicit -k still wins over the setting.
     askp.add_argument(
-        "-k", type=_pos_int, default=None, help="検索深さ (省略時: nb設定か既定値)"
+        "-k", type=_pos_int, default=None, help=_t("help.ask.k")
     )
     askp.add_argument(
         "--source",
@@ -665,37 +797,37 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         type=_pos_int,
         metavar="ID",
-        help="このソースIDのみを検索対象にする(複数回指定可)",
+        help=_t("help.ask.source"),
     )
 
-    st = sub.add_parser("studio", help="Studio出力生成")
+    st = sub.add_parser("studio", help=_t("help.studio"))
     st.add_argument("notebook_id", type=int)
     st.add_argument("kind", choices=KINDS)
 
-    q = sub.add_parser("questions", help="推奨質問の提案")
+    q = sub.add_parser("questions", help=_t("help.questions"))
     q.add_argument("notebook_id", type=int)
 
-    srch = sub.add_parser("search", help="全ノートブック横断検索")
+    srch = sub.add_parser("search", help=_t("help.search"))
     srch.add_argument("question")
-    srch.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
+    srch.add_argument("-k", type=_pos_int, default=TOP_K, help=_t("help.k"))
 
-    ev = sub.add_parser("eval", help="検索精度を測定 (recall/MRR)")
+    ev = sub.add_parser("eval", help=_t("help.eval"))
     ev.add_argument("notebook_id", type=int)
     ev.add_argument(
-        "cases", nargs="?", help='JSONファイル: [{"q": "質問", "sources": [1, 2]}]'
+        "cases", nargs="?", help=_t("help.eval.cases")
     )
-    ev.add_argument("-k", type=_pos_int, default=TOP_K, help="検索深さ")
-    ev.add_argument("--save", metavar="FILE", help="この実行をベースラインJSONとして保存")
-    ev.add_argument("--diff", metavar="FILE", help="保存済みベースラインとの差分を表示")
+    ev.add_argument("-k", type=_pos_int, default=TOP_K, help=_t("help.k"))
+    ev.add_argument("--save", metavar="FILE", help=_t("help.eval.save"))
+    ev.add_argument("--diff", metavar="FILE", help=_t("help.eval.diff"))
     ev.add_argument(
         "--gen",
         nargs="?",
         const="-",
         metavar="FILE",
-        help="ノートブックからケース雛形を生成 (--gen単独=stdout、--gen FILE=保存)",
+        help=_t("help.eval.gen"),
     )
 
-    ex = sub.add_parser("export", help="エクスポート")
+    ex = sub.add_parser("export", help=_t("help.export"))
     ex.add_argument("notebook_id", type=int)
     # "tree" (v0.2.655): the machine-transfer document — a JSON notebook
     # tree, not a human-readable export format, so it stays out of
@@ -703,51 +835,56 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--format", choices=(*FORMATS, "tree"), default="md")
 
     imp = sub.add_parser(
-        "import", help="インポート(export --format tree のJSONからnbを復元)"
+        "import", help=_t("help.import")
     )
-    imp.add_argument("file", help="export JSONファイル ('-' でstdin)")
+    imp.add_argument("file", help=_t("help.import.file"))
 
-    sv = sub.add_parser("serve", help="Web UI起動 (127.0.0.1のみ)")
-    sv.add_argument("--port", type=_port_num, default=port(), help=f"ポート(既定: {port()})")
+    sv = sub.add_parser("serve", help=_t("help.serve"))
+    sv.add_argument(
+        "--port",
+        type=_port_num,
+        default=port(),
+        help=_t("help.serve.port", port=str(port())),
+    )
 
-    sub.add_parser("health", help="設定・LLM到達性を表示 (headless diagnostics)")
+    sub.add_parser("health", help=_t("help.health"))
 
     setup = sub.add_parser(
         "setup",
-        help="初回セットアップ (LLM検出→構成保存→サンプル文書で引用付き回答を体験)",
+        help=_t("help.setup"),
     )
     setup.add_argument(
-        "--url", default=None, help="OpenAI互換エンドポイントURL (検出より優先)"
+        "--url", default=None, help=_t("help.setup.url")
     )
-    setup.add_argument("--model", default=None, help="生成モデル名")
+    setup.add_argument("--model", default=None, help=_t("help.setup.model"))
     setup.add_argument(
-        "--embed-model", default=None, help="埋め込みモデル名 (空文字でBM25のみ)"
-    )
-    setup.add_argument(
-        "--no-save", action="store_true", help="構成を config.json に保存しない"
+        "--embed-model", default=None, help=_t("help.setup.embed_model")
     )
     setup.add_argument(
-        "--skip-demo", action="store_true", help="サンプル文書での体験を省略"
+        "--no-save", action="store_true", help=_t("help.setup.no_save")
+    )
+    setup.add_argument(
+        "--skip-demo", action="store_true", help=_t("help.setup.skip_demo")
     )
 
-    stt = sub.add_parser("stats", help="ノートブック統計 (ソース/チャンク/DBサイズ)")
+    stt = sub.add_parser("stats", help=_t("help.stats"))
     stt.add_argument("notebook_id", type=int)
 
-    bk = sub.add_parser("backup", help="DBをバックアップ (オンラインスナップショット)")
+    bk = sub.add_parser("backup", help=_t("help.backup"))
     bk.add_argument("dest")
 
-    tr = sub.add_parser("trash", help="ゴミ箱 (削除済みnbの一覧・復元・完全削除)")
+    tr = sub.add_parser("trash", help=_t("help.trash"))
     trsub = tr.add_subparsers(dest="action", required=True)
-    trsub.add_parser("list", help="一覧")
-    tr_res = trsub.add_parser("restore", help="元id・埋込み込みで復元")
+    trsub.add_parser("list", help=_t("help.list"))
+    tr_res = trsub.add_parser("restore", help=_t("help.trash.restore"))
     tr_res.add_argument("trash_id", type=int)
-    tr_pur = trsub.add_parser("purge", help="アーカイブを完全削除(復元不可)")
+    tr_pur = trsub.add_parser("purge", help=_t("help.trash.purge"))
     tr_pur.add_argument("trash_id", type=int)
-    trsub.add_parser("empty", help="ゴミ箱を空にする(全アーカイブ完全削除・復元不可)")
+    trsub.add_parser("empty", help=_t("help.trash.empty"))
 
-    sub.add_parser("vacuum", help="DBをVACUUMして削除済み領域をOSへ返却")
+    sub.add_parser("vacuum", help=_t("help.vacuum"))
     sub.add_parser(
-        "check", help="DB物理整合性を診断 (integrity/FK違反/スキーマ版、破損時rc=1)"
+        "check", help=_t("help.check")
     )
     return p
 

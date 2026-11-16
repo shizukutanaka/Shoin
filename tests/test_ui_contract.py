@@ -266,6 +266,24 @@ class TestUIContract(unittest.TestCase):
                 "the line defines — dead substitution",
             )
 
+    def test_notebook_source_count_uses_i18n(self) -> None:
+        """The notebook row's source count was a hardcoded Japanese counter
+        suffix (`${n}册`) rendered in every locale — the one UI string that
+        bypassed the I18N table. It now goes through the nb.srcount key
+        (ja/en, {n} placeholder) like every other display string."""
+        script = _script()
+        self.assertIn('t("nb.srcount")', script)
+        self.assertNotIn("}册`", script)
+        for loc in ("ja", "en"):
+            m = re.search(rf"\b{loc}:\s*\{{(.*?)\n\s*\}}", script, re.S)
+            self.assertIsNotNone(m, f"I18N.{loc} block not found")
+            assert m is not None
+            entries = dict(
+                re.findall(r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"', m.group(1))
+            )
+            self.assertIn("nb.srcount", entries, f"nb.srcount missing from I18N.{loc}")
+            self.assertIn("{n}", entries["nb.srcount"])
+
     def test_studio_kinds_match_between_server_and_ui(self) -> None:
         """The UI's `const KINDS` array must equal studio.KINDS exactly.
 
@@ -3770,7 +3788,7 @@ function mkEl(){ return {children:[], parent:null, className:"", value:"",
   press(k){ if(this.onkeydown) this.onkeydown({key:k, target:this, preventDefault(){}}) } }; }
 function $(sel){ if (!reg[sel]) reg[sel] = mkEl(); return reg[sel]; }
 function el(tag, cls, text){ const e = mkEl(); e.tag=tag; e.cls=cls; e.text=text; return e }
-function t(k){ return k }
+function t(k){ return k === "nb.srcount" ? "{n}册" : k }
 function toast(){}
 function renderNotebook(){}
 let notebooks = [], cur = null, srcIndex = new Map();
@@ -4108,7 +4126,10 @@ const nbBtn = {disabled: false};
         localStorage, and applyI18n() must rewrite ALL four attribute classes
         ([data-i18n] text, [data-i18n-ph] placeholder, [data-i18n-title] title,
         [data-i18n-aria] aria-label) plus the button label and
-        documentElement.lang. Runs the real applyI18n + onclick under node."""
+        documentElement.lang. The toggle also reloads the notebook list, so
+        rows rendered from data (the nb.srcount source count) switch language
+        too instead of staying in the previous locale until the next manual
+        refresh. Runs the real applyI18n + onclick under node."""
         if not shutil.which("node"):
             self.skipTest("node not available; JS behavior check skipped")
         src = _script()
@@ -4145,6 +4166,8 @@ function buildKindButtons(){ rebuilt.push(1) }
 const cur = {id: 1};
 const rendered = [];
 function renderNotebook(){ rendered.push(1) }
+const nbLoads = [];
+function loadNotebooks(){ nbLoads.push(1) }
 const t = k => (I18N[lang] && I18N[lang][k]) || I18N.ja[k] || k;
 """
             + apply_fn
@@ -4166,8 +4189,9 @@ if (texts[0].textContent !== "Chat" || phs[0].placeholder !== "Ask"
     || langBtn.textContent !== "日本語" || langBtn["aria-label"] !== "Language"
     || document.documentElement.lang !== "en")
   { console.error("en applyI18n wrong"); process.exit(1) }
-if (rebuilt.length !== 1 || rendered.length !== 1)
-  { console.error("rebuild hooks wrong: " + JSON.stringify({rebuilt, rendered})); process.exit(1) }
+if (rebuilt.length !== 1 || rendered.length !== 1 || nbLoads.length !== 1)
+  { console.error("rebuild hooks wrong: "
+      + JSON.stringify({rebuilt, rendered, nbLoads})); process.exit(1) }
 console.log("ok")
 """
         )

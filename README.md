@@ -1,5 +1,7 @@
 # Shoin (書院)
 
+**Language**: 日本語 | [English](README_EN.md)
+
 ローカルに構える自分だけの書院。文書を収め、引用付きで対話するNotebookLM代替。外部にデータを一切送らない。
 
 ## Features

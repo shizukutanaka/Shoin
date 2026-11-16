@@ -17865,6 +17865,74 @@ class TestResidualGuards(unittest.TestCase):
                     f"extra={sorted(supplied - needed)}",
                 )
 
+    def test_cli_help_text_follows_shoin_lang(self) -> None:
+        """Every argparse help string was a hardcoded Japanese literal, so
+        `SHOIN_LANG=en shoin --help` — the first command an English-speaking
+        user runs — stayed Japanese even though all runtime messages
+        already resolved through _STRINGS. Help now goes through the same
+        table at parser-build time and follows ui_lang() like the rest."""
+        import argparse
+        import os
+        import re
+
+        from shoin.cli import _build_parser
+
+        def all_help(parser: argparse.ArgumentParser) -> list[str]:
+            texts = [parser.description or ""]
+            for action in parser._actions:
+                if action.help:
+                    texts.append(action.help)
+                # add_parser(help=...) lives on the choices pseudo-actions,
+                # not on the subparser itself.
+                for pseudo in getattr(action, "_choices_actions", []):
+                    if pseudo.help:
+                        texts.append(pseudo.help)
+                choices = getattr(action, "choices", None)
+                if isinstance(choices, dict):
+                    for sub in choices.values():
+                        texts.extend(all_help(sub))
+            return texts
+
+        cjk = re.compile(r"[぀-ヿ一-鿿]")
+        with patch.dict(os.environ, {"SHOIN_LANG": "en"}):
+            texts = all_help(_build_parser())
+            joined = "\n".join(texts)
+            self.assertIn("Manage notebooks", joined)
+            self.assertIn("First-time setup", joined)
+            self.assertRegex(joined, r"Port \(default: \d+\)")
+            self.assertEqual(
+                [t for t in texts if cjk.search(t)],
+                [],
+                "en help must not contain Japanese literals",
+            )
+        with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+            texts = all_help(_build_parser())
+            joined = "\n".join(texts)
+            self.assertIn("ノートブック管理", joined)
+            self.assertIn("初回セットアップ", joined)
+            self.assertRegex(joined, r"ポート\(既定: \d+\)")
+
+    def test_english_readme_mirrors_the_japanese(self) -> None:
+        """README_EN.md is the English counterpart of README.md: the two
+        link to each other, and the English one documents the same SHOIN_*
+        surface — an English reader must be able to discover every setting
+        the Japanese README documents (the ja-side contract is pinned by
+        test_every_shoin_env_var_is_documented_in_readme)."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        en = (root / "README_EN.md").read_text(encoding="utf-8")
+        ja = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("[日本語](README.md)", en)
+        self.assertIn("[English](README_EN.md)", ja)
+        keys: set[str] = set()
+        for f in root.glob("shoin/*.py"):
+            keys.update(re.findall(r"SHOIN_[A-Z_]+", f.read_text(encoding="utf-8")))
+        keys = {k.rstrip("_") for k in keys if len(k) > len("SHOIN_")}
+        missing = [k for k in keys if k not in en]
+        self.assertEqual(missing, [], f"env vars absent from README_EN: {missing}")
+
     def test_no_assert_statements_in_package(self) -> None:
         """`python -O` strips assert — a library must never depend on one for
         control flow or a debug-only check becomes silent behavior change

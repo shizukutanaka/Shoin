@@ -9,7 +9,7 @@ const I18N = {
     "sources.addurl":"取込","sources.added":"取込完了","src.pages_failed":"⚠ {n} ページの抽出に失敗（索引が不完全です）","src.embed_short":"⚠ 埋め込み {n}/{total} 件 — 意味検索が不完全です",
     "nb.placeholder":"新しい書院の名前","nb.create":"作成","nb.rename":"名前を変更","nb.delete":"この書院を削除",
     "nb.empty.title":"まだ書院がありません","nb.empty.body":"名前を付けて最初の書院を作る。",
-    "nb.more":"残り {n} 書院を表示",
+    "nb.more":"残り {n} 書院を表示","nb.srcount":"{n}册",
     "chat.head":"文 机","chat.placeholder":"資料への質問…","chat.ask":"尋ねる","chat.clear":"クリア",
     "chat.empty.title":"問いから始まる","chat.empty.body":"下の入力欄から、資料に基づく質問をどうぞ。",
     "chat.you":"あなた","chat.shoin":"書院","chat.degraded":"検索のみ",
@@ -55,7 +55,7 @@ const I18N = {
     "sources.addurl":"Fetch","sources.added":"Source added","src.pages_failed":"⚠ {n} page(s) could not be extracted — index is incomplete","src.embed_short":"⚠ {n}/{total} chunks embedded — semantic search is partial",
     "nb.placeholder":"Name a new notebook","nb.create":"Create","nb.rename":"Rename","nb.delete":"Delete this notebook",
     "nb.empty.title":"No notebooks yet","nb.empty.body":"Name your first notebook to begin.",
-    "nb.more":"Show {n} more notebooks",
+    "nb.more":"Show {n} more notebooks","nb.srcount":"{n} sources",
     "chat.head":"DESK","chat.placeholder":"Ask your sources…","chat.ask":"Ask","chat.clear":"Clear",
     "chat.empty.title":"Start with a question","chat.empty.body":"Ask anything grounded in your sources.",
     "chat.you":"You","chat.shoin":"Shoin","chat.degraded":"search only",
@@ -183,7 +183,7 @@ async function loadNotebooks(){
   const mkNbRow = nb => {
     const li = el("li"); li.className = cur && cur.id===nb.id ? "cur":"";
     const name = el("span","name", nb.name);
-    const c = el("span","c", `${nb.counts.sources}册`);
+    const c = el("span","c", t("nb.srcount").replace("{n}", nb.counts.sources));
     const ren = el("button","ren","✎"); ren.type="button"; ren.title=t("nb.rename"); ren.setAttribute("aria-label",t("nb.rename"));
     ren.onclick = async ev=>{
       ev.stopPropagation();
@@ -1173,6 +1173,7 @@ document.querySelectorAll(".tabs button").forEach(b=>{
 $("#langBtn").onclick = ()=>{
   lang = lang==="ja" ? "en":"ja"; _lsSet("shoin.lang", lang);
   applyI18n(); buildKindButtons(); if (cur) renderNotebook();
+  loadNotebooks();
 };
 /* Global shortcuts (v0.2.642): `/` focuses the question box, 1/2/3 select the
    pane at that position in the tab row — same discovery surface as the
