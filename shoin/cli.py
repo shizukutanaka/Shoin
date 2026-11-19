@@ -77,6 +77,13 @@ def _port_num(value: str) -> int:
     return n
 
 
+def _voicevox_style_id(value: str) -> int:
+    style_id = int(value)
+    if style_id < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative style ID")
+    return style_id
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` atomically: sibling temp file + os.replace.
 
@@ -375,6 +382,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.studio": "Studio出力生成",
         "help.audio": "保存済みブリーフィングをローカル音声 (WAV) に変換",
         "help.audio.model": "ローカルの Piper 音声モデル (.onnx)",
+        "help.audio.voicevox": "ローカル VOICEVOX エンジン (127.0.0.1:50021) のスタイル ID",
         "help.audio.output": "新規 WAV ファイルの保存先",
         "audio.saved": "音声を保存: {path}",
         "audio.no_briefing": "先に shoin studio {id} briefing でブリーフィングを生成してください。",
@@ -680,6 +688,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.studio": "Generate Studio output",
         "help.audio": "Narrate a saved briefing locally as a WAV file",
         "help.audio.model": "Local Piper voice model (.onnx)",
+        "help.audio.voicevox": "Style ID from the local VOICEVOX engine (127.0.0.1:50021)",
         "help.audio.output": "Path for a new WAV file",
         "audio.saved": "Saved audio: {path}",
         "audio.no_briefing": "Generate a briefing first with shoin studio {id} briefing.",
@@ -849,7 +858,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     audio = sub.add_parser("audio", help=_t("help.audio"), description=_t("help.audio"))
     audio.add_argument("notebook_id", type=_pos_int)
-    audio.add_argument("--model", type=Path, required=True, help=_t("help.audio.model"))
+    voice = audio.add_mutually_exclusive_group(required=True)
+    voice.add_argument("--model", type=Path, help=_t("help.audio.model"))
+    voice.add_argument(
+        "--voicevox-speaker", type=_voicevox_style_id, help=_t("help.audio.voicevox")
+    )
     audio.add_argument("--output", type=Path, required=True, help=_t("help.audio.output"))
 
     q = sub.add_parser("questions", help=_t("help.questions"))
@@ -1939,7 +1952,8 @@ def _cmd_audio(store: Store, args: argparse.Namespace) -> int:
         )
     if briefing is None:
         raise AudioError("AUDIO_BRIEFING_NOT_FOUND", _t("audio.no_briefing", id=str(notebook_id)))
-    write_briefing_audio(str(briefing["body"]), args.model, args.output)
+    voice = args.voicevox_speaker if args.model is None else args.model
+    write_briefing_audio(str(briefing["body"]), voice, args.output)
     print(_t("audio.saved", path=_safe_text(str(args.output))))
     return 0
 

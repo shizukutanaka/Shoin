@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tempfile
+import threading
 import unittest
+import urllib.parse
 import wave
+from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,10 +29,13 @@ class TestAudioCLI(unittest.TestCase):
         with Store(self.db) as store:
             self.notebook = store.create_notebook("Local research").id
 
-    def invoke(self, notebook_id: int | None = None) -> tuple[int, str, str]:
+    def invoke(
+        self, notebook_id: int | None = None, *, voice: list[str] | None = None,
+    ) -> tuple[int, str, str]:
         args = [
             "--db", str(self.db), "audio", str(notebook_id or self.notebook),
-            "--model", str(self.model), "--output", str(self.output),
+            *(["--model", str(self.model)] if voice is None else voice),
+            "--output", str(self.output),
         ]
         with (
             patch("sys.stdout", new_callable=io.StringIO) as out,
@@ -130,3 +138,133 @@ class TestAudioCLI(unittest.TestCase):
                 self.assertEqual((rc, out), (1, ""))
                 self.assertIn(code, err)
                 self.assertFalse(self.output.exists())
+
+    @staticmethod
+    def voicevox_wav() -> bytes:
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as audio:
+            audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x01\x00" * 2)
+        return buffer.getvalue()
+
+    def test_voicevox_narrates_japanese_using_only_the_local_engine(self) -> None:
+        first = "研究結果" * 250 + "。"
+        second = "次の調査 & 実験。"
+        self.save_briefing("Older briefing.")
+        self.save_briefing(f"{first}［Ｓ１］\n{second} [S2]")
+        calls: list[tuple[str, dict[str, list[str]], bytes, str | None]] = []
+        wav = self.voicevox_wav()
+
+        class Engine(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                parsed = urllib.parse.urlsplit(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                calls.append((parsed.path, params, body, self.headers.get("Content-Type")))
+                reply = wav if parsed.path == "/synthesis" else json.dumps({
+                    "accent_phrases": [{"id": len(calls)}], "kana": "カナ", "speedScale": 1,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+        with HTTPServer(("127.0.0.1", 0), Engine) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def connection(host: str, port: int, *, timeout: float) -> HTTPConnection:
+                self.assertEqual((host, port), ("127.0.0.1", 50021))
+                return HTTPConnection(host, server.server_port, timeout=timeout)
+
+            try:
+                with (
+                    patch("shoin.audio.http.client.HTTPConnection", side_effect=connection),
+                    patch("shoin.audio.subprocess.run") as piper,
+                ):
+                    rc, out, err = self.invoke(voice=["--voicevox-speaker", "0"])
+                piper.assert_not_called()
+            finally:
+                server.shutdown()
+                thread.join()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn(str(self.output), out)
+        self.assertEqual([path for path, *_ in calls], ["/audio_query", "/synthesis"])
+        self.assertEqual(calls[0][1], {"text": [first + "\n" + second], "speaker": ["0"]})
+        self.assertEqual(calls[1][1], {"speaker": ["0"]})
+        self.assertEqual(calls[1][3], "application/json")
+        self.assertEqual(json.loads(calls[1][2])["accent_phrases"], [{"id": 1}])
+        self.assertEqual(self.output.read_bytes(), wav)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.root.glob(".shoin-audio-*")), [])
+
+    def test_long_briefing_combines_voicevox_queries_and_validates_wav(self) -> None:
+        first = "研究結果" * 250 + "。"
+        second = "次の実験" * 20 + "。"
+        self.save_briefing(f"{first}\n{second}")
+        for truncate in (False, True):
+            wav = self.voicevox_wav()
+            phrases = [{"id": 1}, {"id": 2}]
+            replies = [
+                json.dumps({"accent_phrases": [p], "kana": "カナ"}).encode() for p in phrases
+            ]
+            with (
+                self.subTest(truncate=truncate),
+                patch("shoin.audio._voicevox_post", side_effect=[
+                    *replies, wav[:-2] if truncate else wav,
+                ]) as post,
+            ):
+                rc, _, err = self.invoke(voice=["--voicevox-speaker", "3"])
+                self.assertEqual(post.call_count, 3)
+                parts = [
+                    urllib.parse.parse_qs(urllib.parse.urlsplit(call.args[0]).query)["text"][0]
+                    for call in post.call_args_list[:2]
+                ]
+                self.assertEqual(parts, [first + "\n", second])
+                self.assertEqual(
+                    json.loads(post.call_args.args[2]), {"accent_phrases": phrases, "kana": None}
+                )
+                if truncate:
+                    self.assertEqual(rc, 1)
+                    self.assertIn("AUDIO_INVALID_WAV", err)
+                    self.assertFalse(self.output.exists())
+                else:
+                    self.assertEqual((rc, err), (0, ""))
+                    self.assertEqual(self.output.read_bytes(), wav)
+                    self.output.unlink()
+
+    def test_voicevox_errors_do_not_publish_audio_or_disclose_text(self) -> None:
+        self.save_briefing("private text")
+        for status, body, code in (
+            (307, b"private text", "AUDIO_VOICEVOX_FAILED"),
+            (200, b"private text", "AUDIO_VOICEVOX_FAILED"),
+            (200, b"{}", "AUDIO_VOICEVOX_FAILED"),
+            (200, b"x" * (1024 * 1024 + 1), "AUDIO_VOICEVOX_FAILED"),
+            (None, b"", "AUDIO_VOICEVOX_UNAVAILABLE"),
+        ):
+            with self.subTest(status=status), patch("shoin.audio.http.client.HTTPConnection") as c:
+                conn = c.return_value
+                resp = conn.getresponse.return_value.__enter__.return_value
+                resp.status = status
+                resp.read.return_value = body
+                if status is None:
+                    conn.request.side_effect = ConnectionRefusedError("private text")
+                rc, out, err = self.invoke(voice=["--voicevox-speaker", "3"])
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(code, err)
+                self.assertNotIn("private text", err)
+                self.assertFalse(self.output.exists())
+                conn.request.assert_called_once()
+                conn.close.assert_called_once()
+        self.assertEqual(list(self.root.glob(".shoin-audio-*")), [])
+
+    def test_audio_engine_options_are_mutually_exclusive(self) -> None:
+        for voice in ([], ["--voicevox-speaker", "-1"], [
+            "--model", str(self.model), "--voicevox-speaker", "3",
+        ]):
+            with self.subTest(voice=voice), self.assertRaises(SystemExit) as err:
+                self.invoke(voice=voice)
+            self.assertEqual(err.exception.code, 2)

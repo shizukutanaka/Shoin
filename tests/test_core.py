@@ -20959,7 +20959,7 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
-            "audio.py": 3,   # private WAV staging, chmod, and no-overwrite publish
+            "audio.py": 4,   # private WAV staging, VOICEVOX write, chmod, and publication
             "cli.py": 4,     # _atomic_write_text: tmp.write_text + os.replace
             #     + finally tmp.unlink — the eval --gen/--save writers funnel
             #     through one atomic helper (v0.2.732)
@@ -21122,6 +21122,8 @@ class TestResidualGuards(unittest.TestCase):
             "audio.py": [
                 "FileNotFoundError", "subprocess.TimeoutExpired", "subprocess.CalledProcessError",
                 "(EOFError,FileNotFoundError,wave.Error)", "FileExistsError",
+                "(OSError,http.client.HTTPException)",
+                "(RecursionError,UnicodeDecodeError,ValueError)",
             ],
             "cli.py": [
                 "(IngestError,StoreError)",
@@ -21486,13 +21488,14 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline: dict[str, list[str]] = {
-            "audio.py": ["AudioError"] * 9,
+            "audio.py": ["AudioError"] * 15,
             "citation.py": [
                 "ValueError", "ValueError", "ValueError",
                 "ValueError", "ValueError",
             ],
             "cli.py": [
                 "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
+                "argparse.ArgumentTypeError",
                 "AudioError",  # missing saved briefing
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
@@ -22826,7 +22829,7 @@ class TestResidualGuards(unittest.TestCase):
         # connection) — `http.server` stays sanctioned.
         capability_dotted = {"http.client"}
         baseline = {
-            "audio.py": ["subprocess"],  # fixed local Piper invocation only
+            "audio.py": ["http.client", "subprocess"],  # fixed loopback VOICEVOX / local Piper
             "ingest.py": ["http.client", "socket", "ssl"],
             "llm.py": ["http.client"],
         }

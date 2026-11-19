@@ -104,6 +104,16 @@ shoin studio 1 briefing
 shoin audio 1 --model ./voice.onnx --output ./briefing.wav
 ```
 
+[VOICEVOX](https://voicevox.hiroshiba.jp/) で日本語を読み上げるには、
+エンジンを `127.0.0.1:50021` で起動し、`/speakers` で確認したスタイル ID を指定してください
+（例では 3）。
+
+```bash
+shoin audio 1 --voicevox-speaker 3 --output ./briefing-ja.wav
+```
+
+VOICEVOX エンジン自身のローカル HTTP アクセスログには、読み上げる本文が残ることがあります。
+
 `audio` は最新の保存済みブリーフィングを使うため、LLM に再接続せずオフラインで動作します。
 音声では引用番号を読み上げません。引用は元の Studio 出力で確認できます。
 モデルの自動ダウンロードや既存 WAV ファイルの上書きはしません。
