@@ -68,6 +68,7 @@ shoin notebook merge 1 2               # nb2をnb1へ統合(元nbはゴミ箱へ
 shoin notebook settings 1 top_k=4 source_text_tokens=512  # nb単位の検索上書き(未設定=グローバル既定)
 shoin add 1 ./paper.pdf https://example.com/article
 shoin add 1 ~/papers/                 # フォルダ一括取込(再実行で新規追加+変更分のみ更新)
+shoin source missing 1 ~/papers/      # 元ファイルが見つからないソースのIDとパスを確認
 shoin ask 1 "この論文の主要な貢献は?"
 shoin studio 1 study_guide
 shoin health                          # 設定・LLM到達性を確認(headless診断)
@@ -79,6 +80,11 @@ shoin eval 1 cases.json               # 検索精度を自分の文書で測定(
 ```
 
 Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・ノート。
+
+`source missing` は指定フォルダ内の元ファイルを確認するだけで、索引は変更しません。
+外部ドライブなどが接続されていることを確認したうえで、不要なソースだけを
+`shoin source delete <source_id>` でゴミ箱へ移動できます。復元は `shoin trash list` で
+ゴミ箱内のIDを調べ、`shoin trash restore <trash_id>` を実行します。
 
 ### 検索の挙動(日本語)
 

@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.748")
+        self.assertEqual(VERSION, "0.2.749")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -21100,6 +21100,10 @@ class TestResidualGuards(unittest.TestCase):
                 # finding — DatabaseError (covers OperationalError) catches
                 # 'file is not a database' raised at Store()'s first PRAGMA.
                 "(OSError,StoreError,sqlite3.DatabaseError)",
+                # v0.2.749: missing-source preview reports an unknown home,
+                # distinguishes absent files from unchecked paths, and keeps
+                # checking the rest after a per-path OS or invalid-path error.
+                "RuntimeError", "FileNotFoundError", "(OSError,ValueError)",
             ],
             "config.py": [
                 "(TypeError,ValueError)", "(TypeError,ValueError)",

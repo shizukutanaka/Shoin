@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -1171,6 +1172,111 @@ class CliTest(unittest.TestCase):
             rc, _, err = self._run(["--db", db, "add", "1", "/no/such/file.txt"], llm)
         self.assertEqual(rc, 1)
         self.assertIn("✗", err)
+
+    def test_source_missing_is_scoped_and_only_explicit_delete_moves_to_trash(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "docs"
+            nested = root / "nested"
+            nested.mkdir(parents=True)
+            sibling = Path(td) / "docs-other"
+            sibling.mkdir()
+            present = root / "present.txt"
+            missing = nested / "gone.md"
+            outside = sibling / "outside.txt"
+            for path in (present, missing, outside):
+                path.write_text(f"Text unique to {path.name}.", encoding="utf-8")
+            db = str(Path(td) / "shoin.db")
+            base = ["--db", db]
+            with Store(db) as store:
+                nb = store.create_notebook("main")
+                other = store.create_notebook("other")
+            for argv in (
+                ["add", str(nb.id), str(root), str(outside)],
+                ["add", str(other.id), str(missing)],
+            ):
+                rc, _, err = self._run(base + argv, llm)
+                self.assertEqual(rc, 0, err)
+            with Store(db) as store:
+                store.add_source(nb.id, "url", "web", "https://example.invalid/", "web")
+                store.add_source(nb.id, "txt", "relative", "old.txt", "old")
+                sources = store.sources_for_notebook(nb.id)
+                saved = next(src for src in sources if src.origin == str(missing))
+                chunks = [c.text for c in store.chunks_for_source(saved.id)]
+                self.assertTrue(chunks)
+            missing.unlink()
+            outside.unlink()
+
+            with patch.dict(os.environ, {"SHOIN_LANG": "en", "HOME": td, "USERPROFILE": td}):
+                rc, out, err = self._run(
+                    base + ["source", "missing", str(nb.id), "~/docs"], llm
+                )
+            self.assertEqual((rc, err), (0, ""))
+            self.assertIn(f"[{saved.id}] gone.md", out)
+            self.assertIn(str(missing), out)
+            self.assertIn("shoin source delete <source_id>", out)
+            for name in ("present.txt", "outside.txt", "old.txt", "example.invalid"):
+                self.assertNotIn(name, out)
+            self.assertEqual(sum(line.startswith("[") for line in out.splitlines()), 1)
+            with Store(db) as store:
+                self.assertEqual(store.sources_for_notebook(nb.id), sources)
+                self.assertEqual(store.trash_list(), [])
+
+            rc, _, err = self._run(base + ["source", "delete", str(saved.id)], llm)
+            self.assertEqual(rc, 0, err)
+            with Store(db) as store:
+                trash = store.trash_list()
+                self.assertEqual(len(trash), 1)
+                self.assertEqual(trash[0]["kind"], "source")
+                self.assertEqual(len(store.sources_for_notebook(nb.id)), len(sources) - 1)
+                self.assertEqual(len(store.sources_for_notebook(other.id)), 1)
+            rc, _, err = self._run(base + ["trash", "restore", str(trash[0]["id"])], llm)
+            self.assertEqual(rc, 0, err)
+            with Store(db) as store:
+                restored = next(
+                    src for src in store.sources_for_notebook(nb.id)
+                    if src.origin == saved.origin
+                )
+                self.assertEqual([c.text for c in store.chunks_for_source(restored.id)], chunks)
+
+    def test_source_missing_distinguishes_unchecked_paths_from_missing_files(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "docs"
+            root.mkdir()
+            blocked = root / "blocked.md"
+            missing = root / "missing.md"
+            db = str(Path(td) / "shoin.db")
+            base = ["--db", db, "source", "missing"]
+            with Store(db) as store:
+                nb = store.create_notebook("main")
+                empty = store.create_notebook("empty")
+                store.add_source(nb.id, "md", "blocked", str(blocked), "first")
+                saved = store.add_source(nb.id, "md", "missing", str(missing), "second")
+            original_stat = Path.stat
+
+            def stat_with_denial(path, *args, **kwargs):
+                if path == blocked:
+                    raise PermissionError("denied")
+                return original_stat(path, *args, **kwargs)
+
+            with patch.dict(os.environ, {"SHOIN_LANG": "ja"}):
+                with patch.object(Path, "stat", stat_with_denial):
+                    rc, out, err = self._run(base + [str(nb.id), str(root)], llm)
+                self.assertEqual(rc, 1)
+                self.assertIn(f"[{saved.id}] missing", out)
+                self.assertNotIn("blocked", out)
+                self.assertIn("確認できません", err)
+                self.assertIn(str(blocked), err)
+                rc, out, err = self._run(base + [str(empty.id), str(root)], llm)
+                self.assertEqual((rc, err), (0, ""))
+                self.assertIn("見つからない元ファイルはありません", out)
+                rc, out, err = self._run(base + [str(nb.id), str(root / "unmounted")], llm)
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn("フォルダ", err)
+                rc, out, err = self._run(base + ["9999", str(root)], llm)
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn("NOTEBOOK_NOT_FOUND", err)
 
     def test_studio_error_surfaces_code(self) -> None:
         llm = FakeLLM()

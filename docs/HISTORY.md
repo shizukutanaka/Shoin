@@ -29,7 +29,20 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.748
+## Version History: v0.1.37 → v0.2.749
+
+### v0.2.749 (2026-11-19)
+
+**Added**: `shoin source missing <notebook_id> <directory>` lists indexed sources whose
+original path under the selected folder no longer exists. This is a separate read-only
+step: it neither re-fetches sources nor modifies the index. Other notebooks, paths outside
+the directory, URLs, and imported display-only origins are excluded. A path that cannot
+be checked (e.g. due to permissions) is reported separately and returns exit status 1.
+Users can review the results and move individual sources to the existing recoverable
+trash with `shoin source delete <source_id>`.
+
+Two CLI tests cover folder and notebook scoping, explicit trash and restore, and
+unavailable paths. Both fail against v0.2.748 and pass with the new command.
 
 ### v0.2.748 — `shoin add` がフォルダを受け付け、再実行で差分同期する
 
