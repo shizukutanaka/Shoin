@@ -86,6 +86,20 @@ Web UIは3ペイン構成: 左=ソース / 中央=チャット / 右=Studio・�
 `shoin source delete <source_id>` でゴミ箱へ移動できます。復元は `shoin trash list` で
 ゴミ箱内のIDを調べ、`shoin trash restore <trash_id>` を実行します。
 
+### 音声概要 (CLI)
+
+[Piper](https://github.com/OHF-Voice/piper1-gpl) をインストールして `piper` を PATH に通し、
+ブリーフィングの言語に合う音声モデル (`.onnx` と同名の `.onnx.json`) を手元に用意してください。
+
+```bash
+shoin studio 1 briefing
+shoin audio 1 --model ./voice.onnx --output ./briefing.wav
+```
+
+`audio` は最新の保存済みブリーフィングを使うため、LLM に再接続せずオフラインで動作します。
+音声では引用番号を読み上げません。引用は元の Studio 出力で確認できます。
+モデルの自動ダウンロードや既存 WAV ファイルの上書きはしません。
+
 ### 検索の挙動(日本語)
 
 BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本語の表記ゆれを検索時に自動で吸収する:
