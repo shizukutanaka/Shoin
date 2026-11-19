@@ -401,6 +401,56 @@ const mkRes = (ok, status, body, bad) => ({
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_upload_failure_toasts_use_the_original_name_and_localized_reason(self) -> None:
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        blocks = [
+            _js_block(src, marker)
+            for marker in (
+                "const I18N", "async function api", "function uploadErrorMessage",
+                '$("#fileInput").onchange',
+            )
+        ]
+        translate = next(line for line in src.splitlines() if line.startswith("const t = "))
+        harness = """
+let lang;
+let code;
+const input = {value: "fakepath", files: [{name: "資料-{reason}-$&.txt"}]};
+const $ = () => input;
+const cur = {id: 9};
+let toastText;
+const toast = message => { toastText = message };
+const fetch = async () => {
+  if (code === null) throw new TypeError("Network failure");
+  return {ok: false, status: 400, json: async () => ({error: {
+    code, message: "temporary-file-abcd.txt"
+  }})};
+};
+""" + "\n".join([translate, *blocks]) + """
+const filename = input.files[0].name;
+const enPrefix = `Could not import “${filename}”: `;
+const fallback = enPrefix + "The upload failed. Please try again.";
+const cases = [
+  ["ja", "INGEST_EMPTY",
+    `「${filename}」を取り込めませんでした: ` + "ファイルからテキストを抽出できませんでした。"],
+  ["en", "INGEST_EMPTY", enPrefix + "No text could be extracted from this file."],
+  ["en", "INGEST_UNSUPPORTED_FORMAT", enPrefix + "This file format is not supported."],
+  ["en", "UNKNOWN_ERROR", fallback],
+  ["en", null, fallback],
+];
+for (const [locale, failure, expected] of cases){
+  lang = locale;
+  code = failure;
+  input.value = "fakepath";
+  await input.onchange({target: input});
+  if (toastText !== expected) throw new Error(`Expected ${expected}; got ${toastText}`);
+  if (input.value !== "" || input.disabled) throw new Error("Upload input was not reset");
+}
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_jpost_serializes_json_request(self) -> None:
         """v0.2.333: jpost() is the request-side half of the api() boundary
         contract — every mutating call must reach fetch() as method=POST with
