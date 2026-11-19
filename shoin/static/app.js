@@ -22,6 +22,7 @@ const I18N = {
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
     "studio.mindmap.diagram":"マインドマップの図",
+    "studio.audio":"音声をダウンロード (WAV)",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
     "studio.savenote":"ノートに保存","studio.savenote.ok":"ノートに保存しました",
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
@@ -81,6 +82,7 @@ const I18N = {
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
     "studio.mindmap.diagram":"Mind map diagram",
+    "studio.audio":"Download audio (WAV)",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
     "studio.savenote":"Save as note","studio.savenote.ok":"Saved as note",
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
@@ -1128,6 +1130,27 @@ function mindMapDiagram(body){
   frame.append(svg);
   return frame;
 }
+function studioAudioButton(nbId){
+  const button = el("button","btn", t("studio.audio"));
+  button.type = "button";
+  button.onclick = async ()=>{
+    button.disabled = true;
+    button.textContent = t("busy");
+    try{
+      const reply = await api(`/api/notebooks/${nbId}/studio/audio`, {method:"POST"});
+      const url = URL.createObjectURL(await reply.blob());
+      const link = el("a");
+      link.href = url;
+      link.download = `briefing-${nbId}.wav`;
+      link.hidden = true;
+      document.body.append(link);
+      try{ link.click(); }
+      finally{ link.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000); }
+    }catch(e){ toast(e.message); }
+    finally{ button.disabled = false; button.textContent = t("studio.audio"); }
+  };
+  return button;
+}
 function renderStudio(){
   const out = $("#studioOut"); out.replaceChildren();
   const items = cur.studio||[];
@@ -1157,6 +1180,7 @@ function renderStudio(){
         toast(t("studio.savenote.ok")); openNotebook(cur.id);
       }catch(e){ toast(e.message); } finally{ sn.disabled = false; } };
     card.append(sn);
+    if (o.kind === "briefing" && cur.audio_enabled) card.append(studioAudioButton(cur.id));
     out.append(card);
   });
 }

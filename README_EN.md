@@ -119,6 +119,11 @@ The VOICEVOX engine may include briefing text in its own local HTTP access log.
 Citation labels are omitted from the narration but remain in the original Studio output.
 Shoin does not download the voice or overwrite an existing output file.
 
+To download a briefing as WAV from Studio in the Web UI, start Shoin with a
+local voice, for example `shoin serve --piper-model ./voice.onnx` or
+`shoin serve --voicevox-speaker 3`. Open a notebook with a saved briefing and
+select **Download audio (WAV)**. The button is hidden unless audio is enabled.
+
 ### Search behavior (Japanese text)
 
 Hybrid search: BM25 (FTS5 trigram) + vectors. Variations in Japanese orthography are absorbed automatically at search time:

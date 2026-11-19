@@ -14,15 +14,17 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from .store import Store
+
 _BRACKETS = re.compile(r"[\[［]([^\[［\]］\n]+)[\]］]")
 _SOURCE_NUMBER = re.compile(r"[SsＳｓ]\s*[0-9０-９]+")
 _CITATION_SEPARATOR = re.compile(r"[,，、;；]|and", re.IGNORECASE)
 _PIPER_TIMEOUT_SEC = 180
 _VOICEVOX_TIMEOUT_SEC = 180
 _VOICEVOX_QUERY_LIMIT = 1024 * 1024
-_VOICEVOX_WAV_LIMIT = 64 * 1024 * 1024
+MAX_AUDIO_WAV_BYTES = 64 * 1024 * 1024
 _VOICEVOX_SEGMENT_CHARS = 1024
-_VOICEVOX_MAX_CHARS = 16 * _VOICEVOX_SEGMENT_CHARS
+MAX_BRIEFING_AUDIO_CHARS = 16 * _VOICEVOX_SEGMENT_CHARS
 
 
 class AudioError(Exception):
@@ -93,7 +95,7 @@ def _voicevox_segments(text: str) -> Iterator[str]:
 
 
 def _run_voicevox(text: str, speaker: int, wav_path: Path) -> None:
-    if len(text) > _VOICEVOX_MAX_CHARS:
+    if len(text) > MAX_BRIEFING_AUDIO_CHARS:
         raise AudioError("AUDIO_VOICEVOX_FAILED", "briefing exceeds the VOICEVOX narration limit")
     query: dict[str, Any] = {}
     for segment in _voicevox_segments(text):
@@ -112,9 +114,18 @@ def _run_voicevox(text: str, speaker: int, wav_path: Path) -> None:
             query["kana"] = None
     wav_path.write_bytes(
         _voicevox_post(
-            f"/synthesis?speaker={speaker}", _VOICEVOX_WAV_LIMIT, json.dumps(query).encode()
+            f"/synthesis?speaker={speaker}", MAX_AUDIO_WAV_BYTES, json.dumps(query).encode()
         )
     )
+
+
+def latest_briefing(store: Store, notebook_id: int) -> str | None:
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)
+        for row in store.latest_studio_outputs(notebook_id):
+            if row["kind"] == "briefing":
+                return str(row["body"])
+    return None
 
 
 def write_briefing_audio(body: str, voice: Path | int, output: Path) -> None:

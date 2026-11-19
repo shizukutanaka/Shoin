@@ -1,8 +1,8 @@
 """Shoin web server: stdlib HTTP, bound to 127.0.0.1 only (spec STRIDE).
 
 Single-user local app. Each request opens its own Store (SQLite/WAL), the LLM
-backend is shared and injectable for tests. `ask` streams over SSE; everything
-else is plain JSON. Static serving is the three packaged UI files under
+backend is shared and injectable for tests. `ask` streams over SSE; Studio audio
+downloads a WAV. Static serving is the three packaged UI files under
 literal routes only (index.html + app.js + style.css) — no path traversal.
 """
 
@@ -23,6 +23,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .audio import (
+    MAX_AUDIO_WAV_BYTES,
+    MAX_BRIEFING_AUDIO_CHARS,
+    AudioError,
+    latest_briefing,
+    write_briefing_audio,
+)
 from .citation import make_report
 from .config import (
     API_VERSION,
@@ -311,6 +318,8 @@ class _Handler(BaseHTTPRequestHandler):
     ]  # set by make_server; fingerprint = questions_fingerprint() (v0.2.701)
     questions_cache_lock: threading.Lock  # guards questions_cache across threads
     generation_lock: threading.Lock  # serializes LLM generation (spec.md STRIDE DoS control)
+    audio_voice: Path | int | None
+    audio_lock: threading.Lock
 
     # --- plumbing -------------------------------------------------------
 
@@ -616,6 +625,7 @@ class _Handler(BaseHTTPRequestHandler):
         ("POST", r"^/api/notebooks/(\d+)/search$", "nb_search"),
         ("POST", r"^/api/search$", "global_search"),
         ("POST", r"^/api/notebooks/(\d+)/studio$", "studio"),
+        ("POST", r"^/api/notebooks/(\d+)/studio/audio$", "studio_audio"),
         ("GET", r"^/api/notebooks/(\d+)/questions$", "questions"),
         ("POST", r"^/api/notebooks/(\d+)/notes$", "note_add"),
         ("DELETE", r"^/api/notes/(\d+)$", "note_delete"),
@@ -915,7 +925,9 @@ class _Handler(BaseHTTPRequestHandler):
             # `omitted` disclosures can go negative (v0.2.707). One WAL
             # snapshot frames the whole composition.
             with store.read_snapshot():
-                self._json(_notebook_json(store, nb_id))
+                payload = _notebook_json(store, nb_id)
+                payload["audio_enabled"] = self.audio_voice is not None
+                self._json(payload)
 
     def _h_nb_rename(self, nb_id: int) -> None:
         # PATCH accepts {name} and/or {settings} (v0.2.659) — either field
@@ -1371,6 +1383,44 @@ class _Handler(BaseHTTPRequestHandler):
             with self.generation_lock:
                 result = generate(store, self.llm, nb_id, kind)
             self._json({"kind": result.kind, "body": result.body, "report": dict(result.report)})
+
+    def _h_studio_audio(self, nb_id: int) -> None:
+        voice = self.audio_voice
+        if voice is None:
+            self._error(503, "AUDIO_DISABLED", "start Shoin with a local audio voice")
+            return
+        if not self.audio_lock.acquire(blocking=False):
+            self._error(409, "AUDIO_BUSY", "another audio overview is being generated")
+            return
+        try:
+            with Store(self.db) as store:
+                body = latest_briefing(store, nb_id)
+            if body is None:
+                self._error(404, "AUDIO_BRIEFING_NOT_FOUND", "generate a briefing first")
+                return
+            if len(body) > MAX_BRIEFING_AUDIO_CHARS:
+                self._error(400, "AUDIO_BRIEFING_TOO_LONG", "the briefing is too long to narrate")
+                return
+            with tempfile.TemporaryDirectory(prefix="shoin-web-audio-") as staging:
+                wav = Path(staging) / "briefing.wav"
+                write_briefing_audio(body, voice, wav)
+                size = wav.stat().st_size
+                if size > MAX_AUDIO_WAV_BYTES:
+                    self._error(502, "AUDIO_WAV_TOO_LARGE", "the recording exceeds the size limit")
+                    return
+                with wav.open(mode="rb") as stream:
+                    self._headers(200, "audio/wav", {
+                        "Content-Length": str(int(size)),
+                        "Content-Disposition": f'attachment; filename="briefing-{nb_id}.wav"',
+                    })
+                    for block in iter(lambda: stream.read(64 * 1024), b""):
+                        self.wfile.write(block)
+        except AudioError as exc:
+            self._safe_error(502, exc.code, str(exc))
+        except ConnectionError:
+            return
+        finally:
+            self.audio_lock.release()
 
     def _h_questions(self, nb_id: int) -> None:
         with Store(self.db) as store:
@@ -1842,6 +1892,8 @@ def make_server(
     port: int = 0,
     db: str | None = None,
     llm: ChatBackend | None = None,
+    *,
+    audio_voice: Path | int | None = None,
 ) -> ThreadingHTTPServer:
     """Build a configured server. host is pinned to loopback by design."""
     if not (host.startswith("127.") or host == "::1"):
@@ -1855,6 +1907,8 @@ def make_server(
             "questions_cache": {},
             "questions_cache_lock": threading.Lock(),
             "generation_lock": threading.Lock(),
+            "audio_voice": audio_voice,
+            "audio_lock": threading.Lock(),
         },
     )
     return _HTTPServer((host, port), handler)
@@ -1914,8 +1968,10 @@ class _HTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def serve(port: int, db: str | None = None) -> None:  # pragma: no cover (blocking loop)
-    server = make_server(port=port, db=db)
+def serve(
+    port: int, db: str | None = None, *, audio_voice: Path | int | None = None,
+) -> None:  # pragma: no cover (blocking loop)
+    server = make_server(port=port, db=db, audio_voice=audio_voice)
     actual = server.server_address[1]
     print(f"Shoin (書院) v{VERSION} — http://127.0.0.1:{actual}/")
     print(_t("serve.no_egress"))

@@ -2229,6 +2229,69 @@ assert.equal(multiRootCard.children.find(node => node.cls === "bd").children[0].
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_renderStudio_downloads_audio_only_for_configured_briefings(self) -> None:
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        functions = "\n".join(_js_block(src, marker) for marker in (
+            "function studioAudioButton", "function renderStudio",
+        ))
+        harness = """\
+import assert from "node:assert/strict";
+function el(tag, cls, textContent){
+  return {tag, cls, textContent, children:[],
+    append(...items){this.children.push(...items)},
+    replaceChildren(){this.children = []}, setAttribute(){},
+    click(){downloads.push([this.href, this.download])},
+    remove(){document.body.children = []}};
+}
+const out = el("div");
+const $ = () => out;
+const t = key => key;
+const cur = {id:17, studio:[{kind:"briefing", body:"A saved briefing."},
+                            {kind:"faq", body:"Not a briefing."}]};
+function renderWithSeals(){}
+const downloads = [], toasts = [], revoked = [];
+const toast = message => toasts.push(message);
+const document = {body:el("body")};
+const wav = {};
+const URL = {
+  createObjectURL(value){assert.equal(value, wav); return "blob:wav"},
+  revokeObjectURL(url){revoked.push(url)},
+};
+const setTimeout = fn => fn();
+let failure = false;
+async function api(path, opts){
+  assert.equal(path, "/api/notebooks/17/studio/audio");
+  assert.equal(opts.method, "POST");
+  assert.equal(button.disabled, true);
+  if (failure) throw new Error("Audio engine unavailable");
+  return {blob:async ()=>wav};
+}
+""" + functions + """
+const audioButton = card => card.children.find(node => node.textContent === "studio.audio");
+renderStudio();
+assert.ok(out.children.every(card => !audioButton(card)));
+cur.audio_enabled = true;
+renderStudio();
+const button = audioButton(out.children[0]);
+assert.ok(button);
+assert.ok(!audioButton(out.children[1]));
+await button.onclick();
+assert.deepEqual(downloads, [["blob:wav", "briefing-17.wav"]]);
+assert.deepEqual(revoked, ["blob:wav"]);
+assert.deepEqual(document.body.children, []);
+assert.equal(button.disabled, false);
+failure = true;
+await button.onclick();
+assert.deepEqual(toasts, ["Audio engine unavailable"]);
+assert.equal(downloads.length, 1);
+assert.equal(button.disabled, false);
+assert.equal(button.textContent, "studio.audio");
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_renderStudio_shows_all_warning_badges(self) -> None:
         """v0.2.235: a Studio card's heading badges were a third badge chain —
         and it silently dropped numeric_mismatch, unit_mismatch, negation,
