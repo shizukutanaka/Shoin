@@ -199,6 +199,12 @@ _STRINGS: dict[str, dict[str, str]] = {
             "一括再取込: {n}件 (更新 {refreshed} / 変更なし {unchanged} / "
             "skip {skipped} / 失敗 {failed})"
         ),
+        "src.missing.not_dir": "フォルダにアクセスできません: {path}",
+        "src.missing.unchecked": "[{id}] 元ファイルを確認できません: {path} ({error})",
+        "src.missing.empty": "見つからない元ファイルはありません。",
+        "src.missing.hint": (
+            "確認後、不要なソースだけを shoin source delete <source_id> でゴミ箱へ移動できます。"
+        ),
         "src.weighted": "重み設定完了: [{id}] weight={w} (0-8、検索スコアへ乗算)",
         "src.meta_set": "メタデータ設定完了: [{id}] {meta}",
         "chunk.edited": "チャンク更新完了: [{id}] (埋め込みクリア — reindexで再構築)",
@@ -354,6 +360,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.source": "ソース管理",
         "help.source.refresh": "ソースの再取込 (URL、または元ファイルが残るファイルソース)",
         "help.source.refresh_all": "ノートブック内の全ソースを一括再取込 (cron向け)",
+        "help.source.missing": "指定フォルダ内で元ファイルが見つからないソースを表示 (変更なし)",
         "help.source.weight": "検索重みの設定 (1.0=標準・>1優遇・<1降格・0で下位固定)",
         "help.source.meta": (
             "ソースメタデータ (author=… year=…; 引数なしで表示・--clearで消去)"
@@ -490,6 +497,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.refresh_all.done": (
             "refresh-all: {n} source(s) ({refreshed} refreshed / "
             "{unchanged} unchanged / {skipped} skipped / {failed} failed)"
+        ),
+        "src.missing.not_dir": "Cannot access directory: {path}",
+        "src.missing.unchecked": "[{id}] Cannot check original file: {path} ({error})",
+        "src.missing.empty": "No missing original files.",
+        "src.missing.hint": (
+            "After reviewing, move individual sources to trash with shoin source delete <source_id>."
         ),
         "src.weighted": "Weight set: [{id}] weight={w} (0-8, multiplies retrieval score)",
         "src.meta_set": "Metadata set: [{id}] {meta}",
@@ -644,6 +657,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Re-fetch a source (URL, or a file source whose original file still exists)"
         ),
         "help.source.refresh_all": "Re-fetch every source in a notebook (for cron)",
+        "help.source.missing": "List missing original files under a folder (read-only)",
         "help.source.weight": (
             "Set search weight (1.0=standard, >1 boosts, <1 demotes, 0 pins to the bottom)"
         ),
@@ -778,6 +792,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "refresh-all", help=_t("help.source.refresh_all")
     )
     src_ra.add_argument("notebook_id", type=int)
+    src_missing = srcsub.add_parser("missing", help=_t("help.source.missing"))
+    src_missing.add_argument("notebook_id", type=int)
+    src_missing.add_argument("directory")
     src_w = srcsub.add_parser(
         "weight", help=_t("help.source.weight")
     )
@@ -1974,6 +1991,47 @@ def _cmd_note(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _list_missing_sources(store: Store, notebook_id: int, directory: str) -> int:
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)
+        sources = store.sources_for_notebook(notebook_id)
+    try:
+        root = Path(os.path.abspath(Path(directory).expanduser()))
+    except RuntimeError:  # unknown home in a ~user path
+        print(_t("src.missing.not_dir", path=_one_line(directory)), file=sys.stderr)
+        return 1
+    if not root.is_dir():
+        print(_t("src.missing.not_dir", path=_one_line(str(root))), file=sys.stderr)
+        return 1
+
+    found_missing = False
+    rc = 0
+    for src in sources:
+        # Match the absolute locator recorded by `shoin add`, not the realpath.
+        path = Path(src.origin)
+        if not path.is_absolute() or not path.is_relative_to(root):
+            continue
+        try:
+            path.stat()
+        except FileNotFoundError:
+            found_missing = True
+            print(f"[{src.id}] {_one_line(src.title)}: {_one_line(str(path))}")
+        except (OSError, ValueError) as exc:
+            rc = 1
+            print(
+                _t(
+                    "src.missing.unchecked", id=str(src.id),
+                    path=_one_line(str(path)), error=_one_line(str(exc)),
+                ),
+                file=sys.stderr,
+            )
+    if found_missing:
+        print(_t("src.missing.hint"))
+    elif rc == 0:
+        print(_t("src.missing.empty"))
+    return rc
+
+
 def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     action = str(args.action)
     if action == "delete":
@@ -2022,6 +2080,8 @@ def _cmd_source(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int
                 failed=str(tally.get("failed", 0)),
             )
         )
+    elif action == "missing":
+        return _list_missing_sources(store, int(args.notebook_id), str(args.directory))
     elif action == "weight":
         # update_source_weight raises the coded StoreError for range/type —
         # argparse's type=float accepts nan/inf, so the store bound is the

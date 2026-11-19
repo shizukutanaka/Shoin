@@ -69,6 +69,7 @@ shoin notebook merge 1 2              # Merge nb2 into nb1 (nb2 is archived to t
 shoin notebook settings 1 top_k=4 source_text_tokens=512  # Per-notebook retrieval overrides (unset = global default)
 shoin add 1 ./paper.pdf https://example.com/article
 shoin add 1 ~/papers/                 # add a whole folder (re-run: adds new files, refreshes changed ones)
+shoin source missing 1 ~/papers/      # review source IDs and paths for missing originals
 shoin ask 1 "What is this paper's main contribution?"
 shoin studio 1 study_guide
 shoin health                          # Check configuration and LLM reachability (headless diagnostics)
@@ -80,6 +81,11 @@ shoin eval 1 cases.json               # Measure retrieval quality on your own do
 ```
 
 The Web UI has three panes: left = sources, center = chat, right = Studio and notes.
+
+`source missing` checks original paths under the selected folder without changing the index.
+Check that any external drive is connected before moving an unwanted source to trash with
+`shoin source delete <source_id>`. To undo, find its trash ID with `shoin trash list` and run
+`shoin trash restore <trash_id>`.
 
 ### Search behavior (Japanese text)
 
