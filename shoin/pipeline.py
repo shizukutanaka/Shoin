@@ -207,6 +207,15 @@ def _embed_chunks(
     return done
 
 
+def _rollback_index_source(store: Store, source: Source | None) -> None:
+    if source is not None:
+        try:
+            store.delete_source(source.id)
+        except Exception:
+            pass
+    store.bump_metrics({"index.fail": 1.0})
+
+
 def index_source(
     store: Store,
     notebook_id: int,
@@ -269,17 +278,15 @@ def index_source(
             store, llm or _NoEmbed(), chunk_ids, embed_texts,
             expected_texts=texts,
         )
+    except KeyboardInterrupt:
+        _rollback_index_source(store, source)
+        raise
     except Exception:
         # Catch-all by contract, not by accident: every ingest/index failure —
         # coded or not — is a real usage failure worth one counter tick, then
         # the original exception propagates unchanged. The rollback delete is
         # best-effort: a cleanup failure must not mask the original error.
-        if source is not None:
-            try:
-                store.delete_source(source.id)
-            except Exception:
-                pass
-        store.bump_metrics({"index.fail": 1.0})
+        _rollback_index_source(store, source)
         raise
     ms = round((time.monotonic() - t0) * 1000)
     store.bump_metrics(

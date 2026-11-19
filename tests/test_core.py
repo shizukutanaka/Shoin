@@ -21150,6 +21150,7 @@ class TestResidualGuards(unittest.TestCase):
                 # to SYSTEM_IO_ERROR — same coded OSError contract, now on
                 # the write side (v0.2.732).
                 "OSError",
+                "OSError",  # a watched file can become unreadable between polls
                 "OverflowError",
                 # v0.2.611: custom ChatBackends can emit surrogate tokens that
                 # crash print() on strict-UTF-8 stdout — boundary catch in
@@ -21230,7 +21231,7 @@ class TestResidualGuards(unittest.TestCase):
                 "(OSError,UnicodeEncodeError,ValueError)",
             ],
             "pipeline.py": [
-                "Exception", "Exception", "Exception",
+                "Exception", "Exception", "Exception", "KeyboardInterrupt",
                 # v0.2.653: index_source's usage-metrics wrapper counts every
                 # escaping failure once (index.fail), then re-raises it.
                 "Exception",
@@ -21520,6 +21521,7 @@ class TestResidualGuards(unittest.TestCase):
                 # +1: _atomic_write_text's OSError -> SYSTEM_IO_ERROR wrap
                 #     (v0.2.732).
                 "StoreError",
+                "StoreError",  # _cmd_watch requires a regular directory
             ],
             "evaluate.py": ["ValueError"] * 15,
             "export.py": ["ValueError"],
@@ -21538,6 +21540,7 @@ class TestResidualGuards(unittest.TestCase):
                 # +1 RE-RAISE: the metrics wrapper re-raises after counting
                 # index.fail (v0.2.653).
                 "RE-RAISE",
+                "RE-RAISE",  # re-raise Ctrl-C after rolling back the interrupted import
                 "StoreError",
             ],
             # +1 RE-RAISE: the metrics wrapper re-raises after counting
@@ -22357,6 +22360,7 @@ class TestResidualGuards(unittest.TestCase):
         }
 
         baseline = {
+            "cli.py": ["time.sleep"],  # foreground folder-watch polling
             # v0.2.639: geometric backoff between _post retries.
             "llm.py": ["time.sleep"],
             "store.py": ["datetime.now", "time.sleep"],

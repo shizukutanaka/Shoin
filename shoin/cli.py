@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+import stat
 import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -195,6 +197,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add.dir_empty": "✗ {path}: 対応形式のファイルがありません (.txt/.md/.html/.pdf/.vtt)",
         "add.unchanged": "= {title}: 変更なし",
         "add.duplicate": "= {path}: 同一内容のソースが既にあります (skip)",
+        "watch.folder_invalid": "監視先が見つからないか、通常のフォルダではありません: {path}",
         "add.dir_done": (
             "フォルダ取込: {n}件 (追加 {added} / 更新 {refreshed} / 変更なし {unchanged} / "
             "重複 {duplicate} / 失敗 {failed})"
@@ -363,6 +366,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.messages": "チャット履歴管理",
         "help.messages.clear": "履歴クリア",
         "help.add_source": "ソース追加(ファイル/フォルダ/URL)",
+        "help.watch": "ローカルフォルダを監視してソースを追加・更新",
+        "help.watch.once": "1回だけ確認して終了",
         "help.reindex": "ノートブックの埋め込みを再構築",
         "help.note": "ノート管理",
         "help.source": "ソース管理",
@@ -500,6 +505,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add.dir_empty": "✗ {path}: no supported files (.txt/.md/.html/.pdf/.vtt)",
         "add.unchanged": "= {title}: unchanged",
         "add.duplicate": "= {path}: identical source already in notebook (skipped)",
+        "watch.folder_invalid": "Watch folder is missing or not a regular directory: {path}",
         "add.dir_done": (
             "folder add: {n} file(s) ({added} added / {refreshed} refreshed / "
             "{unchanged} unchanged / {duplicate} duplicate / {failed} failed)"
@@ -665,6 +671,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.messages": "Manage chat history",
         "help.messages.clear": "Clear history",
         "help.add_source": "Add sources (files/folders/URLs)",
+        "help.watch": "Watch a local folder for new and updated sources",
+        "help.watch.once": "Scan once and exit",
         "help.reindex": "Rebuild a notebook's embeddings",
         "help.note": "Manage notes",
         "help.source": "Manage sources",
@@ -783,6 +791,11 @@ def _build_parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add", help=_t("help.add_source"))
     add.add_argument("notebook_id", type=int)
     add.add_argument("targets", nargs="+")
+
+    watch = sub.add_parser("watch", help=_t("help.watch"))
+    watch.add_argument("notebook_id", type=int)
+    watch.add_argument("directory", type=Path)
+    watch.add_argument("--once", action="store_true", help=_t("help.watch.once"))
 
     ri = sub.add_parser("reindex", help=_t("help.reindex"))
     ri.add_argument("notebook_id", type=int)
@@ -1801,6 +1814,38 @@ def _dir_files(root: str) -> list[str]:
     return out
 
 
+def _add_target(
+    store: Store, llm: ChatBackend, notebook_id: int, target: str,
+    src: Source | None, *, in_dir: bool,
+) -> str:
+    try:
+        if src is None:
+            result = index_source(store, notebook_id, target, llm)
+        else:
+            result = refresh_source(store, src.id, llm)
+            if result.source.sha256 == src.sha256:
+                print(_t("add.unchanged", title=_one_line(result.source.title)))
+                return "unchanged"
+        print(
+            f"✓ {_one_line(result.source.title)}: {result.n_chunks}"
+            f" chunks ({result.n_embedded} embedded)"
+        )
+        if result.pages_failed:
+            # Don't report a partial index as complete: the graceful
+            # per-page PDF fallback drops failed pages silently.
+            print(_t("src.pages_failed", n=str(result.pages_failed)), file=sys.stderr)
+    except (IngestError, StoreError) as exc:
+        if in_dir and exc.code == "SOURCE_ALREADY_EXISTS":
+            print(_t("add.duplicate", path=_one_line(target)))
+            return "duplicate"
+        print(f"✗ {_one_line(target)}: [{exc.code}] {exc}", file=sys.stderr)
+        return "failed"
+    except sqlite3.OperationalError as exc:
+        print(f"✗ {_one_line(target)}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
+        return "failed"
+    return "added" if src is None else "refreshed"
+
+
 def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     rc = 0
     notebook_id = int(args.notebook_id)
@@ -1831,44 +1876,12 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         known = {s.origin: s for s in store.sources_for_notebook(notebook_id)}
     tally = dict.fromkeys(("added", "refreshed", "unchanged", "duplicate", "failed"), 0)
     for target, in_dir in items:
-        status = "added"
-        try:
-            src = known.get(os.path.abspath(target)) if in_dir else None
-            if src is None:
-                result = index_source(store, notebook_id, target, llm)
-            else:
-                result = refresh_source(store, src.id, llm)
-                if result.source.sha256 == src.sha256:
-                    status = "unchanged"
-                    print(_t("add.unchanged", title=_one_line(result.source.title)))
-                    continue
-                status = "refreshed"
-            print(
-                f"✓ {_one_line(result.source.title)}: {result.n_chunks}"
-                f" chunks ({result.n_embedded} embedded)"
-            )
-            if result.pages_failed:
-                # Don't report a partial index as complete: the graceful
-                # per-page PDF fallback drops failed pages silently.
-                print(
-                    _t("src.pages_failed", n=str(result.pages_failed)),
-                    file=sys.stderr,
-                )
-        except (IngestError, StoreError) as exc:
-            if in_dir and exc.code == "SOURCE_ALREADY_EXISTS":
-                status = "duplicate"
-                print(_t("add.duplicate", path=_one_line(target)))
-                continue
-            status = "failed"
-            print(f"✗ {_one_line(target)}: [{exc.code}] {exc}", file=sys.stderr)
+        src = known.get(os.path.abspath(target)) if in_dir else None
+        status = _add_target(store, llm, notebook_id, target, src, in_dir=in_dir)
+        if status == "failed":
             rc = 1
-        except sqlite3.OperationalError as exc:
-            status = "failed"
-            print(f"✗ {_one_line(target)}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
-            rc = 1
-        finally:
-            if in_dir:
-                tally[status] += 1
+        if in_dir:
+            tally[status] += 1
     if has_dir:
         print(
             _t(
@@ -1882,6 +1895,49 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
             )
         )
     return rc
+
+
+def _cmd_watch(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
+    notebook_id = int(args.notebook_id)
+    root = Path(os.path.abspath(args.directory.expanduser()))
+    if root.is_symlink() or not root.is_dir():
+        raise StoreError(
+            "VALIDATION_FIELD_FORMAT_INVALID", _t("watch.folder_invalid", path=_one_line(str(root)))
+        )
+    previous: dict[str, tuple[int, ...]] = {}
+    while True:
+        store.get_notebook(notebook_id)
+        current: dict[str, tuple[int, ...]] = {}
+        pending: dict[str, tuple[int, ...]] = {}
+        failed = False
+        paths = [] if root.is_symlink() else _dir_files(str(root))
+        for path in paths:
+            try:
+                info = os.lstat(path)
+            except OSError as exc:
+                if not isinstance(exc, FileNotFoundError):
+                    print(f"✗ {_one_line(path)}: [SYSTEM_IO_ERROR] {exc}", file=sys.stderr)
+                    failed = True
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if previous.get(path) == stamp:
+                current[path] = stamp
+            else:
+                pending[path] = stamp
+        if pending:
+            known = {s.origin: s for s in store.sources_for_notebook(notebook_id)}
+            for path, pending_stamp in pending.items():
+                status = _add_target(store, llm, notebook_id, path, known.get(path), in_dir=True)
+                if status == "failed":
+                    failed = True
+                else:
+                    current[path] = pending_stamp
+        if args.once:
+            return int(failed)
+        previous = current
+        time.sleep(2)
 
 
 def _cmd_ask(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
@@ -2229,6 +2285,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 )
             if command == "add":
                 return _cmd_add(store, backend, args)
+            if command == "watch":
+                return _cmd_watch(store, backend, args)
             if command == "ask":
                 return _cmd_ask(store, backend, args)
             if command == "studio":
