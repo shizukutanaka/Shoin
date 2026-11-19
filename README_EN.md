@@ -105,6 +105,16 @@ shoin studio 1 briefing
 shoin audio 1 --model ./voice.onnx --output ./briefing.wav
 ```
 
+For Japanese narration with [VOICEVOX](https://voicevox.hiroshiba.jp/), start its
+engine at `127.0.0.1:50021` and pass a style ID from its `/speakers` response
+(the example uses style 3):
+
+```bash
+shoin audio 1 --voicevox-speaker 3 --output ./briefing-ja.wav
+```
+
+The VOICEVOX engine may include briefing text in its own local HTTP access log.
+
 `audio` narrates the latest saved briefing offline without calling the LLM again.
 Citation labels are omitted from the narration but remain in the original Studio output.
 Shoin does not download the voice or overwrite an existing output file.
