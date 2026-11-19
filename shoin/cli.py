@@ -502,7 +502,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "src.missing.unchecked": "[{id}] Cannot check original file: {path} ({error})",
         "src.missing.empty": "No missing original files.",
         "src.missing.hint": (
-            "After reviewing, move individual sources to trash with shoin source delete <source_id>."
+            "After reviewing, move individual sources to trash with "
+            "shoin source delete <source_id>."
         ),
         "src.weighted": "Weight set: [{id}] weight={w} (0-8, multiplies retrieval score)",
         "src.meta_set": "Metadata set: [{id}] {meta}",

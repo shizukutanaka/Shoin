@@ -1214,6 +1214,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual((rc, err), (0, ""))
             self.assertIn(f"[{saved.id}] gone.md", out)
             self.assertIn(str(missing), out)
+            self.assertIn("shoin source delete <source_id>", out)
             for name in ("present.txt", "outside.txt", "old.txt", "example.invalid"):
                 self.assertNotIn(name, out)
             self.assertEqual(sum(line.startswith("[") for line in out.splitlines()), 1)
