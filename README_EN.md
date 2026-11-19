@@ -87,6 +87,20 @@ Check that any external drive is connected before moving an unwanted source to t
 `shoin source delete <source_id>`. To undo, find its trash ID with `shoin trash list` and run
 `shoin trash restore <trash_id>`.
 
+### Audio overview (CLI)
+
+Install [Piper](https://github.com/OHF-Voice/piper1-gpl) so `piper` is on PATH, and
+place a voice matching the briefing language (`.onnx` and its matching `.onnx.json`) on your machine.
+
+```bash
+shoin studio 1 briefing
+shoin audio 1 --model ./voice.onnx --output ./briefing.wav
+```
+
+`audio` narrates the latest saved briefing offline without calling the LLM again.
+Citation labels are omitted from the narration but remain in the original Studio output.
+Shoin does not download the voice or overwrite an existing output file.
+
 ### Search behavior (Japanese text)
 
 Hybrid search: BM25 (FTS5 trigram) + vectors. Variations in Japanese orthography are absorbed automatically at search time:

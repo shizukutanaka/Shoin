@@ -19678,11 +19678,9 @@ class TestResidualGuards(unittest.TestCase):
 
         1. Dynamic-execution / deserialization primitives — eval, exec,
            compile, __import__, globals()/locals() mutation, pickle,
-           marshal, subprocess/os.system/os.popen, ctypes. Shoin is a
-           stdlib-only local tool: NONE of these is ever legitimate here,
-           and any one of them is either a code-injection sink (eval'd
-           source text, pickled model output) or a sandbox escape. Today
-           there are zero; the pin keeps it zero.
+           marshal, subprocess/os.system/os.popen, ctypes. The only
+           permitted launch is the CLI's fixed, shell-free Piper audio
+           synthesis call; anything else is a new execution surface.
 
         2. Mutable default arguments — `def f(x=[], y={})` binds ONE list/
            dict shared across every call; the classic aliasing bug that
@@ -19727,6 +19725,7 @@ class TestResidualGuards(unittest.TestCase):
         # the handler thread silently. Catalog by file -> site count.
         expected_exit_sites = {"cli.py": 1, "__main__.py": 1}
         exit_sites: dict[str, int] = {}
+        piper_calls = 0
         problems: list[str] = []
         n_funcs = 0
         for path in sorted(shoin_dir.glob("*.py")):
@@ -19739,6 +19738,8 @@ class TestResidualGuards(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module.split(".")[0])
             bad_imports = imported & banned_mods
+            if path.name == "audio.py":
+                bad_imports.discard("subprocess")
             if bad_imports:
                 problems.append(
                     f"{path.name}: banned imports {sorted(bad_imports)}"
@@ -19766,12 +19767,25 @@ class TestResidualGuards(unittest.TestCase):
                     if isinstance(f, ast.Attribute):
                         root = f.value
                         root_name = root.id if isinstance(root, ast.Name) else ""
-                        if root_name in banned_mods and f.attr in banned_attrs | {
-                            "run", "call", "Popen", "system", "popen"
-                        }:
-                            problems.append(
-                                f"{path.name}:{node.lineno}: {root_name}.{f.attr}()"
-                            )
+                        if root_name == "subprocess" or (
+                            root_name in banned_mods
+                            and f.attr in banned_attrs | {"run", "call", "Popen", "system", "popen"}
+                        ):
+                            if (
+                                path.name == "audio.py"
+                                and ast.unparse(node) == (
+                                    "subprocess.run(['piper', '-m', str(model), "
+                                    "'-f', str(wav_path)], input=text + '\\n', "
+                                    "encoding='utf-8', stdout=subprocess.DEVNULL, "
+                                    "stderr=subprocess.DEVNULL, check=True, "
+                                    "timeout=_PIPER_TIMEOUT_SEC)"
+                                )
+                            ):
+                                piper_calls += 1
+                            else:
+                                problems.append(
+                                    f"{path.name}:{node.lineno}: {root_name}.{f.attr}()"
+                                )
                         # os carries the same shell-exec family under a
                         # legitimate-looking module name: os.system, os.popen,
                         # os.spawn*, os.exec*, os.startfile — banning the
@@ -19806,6 +19820,7 @@ class TestResidualGuards(unittest.TestCase):
                         f"{path.name}:{node.lineno}: raise SystemExit"
                     )
         self.assertEqual(problems, [], f"dangerous constructs: {problems}")
+        self.assertEqual(piper_calls, 1)
         self.assertEqual(
             exit_sites,
             expected_exit_sites,
@@ -20897,6 +20912,7 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline = {
+            "audio.py": 3,   # private WAV staging, chmod, and no-overwrite publish
             "cli.py": 4,     # _atomic_write_text: tmp.write_text + os.replace
             #     + finally tmp.unlink — the eval --gen/--save writers funnel
             #     through one atomic helper (v0.2.732)
@@ -21056,9 +21072,13 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline: dict[str, list[str]] = {
+            "audio.py": [
+                "FileNotFoundError", "subprocess.TimeoutExpired", "subprocess.CalledProcessError",
+                "(EOFError,FileNotFoundError,wave.Error)", "FileExistsError",
+            ],
             "cli.py": [
                 "(IngestError,StoreError)",
-                "(IngestError,LLMError,StoreError)",
+                "(AudioError,IngestError,LLMError,StoreError)",
                 # v0.2.718: RecursionError joins all three CLI file-parse
                 # tuples — deeply nested JSON is a 400-class input defect
                 # (server.py's _read_json sets the same classification).
@@ -21419,12 +21439,14 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline: dict[str, list[str]] = {
+            "audio.py": ["AudioError"] * 9,
             "citation.py": [
                 "ValueError", "ValueError", "ValueError",
                 "ValueError", "ValueError",
             ],
             "cli.py": [
                 "argparse.ArgumentTypeError", "argparse.ArgumentTypeError",
+                "AudioError",  # missing saved briefing
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 "StoreError", "StoreError", "StoreError", "StoreError",
                 # +2: _cmd_search's question/length guards (v0.2.649)
@@ -22423,6 +22445,7 @@ class TestResidualGuards(unittest.TestCase):
             "signal", "io", "select", "multiprocessing", "gc",
         }
         from_baseline = {
+            "audio.py": ["pathlib.Path"],
             "cli.py": ["pathlib.Path"],
             "config.py": ["pathlib.Path"],
             "ingest.py": ["io.BytesIO", "pathlib.Path"],
@@ -22728,11 +22751,9 @@ class TestResidualGuards(unittest.TestCase):
         — the import itself is the smallest, most reviewable event,
         and none of it passes through a call-site pattern. The whole
         capability-import surface is pinned per-file: the only live
-        grants today are ingest.py's `socket`+`ssl` for the
-        SSRF-pinned TLS connection (ADR-001). Any new grant — a new
-        `import subprocess` anywhere, or socket/ssl spreading beyond
-        ingest.py — drifts this catalog loudly instead of arriving
-        silently in a diff."""
+        grants are private to the audited invocation sites in the
+        ingestion, LLM, and local audio modules. Any new grant drifts
+        this catalog loudly instead of arriving silently in a diff."""
         import ast as _ast
 
         capability = {
@@ -22758,6 +22779,7 @@ class TestResidualGuards(unittest.TestCase):
         # connection) — `http.server` stays sanctioned.
         capability_dotted = {"http.client"}
         baseline = {
+            "audio.py": ["subprocess"],  # fixed local Piper invocation only
             "ingest.py": ["http.client", "socket", "ssl"],
             "llm.py": ["http.client"],
         }

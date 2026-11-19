@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from .audio import AudioError, write_briefing_audio
 from .chunk import split_text_with_context
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
@@ -372,6 +373,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.ask.source": "このソースIDのみを検索対象にする(複数回指定可)",
         "help.k": "検索深さ",
         "help.studio": "Studio出力生成",
+        "help.audio": "保存済みブリーフィングをローカル音声 (WAV) に変換",
+        "help.audio.model": "ローカルの Piper 音声モデル (.onnx)",
+        "help.audio.output": "新規 WAV ファイルの保存先",
+        "audio.saved": "音声を保存: {path}",
+        "audio.no_briefing": "先に shoin studio {id} briefing でブリーフィングを生成してください。",
         "help.questions": "推奨質問の提案",
         "help.search": "全ノートブック横断検索",
         "help.eval": "検索精度を測定 (recall/MRR)",
@@ -672,6 +678,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help.ask.source": "Restrict retrieval to this source ID (may be repeated)",
         "help.k": "Retrieval depth",
         "help.studio": "Generate Studio output",
+        "help.audio": "Narrate a saved briefing locally as a WAV file",
+        "help.audio.model": "Local Piper voice model (.onnx)",
+        "help.audio.output": "Path for a new WAV file",
+        "audio.saved": "Saved audio: {path}",
+        "audio.no_briefing": "Generate a briefing first with shoin studio {id} briefing.",
         "help.questions": "Suggest questions",
         "help.search": "Search across all notebooks",
         "help.eval": "Measure retrieval quality (recall/MRR)",
@@ -835,6 +846,11 @@ def _build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("studio", help=_t("help.studio"))
     st.add_argument("notebook_id", type=int)
     st.add_argument("kind", choices=KINDS)
+
+    audio = sub.add_parser("audio", help=_t("help.audio"), description=_t("help.audio"))
+    audio.add_argument("notebook_id", type=_pos_int)
+    audio.add_argument("--model", type=Path, required=True, help=_t("help.audio.model"))
+    audio.add_argument("--output", type=Path, required=True, help=_t("help.audio.output"))
 
     q = sub.add_parser("questions", help=_t("help.questions"))
     q.add_argument("notebook_id", type=int)
@@ -1913,6 +1929,21 @@ def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> 
     return 0
 
 
+def _cmd_audio(store: Store, args: argparse.Namespace) -> int:
+    notebook_id = int(args.notebook_id)
+    with store.read_snapshot():
+        store.get_notebook(notebook_id)
+        briefing = next(
+            (row for row in store.latest_studio_outputs(notebook_id) if row["kind"] == "briefing"),
+            None,
+        )
+    if briefing is None:
+        raise AudioError("AUDIO_BRIEFING_NOT_FOUND", _t("audio.no_briefing", id=str(notebook_id)))
+    write_briefing_audio(str(briefing["body"]), args.model, args.output)
+    print(_t("audio.saved", path=_safe_text(str(args.output))))
+    return 0
+
+
 def _cmd_search(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     """Cross-notebook retrieval (v0.2.649): the same pipeline ask() runs, with
     notebook_id=None — every source in the DB is a candidate and each hit is
@@ -2187,6 +2218,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return _cmd_ask(store, backend, args)
             if command == "studio":
                 return _cmd_studio(store, backend, args)
+            if command == "audio":
+                return _cmd_audio(store, args)
             if command == "questions":
                 return _cmd_questions(store, backend, args)
             if command == "eval":
@@ -2227,7 +2260,7 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
                 return 0
             if command == "import":
                 return _cmd_import(store, args)
-    except (StoreError, IngestError, LLMError) as exc:
+    except (StoreError, IngestError, LLMError, AudioError) as exc:
         print(_t("err.prefix", code=exc.code, msg=str(exc)), file=sys.stderr)
         return 1
     except sqlite3.OperationalError as exc:
