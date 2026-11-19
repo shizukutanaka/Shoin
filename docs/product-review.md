@@ -149,7 +149,7 @@ v0.2.172 で CLAUDE.md から分離)と CHANGELOG.md(〜v0.1.55)にバグ単位�
 | ~~7~~ | ~~ノートブック横断検索が無い~~ | **解消 (v0.2.649)**: `retrieve`/`bm25_search`/`vector_search` の `notebook_id` を `int | None` 化——`(? IS NULL OR s.notebook_id = ?)` で単一SQL形状のまま全nb横断。`POST /api/search` (nb_id/notebook/title provenance付きhits) + `shoin search <q>` でCLI/Web両面 |
 | 8 | **認証・マルチユーザー非対応** | 単一ユーザーの loopback 前提設計。LAN公開するだけで誰でも全ノートブックを読み書きできる(意図的だが、公開用途では致命的) |
 | 9 | **TLS 非対応** | stdlib `http.server` ベースで HTTPS を話せない。リモート配置・リバプロ前提の利用は外側の問題として未扱い |
-| 10 | **docx/epub/pptx 未対応** | `_EXT_KIND` は txt/md/html/pdf のみ。オフィス文書は前処理で変換が必要 |
+| 10 | **docx/epub/pptx 未対応** | オフィス文書は前処理で対応形式への変換が必要 |
 | 11 | **OCR 非対応** | スキャンPDFはテキストレイヤが無いと空チャンク化(pages_failed は露出するが内容は取れない) |
 | 12 | **画像・表の構造抽出が無い** | HTML img/表は alt テキスト程度まで。図表の意味は検索対象にならない |
 | 13 | ~~**CLI ask は非ストリーミング**~~ → **解消済み** (v0.2.635) | `ask()` が `on_delta` コールバックを受理し、chat_stream 搭載バックエンドでは逐字トークンを stdout へ即時転送(連結結果が永続回答と同一のため stdout バイト同一)。chat_stream 非搭載の最小 ChatBackend は従来の一括 chat() 経路へ自動退避 |

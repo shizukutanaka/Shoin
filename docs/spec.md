@@ -62,7 +62,8 @@
 ### P2 (Future / アーキ上の予約)
 
 - 音声概要: `shoin audio <notebook_id> --model <voice.onnx> --output <file.wav>` は保存済みの最新 Studio ブリーフィングをローカルの Piper で読み上げる。音声ファイルを新規作成し、元の引用・Studio 出力は変更しない。Web UI と VOICEVOX 対応は未実装。
-- YouTube字幕取込 / Obsidian vault監視 / マインドマップSVG描画 / 暗号化インデックス
+- YouTube字幕取込: 書き出した WebVTT (`.vtt`) ファイルを CLI / Web UI でオフライン取込し、字幕本文を索引化。動画 URL からの字幕取得は未実装。
+- Obsidian vault監視 / マインドマップSVG描画 / 暗号化インデックス
 
 ## データモデル (SQLite単一ファイル)
 

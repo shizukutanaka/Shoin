@@ -6,7 +6,7 @@ Your own private study, kept on your machine. A NotebookLM alternative that shel
 
 ## Features
 
-- **Notebooks**: Bundle PDF / Markdown / TXT / HTML / URL sources and get answers grounded strictly in that set
+- **Notebooks**: Bundle PDF / Markdown / TXT / HTML / WebVTT / URL sources and get answers grounded strictly in that set
 - **Cited answers + mechanical citation verification**: Click a `[S1]` / `[S2]` in an answer to jump to the original passage — the cited chunk itself is highlighted, with its section name and detection path (full-text / semantic). The checks cover (1) source numbers that don't exist, (2) a "grounding confirmed" mark from lexical support, (3) wrong-number detection via a strong match to a *different* source (with the likely correct source suggested), and (4) uncited assertions (a sentence that matches a source is distinguished as a missing citation, again with the likely source). Numbers (magnitude shorthand / kanji numerals / spelled-out English / 歩合 / rate notation / era-name years), units, negation flips, tampered verbatim quotes, self-contradictions inside an answer, and repetition degeneration are also machine-checked. Knowing the limits of lexical signals (a synonym paraphrase cannot be judged), the checks only speak up when they are confident, so a correct answer is never falsely accused. No LLM required, zero dependencies
 - **Studio outputs**: Generate briefings / study guides / FAQs / timelines / mind maps from your sources. Each output can be saved as a note in one click
 - **Notes**: Free-form memos per notebook. Studio outputs can also be turned into notes
@@ -86,6 +86,13 @@ The Web UI has three panes: left = sources, center = chat, right = Studio and no
 Check that any external drive is connected before moving an unwanted source to trash with
 `shoin source delete <source_id>`. To undo, find its trash ID with `shoin trash list` and run
 `shoin trash restore <trash_id>`.
+
+### Import YouTube captions
+
+Add a WebVTT (`.vtt`) export from YouTube Studio or another caption editor using the
+Web UI file picker or `shoin add 1 ./captions.vtt`. The caption text is searchable
+and citable without timestamps or formatting tags. Shoin does not fetch captions
+from a video URL.
 
 ### Audio overview (CLI)
 

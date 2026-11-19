@@ -185,7 +185,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "note.added": "追加: [{id}] {title}",
         "note.deleted": "ノート削除完了",
         "note.empty": "ノートがありません。`shoin note add <書院ID> <題> <本文>` で追加。",
-        "add.dir_empty": "✗ {path}: 対応形式のファイルがありません (.txt/.md/.html/.pdf)",
+        "add.dir_empty": "✗ {path}: 対応形式のファイルがありません (.txt/.md/.html/.pdf/.vtt)",
         "add.unchanged": "= {title}: 変更なし",
         "add.duplicate": "= {path}: 同一内容のソースが既にあります (skip)",
         "add.dir_done": (
@@ -489,7 +489,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "note.added": "Added: [{id}] {title}",
         "note.deleted": "Note deleted",
         "note.empty": "No notes. Add one with `shoin note add <notebook_id> <title> <body>`.",
-        "add.dir_empty": "✗ {path}: no supported files (.txt/.md/.html/.pdf)",
+        "add.dir_empty": "✗ {path}: no supported files (.txt/.md/.html/.pdf/.vtt)",
         "add.unchanged": "= {title}: unchanged",
         "add.duplicate": "= {path}: identical source already in notebook (skipped)",
         "add.dir_done": (
