@@ -146,6 +146,12 @@ main{display:grid;grid-template-columns:264px 1fr 336px;height:calc(100% - 52px)
 .card .bd{white-space:pre-wrap;font-size:13.5px;margin-top:6px;word-break:break-word}
 .card .x{float:right;border:0;background:none;color:var(--sumi-soft);cursor:pointer}
 .card .x:hover{color:var(--shu)}
+.mindmap-frame{max-height:22rem;overflow:auto;margin-top:6px;background:var(--washi);
+  border:1px solid var(--border);border-radius:4px}
+.mindmap-diagram{display:block;font:13px var(--mono)}
+.mindmap-diagram path{fill:none;stroke:var(--seiji-ink)}
+.mindmap-diagram rect{fill:var(--paper);stroke:var(--border-strong)}
+.mindmap-diagram text{fill:var(--sumi)}
 .exports{display:flex;gap:6px;margin-top:4px}
 
 /* ---- passage viewer / toast ---- */

@@ -2104,6 +2104,81 @@ console.log("ok")
         rc, out = _run_node(harness)
         self.assertEqual(rc, 0, out)
 
+    def test_renderStudio_draws_mindmap_and_keeps_text_citations(self) -> None:
+        if not shutil.which("node"):
+            self.skipTest("node not available; JS behavior check skipped")
+        src = _script()
+        functions = "\n".join(_js_block(src, marker) for marker in (
+            "function mindMapNodes", "function mindMapDiagram",
+            "function renderStudio", "function renderWithSeals",
+        ))
+        harness = """\
+import assert from "node:assert/strict";
+function el(tag, cls, textContent){
+  return {tag, cls, textContent, attrs:{}, children:[],
+    append(...items){this.children.push(...items)},
+    replaceChildren(){this.children = []},
+    setAttribute(name, value){this.attrs[name] = String(value)}};
+}
+const document = {
+  createElementNS(ns, tag){
+    assert.equal(ns, "http://www.w3.org/2000/svg");
+    return el(tag);
+  },
+  createTextNode(text){return el("#text", null, text)},
+};
+const out = el("div");
+const $ = () => out;
+const t = key => key;
+const cur = {studio: []};
+let opened;
+function openSeal(number){opened = number}
+""" + functions + """
+const body = [
+  "```markdown",
+  "- Root [S1]",
+  "  * Branch",
+  "\\t  + <script>日本語</script>",
+  "  - Another branch",
+  "```",
+].join("\\n");
+const fallback = "- First root\\n- Second root";
+cur.studio = [
+  {kind:"mindmap", body},
+  {kind:"mindmap", body:fallback},
+  {kind:"mindmap", body:"The model returned prose."},
+  {kind:"briefing", body},
+];
+renderStudio();
+const [card, multiRootCard, proseCard, briefing] = out.children;
+const frame = card.children.find(node => node.cls === "mindmap-frame");
+assert.equal(frame.tag, "section");
+assert.equal(frame.tabIndex, 0);
+assert.equal(frame.attrs["aria-label"], "studio.mindmap.diagram");
+const [svg] = frame.children;
+assert.equal(svg.tag, "svg");
+assert.equal(svg.attrs["aria-hidden"], "true");
+const labels = svg.children.filter(node => node.tag === "text");
+assert.deepEqual(labels.map(node => node.textContent),
+  ["Root [S1]", "Branch", "<script>日本語</script>", "Another branch"]);
+assert.deepEqual(labels.map(node => node.attrs.x), ["16", "40", "64", "40"]);
+assert.deepEqual(svg.children.filter(node => node.tag === "path").map(node => node.attrs.d),
+  ["M 20 34 V 55 H 32", "M 44 68 V 89 H 56", "M 20 34 V 123 H 32"]);
+const text = card.children.find(node => node.cls === "bd");
+const seal = text.children.find(node => node.cls === "seal");
+assert.equal(seal.textContent, "S1");
+seal.onclick();
+assert.equal(opened, 1);
+for (const other of [multiRootCard, proseCard, briefing]){
+  assert.ok(!other.children.some(node => node.cls === "mindmap-frame"));
+  assert.ok(other.children.find(node => node.cls === "bd").children.length);
+}
+assert.equal(multiRootCard.children.find(node => node.cls === "bd").children[0].textContent,
+  fallback);
+"""
+        rc, out = _run_node(harness)
+        self.assertEqual(rc, 0, out)
+
     def test_renderStudio_shows_all_warning_badges(self) -> None:
         """v0.2.235: a Studio card's heading badges were a third badge chain —
         and it silently dropped numeric_mismatch, unit_mismatch, negation,

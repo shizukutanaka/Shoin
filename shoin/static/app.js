@@ -21,6 +21,7 @@ const I18N = {
     "chat.earlier":"— 以前の {n} 件は省略 —",
     "studio.head":"書 斎","studio.briefing":"ブリーフィング","studio.study_guide":"学習ガイド",
     "studio.faq":"FAQ","studio.timeline":"年表","studio.mindmap":"マインドマップ",
+    "studio.mindmap.diagram":"マインドマップの図",
     "studio.empty.title":"まだ出力がありません","studio.empty.body":"上のボタンで書院に生成させる。",
     "studio.savenote":"ノートに保存","studio.savenote.ok":"ノートに保存しました",
     "notes.head":"ノ ー ト","notes.title":"題","notes.body":"本文","notes.save":"ノートを保存",
@@ -67,6 +68,7 @@ const I18N = {
     "chat.earlier":"— {n} earlier messages not shown —",
     "studio.head":"STUDIO","studio.briefing":"Briefing","studio.study_guide":"Study guide",
     "studio.faq":"FAQ","studio.timeline":"Timeline","studio.mindmap":"Mind map",
+    "studio.mindmap.diagram":"Mind map diagram",
     "studio.empty.title":"No output yet","studio.empty.body":"Use the buttons above to generate content.",
     "studio.savenote":"Save as note","studio.savenote.ok":"Saved as note",
     "notes.head":"NOTES","notes.title":"Title","notes.body":"Body","notes.save":"Save note",
@@ -1041,6 +1043,61 @@ function buildKindButtons(){
     k.append(b);
   });
 }
+function mindMapNodes(body){
+  const lines = body.split(/\r?\n/).filter(line=>line.trim());
+  if (/^```(?:markdown|md)?$/i.test(lines[0]?.trim()) && lines.at(-1)?.trim() === "```"){
+    lines.shift(); lines.pop();
+  }
+  const nodes = [], ancestors = [];
+  for (const line of lines){
+    const bullet = line.match(/^([ \t]*)[-*+][ \t]+(\S.*)$/);
+    if (!bullet) return [];
+    const indent = bullet[1].replace(/\t/g, "    ").length;
+    const previous = ancestors.at(-1);
+    if (previous && indent < previous.indent && !ancestors.some(node=>node.indent === indent)){
+      return [];
+    }
+    while (ancestors.length && indent <= ancestors.at(-1).indent) ancestors.pop();
+    if (ancestors.length >= 3 || (!ancestors.length && nodes.length)) return [];
+    const node = {indent, label:bullet[2].trim(), parent:ancestors.at(-1),
+      x:8 + 24 * ancestors.length, y:8 + 34 * nodes.length};
+    ancestors.push(node);
+    nodes.push(node);
+  }
+  return nodes;
+}
+function mindMapDiagram(body){
+  const nodes = mindMapNodes(body);
+  if (nodes.length < 2) return null;
+  const svgEl = (tag, attrs)=>{
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+    return node;
+  };
+  const svg = svgEl("svg", {"aria-hidden":"true", class:"mindmap-diagram"});
+  let width = 0;
+  for (const {parent, x, y} of nodes){
+    if (parent){
+      svg.append(svgEl("path", {d:`M ${parent.x + 12} ${parent.y + 26} V ${y + 13} H ${x}`}));
+    }
+  }
+  for (const {label, x, y} of nodes){
+    const boxWidth = [...label].reduce((n, c)=>n + (c.codePointAt(0) < 128 ? 9 : 16), 16);
+    width = Math.max(width, x + boxWidth + 8);
+    svg.append(svgEl("rect", {x, y, width:boxWidth, height:26, rx:4}));
+    const text = svgEl("text", {x:x + 8, y:y + 13, "dominant-baseline":"central"});
+    text.textContent = label;
+    svg.append(text);
+  }
+  const height = nodes.at(-1).y + 34;
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  const frame = el("section","mindmap-frame", null);
+  frame.setAttribute("aria-label", t("studio.mindmap.diagram"));
+  frame.tabIndex = 0;
+  frame.append(svg);
+  return frame;
+}
 function renderStudio(){
   const out = $("#studioOut"); out.replaceChildren();
   const items = cur.studio||[];
@@ -1053,6 +1110,10 @@ function renderStudio(){
     const h = el("h4",null,t("studio."+o.kind));
     if (o.report) reportBadges(h, o.report);
     card.append(h);
+    if (o.kind === "mindmap"){
+      const diagram = mindMapDiagram(o.body);
+      if (diagram) card.append(diagram);
+    }
     const bd = el("div","bd"); renderWithSeals(bd, o.body, o.report); card.append(bd);
     // REQ-103's "studio output -> note": without this button the only path was
     // manual copy-paste into the note form — the spec capability existed in

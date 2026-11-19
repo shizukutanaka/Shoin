@@ -81,6 +81,7 @@ shoin eval 1 cases.json               # Measure retrieval quality on your own do
 ```
 
 The Web UI has three panes: left = sources, center = chat, right = Studio and notes.
+Studio mind maps display a diagram when the generated list has a valid hierarchy. The original text and clickable citations stay below the diagram.
 
 `source missing` checks original paths under the selected folder without changing the index.
 Check that any external drive is connected before moving an unwanted source to trash with
