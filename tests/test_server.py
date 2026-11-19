@@ -1666,6 +1666,33 @@ class ServerTest(unittest.TestCase):
         conn.close()
         self.assertEqual(resp.status, 400)
         self.assertEqual(body["error"]["code"], "INGEST_EMPTY")
+        self.assertEqual(
+            body["error"]["message"], "empty.txt: No text could be extracted from this file."
+        )
+
+    def test_upload_ingest_errors_name_the_original_file(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "upload-errors"})
+        cases = (
+            ("空のメモ.txt", b"   ", "INGEST_EMPTY", "No text could be extracted from this file."),
+            (
+                "壊れた資料.pdf", b"not a PDF",
+                "INGEST_PARSE_FAILED", "The file could not be parsed.",
+            ),
+            (
+                "unknown.xyz", b"text",
+                "INGEST_UNSUPPORTED_FORMAT", "This file format is not supported.",
+            ),
+        )
+        for name, data, code, reason in cases:
+            with self.subTest(name=name):
+                status, _, raw = self._req(
+                    "POST", f"/api/notebooks/{nb['id']}/upload", data,
+                    {"X-Filename": urllib.parse.quote(f"nested/{name}")},
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(
+                    json.loads(raw), {"error": {"code": code, "message": f"{name}: {reason}"}}
+                )
 
     def test_upload_too_large_rejected(self) -> None:
         _, nb = self._json("POST", "/api/notebooks", {"name": "limit"})
