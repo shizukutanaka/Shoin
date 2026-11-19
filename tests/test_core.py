@@ -21272,7 +21272,7 @@ class TestResidualGuards(unittest.TestCase):
                 # envelope, never a mid-stream frame).
                 "Exception", "Exception", "Exception", "Exception",
                 "Exception", "Exception", "Exception",
-                "IngestError", "KeyboardInterrupt",
+                "IngestError", "IngestError", "KeyboardInterrupt",
                 "LLMError", "LLMError", "StoreError",
                 "UnicodeEncodeError",
                 # v0.2.614: _json() falls back to ensure_ascii escapes when a

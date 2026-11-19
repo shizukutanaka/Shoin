@@ -1125,6 +1125,23 @@ class _Handler(BaseHTTPRequestHandler):
             Path(urllib.parse.unquote(header_name)).name
             or "upload.txt"
         ).replace("\x00", "").replace("\r", "").replace("\n", "").strip() or "upload.txt"
+        try:
+            self._upload_source_file(nb_id, raw_name)
+        except IngestError as exc:
+            reasons = {
+                "INGEST_BINARY": "This file appears to be binary, not text.",
+                "INGEST_EMPTY": "No text could be extracted from this file.",
+                "INGEST_FETCH_FAILED": "The uploaded file could not be read.",
+                "INGEST_FILE_TOO_LARGE": "This file exceeds the import limits.",
+                "INGEST_NOTEBOOK_FULL": "This notebook has reached its source text limit.",
+                "INGEST_PARSE_FAILED": "The file could not be parsed.",
+                "INGEST_PDF_SUPPORT_MISSING": "PDF support is not installed.",
+                "INGEST_UNSUPPORTED_FORMAT": "This file format is not supported.",
+            }
+            reason = reasons.get(exc.code, "The file could not be imported.")
+            self._safe_error(400, exc.code, f"{raw_name}: {reason}")
+
+    def _upload_source_file(self, nb_id: int, raw_name: str) -> None:
         suffix = Path(raw_name).suffix.lower() or ".txt"
         try:
             n = int(self.headers.get("Content-Length") or 0)

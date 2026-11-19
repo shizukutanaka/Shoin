@@ -44,6 +44,18 @@ const I18N = {
     "src.scope":"検索対象","chat.noscope":"検索対象の資料を1つ以上選んでください",
     "banner.offline":"行灯が消えています — LLM未接続。引用検索のみ動作します。",
     "err.generic":"通信に失敗。サーバ起動を確認。","busy":"生成中…",
+    "err.upload":"「{filename}」を取り込めませんでした: {reason}",
+    "err.upload.generic":"アップロードに失敗しました。もう一度お試しください。",
+    "err.upload.ingest_binary":"テキストではなくバイナリファイルのようです。",
+    "err.upload.ingest_empty":"ファイルからテキストを抽出できませんでした。",
+    "err.upload.ingest_fetch_failed":"アップロードしたファイルを読み込めませんでした。",
+    "err.upload.ingest_file_too_large":"ファイルが取込上限を超えています。",
+    "err.upload.ingest_notebook_full":"書院の資料本文が上限に達しています。",
+    "err.upload.ingest_parse_failed":"ファイルの内容を解析できませんでした。",
+    "err.upload.ingest_pdf_support_missing":"PDFの読み取り機能がインストールされていません。",
+    "err.upload.ingest_unsupported_format":"対応していないファイル形式です。",
+    "err.upload.notebook_not_found":"書院が見つかりませんでした。",
+    "err.upload.source_already_exists":"同じ内容の資料がすでにこの書院にあります。",
     "chat.hint":"ヒント: -語 で除外検索(例: Python -legacy)。/ で質問へ、1/2/3 でペイン切替",
     "a11y.lang":"言語切替","a11y.upload":"ファイルをアップロード","a11y.url":"URL",
     "a11y.questions":"推奨質問","a11y.delsrc":"ソースを削除","a11y.viewsrc":"ソースを表示: ",
@@ -92,6 +104,18 @@ const I18N = {
     "src.scope":"In scope","chat.noscope":"Select at least one source to ask.",
     "banner.offline":"The lantern is out — no LLM connected. Citation search still works.",
     "err.generic":"Request failed. Is the server running?","busy":"Working…",
+    "err.upload":"Could not import “{filename}”: {reason}",
+    "err.upload.generic":"The upload failed. Please try again.",
+    "err.upload.ingest_binary":"This file appears to be binary, not text.",
+    "err.upload.ingest_empty":"No text could be extracted from this file.",
+    "err.upload.ingest_fetch_failed":"The uploaded file could not be read.",
+    "err.upload.ingest_file_too_large":"This file exceeds the import limits.",
+    "err.upload.ingest_notebook_full":"This notebook has reached its source text limit.",
+    "err.upload.ingest_parse_failed":"The file could not be parsed.",
+    "err.upload.ingest_pdf_support_missing":"PDF support is not installed.",
+    "err.upload.ingest_unsupported_format":"This file format is not supported.",
+    "err.upload.notebook_not_found":"The notebook could not be found.",
+    "err.upload.source_already_exists":"This notebook already contains a source with the same content.",
     "chat.hint":"Tip: use -word to exclude (e.g. Python -legacy). / focuses, 1/2/3 switches panes",
     "a11y.lang":"Switch language","a11y.upload":"Upload file","a11y.url":"URL",
     "a11y.questions":"Suggested questions","a11y.delsrc":"Delete source","a11y.viewsrc":"View source: ",
@@ -146,12 +170,18 @@ function embedNote(j){
 }
 function toast(msg){ const x=$("#toast"); x.textContent=msg; x.style.display="block";
   clearTimeout(x._t); x._t=setTimeout(()=>x.style.display="none", 6000); }
+function uploadErrorMessage(filename, err){
+  const key = typeof err?.code === "string" ? `err.upload.${err.code.toLowerCase()}` : "err.upload.generic";
+  const message = t(key);
+  const reason = message === key ? t("err.upload.generic") : message;
+  return t("err.upload").replace("{reason}", ()=>reason).replace("{filename}", ()=>filename);
+}
 async function api(path, opts){
   const r = await fetch(path, opts);
   if (!r.ok){
     let code=r.status, msg=t("err.generic");
     try{ const j=await r.json(); code=j.error.code; msg=j.error.message; }catch(_e){/* keep defaults */}
-    throw new Error(`[${code}] ${msg}`);
+    throw Object.assign(new Error(`[${code}] ${msg}`), {code});
   }
   return r;
 }
@@ -1221,7 +1251,7 @@ $("#fileInput").onchange = async e=>{
     const j = await (await api(`/api/notebooks/${nbId}/upload`, {method:"POST",
       headers:{"X-Filename":encodeURIComponent(f.name),"Content-Type":"application/octet-stream"}, body:f})).json();
     e.target.value=""; toast(t("sources.added") + (j.pages_failed ? " " + t("src.pages_failed").replace("{n}", j.pages_failed) : "") + embedNote(j)); openNotebook(nbId);
-  }catch(err){ e.target.value=""; toast(err.message); }
+  }catch(err){ e.target.value=""; toast(uploadErrorMessage(f.name, err)); }
   finally{ e.target.disabled = false; }
 };
 $("#urlBtn").onclick = async ()=>{
