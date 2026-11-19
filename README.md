@@ -87,6 +87,13 @@ Studio のマインドマップは、階層箇条書きとして解析できる�
 `shoin source delete <source_id>` でゴミ箱へ移動できます。復元は `shoin trash list` で
 ゴミ箱内のIDを調べ、`shoin trash restore <trash_id>` を実行します。
 
+Obsidian の vault など、ローカルフォルダの追加・更新を自動で取り込むには
+`shoin watch 1 ~/my-vault` を実行します。約2秒ごとに確認し、Ctrl-C で停止します。
+`--once` を付けると1回だけ確認します。通常の取込と同じ対応形式・上限で、
+`.obsidian` や `.trash` などの隠し項目とシンボリックリンクは対象外です。
+元ファイルの削除・改名では索引を削除しません。元のパスは `source missing` で確認できます。
+改名先は新しいパスとして扱いますが、既存ソースと同一内容なら通常の取込と同様に重複登録しません。
+
 ### YouTube の字幕を取り込む
 
 YouTube Studio などから書き出した WebVTT (`.vtt`) ファイルを、Web UI の

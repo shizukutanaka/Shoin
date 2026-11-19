@@ -88,6 +88,14 @@ Check that any external drive is connected before moving an unwanted source to t
 `shoin source delete <source_id>`. To undo, find its trash ID with `shoin trash list` and run
 `shoin trash restore <trash_id>`.
 
+Run `shoin watch 1 ~/my-vault` to import new and edited files from a local
+folder such as an Obsidian vault. It checks about every two seconds; press
+Ctrl-C to stop or pass `--once` for a single scan. It uses the usual import
+formats and limits, and skips hidden entries such as `.obsidian` and `.trash`
+as well as symlinks. Deleted or renamed files stay indexed at their old paths,
+which `source missing` can list. A rename is considered a new path, but the
+usual deduplication rule skips it if its content is already in the notebook.
+
 ### Import YouTube captions
 
 Add a WebVTT (`.vtt`) export from YouTube Studio or another caption editor using the

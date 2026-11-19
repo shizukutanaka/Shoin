@@ -1152,6 +1152,109 @@ class CliTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_watch_polls_for_changes_without_removing_missing_sources(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            base = ["--db", str(Path(td) / "shoin.db")]
+            root = Path(td) / "vault"
+            (root / "nested").mkdir(parents=True)
+            for name in (".obsidian", ".trash"):
+                (root / name).mkdir()
+                (root / name / "hidden.md").write_text("not a note to index", encoding="utf-8")
+            outside = Path(td) / "outside.md"
+            outside.write_text("outside the vault", encoding="utf-8")
+            (root / "linked.md").symlink_to(outside)
+            (root / "extra.bin").write_bytes(b"not supported")
+            edited = root / "nested" / "edited.md"
+            edited.write_text("First revision.", encoding="utf-8")
+            gone = root / "gone.md"
+            gone.write_text("Original retained text.", encoding="utf-8")
+            renamed = root / "renamed.md"
+            new_path = root / "new.md"
+            self._run(base + ["notebook", "new", "vault"], llm)
+            initial: dict[str, int] = {}
+            polls = 0
+
+            def between_polls(_seconds: int) -> None:
+                nonlocal polls
+                polls += 1
+                if polls == 1:
+                    with Store(base[1]) as store:
+                        initial.update({s.origin: s.id for s in store.sources_for_notebook(1)})
+                    gone.rename(renamed)
+                    edited.write_text("Second revision.", encoding="utf-8")
+                    new_path.write_text("A newly created note.", encoding="utf-8")
+                elif polls == 2:
+                    # The move alone was deduped. An edit gives the new path its own source.
+                    renamed.write_text("Revised text at the new path.", encoding="utf-8")
+                    new_path.unlink()
+                elif polls == 4:
+                    raise KeyboardInterrupt
+
+            with (
+                patch("shoin.cli.time.sleep", side_effect=between_polls),
+                patch("shoin.cli.index_source", wraps=cli.index_source) as index,
+                patch("shoin.cli.refresh_source", wraps=cli.refresh_source) as refresh,
+            ):
+                rc, _, err = self._run(base + ["watch", "1", str(root)], llm)
+            self.assertEqual((rc, err.strip()), (130, ""))
+            self.assertEqual(polls, 4)
+            self.assertEqual(index.call_count, 5)
+            self.assertEqual(refresh.call_count, 1)
+            self.assertEqual(set(initial), {str(edited), str(gone)})
+            rc, out, err = self._run(base + ["source", "missing", "1", str(root)], llm)
+            self.assertEqual((rc, err), (0, ""))
+            self.assertIn(f"[{initial[str(gone)]}] gone.md", out)
+            self.assertIn("new.md", out)
+            with Store(base[1]) as store:
+                sources = {s.origin: s.id for s in store.sources_for_notebook(1)}
+                self.assertEqual(
+                    sources.keys(), {str(edited), str(gone), str(renamed), str(new_path)}
+                )
+                self.assertEqual(sources[str(edited)], initial[str(edited)])
+                self.assertEqual(sources[str(gone)], initial[str(gone)])
+                texts = {c.text for c in store.chunks_for_notebook(1)}
+                self.assertIn("Original retained text.", texts)
+                self.assertIn("Second revision.", texts)
+                self.assertNotIn("First revision.", texts)
+                self.assertEqual(store.trash_list(), [])
+
+    def test_watch_once_reports_errors_but_processes_other_files(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            base = ["--db", str(Path(td) / "shoin.db")]
+            root = Path(td) / "vault"
+            root.mkdir()
+            self._run(base + ["notebook", "new", "vault"], llm)
+            command = base + ["watch", "1", str(root), "--once"]
+            with patch("shoin.cli.time.sleep") as sleep:
+                self.assertEqual(self._run(command, llm), (0, "", ""))
+                (root / "a-empty.md").touch()
+                (root / "z-note.md").write_text("A valid note.", encoding="utf-8")
+                rc, out, err = self._run(command, llm)
+                sleep.assert_not_called()
+            self.assertEqual(rc, 1)
+            self.assertIn("INGEST_EMPTY", err)
+            self.assertIn("✓ z-note.md", out)
+            invalid = base + ["watch", "1", str(root / "absent"), "--once"]
+            rc, _, err = self._run(invalid, llm)
+            self.assertEqual(rc, 1)
+            self.assertIn("VALIDATION_FIELD_FORMAT_INVALID", err)
+
+    def test_watch_interrupt_during_import_does_not_leave_an_orphan(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            base = ["--db", str(Path(td) / "shoin.db")]
+            root = Path(td) / "vault"
+            root.mkdir()
+            (root / "note.md").write_text("A note to import.", encoding="utf-8")
+            self._run(base + ["notebook", "new", "vault"], llm)
+            with patch.object(Store, "add_chunks", side_effect=KeyboardInterrupt):
+                rc, _, err = self._run(base + ["watch", "1", str(root)], llm)
+            self.assertEqual((rc, err.strip()), (130, ""))
+            with Store(base[1]) as store:
+                self.assertEqual(store.sources_for_notebook(1), [])
+
     def test_add_directory_without_supported_files_fails(self) -> None:
         llm = FakeLLM()
         with tempfile.TemporaryDirectory() as td:
