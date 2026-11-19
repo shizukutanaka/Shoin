@@ -1103,6 +1103,66 @@ class CliTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("ノートがありません", out)
 
+    def test_add_directory_expands_and_resyncs(self) -> None:
+        """v0.2.748: `add <nb> <dir>` ingests every supported file under the
+        folder (dot-entries and unsupported extensions skipped), and a re-run
+        is a sync: unchanged files are no-ops, an edited file is refreshed in
+        place (no stale second copy), duplicate content is skipped (rc 0)."""
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            root = Path(td) / "docs"
+            (root / "sub").mkdir(parents=True)
+            (root / ".git").mkdir()
+            (root / "a.md").write_text("会議メモ。決定事項あり。" * 5, encoding="utf-8")
+            (root / "sub" / "b.txt").write_text("第二の文書。結論は延期。" * 5, encoding="utf-8")
+            (root / "sub" / "copy.md").write_text(
+                (root / "a.md").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (root / ".git" / "c.md").write_text("hidden", encoding="utf-8")
+            (root / ".hidden.md").write_text("hidden", encoding="utf-8")
+            (root / "img.png").write_bytes(b"\x89PNG")
+            self._run(["--db", db, "notebook", "new", "x"], llm)
+
+            rc, out, err = self._run(["--db", db, "add", "1", str(root)], llm)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("✓ a.md", out)
+            self.assertIn("✓ b.txt", out)
+            self.assertIn("copy.md", out)
+            self.assertIn("追加 2 / 更新 0 / 変更なし 0 / 重複 1 / 失敗 0", out)
+
+            (root / "sub" / "b.txt").write_text("改訂版。結論は承認。" * 5, encoding="utf-8")
+            (root / "new.html").write_text("<p>新しい資料。</p>", encoding="utf-8")
+            rc, out, err = self._run(["--db", db, "add", "1", str(root)], llm)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("= a.md", out)
+            self.assertIn("追加 1 / 更新 1 / 変更なし 1 / 重複 1 / 失敗 0", out)
+
+            store = Store(db)
+            try:
+                srcs = store.sources_for_notebook(1)
+                self.assertEqual(
+                    sorted(Path(s.origin).name for s in srcs),
+                    ["a.md", "b.txt", "new.html"],
+                )
+                texts = " ".join(c.text for c in store.chunks_for_notebook(1))
+                self.assertIn("改訂版", texts)
+                self.assertNotIn("延期", texts)
+            finally:
+                store.close()
+
+    def test_add_directory_without_supported_files_fails(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "shoin.db")
+            empty = Path(td) / "empty"
+            empty.mkdir()
+            (empty / "img.png").write_bytes(b"\x89PNG")
+            self._run(["--db", db, "notebook", "new", "x"], llm)
+            rc, _, err = self._run(["--db", db, "add", "1", str(empty)], llm)
+        self.assertEqual(rc, 1)
+        self.assertIn("対応形式のファイルがありません", err)
+
     def test_add_missing_file_returns_error(self) -> None:
         llm = FakeLLM()
         with tempfile.TemporaryDirectory() as td:
