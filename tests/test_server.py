@@ -14,6 +14,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shoin.config import API_VERSION  # noqa: E402
 from shoin.server import _THEME_CSS_LIMIT, make_server  # noqa: E402
+from shoin.store import Store  # noqa: E402
 
 
 class FakeLLM:
@@ -1394,6 +1396,74 @@ class ServerTest(unittest.TestCase):
         status, err = self._json("POST", "/api/notebooks/99999/studio", {"kind": "briefing"})
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "NOTEBOOK_NOT_FOUND")  # type: ignore[index]
+
+    def test_studio_audio_download_narrates_latest_saved_briefing(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "WAV download"})
+        nb_id = int(str(nb["id"]))
+        detail = f"/api/notebooks/{nb_id}"
+        url = f"{detail}/studio/audio"
+        handler = self.server.RequestHandlerClass
+        _, disabled = self._json("GET", detail)
+        self.assertIs(disabled["audio_enabled"], False)
+        self.assertEqual(self._json("POST", url)[0], 503)
+        model = Path(self.tmp.name) / "web-voice.onnx"
+        model.touch()
+        model.with_suffix(".onnx.json").touch()
+        with patch.object(handler, "audio_voice", model):
+            _, enabled = self._json("GET", detail)
+            self.assertIs(enabled["audio_enabled"], True)
+            self.assertEqual(self._json("POST", url)[0], 404)
+
+            with Store(Path(self.tmp.name) / "s.db") as store:
+                store.add_studio_output(nb_id, "briefing", "Old briefing", "{}")
+                store.add_studio_output(nb_id, "briefing", "Latest [S1].", "{}")
+                store.add_studio_output(nb_id, "faq", "Not a briefing", "{}")
+
+            staged: list[Path] = []
+
+            def run_piper(argv: list[str], **kwargs: object) -> None:
+                self.assertEqual(kwargs["input"], "Latest .\n")
+                staged.append(Path(argv[4]))
+                with wave.open(argv[4], "wb") as wav:
+                    wav.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+                    wav.writeframes(b"\x01\x00")
+
+            with patch("shoin.audio.subprocess.run", side_effect=run_piper) as piper:
+                self.assertEqual(self._req("POST", url, headers={
+                    "Origin": "https://example.invalid",
+                })[0], 403)
+                piper.assert_not_called()
+                status, headers, data = self._req("POST", url)
+                piper.assert_called_once()
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "audio/wav")
+        self.assertEqual(
+            headers["Content-Disposition"], f'attachment; filename="briefing-{nb_id}.wav"'
+        )
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(int(headers["Content-Length"]), len(data))
+        self.assertTrue(data.startswith(b"RIFF"))
+        self.assertFalse(staged[0].exists())
+        _, after = self._json("GET", detail)
+        self.assertEqual(after["studio"], [
+            {"kind": "briefing", "body": "Latest [S1].", "report": {}},
+            {"kind": "faq", "body": "Not a briefing", "report": {}},
+        ])
+
+    def test_studio_audio_returns_busy_without_waiting_for_engine(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "Busy audio"})
+        handler = self.server.RequestHandlerClass
+        lock = threading.Lock()
+        with (
+            lock,
+            patch.object(handler, "audio_lock", lock),
+            patch.object(handler, "audio_voice", 0),
+            patch("shoin.server.write_briefing_audio") as synthesize,
+        ):
+            status, _, data = self._req("POST", f"/api/notebooks/{nb['id']}/studio/audio")
+            self.assertEqual(status, 409)
+            self.assertEqual(json.loads(data)["error"]["code"], "AUDIO_BUSY")
+            synthesize.assert_not_called()
 
     def test_export_invalid_format_returns_400(self) -> None:
         """Unknown export format must return 400 VALIDATION_FIELD_FORMAT_INVALID."""

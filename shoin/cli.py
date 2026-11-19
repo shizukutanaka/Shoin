@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .audio import AudioError, write_briefing_audio
+from .audio import AudioError, latest_briefing, write_briefing_audio
 from .chunk import split_text_with_context
 from .citation import COVERAGE_LOW, CitationReport, found_bits
 from .config import (
@@ -906,6 +906,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_port_num,
         default=port(),
         help=_t("help.serve.port", port=str(port())),
+    )
+    web_voice = sv.add_mutually_exclusive_group()
+    web_voice.add_argument("--piper-model", type=Path, help=_t("help.audio.model"))
+    web_voice.add_argument(
+        "--voicevox-speaker", type=_voicevox_style_id, help=_t("help.audio.voicevox")
     )
 
     sub.add_parser("health", help=_t("help.health"))
@@ -1944,16 +1949,11 @@ def _cmd_questions(store: Store, llm: ChatBackend, args: argparse.Namespace) -> 
 
 def _cmd_audio(store: Store, args: argparse.Namespace) -> int:
     notebook_id = int(args.notebook_id)
-    with store.read_snapshot():
-        store.get_notebook(notebook_id)
-        briefing = next(
-            (row for row in store.latest_studio_outputs(notebook_id) if row["kind"] == "briefing"),
-            None,
-        )
+    briefing = latest_briefing(store, notebook_id)
     if briefing is None:
         raise AudioError("AUDIO_BRIEFING_NOT_FOUND", _t("audio.no_briefing", id=str(notebook_id)))
     voice = args.voicevox_speaker if args.model is None else args.model
-    write_briefing_audio(str(briefing["body"]), voice, args.output)
+    write_briefing_audio(briefing, voice, args.output)
     print(_t("audio.saved", path=_safe_text(str(args.output))))
     return 0
 
@@ -2188,7 +2188,8 @@ def main(argv: Sequence[str] | None = None, llm: ChatBackend | None = None) -> i
             # probing anything — serve must start just as fast as before.
             print(_t("setup.serve_hint"), file=sys.stderr)
         try:
-            serve(int(args.port), _db_arg(args))
+            voice = args.voicevox_speaker if args.piper_model is None else args.piper_model
+            serve(int(args.port), _db_arg(args), audio_voice=voice)
         except OSError as exc:
             print(_t("err.prefix", code="SYSTEM_PORT_IN_USE", msg=str(exc)), file=sys.stderr)
             return 1

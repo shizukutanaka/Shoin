@@ -268,3 +268,13 @@ class TestAudioCLI(unittest.TestCase):
             with self.subTest(voice=voice), self.assertRaises(SystemExit) as err:
                 self.invoke(voice=voice)
             self.assertEqual(err.exception.code, 2)
+
+    def test_serve_accepts_local_audio_engine_options(self) -> None:
+        for args, voice in (
+            ([], None),
+            (["--piper-model", str(self.model)], self.model),
+            (["--voicevox-speaker", "0"], 0),
+        ):
+            with self.subTest(voice=voice), patch("shoin.server.serve") as serve:
+                self.assertEqual(main(["--db", str(self.db), "serve", "--port", "0", *args]), 0)
+                serve.assert_called_once_with(0, str(self.db), audio_voice=voice)

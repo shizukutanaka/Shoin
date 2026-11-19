@@ -61,7 +61,7 @@
 
 ### P2 (Future / アーキ上の予約)
 
-- 音声概要: `shoin audio <notebook_id> --output <file.wav>` は保存済みの最新 Studio ブリーフィングを、`--model <voice.onnx>` ならローカルの Piper、`--voicevox-speaker <style_id>` ならループバック上の VOICEVOX (`127.0.0.1:50021`) で読み上げる。音声ファイルを新規作成し、元の引用・Studio 出力は変更しない。Web UI は未実装。
+- 音声概要: `shoin audio <notebook_id> --output <file.wav>` は保存済みの最新 Studio ブリーフィングを、`--model <voice.onnx>` ならローカルの Piper、`--voicevox-speaker <style_id>` ならループバック上の VOICEVOX (`127.0.0.1:50021`) で読み上げる。音声ファイルを新規作成し、元の引用・Studio 出力は変更しない。Web UI の Studio でも `shoin serve --piper-model <voice.onnx>` または `--voicevox-speaker <style_id>` で起動すると、同じブリーフィングの WAV をダウンロードできる。
 - YouTube字幕取込: 書き出した WebVTT (`.vtt`) ファイルを CLI / Web UI でオフライン取込し、字幕本文を索引化。動画 URL からの字幕取得は未実装。
 - マインドマップSVG描画: Studio の階層箇条書きを Web UI で図示する。引用付き本文は残し、箇条書きに解析できない出力は本文のみ表示する。
 - Obsidian vault監視 / 暗号化インデックス

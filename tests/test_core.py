@@ -20080,7 +20080,7 @@ class TestResidualGuards(unittest.TestCase):
         injection sink that no behavior test sees (BaseHTTPRequestHandler
         writes the bytes verbatim; http.client never validates).
 
-        Safe shapes today: str(len(body)), constants, `_EXPORT_*[fmt]`
+        Safe shapes today: str(len(body)), str(int(size)), constants, `_EXPORT_*[fmt]`
         subscripts (closed maps), `safe_lang` (ja|en whitelist), and
         f-strings interpolating only route-captured ints ({nb_id} —
         the route regex is \\d+, so it is always digits)."""
@@ -20104,9 +20104,9 @@ class TestResidualGuards(unittest.TestCase):
                 if (
                     isinstance(inner, ast.Call)
                     and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "len"
+                    and inner.func.id in {"len", "int"}
                 ):
-                    return True  # str(len(body)) — byte count
+                    return True  # integer output cannot contain CRLF
                 if isinstance(inner, ast.Name) and inner.id in {"nb_id", "src_id"}:
                     return True  # route-regex ints
                 return False
@@ -20967,7 +20967,7 @@ class TestResidualGuards(unittest.TestCase):
             #     (config_file().parent.mkdir) before the atomic write —
             #     the setup wizard is the first writer of config.json, and
             #     ~/.config/shoin may not exist on a first run.
-            "server.py": 2,  # NamedTemporaryFile staging + tmp_path.unlink cleanup
+            "server.py": 3,  # upload staging and cleanup, plus private WAV staging
             "store.py": 7,   # mkdir x2 + os.open(O_CREAT,0600) x2 + os.chmod x3
                              # (init 4; backup_to dest-parent + fd + mode 3)
         }
@@ -21257,6 +21257,7 @@ class TestResidualGuards(unittest.TestCase):
                 "(UnicodeDecodeError,UnicodeEncodeError)",
                 "(RecursionError,UnicodeDecodeError,json.JSONDecodeError)",
                 "(ValueError,json.JSONDecodeError)",
+                "AudioError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 "ConnectionError", "ConnectionError", "ConnectionError",
                 # v0.2.665: per-delta write guard inside the generation loop —
@@ -21373,7 +21374,7 @@ class TestResidualGuards(unittest.TestCase):
             # server.py -2: the build_context error-frame send guard and
             # the repair-persist swallow folded into the pre-headers
             # snapshot (v0.2.724).
-            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 10,
+            "pipeline.py": 3, "qa.py": 2, "search.py": 1, "server.py": 11,
             # store.py +2: bump_metrics' best-effort pass and usage_metrics'
             # corrupt-row skip (v0.2.653). +1: _remap_report_source_ids'
             # corrupt-report verbatim passthrough (v0.2.655).
@@ -22370,7 +22371,7 @@ class TestResidualGuards(unittest.TestCase):
             # the concurrency primitive, not a new thread source.
             "server.py": [
                 "threading.BoundedSemaphore",
-                "threading.Lock", "threading.Lock",
+                "threading.Lock", "threading.Lock", "threading.Lock",
             ],
         }
         actual: dict[str, list[str]] = {}
