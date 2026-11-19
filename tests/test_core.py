@@ -3386,6 +3386,53 @@ class TestChunk(unittest.TestCase):
 
 
 class TestIngest(unittest.TestCase):
+    def test_webvtt_extracts_cues_without_metadata_or_markup(self) -> None:
+        lines = [
+            "WEBVTT - Japanese captions",
+            "Kind: captions",
+            "Language: ja",
+            "",
+            "NOTE ignore this metadata",
+            "00:00.000 --> 00:01.000",
+            "Not a caption",
+            "",
+            "STYLE",
+            "::cue { color: white }",
+            "",
+            "REGION",
+            "id:main",
+            "",
+            "intro",
+            "00:00:01.250 --> 00:00:02.300 align:start position:0%",
+            "<v Narrator><c.green>日本語</c><00:00:01.500><i>の字幕</i></v>",
+            "A &amp; B &lt; 3",
+            "",
+            "00:02.300 --> 00:04.000",
+            "次の字幕",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video.VTT"
+            path.write_bytes("\r\n".join(lines).encode("utf-8-sig"))
+            result = extract_file(path)
+            self.assertEqual(result.kind, "vtt")
+            self.assertEqual(result.title, path.name)
+            self.assertEqual(result.origin, str(path))
+            self.assertEqual(result.text, "日本語の字幕\nA & B < 3\n次の字幕")
+
+    def test_webvtt_requires_a_header_and_caption_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video.vtt"
+            for content in (
+                "WEBVTT-not-a-header\n\n00:00.000 --> 00:01.000\nNot WebVTT",
+                "WEBVTT\n\n00:99.000 --> 00:01.000\nInvalid timing",
+                "WEBVTT\n\n00:00.000 --> 00:01.000\n<c></c>",
+            ):
+                with self.subTest(content=content):
+                    path.write_text(content, encoding="utf-8")
+                    with self.assertRaises(IngestError) as caught:
+                        extract_file(path)
+                    self.assertEqual(caught.exception.code, "INGEST_EMPTY")
+
     def test_txt_md_extract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "a.md"

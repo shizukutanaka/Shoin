@@ -1,12 +1,13 @@
 """Source ingestion: text extraction for files and URLs with SSRF guards.
 
-Supported kinds: txt, md, html, pdf, url. All extraction is local; URL fetch
+Supported kinds: txt, md, html, pdf, vtt, url. All extraction is local; URL fetch
 is the only network path and is restricted to public http(s) hosts.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
 import http.client
 import ipaddress
 import os
@@ -37,6 +38,7 @@ _EXT_KIND = {
     ".html": "html",
     ".htm": "html",
     ".pdf": "pdf",
+    ".vtt": "vtt",
 }
 
 _BLOCK_TAGS = frozenset(
@@ -717,6 +719,42 @@ def fetch_url(url: str) -> tuple[bytes, str, str]:
 # --- public API -----------------------------------------------------------
 
 
+_VTT_TIMESTAMP = re.compile(r"(?:[0-9]{2,}:)?[0-5][0-9]:[0-5][0-9]\.[0-9]{3}")
+_VTT_CUE_TAG = re.compile(
+    r"<(?:/?(?:b|i|u|c|v|lang|ruby|rt)(?:[. \t][^<>\n]*)?"
+    r"|(?:[0-9]{2,}:)?[0-5][0-9]:[0-5][0-9]\.[0-9]{3})>"
+)
+
+
+def _vtt_to_text(data: bytes) -> str:
+    text = _decode(data).replace("\r\n", "\n").replace("\r", "\n")
+    header, _, _ = text.partition("\n")
+    if header != "WEBVTT" and not header.startswith(("WEBVTT ", "WEBVTT\t")):
+        return ""
+    blocks = re.split(r"\n[ \t]*\n", text)
+    captions: list[str] = []
+    for block in blocks[1:]:
+        lines = block.strip().split("\n")
+        first = lines[0]
+        if first in ("NOTE", "STYLE", "REGION") or first.startswith(("NOTE ", "NOTE\t")):
+            continue
+        timing_index = 0 if "-->" in first else 1
+        if len(lines) <= timing_index + 1:
+            continue
+        start, arrow, end_with_settings = lines[timing_index].partition("-->")
+        end = end_with_settings.split(maxsplit=1)
+        if not (
+            arrow and end
+            and _VTT_TIMESTAMP.fullmatch(start.strip())
+            and _VTT_TIMESTAMP.fullmatch(end[0])
+        ):
+            continue
+        caption = html.unescape(_VTT_CUE_TAG.sub("", "\n".join(lines[timing_index + 1:]))).strip()
+        if caption:
+            captions.append(caption)
+    return "\n".join(captions)
+
+
 def extract_file(path: Path | str) -> Extracted:
     """Extract text from a local file (kind inferred from extension)."""
     p = Path(path)
@@ -755,6 +793,8 @@ def extract_file(path: Path | str) -> Extracted:
     elif kind == "html":
         html_title, text = html_to_text(_decode(data))
         title = html_title or title
+    elif kind == "vtt":
+        text = _vtt_to_text(data)
     else:
         text = _decode(data)
     # Strip null bytes (U+0000): str.strip() skips them (category Cc, not whitespace),

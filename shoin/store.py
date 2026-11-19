@@ -48,7 +48,7 @@ STUDIO_KINDS = ("briefing", "study_guide", "faq", "timeline", "mindmap")
 # guards writes on it for the same reason as STUDIO_KINDS — export's RIS TY
 # mapping (_RIS_TYPE), the md legend, and the UI badge all consume kind, so a
 # typo'd literal silently degrades exported citations and the source list.
-SOURCE_KINDS = ("txt", "md", "html", "pdf", "url")
+SOURCE_KINDS = ("txt", "md", "html", "pdf", "vtt", "url")
 
 # Settings-table key prefix for the usage counters written by bump_metrics —
 # the prefix is what usage_metrics scans for, and it keeps product counters

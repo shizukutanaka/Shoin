@@ -1319,6 +1319,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(s2, 409)
         self.assertEqual(json.loads(raw)["error"]["code"], "SOURCE_ALREADY_EXISTS")
 
+    def test_upload_webvtt_indexes_caption_text_as_a_source(self) -> None:
+        _, nb = self._json("POST", "/api/notebooks", {"name": "captions"})
+        nb_id = nb["id"]
+        status, _, raw = self._req(
+            "POST", f"/api/notebooks/{nb_id}/upload",
+            b"WEBVTT\n\n00:00.000 --> 00:01.250\n<c>Whales migrate seasonally.</c>\n",
+            {"X-Filename": "video.vtt"},
+        )
+        self.assertEqual(status, 201)
+        src_id = json.loads(raw)["source"]["id"]
+        status, detail = self._json("GET", f"/api/notebooks/{nb_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["sources"][0]["kind"], "vtt")
+        status, results = self._json(
+            "POST", f"/api/notebooks/{nb_id}/search", {"question": "whales migrate"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(results["hits"][0]["source_id"], src_id)
+        self.assertEqual(results["hits"][0]["text"], "Whales migrate seasonally.")
+
     def test_upload_to_deleted_notebook_returns_404(self) -> None:
         """Uploading to a deleted notebook must return 404, not a silent error."""
         _, nb = self._json("POST", "/api/notebooks", {"name": "delme"})
