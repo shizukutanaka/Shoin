@@ -38,7 +38,7 @@ from .config import (
     ui_lang,
 )
 from .export import FORMATS, export
-from .ingest import IngestError
+from .ingest import _EXT_KIND, IngestError
 from .llm import LLMClient, LLMError
 from .log import one_line as _one_line
 from .log import safe_text as _safe_text
@@ -58,7 +58,7 @@ from .qa import (
     retrieve_for_question,
 )
 from .search import suggest_corrections
-from .store import Store, StoreError
+from .store import Source, Store, StoreError
 from .studio import KINDS, generate, suggest_questions
 
 
@@ -184,6 +184,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "note.added": "追加: [{id}] {title}",
         "note.deleted": "ノート削除完了",
         "note.empty": "ノートがありません。`shoin note add <書院ID> <題> <本文>` で追加。",
+        "add.dir_empty": "✗ {path}: 対応形式のファイルがありません (.txt/.md/.html/.pdf)",
+        "add.unchanged": "= {title}: 変更なし",
+        "add.duplicate": "= {path}: 同一内容のソースが既にあります (skip)",
+        "add.dir_done": (
+            "フォルダ取込: {n}件 (追加 {added} / 更新 {refreshed} / 変更なし {unchanged} / "
+            "重複 {duplicate} / 失敗 {failed})"
+        ),
         "src.deleted": "ソース削除完了",
         "src.renamed": "改名完了: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
@@ -341,7 +348,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "help.messages": "チャット履歴管理",
         "help.messages.clear": "履歴クリア",
-        "help.add_source": "ソース追加(ファイル/URL)",
+        "help.add_source": "ソース追加(ファイル/フォルダ/URL)",
         "help.reindex": "ノートブックの埋め込みを再構築",
         "help.note": "ノート管理",
         "help.source": "ソース管理",
@@ -469,6 +476,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "note.added": "Added: [{id}] {title}",
         "note.deleted": "Note deleted",
         "note.empty": "No notes. Add one with `shoin note add <notebook_id> <title> <body>`.",
+        "add.dir_empty": "✗ {path}: no supported files (.txt/.md/.html/.pdf)",
+        "add.unchanged": "= {title}: unchanged",
+        "add.duplicate": "= {path}: identical source already in notebook (skipped)",
+        "add.dir_done": (
+            "folder add: {n} file(s) ({added} added / {refreshed} refreshed / "
+            "{unchanged} unchanged / {duplicate} duplicate / {failed} failed)"
+        ),
         "src.deleted": "Source deleted",
         "src.renamed": "Renamed: [{id}] {title}",
         "src.refreshed": "✓ {title}: {chunks} chunks ({embedded} embedded)",
@@ -622,7 +636,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "help.messages": "Manage chat history",
         "help.messages.clear": "Clear history",
-        "help.add_source": "Add sources (files/URLs)",
+        "help.add_source": "Add sources (files/folders/URLs)",
         "help.reindex": "Rebuild a notebook's embeddings",
         "help.note": "Manage notes",
         "help.source": "Manage sources",
@@ -1719,8 +1733,30 @@ def _cmd_messages(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _dir_files(root: str) -> list[str]:
+    """Supported files under a directory, in sorted depth-first order.
+
+    Dot-entries (.git, editor swap files) are skipped, and os.walk does not
+    follow directory symlinks, so a link cycle cannot loop."""
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        out.extend(
+            os.path.join(dirpath, name)
+            for name in sorted(filenames)
+            if not name.startswith(".") and Path(name).suffix.casefold() in _EXT_KIND
+        )
+    return out
+
+
 def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
     rc = 0
+    notebook_id = int(args.notebook_id)
+    # A directory target expands to its supported files. Re-running the same
+    # folder add is a sync: a file whose path is already a source is
+    # refreshed in place (no stale second copy), byte-identical content
+    # elsewhere is skipped, and only new files are added.
+    items: list[tuple[str, bool]] = []
     # expanduser() on each target: `add` takes positional args so word-start
     # `~/x.md` is shell-expanded already, but a quoted '~/x.md' arrives
     # literally — same contract as every other Path(str(*)) in this module.
@@ -1729,8 +1765,32 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
         str(Path(str(t)).expanduser()) if str(t).startswith("~") else str(t)
         for t in args.targets
     ]:
+        if not os.path.isdir(target):
+            items.append((target, False))
+            continue
+        files = _dir_files(target)
+        if not files:
+            print(_t("add.dir_empty", path=_one_line(target)), file=sys.stderr)
+            rc = 1
+        items.extend((f, True) for f in files)
+    has_dir = any(in_dir for _, in_dir in items)
+    known: dict[str, Source] = {}
+    if has_dir:
+        known = {s.origin: s for s in store.sources_for_notebook(notebook_id)}
+    tally = dict.fromkeys(("added", "refreshed", "unchanged", "duplicate", "failed"), 0)
+    for target, in_dir in items:
+        status = "added"
         try:
-            result = index_source(store, int(args.notebook_id), target, llm)
+            src = known.get(os.path.abspath(target)) if in_dir else None
+            if src is None:
+                result = index_source(store, notebook_id, target, llm)
+            else:
+                result = refresh_source(store, src.id, llm)
+                if result.source.sha256 == src.sha256:
+                    status = "unchanged"
+                    print(_t("add.unchanged", title=_one_line(result.source.title)))
+                    continue
+                status = "refreshed"
             print(
                 f"✓ {_one_line(result.source.title)}: {result.n_chunks}"
                 f" chunks ({result.n_embedded} embedded)"
@@ -1743,11 +1803,32 @@ def _cmd_add(store: Store, llm: ChatBackend, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         except (IngestError, StoreError) as exc:
+            if in_dir and exc.code == "SOURCE_ALREADY_EXISTS":
+                status = "duplicate"
+                print(_t("add.duplicate", path=_one_line(target)))
+                continue
+            status = "failed"
             print(f"✗ {_one_line(target)}: [{exc.code}] {exc}", file=sys.stderr)
             rc = 1
         except sqlite3.OperationalError as exc:
+            status = "failed"
             print(f"✗ {_one_line(target)}: [SYSTEM_DB_LOCKED] {exc}", file=sys.stderr)
             rc = 1
+        finally:
+            if in_dir:
+                tally[status] += 1
+    if has_dir:
+        print(
+            _t(
+                "add.dir_done",
+                n=str(sum(tally.values())),
+                added=str(tally["added"]),
+                refreshed=str(tally["refreshed"]),
+                unchanged=str(tally["unchanged"]),
+                duplicate=str(tally["duplicate"]),
+                failed=str(tally["failed"]),
+            )
+        )
     return rc
 
 

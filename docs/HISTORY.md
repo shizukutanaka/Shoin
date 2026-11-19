@@ -29,7 +29,14 @@ not to `CLAUDE.md` — `CLAUDE.md` keeps only a short pointer and pin update.
 
 ---
 
-## Version History: v0.1.37 → v0.2.747
+## Version History: v0.1.37 → v0.2.748
+
+### v0.2.748 — `shoin add` がフォルダを受け付け、再実行で差分同期する
+
+**発見**: 運営型の競合はソース数を課金軸にしている(NotebookLM: 無料50 / Plus 100 / Pro 300 / Ultra 500-600 ソース/ノートブック、Humata: ページ従量)。Shoin にはソース上限の課金理由が無い(作成者は保管費を負担しない)のに、取込はファイルを1つずつ列挙する以外に手段が無く、ディレクトリを渡すと `INGEST_UNSUPPORTED_FORMAT` で失敗していた。手元のフォルダを直接読める——アップロード不要——というローカル製品だけの性質が、操作面で使えていなかった。
+**修正**: `cli._cmd_add` のみ。ディレクトリ対象を `_dir_files()` で対応拡張子(`ingest._EXT_KIND`)のファイルへ展開(ソート済み深さ優先、ドット始まりのファイル/ディレクトリは除外、ディレクトリ symlink は辿らない)。展開ファイルは絶対パスが既存ソースの origin と一致すれば `refresh_source`(変更なしは no-op、変更ありは置換——古い版が2つ目のソースとして残らない)、一致しなければ `index_source`。別パスの同一内容(`SOURCE_ALREADY_EXISTS`)は重複として skip し rc を汚さない。末尾に件数集計1行。対応ファイルが1つも無いフォルダは rc=1。ファイル/URL 対象の挙動は不変(重複は従来どおり ✗ / rc=1)。Web API にはパス読取り面を足していない(ローカルファイル読取りをHTTP経由に開かないため)。
+**効果**: `shoin add 1 ~/papers/` で数百ファイルを一括取込でき、同じコマンドを再実行するだけで新規追加+変更分更新の同期になる(cron 可)。新規依存なし、スキーマ・検索・引用検証は無変更。テスト2本追加(展開/除外/再実行同期/重複skip、空フォルダ rc=1)。
+**却下**: フォルダ監視デーモン(自動化は最後——まず手動同期で需要を確かめる)・消えたファイルのソース自動削除(利用者データの暗黙削除になる。`source refresh-all` が skipped と報告する既存経路で可視)・Web UI のフォルダ選択(ブラウザはディレクトリの絶対パスを渡せず、同期の前提が成立しない)。
 
 ### v0.2.747 — 数値・元号クエリの LIKE フォールバックを高速化（bm25 2.5〜8.5倍、結果はビット同一）
 **Performance**: A measured performance pass (method, environment, and full tables in `docs/performance.md`) found one dominant cost: numeric / era-name queries in `bm25_search`'s LIKE fallback. A query like 「令和6年の予算」 expands through the era bridge to ~75 substring needles; the old SQL evaluated the density score in `ORDER BY` with `LOWER(c.text)` — and its `LENGTH` — recomputed for every (row × needle) pair. Medians on the benchmark VM: 990 ms at 510 chunks, 5.3 s at 5,101, 12.1 s at 20,405, 22.6 s at 48,974.
