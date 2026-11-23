@@ -1,0 +1,19 @@
+[package]
+name = "shoin-accel"
+version = "0.1.0"
+edition = "2021"
+description = "Optional Rust accelerator for Shoin's search and ingest kernels; the pure-Python path remains the default and the fallback"
+license = "MIT"
+
+[lib]
+name = "_shoin_accel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[profile.release]
+# The kernels are small and latency-bound; LTO + a single codegen unit is
+# the cheapest reliable win and keeps the artifact self-contained.
+lto = true
+codegen-units = 1

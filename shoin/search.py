@@ -19,6 +19,7 @@ import math
 import operator
 import os
 import re
+import sqlite3
 import sys
 import threading
 import unicodedata
@@ -27,6 +28,7 @@ from collections.abc import Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
+from . import accel
 from .chunk import (
     _CJK_RANGES,
     _KYU_TO_SHIN,
@@ -936,6 +938,114 @@ def bm25_search(
             for r in rows
         ]
         return _apply_neg_filter(pool, negs)[:k]
+    rows = _like_pool_rows(store, notebook_id, scope_params, needles, k)
+    like_hits: list[Hit] = []
+    for r in rows:
+        text = str(r["text"])
+        score = _needle_score(text, str(r["context"] or ""), needles)
+        if score > 0:
+            like_hits.append(
+                Hit(r["id"], r["source_id"], text, 0.0, bm25=score,
+                    context=str(r["context"] or ""), seq=int(r["seq"]))
+            )
+    like_hits.sort(key=lambda h: h.bm25, reverse=True)
+    if fts_hits:
+        # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
+        # compare fairly against LIKE-only hits.  Raw FTS5 BM25 is near-zero for
+        # small corpora (~2e-6), while LIKE scores are integers (1, 2, …).
+        # Without this, the min-max rescale before rerank makes LIKE-only hits
+        # dominate even when the FTS5 hit matches more query terms.
+        fts_ids = {h.chunk_id for h in fts_hits}
+        for h in fts_hits:
+            h.bm25 += _needle_score(h.text, h.context, needles)
+        fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
+        # Re-sort the combined list after extending with LIKE-only hits.  The
+        # previous sort ran before the extend, leaving LIKE-only hits appended
+        # after FTS5 hits regardless of score — a LIKE-only chunk with bm25=50
+        # would rank behind an FTS5 chunk with bm25=5.  rrf_fuse() uses rank
+        # position (1/(k+rank+1)), so a wrong order here gives wrong RRF scores.
+        fts_hits.sort(key=lambda h: h.bm25, reverse=True)
+        if negs:
+            fts_hits = _apply_neg_filter(fts_hits, negs)
+        # The LIKE-only path caps at k; cap the merge path for consistency so
+        # callers can rely on the k parameter being respected on all code paths.
+        return fts_hits[:k]
+    if negs:
+        like_hits = _apply_neg_filter(like_hits, negs)
+    # Filter before capping, exactly as the merge path does above: slicing
+    # [:k] first would starve the result when the top-k hits all carry the
+    # negated term, dropping better-qualified chunks just below the cap.
+    return like_hits[:k]
+
+
+def _like_pool_accel(
+    store: Store,
+    notebook_id: int | None,
+    scope_params: list[str],
+    needles: list[str],
+    like_cap: int,
+) -> list[sqlite3.Row] | None:
+    """The LIKE-fallback candidate pool via the Rust kernel, or None.
+
+    The kernel re-implements the SQL selector's *selection* only: the
+    same candidate set (score > 0 under the SQL's own formula — ASCII-
+    folded non-overlapping occurrence counts in text plus the flat
+    context bonus), the same order (score DESC, id ASC), the same cap.
+    It streams (id, text, context) from a plain SELECT instead of
+    evaluating a per-needle SQL expression over LOWER()ed text for every
+    row, and only the <=cap survivors are hydrated with the wide
+    columns. _needle_score still computes every pooled chunk's real
+    score in Python afterwards, exactly as on the SQL path.
+    """
+    # fetchall + a list comprehension, not a generator over the cursor:
+    # the columns are NOT NULL by schema, so no per-row filtering is
+    # needed, and materializing the triples in one C-speed pass skips a
+    # Python generator hop per row (measured ~0.9 s of the pool cost at
+    # 49k rows on the benchmark VM).
+    rows = store.conn.execute(
+        "SELECT c.id, c.text, c.context FROM chunks c"
+        " JOIN sources s ON s.id = c.source_id"
+        " WHERE (? IS NULL OR s.notebook_id = ?)"
+        " AND (json_array_length(?) = 0"
+        " OR s.id IN (SELECT value FROM json_each(?)))",
+        (notebook_id, notebook_id, *scope_params),
+    ).fetchall()
+    triples = [
+        (int(r["id"]), str(r["text"]), str(r["context"] or "")) for r in rows
+    ]
+
+    pool = accel.needle_pool(iter(triples), needles, like_cap, _CTX_BM25_WEIGHT)
+    if pool is None:
+        return None
+    if not pool:
+        return []
+    marks = ",".join("?" for _ in pool)
+    fetched = store.conn.execute(
+        "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
+        f" WHERE c.id IN ({marks})",
+        pool,
+    ).fetchall()
+    by_id = {int(r["id"]): r for r in fetched}
+    return [by_id[i] for i in pool if i in by_id]
+
+
+def _like_pool_rows(
+    store: Store,
+    notebook_id: int | None,
+    scope_params: list[str],
+    needles: list[str],
+    k: int,
+) -> list[sqlite3.Row]:
+    """Candidate rows for bm25_search's LIKE fallback, best first.
+
+    The Rust kernel is tried first (see _like_pool_accel); the SQL below
+    is the original selector and the standing fallback — accel absent,
+    disabled, or failed all land here, with identical results.
+    """
+    like_cap = max(k * 10, 2000)
+    pooled = _like_pool_accel(store, notebook_id, scope_params, needles, like_cap)
+    if pooled is not None:
+        return pooled
     conditions = " OR ".join(
         "(c.text LIKE ? ESCAPE '|' OR c.context LIKE ? ESCAPE '|')" for _ in needles
     )
@@ -978,8 +1088,7 @@ def bm25_search(
         for n in needles
         for p in (n, n, len(n), f"%{_esc_like(n)}%", _CTX_BM25_WEIGHT)
     ]
-    like_cap = max(k * 10, 2000)
-    rows = store.conn.execute(
+    return store.conn.execute(
         "WITH m AS MATERIALIZED ("
         "SELECT c.id AS id, c.source_id AS source_id, c.text AS text,"
         " c.context AS context, c.seq AS seq,"
@@ -993,43 +1102,6 @@ def bm25_search(
         " LIMIT ?",
         [notebook_id, notebook_id, *like_params, *scope_params, *score_params, like_cap],
     ).fetchall()
-    like_hits: list[Hit] = []
-    for r in rows:
-        text = str(r["text"])
-        score = _needle_score(text, str(r["context"] or ""), needles)
-        if score > 0:
-            like_hits.append(
-                Hit(r["id"], r["source_id"], text, 0.0, bm25=score,
-                    context=str(r["context"] or ""), seq=int(r["seq"]))
-            )
-    like_hits.sort(key=lambda h: h.bm25, reverse=True)
-    if fts_hits:
-        # FTS5 found results for long terms; add LIKE score to FTS5 hits so they
-        # compare fairly against LIKE-only hits.  Raw FTS5 BM25 is near-zero for
-        # small corpora (~2e-6), while LIKE scores are integers (1, 2, …).
-        # Without this, the min-max rescale before rerank makes LIKE-only hits
-        # dominate even when the FTS5 hit matches more query terms.
-        fts_ids = {h.chunk_id for h in fts_hits}
-        for h in fts_hits:
-            h.bm25 += _needle_score(h.text, h.context, needles)
-        fts_hits.extend(h for h in like_hits if h.chunk_id not in fts_ids)
-        # Re-sort the combined list after extending with LIKE-only hits.  The
-        # previous sort ran before the extend, leaving LIKE-only hits appended
-        # after FTS5 hits regardless of score — a LIKE-only chunk with bm25=50
-        # would rank behind an FTS5 chunk with bm25=5.  rrf_fuse() uses rank
-        # position (1/(k+rank+1)), so a wrong order here gives wrong RRF scores.
-        fts_hits.sort(key=lambda h: h.bm25, reverse=True)
-        if negs:
-            fts_hits = _apply_neg_filter(fts_hits, negs)
-        # The LIKE-only path caps at k; cap the merge path for consistency so
-        # callers can rely on the k parameter being respected on all code paths.
-        return fts_hits[:k]
-    if negs:
-        like_hits = _apply_neg_filter(like_hits, negs)
-    # Filter before capping, exactly as the merge path does above: slicing
-    # [:k] first would starve the result when the top-k hits all carry the
-    # negated term, dropping better-qualified chunks just below the cap.
-    return like_hits[:k]
 
 
 # Field weight for the context breadcrumb column, applied identically in the
@@ -1307,6 +1379,82 @@ def cosine(a: list[float], b: list[float]) -> float:
     return _cosine_prepared(a, _vec_norm(a), b)
 
 
+def _vector_search_accel(
+    store: Store,
+    notebook_id: int | None,
+    query_vec: list[float],
+    k: int,
+    scope_params: list[str],
+) -> list[Hit] | None:
+    """vector_search via the Rust kernel, or None to run the Python scan.
+
+    The kernel receives a narrowed projection (id, embedding, norm) as a
+    lazy row stream and returns the ranked winners; only those <=k rows
+    are then hydrated with the wide columns. The Python scan below
+    materializes a Hit (full text included) for every embedded chunk
+    before nlargest discards all but k, which at notebook scale is most
+    of the cost this path exists to remove. Degenerate rows mirror the
+    Python degrade-and-skip: a non-bytes blob or a non-numeric stored
+    norm is skipped by the row stream here; everything subtler (odd
+    blob length, dimension mismatch, zero/non-finite/non-positive
+    score) is the kernel's own mirror of _cosine_with_norms, and the
+    scores it returns are bit-identical to the Python ones.
+    """
+    cur = store.conn.execute(
+        "SELECT c.id, c.embedding, c.embedding_norm FROM chunks c"
+        " JOIN sources s ON s.id = c.source_id"
+        " WHERE (? IS NULL OR s.notebook_id = ?) AND c.embedding IS NOT NULL"
+        " AND (json_array_length(?) = 0"
+        " OR s.id IN (SELECT value FROM json_each(?)))",
+        (notebook_id, notebook_id, *scope_params),
+    )
+
+    def _rows() -> Iterator[tuple[int, bytes, float | None]]:
+        for r in cur:
+            blob = r["embedding"]
+            if not isinstance(blob, bytes):
+                continue
+            raw_norm = r["embedding_norm"]
+            if raw_norm is None:
+                norm: float | None = None
+            elif isinstance(raw_norm, (int, float)):
+                norm = float(raw_norm)
+            else:
+                continue
+            yield int(r["id"]), blob, norm
+
+    ranked = accel.vector_topk(query_vec, _rows(), k)
+    if ranked is None:
+        return None
+    if not ranked:
+        return []
+    ids = [cid for cid, _score in ranked]
+    marks = ",".join("?" for _ in ids)
+    fetched = store.conn.execute(
+        "SELECT c.id, c.source_id, c.text, c.context, c.seq FROM chunks c"
+        f" WHERE c.id IN ({marks})",
+        ids,
+    ).fetchall()
+    by_id = {int(r["id"]): r for r in fetched}
+    hits: list[Hit] = []
+    for cid, score in ranked:
+        r = by_id.get(cid)
+        if r is None:
+            continue  # row deleted between the scan and hydration
+        hits.append(
+            Hit(
+                r["id"],
+                r["source_id"],
+                r["text"],
+                0.0,
+                vec=score,
+                context=str(r["context"] or ""),
+                seq=int(r["seq"]),
+            )
+        )
+    return hits
+
+
 def vector_search(
     store: Store,
     notebook_id: int | None,
@@ -1324,6 +1472,9 @@ def vector_search(
     # defined as sorted(..., key=..., reverse=True)[:k], so ties still resolve in
     # row order and the returned list is identical to the previous sort-then-slice.
     scope_params = _source_scope_params(source_ids)
+    accel_hits = _vector_search_accel(store, notebook_id, query_vec, k, scope_params)
+    if accel_hits is not None:
+        return accel_hits
     cur = store.conn.execute(
         "SELECT c.id, c.source_id, c.text, c.context, c.seq, c.embedding, c.embedding_norm"
         " FROM chunks c JOIN sources s ON s.id = c.source_id"

@@ -15,3 +15,7 @@ build/
 # ci.yml regenerates sbom.json per build; the committed copy was a frozen
 # v0.1.0 snapshot (stale dependency versions are worse than none).
 sbom.json
+# The optional Rust accelerator is a local build artifact (rust/shoin-accel/
+/build.sh); the package must work — and be releasable — without it.
+/shoin/_shoin_accel*.so
+rust/shoin-accel/target/

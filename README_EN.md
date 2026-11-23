@@ -163,6 +163,7 @@ Environment variables, or `~/.config/shoin/config.json` (environment variables w
 | `SHOIN_LOG_JSON` | (disabled) | `1` emits ingest/answer events as JSON Lines to stderr (`{"ts","event",…}`; `source_indexed` / `ask_completed` — IDs, counts, and ms only, never body text) |
 | `SHOIN_EXPORT_CREDIT` | `1` (enabled) | `0` omits the one-line credit appended to Markdown/BibTeX exports ("Exported with Shoin — repository URL"). The line is plain text, so you may also delete it from the output. Machine-readable formats such as RIS and the JSON tree do not carry it |
 | `SHOIN_THEME_CSS` | `~/.config/shoin/theme.css` | Path to a user theme CSS. All colors are CSS variables, so overriding `:root{--washi:…}` is enough to restyle. The Web UI loads it via `/api/theme.css` (a missing file or one over 256 KiB degrades to an empty stylesheet) |
+| `SHOIN_ACCEL` | `1` (enabled) | Whether to use the optional Rust accelerator (`shoin/_shoin_accel.so`, built from `rust/shoin-accel/`). Without the module Shoin always runs the pure-Python path with identical results; `0` disables the module even when present |
 
 Example `cases.json` for `shoin eval` — run it before and after a configuration change (e.g. `SHOIN_MULTI_QUERY=1`) to compare the effect **on your own documents**, not on literature numbers:
 

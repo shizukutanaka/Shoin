@@ -160,6 +160,7 @@ BM25(FTS5トライグラム)+ ベクトルのハイブリッド検索。日本�
 | `SHOIN_LOG_JSON` | (無効) | `1`で取込・回答イベントをJSON Linesで標準エラー出力へemit(`{"ts","event",…}`、`source_indexed`/`ask_completed`——ID・件数・msのみ、本文非含有) |
 | `SHOIN_EXPORT_CREDIT` | `1`(有効) | `0`でMarkdown/BibTeXエクスポート末尾の帰属表示1行(「Shoinでエクスポート — リポジトリURL」)を付けない。行自体はプレーンテキストなので出力から削除してもよい。RIS・JSONツリー等の機械可読形式には付かない |
 | `SHOIN_THEME_CSS` | `~/.config/shoin/theme.css` | ユーザーテーマCSSのパス。配色は全てCSS変数のため `:root{--washi:…}` を上書きするだけで見た目を変えられる。Web UIが`/api/theme.css`経由で読込む(未存在・256KiB超は空スタイルシートに降格) |
+| `SHOIN_ACCEL` | `1`(有効) | 任意のRust高速化部品(`rust/shoin-accel/`でビルドした`shoin/_shoin_accel.so`)を使うかどうか。部品が無い環境では常に従来の純Python経路で動作し、結果は同一。`0`で部品があっても無効化できる |
 
 `shoin eval` の cases.json 例 — 設定変更(例: `SHOIN_MULTI_QUERY=1`)の前後で実行すれば、
 文献の数値ではなく**自分の文書での効果**を比較できる:
