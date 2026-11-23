@@ -8,7 +8,7 @@ import os
 import urllib.parse
 from pathlib import Path
 
-VERSION = "0.2.749"
+VERSION = "0.2.750"
 API_VERSION = "1"  # X-Shoin-API response header; bump only on breaking changes
 
 
@@ -420,6 +420,20 @@ def log_json_enabled() -> bool:
     stderr — the machine-readable observability half that complements
     SHOIN_DEBUG's human-readable diagnostics. Default OFF (stderr quiet)."""
     return _get("SHOIN_LOG_JSON", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def accel_enabled() -> bool:
+    """Optional Rust accelerator switch (SHOIN_ACCEL).
+
+    Default ON: when the optional `shoin._shoin_accel` native module (the
+    Rust kernels under rust/shoin-accel/) is importable, search and ingest
+    route their compute-bound kernels through it. The module is never a
+    requirement — absence or any failure falls back to the pure-Python
+    path with identical results — and SHOIN_ACCEL=0 (or false/no/off)
+    disables it entirely for users who want the stdlib-only code path
+    even when the artifact is present."""
+    return _get("SHOIN_ACCEL", "1").strip().casefold() not in (
+        "0", "false", "no", "off")
 
 
 def export_credit_enabled() -> bool:

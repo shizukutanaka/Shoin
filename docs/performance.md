@@ -116,3 +116,52 @@ CPU). The residue is inherent to substring occurrence counting over
 ~41k candidate rows × ~75 needles. Removing it needs an n-gram
 index — a storage-format change, deliberately not bundled into this
 fix and left for a separate decision.
+
+## Follow-up (v0.2.750): optional Rust kernels
+
+The two residues named above — the vector scan's dot product and the
+needle-rich LIKE path's substring counting — are arithmetic, and a
+Python-level restructure could not move them (the v0.2.747 two-phase
+vector prototype gained ~3%). v0.2.750 moves exactly that arithmetic
+into an optional Rust extension (`rust/shoin-accel/`, PyO3); semantics
+stay in Python, the module is never required, and any absence, opt-out
+(`SHOIN_ACCEL=0`), or native failure falls back to the pure-Python path
+with identical results.
+
+Method: same harness and corpus as above; "before" is v0.2.749 code and
+"after" the accelerated path, measured back-to-back in one session on
+the same throttled VM (absolute values inflate vs the v0.2.747 table;
+ratios are the signal). Equivalence was verified before timing:
+identical (chunk_id, score) lists for 6 queries × k ∈ {8, 24} across
+bm25 / vector / hybrid at 510 / 5,101 / 48,974 chunks for original code,
+new pure-Python code, and the accelerated path; chunking byte-identical
+over the full corpus (74,990 chunks, SHA-256 compared).
+
+Results at 48,974 chunks (medians, ms):
+
+| Path | Before | After | Speedup |
+|---|---|---|---|
+| vector_search (any query) | 2,954–7,766 | 956–1,000 | 3.0–8.0× |
+| bm25 「令和6年の予算」 (71 needles) | 15,686 | 1,932 | 8.1× |
+| retrieve hybrid, same query | 18,893 | 2,918 | 6.5× |
+| bm25 「経済」 (LIKE path) | 15,835 | 1,395 | 11.4× |
+| bm25 「免疫」 (LIKE path) | 1,700 | 1,378 | 1.2× |
+| bm25, FTS-covered queries | 95–340 | 99–472 | ~1.0× (unchanged) |
+| chunk splitting (19.7M chars) | 4.80 s | 2.00 s | 2.4× |
+| ingest end-to-end | — | — | insert-bound, unchanged within noise |
+
+Kernel design notes:
+
+- The vector kernel consumes a narrowed (id, blob, norm) projection and
+  hydrates only the top-k; scores are bit-identical because the f64
+  accumulation replicates CPython 3.12 `sum()`'s Neumaier compensation
+  operation-for-operation.
+- The LIKE pool kernel is a single Aho-Corasick pass per row. A naive
+  per-needle substring scan measured 24.4 s on the 71-needle query —
+  *slower* than the SQL it replaces (~11 s of scan time), because the
+  SQL's instr/LIKE guard is a real existence filter; the AC pass takes
+  0.72 s on the same input. Final per-chunk scoring (`_needle_score`,
+  with its Unicode casefold semantics) deliberately stays in Python.
+- Residual at this scale: the accelerated bm25 paths are now bounded
+  by row fetch + `_needle_score` + the FTS leg (~1.4–1.9 s), not by
+  candidate selection or vector arithmetic.

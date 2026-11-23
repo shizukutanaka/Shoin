@@ -110,7 +110,7 @@ class _RacyConn:
 
 class TestStore(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(VERSION, "0.2.749")
+        self.assertEqual(VERSION, "0.2.750")
 
 
     def test_migration_versions_strictly_increase(self) -> None:
@@ -2853,7 +2853,16 @@ class TestChunk(unittest.TestCase):
         v0.2.743) — both predicates are pure per code point, so cached classes
         return identical branch decisions and _tail() returns identical
         suffixes; only the per-char cost changes. Re-running the same windows
-        must not grow the cache."""
+        must not grow the cache.
+
+        v0.2.750: the subject is the *Python* memoizer, so the optional
+        Rust kernel is disabled for this test — with it enabled, _tail()
+        returns from Rust and the Python cache is never touched (the
+        kernel's suffixes are pinned identical by the differential tests
+        in tests/test_accel.py)."""
+        from unittest import mock
+
+        from shoin import accel
         from shoin.chunk import _TAIL_CHAR_CLASS, _tail
 
         samples = [
@@ -2864,10 +2873,11 @@ class TestChunk(unittest.TestCase):
             "a" * 100 + "bcdef" * 20,
         ]
         _TAIL_CHAR_CLASS.clear()
-        first = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
-        populated = len(_TAIL_CHAR_CLASS)
-        self.assertGreater(populated, 0, "first pass must populate the cache")
-        second = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
+        with mock.patch.object(accel, "_ENABLED", False):
+            first = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
+            populated = len(_TAIL_CHAR_CLASS)
+            self.assertGreater(populated, 0, "first pass must populate the cache")
+            second = {(s, t): _tail(s, t) for s in samples for t in (1, 3, 10, 64)}
         self.assertEqual(first, second)
         self.assertEqual(
             len(_TAIL_CHAR_CLASS), populated,
@@ -17330,6 +17340,10 @@ class TestCitationCoverageTail(unittest.TestCase):
 # spec.md states these sizes in prose, so they must live at module level for
 # test_doc_catalog_counts_match_spec to compare without duplicating them.
 _EXCEPT_CATALOG = {
+    # +1 (v0.2.750): accel._call — the optional Rust kernel's failure must
+    # degrade to the pure-Python path, so the catch is deliberately broad;
+    # it is also the *only* broad catch the accelerator gets.
+    "accel.py": 1,
     "ingest.py": 4,
     # v0.2.724: -2 — _h_ask_sse's build_context guard and its repair-persist
     # swallow folded into the pre-headers snapshot; failures now ride
@@ -17346,23 +17360,28 @@ _EXCEPT_CATALOG = {
     "qa.py": 1,
 }
 _DYNAMIC_COMPILE_CATALOG = {
-    "chunk.py:212",
+    # +1 by the v0.2.750 accel import in chunk.py.
+    "chunk.py:213",
     "citation.py:580", "citation.py:584", "citation.py:596",
     "citation.py:597", "citation.py:634", "citation.py:647",
     "citation.py:1042", "citation.py:1444", "citation.py:1672",
-    "search.py:76",
+    # +2 by the v0.2.750 import block (accel / sqlite3).
+    "search.py:78",
     # shifted +153 by the v0.2.662 synonym-table block (952 -> 1105);
     # +3 by the v0.2.745 search.py import block (threading/OrderedDict/AbstractSet);
-    # +21 by the v0.2.747 LIKE-score CTE comment block in bm25_search.
-    "search.py:1129",
+    # +21 by the v0.2.747 LIKE-score CTE comment block in bm25_search;
+    # +72 by v0.2.750 (imports +2, the LIKE pool's move into
+    # _like_pool_rows/_like_pool_accel below bm25_search).
+    "search.py:1201",
     # +1: _CJK_RUN_RE — rf-string over the _CJK_WORD_NEG_CLASS constant
     # character class (v0.2.650 suggestion oracle; shifted to 1935 by
     # the v0.2.662 synonym-table block, to 1965 by the v0.2.742 mmr
     # lazy-bigram-fold block; +13 over the eager-precompute draft,
     # to 1986 by the v0.2.744 mmr incremental-similarity block, to 2019
     # by the v0.2.745 import block + bigram-LRU cache block, to 2040
-    # by the v0.2.747 LIKE-score CTE comment block).
-    "search.py:2040",
+    # by the v0.2.747 LIKE-score CTE comment block, to 2191 by
+    # v0.2.750 (the shifts above plus _vector_search_accel).
+    "search.py:2191",
 }
 _ERROR_CODE_CATALOG = {
     # store.py raises (StoreError)
@@ -20371,9 +20390,10 @@ class TestResidualGuards(unittest.TestCase):
                 if re.search(r"MATCH\s*\(", line) or " MATCH ?" in line:
                     sites.append(f"{f.name}:{i}")
         # v0.2.662: the synonym-table block shifted the MATCH site
-        # +153 lines (702 -> 855).
+        # +153 lines (702 -> 855); +3 more by v0.2.745's import block
+        # (855 -> 858); +2 by v0.2.750's import block (858 -> 860).
         self.assertEqual(
-            sites, ["search.py:858"],
+            sites, ["search.py:860"],
             f"MATCH sites drifted: {sites}",
         )
 
@@ -20837,6 +20857,9 @@ class TestResidualGuards(unittest.TestCase):
         )
         root = Path(__file__).resolve().parent.parent
         baseline = {
+            # accel.py (v0.2.750): the type: ignore[assignment] on the
+            # optional-module load guard (stub-typed name, None fallback).
+            "accel.py": 1,
             "cli.py": 3,      # noqa: BLE001 x2 (health + main catch-all) + pragma __main__
             "ingest.py": 2,   # type: ignore[misc] HTMLParser attr + pragma ImportError
             "pipeline.py": 1,  # noqa: E731 embed lambda
@@ -21119,6 +21142,10 @@ class TestResidualGuards(unittest.TestCase):
 
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         baseline: dict[str, list[str]] = {
+            # accel.py (v0.2.750): the optional-module load guard, plus the
+            # one broad catch in _call — a native failure must degrade to
+            # the pure-Python path, never escape into a search/ingest.
+            "accel.py": ["Exception", "ImportError"],
             "audio.py": [
                 "FileNotFoundError", "subprocess.TimeoutExpired", "subprocess.CalledProcessError",
                 "(EOFError,FileNotFoundError,wave.Error)", "FileExistsError",
@@ -21357,6 +21384,8 @@ class TestResidualGuards(unittest.TestCase):
             ],
         }
         trivial_baseline = {
+            # accel.py +1: _call's degrade-to-fallback return (v0.2.750).
+            "accel.py": 1,
             # config.py +1: llm_retries()'s parse failure falls back to the
             # default 2, same contract as port()'s range fallback.
             # config.py +2: endpoint_is_external's probes degrade to a
@@ -23140,7 +23169,8 @@ class TestResidualGuards(unittest.TestCase):
         import ast as _ast
 
         baseline: dict[str, list[int]] = {
-            "chunk.py": [212],
+            # +1 by the v0.2.750 accel import in chunk.py (212 -> 213).
+            "chunk.py": [213],
             "citation.py": [580, 584, 596, 597, 647, 1042, 1444, 1672],
             # +1: _CJK_RUN_RE interpolates _CJK_WORD_NEG_CLASS, a module
             # constant character class — same static-constant category as
@@ -23150,7 +23180,9 @@ class TestResidualGuards(unittest.TestCase):
             # lazy-bigram-fold block, +21 by the v0.2.744 mmr
             # incremental-similarity block, and both sites shifted +21
             # by the v0.2.747 LIKE-score CTE comment block.
-            "search.py": [76, 2040, 1129],
+            # v0.2.750: +2 imports (78); the LIKE-pool helper move and
+            # _vector_search_accel shifted the other two (2191 / 1201).
+            "search.py": [78, 2191, 1201],
         }
         shoin_dir = Path(__file__).resolve().parent.parent / "shoin"
         actual: dict[str, list[int]] = {}
@@ -23198,9 +23230,10 @@ class TestResidualGuards(unittest.TestCase):
                                 f"{path.name}:{node.lineno}"
                             )
         # v0.2.662: shifted +153 by the synonym-table block (952 -> 1105);
-        # +21 by the v0.2.747 LIKE-score CTE comment block (1108 -> 1129).
+        # +21 by the v0.2.747 LIKE-score CTE comment block (1108 -> 1129);
+        # +72 by v0.2.750 (imports + the LIKE-pool helper move, 1129 -> 1201).
         self.assertEqual(
-            escaped_interps, ["search.py:1129"],
+            escaped_interps, ["search.py:1201"],
             "the runtime-term regex path must keep its re.escape",
         )
         self.assertEqual(

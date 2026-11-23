@@ -10,6 +10,7 @@ import bisect
 import re
 import unicodedata
 
+from . import accel
 from .config import CHUNK_OVERLAP, CHUNK_TOKENS
 
 _CJK_RANGES = (
@@ -210,6 +211,10 @@ _CJK_BOUNDS = _merged_cjk_bounds()
 # search.py builds _NEG_RE's classes from _CJK_RANGES the same way.
 _CJK_CLASS = "".join(f"\\U{lo:08x}-\\U{hi:08x}" for lo, hi in _CJK_RANGES)
 _NON_CJK_RE = re.compile(f"[^{_CJK_CLASS}]+")
+# The same bounds packed as little-endian u32 bytes for the optional Rust
+# kernels (accel.py): the table keeps this module as its single owner, so
+# the native side receives it per call instead of duplicating the ranges.
+_CJK_BOUNDS_BYTES = b"".join(n.to_bytes(4, "little") for n in _CJK_BOUNDS)
 
 
 def is_cjk(ch: str) -> bool:
@@ -242,6 +247,9 @@ def _run_token_cost(n: int) -> int:
 
 
 def estimate_tokens(text: str) -> int:
+    fast = accel.estimate_tokens(text, _CJK_BOUNDS_BYTES)
+    if fast is not None:
+        return fast
     # Strip everything that is NOT CJK and measure what is left: one C-level regex
     # pass. Measured against the alternatives on a 1M-character document — this is
     # 12.4 ms / 4.1 MB peak, re.findall is 96.3 ms / 70.5 MB (it materializes one
@@ -407,6 +415,9 @@ def _tail(text: str, tokens: int) -> str:
     """Return a suffix of *text* containing roughly *tokens* tokens."""
     if tokens <= 0:
         return ""
+    fast = accel.tail(text, tokens, _CJK_BOUNDS_BYTES)
+    if fast is not None:
+        return fast
     acc = 0
     run_len = 0
     run_credited = False  # base 1-token cost of the current run already counted
